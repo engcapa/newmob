@@ -6,6 +6,8 @@
  * alias resolution, state tracking, and execution handlers.
  */
 
+import type { EditorView } from "@codemirror/view";
+
 export type ActionCategory =
   | "Edit"
   | "Navigate"
@@ -63,6 +65,8 @@ export type WorkspaceFocus =
 
 export interface WorkspaceActionContext {
   focus: WorkspaceFocus;
+  /** Live editor view when the context carries editor focus (§8.19.2). */
+  editorView?: EditorView;
   hasActiveFile?: boolean;
   hasSelection?: boolean;
   isDirty?: boolean;

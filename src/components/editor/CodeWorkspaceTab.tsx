@@ -203,6 +203,7 @@ import {
   DEFAULT_WORKSPACE_TAB_POLICY,
   type ClosedTabEntry,
 } from "./workspace/workspaceTabPolicy";
+import { attachWorkspaceMouseDispatcher } from "./workspace/workspaceMouseDispatcher";
 import {
   createWorkspaceLocationController,
   isPathContainedInRoot,
@@ -9202,6 +9203,18 @@ export function CodeWorkspaceTab({
     actionsController.host.setKeymapScheme(activeKeymapScheme);
   }, [actionsController.host, activeKeymapScheme]);
 
+  // §8.19.2: one workspace-root mouse dispatcher; unbound gestures (text
+  // selection, editing) pass through untouched. Re-attach only when the
+  // element or host instance changes.
+  const mouseHostRef = useRef(actionsController.host);
+  mouseHostRef.current = actionsController.host;
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return undefined;
+    const attached = attachWorkspaceMouseDispatcher(mouseHostRef.current, root);
+    return () => attached.dispose();
+  }, [visible]);
+
   const applyKeymapScheme = useCallback((scheme: KeymapSchemeV3) => {
     setKeymapSchemes((schemes) => {
       const exists = schemes.some((entry) => entry.id === scheme.id);
@@ -9394,7 +9407,14 @@ export function CodeWorkspaceTab({
         void closeFromTabSwitcherRef.current();
         return;
       }
-      void actionsController.dispatchKeydown(event, { eventTarget: event.target });
+      // §8.19.2: dispatch through the typed V2 entry — IME composition,
+      // dead keys and AltGr are rejected before any binding match and never
+      // swallow characters; chord waits/conflicts are explicit results.
+      void actionsController.dispatchKeydownV2({
+        event,
+        workspaceId: workspaceInstanceId,
+        targetViewId: activeEditorCommandOwner()?.fileKey ?? null,
+      });
     };
     // Modifier-release commit cannot be a keydown action; it stays a keyup
     // listener and commits on whichever platform modifier started the cycle.

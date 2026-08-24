@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-23 · 版本：v4.51（R0 Save/recovery/WorkspaceEdit effect 闭环实施记录，基于 v4.50 合同）· 状态：**实施中；R0 已按 §8.19.1 完成代码合同闭合（工作树未提交），G0 在 native fault/encoding 矩阵与 browser workflow 运行前保持 platform-unverified；G1 未达；G2/G3 只按单 capability 记账**。本版只交付 R0 包：native intent/old hash 事实、v4 disk-effect ledger 与 v3 迁移、committed-writeback-discarded 入账、closed-file 共享 committer、WorkspaceEdit 逐 operation effect/resume、Recovery Center ledger UI。当前权威完成情况仍以 §2.29 为基线、叠加 §8.19.1 的 as-built 记录；唯一可领取待办见 §8.19（R0 已领取）。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-24 · 版本：v4.52（R1 ActionHost/Keymap 唯一运行时真值实施记录；R0 已于 `52da0ebf` 提交）· 状态：**实施中；R0 已合入，R1 已按 §8.19.2 完成代码合同闭合（工作树未提交）；三端 native 前所有 keymap 能力保持 platform-unverified；G0 证据门禁红、G1 未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19.1/§8.19.2 的 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4098,7 +4098,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 顺序 | 包 | 当前状态 | 目标 | 依赖 |
 |---|---|---|---|---|
 | 1 | [x] **R0 Save/recovery/WorkspaceEdit effect closure** | 生产缺陷已确认，G0 红 → **代码合同已闭合（v4.51，工作树），native/browser 证据未运行** | 所有写路径共享 effect result/recovery ledger，partial apply 可恢复 | 无 |
-| 2 | [ ] **R1 Action/Keymap runtime single truth** | editable 基础已接，dispatcher 不完整 | 所有用户命令可发现、可改键、可拒绝 IME/AltGr 误触发 | R0 的 typed-result 命名约定 |
+| 2 | [x] **R1 Action/Keymap runtime single truth** | editable 基础已接，dispatcher 不完整 → **业务键位全部迁入 ActionHost + typed V2 gate/chord/mouse dispatcher（v4.52，工作树），三端 native 未运行** | 所有用户命令可发现、可改键、可拒绝 IME/AltGr 误触发 | R0 的 typed-result 命名约定 |
 | 3 | [ ] **R2 QA catalog 与可执行 workflow 修复** | audit 红、核心 YAML 占位 | catalog current，G0/G1 browser cases 真正操作并断言 | R0/R1 同步提供 testid；基线修复可先行 |
 | 4 | [ ] **R3 real jdtls Basic Completion acceptance** | synthetic L2，真实 Java 未验证 | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 | R1；effectful edits 依赖 R0 |
 | 5 | [ ] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial | G1 多光标/视觉列闭环，G3 history/reference 分项可用 | R1 |
@@ -4302,6 +4302,81 @@ type KeyDispatchResult =
 **持久化。** `KeymapSchemeV3` 若字段足够可保持版本；新增 recorder/mouse runtime不需要 bump。若引入 platform override/chord timeout则升级 v4，按 action id保留 unknown/orphan bindings并在 UI 标“action unavailable”，禁止迁移时删除用户自定义项。built-in base升级只重放 delta；copy/rename/delete/reset有稳定 active fallback。
 
 **测试与 DoD。** inventory test 断言 production keymap中每个非 allowlist binding都有 action id；同一 action通过 keyboard/menu/Search/context/Cheat Sheet得到相同 frozen target/result；two-stroke、prefix collision、timeout、mouse、unmount/remount、双 workspace、non-US physical code、AltGr、dead key、IME composition、macOS Meta/Windows Ctrl均覆盖。QA `TC-IDE-C1-01` 必须真实创建 scheme、录两键、制造/解决冲突、执行、reset。完成后可写 **Action/Keymap G1 L2 production**；三端 native前不得写 cross-platform verified。
+
+**R1 as-built（v4.52，2026-08-24，工作树未提交；基线 `52da0ebf`）。** 按 §8.19.11 回报模板：
+
+```text
+包 ID / commit / capability ID
+    R1 / 工作树（基线 52da0ebf，未提交）/ action.single-truth, keymap.runtime
+As-built production call chain
+    keyboard: window capture dispatcher（CodeWorkspaceTab）→ Switcher 特例 →
+    host.dispatchKeydownV2{composing/dead-key/alt-graph 先拒后匹配，
+    targetViewId 必须在 EditorActionBridge 注册表} → prepareBinding
+    （物理 code 匹配，scheme delta > 定义默认）→ executed{actionId,
+    evaluationId}/pending-chord{prefix,expiresAt=+1200ms}/rejected{七种 reason}；
+    rejected 一律不 preventDefault（不吞字符）。执行经 executePrepared
+    （frozen evaluation + owner/generation 复核）。
+    editor surface：CodeMirrorHost mount 时 EditorActionBridge.registerView(fileKey)
+    + registerActions(buildEditorHostActions)；CM keymap 只装
+    buildEditorPrimitiveKeybindings(true) = Escape 面板栈 +
+    closeBrackets/defaultKeymap（filterActionOwned 剔除 action 已拥有的
+    Mod-/、Shift-Mod-k、Shift-Alt-ArrowUp/Down 等条目）+ indentWithTab +
+    三条本地 Escape 栈；无 host 的独立嵌套走 LEGACY_UNHOSTED_SPREAD（禁止新增）。
+修改 owner 文件（无关文件数 0）
+    workspaceActionHost.ts（V2 gate/结果/evaluationId/bridge/view 注册表）、
+    useWorkspaceActionsController.ts（dispatchKeydownV2 passthrough）、
+    workspaceCodeMirrorKeymap.ts（catalog 迁移 16 条业务键位 + allowlist/
+    primitive builder + canonical ownership filter）、workspaceCommands.ts
+    （KeyboardEventLike.isComposing/getModifierState）、workspaceActionRegistry.ts
+    （context.editorView 可选字段）、CodeMirrorHost.tsx（spread 收敛 + bridge
+    注册）、KeymapSettingsDialog.tsx（两键 recorder + 点击 swatch 替换）、
+    CodeWorkspaceTab.tsx（V2 dispatch + workspace-root mouse dispatcher）、
+    新增 workspaceMouseDispatcher.ts；测试 3 新文件 + CodeMirrorHost 测试修正。
+旧缺陷复现 -> 新状态机/结果
+    IME composition/dead key/AltGr 会误触发或吞字符 → V2 gate 先拒且不
+    preventDefault；chord 第一键无 pending 结果语义 → pending-chord 带
+    expiresAt，Esc/timeout/focus 变更清理；同 specificity 冲突按数组序裁决 →
+    conflict 拒绝并暴露候选（diagnostics/snapshot 不变）；recorder 只录一键 →
+    完整 1–2 键序列 + Backspace/Esc/Enter + 物理 code/layout 标签 + swatch
+    点击替换；mouse shortcut 只有 schema → workspace-root capture dispatcher
+    仅消费命中注册 action 的 click/dblclick，其余手势不拦截；
+    workspaceEditorKeymap/searchKeymap/historyKeymap 直装 CM 与 host 双真值 →
+    全部迁入 editor.*/workspace.* action（含 undo/redo/find/findNext/findPrev/
+    selectSelectionMatches/gotoLine/join/toggleCase/comment/copyLine/deleteLine/
+    moveLine/expand/shrink/completeStatement/unselect/tabJumpOut[无绑定]），
+    Ctrl+W 统一为 LSP-first+syntax fallback 单 owner。
+接口/schema/migration 与 compatibility
+    KeymapSchemeV3 保持 v3（未引入 platform override/chord timeout 字段）；
+    PreparedActionEvaluation 增 evaluationId（附加字段）；KeyboardEventLike
+    增可选 isComposing/getModifierState；无持久化迁移。
+cancel/stale/error/disk/provider/undo effect
+    dispatched-but-unavailable→rejected:disabled；host disposed/stale view→
+    stale-owner；conflict 不执行任何一方；executed 路径 preventDefault+
+    stopPropagation 同步发生，执行异步；undo/redo 经 CM history 命令由
+    workspace.undo/redo action 承载。
+Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
+    Vitest editor 全目录 1163 通过（新增 workspaceKeymapRuntime 13 例：
+    inventory/allowlist/owned-filter/V2 七类 gate/chord 两键/pending expiry；
+    KeymapSettingsDialog recorder 4 例；mouse dispatcher 4 例）+ pnpm build 绿；
+    Rust/QA browser/native/provider/IDEA compare 未运行（本包不改 Rust；
+    TC-IDE-C1-01 属 R2 browser 门禁）。
+未运行项及原因
+    本环境无打包应用与多平台键盘/IME；三端 native 由 R9 解除。
+最高可声明 L0-L3 + evidence layers
+    Action/Keymap G1 L2 code contract（model+production 层）；cross-platform
+    verified 禁止。
+禁止声明仍有哪些
+    不得写 cross-platform verified、"所有平台 AltGr/IME 已验证"、mouse
+    gesture 全量可配置（当前仅 left button single/double 且无生产默认绑定，
+    Ctrl/Cmd-click 仍为 allowlist 平台手势）；LEGACY_UNHOSTED_SPREAD 仅限
+    无 host 的独立嵌入使用。
+残余风险与下一依赖包
+    defaultKeymap 中 Mod-Enter/Alt-l/Mod-i/Mod-[/]/Alt-A/Ctrl-m 等
+    command-primitives 保留于 CM（allowlist 已登记理由），后续逐命令迁移需
+    各自 ADR；Search Everywhere/menu/context/toolbar/CheatSheet/Keymap 设置
+    已确认全部消费 actionsController.snapshot 单真值。下一包：R3（真实
+    jdtls Basic Completion acceptance），R4/R5 在 action id 冻结（本包）后可并行。
+```
 
 #### 8.19.3 R2：QA catalog 与可执行 workflow evidence
 

@@ -34,16 +34,13 @@ import {
   type WindowResizeSession,
 } from "./windowResizeSession";
 import {
-  defaultKeymap,
   history,
-  historyKeymap,
-  indentWithTab,
 } from "@codemirror/commands";
+import type { KeyBinding } from "@codemirror/view";
 import {
   acceptCompletion,
   autocompletion,
   closeBrackets,
-  closeBracketsKeymap,
   startCompletion,
 } from "@codemirror/autocomplete";
 import {
@@ -59,7 +56,7 @@ import {
   indentUnit,
   unfoldAll,
 } from "@codemirror/language";
-import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
+import { openSearchPanel, search } from "@codemirror/search";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
 import { readTextResult, writeText } from "../../../lib/clipboard";
 import { codeViewExtensions } from "../../../lib/codeViewTheme";
@@ -126,12 +123,13 @@ import {
   selectAllEditorOccurrences,
   selectNextEditorOccurrence,
   selectionHistoryField,
-  workspaceEditorKeymap,
   type EditorClipboardPayload,
 } from "./workspaceEditorCommands";
 import {
   buildEditorHostActions,
+  buildEditorPrimitiveKeybindings,
 } from "./workspaceCodeMirrorKeymap";
+import { EditorActionBridge } from "./workspaceActionHost";
 import {
   surroundWithPlan,
   type SurroundKind,
@@ -1639,28 +1637,28 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           },
         ])),
         keymap.of([
-          // §8.18.2: with a workspace action host, business bindings resolve
-          // exclusively through the host's scheme-aware dispatcher; only
-          // generic editor primitives remain in this spread.
-          ...(workspaceActionHost ? [] : [
-            { key: "Mod-s", run: saveHandler },
-            { key: "Mod-r", run: openReplacePanel },
-            { key: "Mod-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
-            { key: "Ctrl-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
-            { key: "Mod-Shift-Space", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
-            { key: "Mod-w", run: expandSemanticSelection },
-          ]),
-          // Escape stack stays an editor-local primitive (snippet/signature/
-          // selection state is not part of WorkspaceActionContext).
-          { key: "Escape", run: (view) => cancelLspSnippetSession(view) },
-          { key: "Escape", run: escapeEditorSelections },
-          { key: "Escape", run: () => hideSignature() },
-          ...workspaceEditorKeymap,
-          ...searchKeymap,
-          ...closeBracketsKeymap,
-          ...defaultKeymap,
-          ...historyKeymap,
-          indentWithTab,
+          // §8.19.2 retained primitives: with a host, ONLY the allowlisted
+          // set remains here (Escape panel-close stack, closeBrackets typing,
+          // defaultKeymap cursor/selection, indentWithTab); every user-visible
+          // business binding resolves through the workspace action host.
+          ...(buildEditorPrimitiveKeybindings(!!workspaceActionHost) as KeyBinding[]),
+          ...(workspaceActionHost
+            ? [
+                { key: "Escape", run: (view: EditorView) => cancelLspSnippetSession(view) },
+                { key: "Escape", run: escapeEditorSelections },
+                { key: "Escape", run: () => hideSignature() },
+              ]
+            : [
+                // Transitional unhosted fallback: standalone embedders/tests
+                // without an action host keep the pre-R1 inline bindings.
+                // Must never grow new entries (see LEGACY_UNHOSTED_SPREAD).
+                { key: "Mod-s", run: saveHandler },
+                { key: "Mod-r", run: openReplacePanel },
+                { key: "Mod-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+                { key: "Ctrl-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+                { key: "Mod-Shift-Space", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+                { key: "Mod-w", run: expandSemanticSelection },
+              ]),
         ]),
         EditorView.domEventHandlers({
           copy(event, view) {
@@ -1801,6 +1799,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     // (isolated usage), the legacy inline bindings below stay active.
     const actionHost = workspaceActionHostRef.current;
     let unregisterEditorActions: (() => void) | null = null;
+    let bridgeRegistration: { dispose(): void } | null = null;
     if (actionHost && !actionHost.isDisposed()) {
       // Handlers close over this mount's view instance; the registration is
       // removed in cleanup so a remount re-binds against the fresh view.
@@ -1812,10 +1811,15 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           cancelLspSnippetSession(view)
           || escapeEditorSelections(view)
           || hideSignature(),
+        runEditorCommand: (command) => command(view),
       }));
+      // §8.19.2 EditorActionBridge: register this mounted view so keyboard
+      // dispatch knows the live view set; unmount releases it.
+      bridgeRegistration = new EditorActionBridge(actionHost).registerView(fileKey);
     }
 
     return () => {
+      bridgeRegistration?.dispose();
       unregisterEditorActions?.();
       clearPendingSelectionEmit();
       clearSignatureDelay();
