@@ -3,6 +3,7 @@ import {
   completeStatementPlan,
   filterGenerateCodeActions,
   smartCompletionGate,
+  surroundKindsForLanguage,
   surroundWithPlan,
   SURROUND_KINDS,
 } from "./workspaceSemanticEditing";
@@ -83,7 +84,6 @@ describe("§8.18.8 Surround With", () => {
     expect(inserted).toContain("doWork();");
     // Caret sits inside catch parameter area of the wrapper head.
     expect(plan.selection.anchor).toBeGreaterThan(0);
-    expect(plan.evidence.rule).toBe("surround.try-catch");
   });
 
   it("rejects partial-token selections, multi-range and unsupported languages", () => {
@@ -101,6 +101,58 @@ describe("§8.18.8 Surround With", () => {
     const pythonRunnable = surroundWithPlan("runnable", { ...facts, languageId: "python" });
     expect(pythonRunnable.kind).toBe("unavailable");
     expect(SURROUND_KINDS.map((kind) => kind.id)).toContain("synchronized");
+  });
+
+  it("labels plans local-text unless node evidence proves syntax alignment (§8.19.8)", () => {
+    // No syntax facts at all → local-text, never the old lying syntax-tree tag.
+    const plain = surroundWithPlan("if", facts);
+    if (plain.kind !== "editor-transaction") throw new Error("expected a plan");
+    expect(plain.provenance).toEqual({ kind: "local-text", ruleId: "surround.if" });
+    expect(plain.evidenceV2.identity).toBeNull();
+    expect(plain.evidenceV2.completeness).toBe("partial");
+
+    // Aligned node but parse errors in scope → still local-text, error recorded.
+    const errorScope = surroundWithPlan("while", {
+      ...facts,
+      syntax: {
+        alignedNodeType: "ExpressionStatement",
+        treeRevision: 4,
+        selectionNodeRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
+        parseErrorsInScope: true,
+      },
+    });
+    if (errorScope.kind !== "editor-transaction") throw new Error("expected a plan");
+    expect(errorScope.provenance.kind).toBe("local-text");
+    expect(errorScope.evidenceV2.parseErrorsInScope).toBe(true);
+
+    // Exact node alignment with clean parse upgrades to syntax-tree.
+    const aligned = surroundWithPlan("try-catch", {
+      ...facts,
+      syntax: {
+        alignedNodeType: "ExpressionStatement",
+        treeRevision: 7,
+        selectionNodeRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
+        parseErrorsInScope: false,
+      },
+    });
+    if (aligned.kind !== "editor-transaction") throw new Error("expected a plan");
+    expect(aligned.provenance).toEqual({
+      kind: "syntax-tree",
+      languageId: "java",
+      nodeType: "ExpressionStatement",
+      treeRevision: 7,
+    });
+    expect(aligned.evidenceV2.completeness).toBe("complete");
+    expect(aligned.evidenceV2.selectionNodeRange).not.toBeNull();
+  });
+
+  it("offers only adapter kinds per language for the dialog", () => {
+    expect(surroundKindsForLanguage(null)).toEqual([]);
+    expect(surroundKindsForLanguage("python")).toEqual([]);
+    expect(surroundKindsForLanguage("java").map((kind) => kind.id))
+      .toEqual(["if", "while", "try-catch", "synchronized", "runnable"]);
+    expect(surroundKindsForLanguage("typescript").map((kind) => kind.id))
+      .toEqual(["if", "while", "try-catch"]);
   });
 });
 

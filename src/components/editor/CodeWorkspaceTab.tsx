@@ -263,6 +263,7 @@ import { useContextMenu } from "../ContextMenu";
 import { useChatStore } from "../../stores/chatStore";
 import {
   type EditorCommandId,
+  type EditorCommandOptions,
   type EditorCommandPort,
   type EditorCommandPortRegistration,
   type EditorCommandState,
@@ -270,6 +271,7 @@ import {
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./workspace/CodeMirrorHost";
+import { SurroundWithDialog } from "./workspace/SurroundWithDialog";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
@@ -1059,18 +1061,19 @@ export function CodeWorkspaceTab({
   const activeEditorCommandState = useCallback((): EditorCommandState | null => {
     return activeEditorCommandOwner()?.port.state() ?? null;
   }, [activeEditorCommandOwner]);
-  const executeActiveEditorCommand = useCallback((commandId: EditorCommandId) => {
-    return activeEditorCommandOwner()?.port.execute(commandId) ?? false;
+  const executeActiveEditorCommand = useCallback((commandId: EditorCommandId, options?: EditorCommandOptions) => {
+    return activeEditorCommandOwner()?.port.execute(commandId, options) ?? false;
   }, [activeEditorCommandOwner]);
   const executeEditorCommandFor = useCallback((
     target: EditorCommandTarget | undefined,
     commandId: EditorCommandId,
+    options?: EditorCommandOptions,
   ) => {
     if (target) {
       return editorCommandOwnerFor(target.groupId, target.fileKey)
-        ?.port.execute(commandId) ?? false;
+        ?.port.execute(commandId, options) ?? false;
     }
-    return executeActiveEditorCommand(commandId);
+    return executeActiveEditorCommand(commandId, options);
   }, [editorCommandOwnerFor, executeActiveEditorCommand]);
   const executeEditorCommand = useCallback((commandId: EditorCommandId, context?: WorkspaceCommandContext) => {
     const target = context?.payload as EditorCommandTarget | undefined;
@@ -1221,6 +1224,8 @@ export function CodeWorkspaceTab({
     patchWorkspaceUi(workspaceInstanceId, { structureLoading: loading });
   }, [patchWorkspaceUi, workspaceInstanceId]);
   const [recentLocationsOpen, setRecentLocationsOpen] = useState(false);
+  // §8.19.8 Surround With dialog state (one entry, all kinds).
+  const [surroundWithDialogOpen, setSurroundWithDialogOpen] = useState(false);
   const [recentLocationsChangedOnly, setRecentLocationsChangedOnly] = useState(false);
   const setStructureUnavailable = useCallback((reason: string | null) => {
     patchWorkspaceUi(workspaceInstanceId, { structureUnavailable: reason });
@@ -7907,14 +7912,20 @@ export function CodeWorkspaceTab({
       run: (context) => executeEditorCommand("completeStatement", context),
     },
     {
-      id: "editor.surroundWith.tryCatch",
-      title: "Surround with try/catch",
+      // §8.19.8: one Surround With entry opens the kind dialog; try/catch is
+      // no longer a hard-wired command and every kind shares the same
+      // plan builder, single transaction and undo entry.
+      id: "editor.surroundWith",
+      title: "Surround With…",
       category: "Edit",
       keybinding: "Ctrl+Alt+T",
       keybindings: ["Meta+Alt+T"],
-      keywords: ["surround", "wrap", "exception"],
-      when: (context) => context.focus === "editor" && !!context.hasSelection && !context.readOnly,
-      run: (context) => executeEditorCommand("surroundWithTryCatch", context),
+      keywords: ["surround", "wrap", "try", "catch", "if", "while", "runnable"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: () => {
+        setSurroundWithDialogOpen(true);
+        return true;
+      },
     },
     {
       // §8.18.8 Smart completion stays visible but typed-unavailable until a
@@ -13214,6 +13225,30 @@ export function CodeWorkspaceTab({
           }}
         />
       )}
+      <SurroundWithDialog
+        open={surroundWithDialogOpen}
+        languageId={activeLanguageId}
+        onClose={() => setSurroundWithDialogOpen(false)}
+        onPick={(kindId) => {
+          const dispatched = executeActiveEditorCommand("surroundWith", {
+            surroundKindId: kindId,
+            onSemanticEditApplied: ({ applied, provenance }) => {
+              if (!applied) {
+                setStatusMessage("Surround requires a whole-line selection in one range");
+                return;
+              }
+              // §8.19.8 honest provenance surfacing: local templates never
+              // masquerade as Semantic in status reporting.
+              setStatusMessage(
+                provenance?.kind === "syntax-tree"
+                  ? `Surround applied (syntax node ${provenance.nodeType})`
+                  : "Surround applied (local template)",
+              );
+            },
+          });
+          if (!dispatched) setStatusMessage("Surround requires an active editor");
+        }}
+      />
       {keymapCheatSheetOpen && (
         <KeymapCheatSheetDialog
           open={true}

@@ -138,8 +138,10 @@ import {
 import { EditorActionBridge } from "./workspaceActionHost";
 import {
   surroundWithPlan,
+  type SemanticEditSource,
   type SurroundKind,
 } from "./workspaceSemanticEditing";
+import { observeSyntaxFacts, treeRevisionField } from "./workspaceSyntaxFacts";
 import type { WorkspaceActionHost } from "./workspaceActionHost";
 
 export interface EditorRevealTarget {
@@ -474,8 +476,15 @@ export type EditorCommandId =
   | "paste"
   | "selectAllOccurrences"
   | "selectNextOccurrence"
-  | "surroundWithTryCatch"
+  | "surroundWith"
   | "unfoldAll";
+
+/** Options for commands that need arguments beyond the id (§8.19.8). */
+export interface EditorCommandOptions {
+  surroundKindId?: SurroundKind["id"];
+  /** Applied once the surround transaction dispatches, with its provenance. */
+  onSemanticEditApplied?: (result: { applied: boolean; provenance: SemanticEditSource | null }) => void;
+}
 
 export interface EditorCommandState {
   composing: boolean;
@@ -486,7 +495,7 @@ export interface EditorCommandState {
 }
 
 export interface EditorCommandPort {
-  execute: (commandId: EditorCommandId) => boolean;
+  execute: (commandId: EditorCommandId, options?: EditorCommandOptions) => boolean;
   state: () => EditorCommandState;
 }
 
@@ -497,10 +506,17 @@ export interface EditorCommandPortRegistration {
 }
 
 /**
- * Apply a Surround With plan to the main selection (§8.18.8). The selection
- * must span whole lines of one range; everything else is a typed no-op.
+ * Apply a Surround With plan to the main selection (§8.18.8/§8.19.8). The
+ * selection must span whole lines of one range; everything else is a typed
+ * no-op. Provenance comes from live syntax facts when the Lezer tree aligns
+ * exactly with the expanded line range and parses cleanly — otherwise the
+ * plan stays honestly local-text.
  */
-function applySurroundWith(view: EditorView, kindId: SurroundKind["id"]): boolean {
+function applySurroundWith(
+  view: EditorView,
+  kindId: SurroundKind["id"],
+  onApplied?: EditorCommandOptions["onSemanticEditApplied"],
+): boolean {
   if (view.state.readOnly || view.composing) return false;
   const ranges = view.state.selection.ranges;
   const main = view.state.selection.main;
@@ -508,6 +524,9 @@ function applySurroundWith(view: EditorView, kindId: SurroundKind["id"]): boolea
   const fromLine = view.state.doc.lineAt(main.from);
   const toLine = view.state.doc.lineAt(main.to);
   const languageId = guessEditorLanguageId(view) ?? "plaintext";
+  // Node evidence is observed against the EXPANDED whole-line bounds, which
+  // are what statement nodes actually align to.
+  const syntax = observeSyntaxFacts(view.state, fromLine.from, toLine.to);
   const plan = surroundWithPlan(kindId, {
     text: view.state.doc.sliceString(fromLine.from, toLine.to),
     from: fromLine.from,
@@ -517,14 +536,20 @@ function applySurroundWith(view: EditorView, kindId: SurroundKind["id"]): boolea
     rangeCount: ranges.length,
     readOnly: view.state.readOnly,
     languageId,
+    syntax,
   });
-  if (plan.kind === "unavailable") return false;
+  if (plan.kind === "unavailable") {
+    onApplied?.({ applied: false, provenance: null });
+    return false;
+  }
   view.dispatch({
     changes: plan.changes,
     selection: { anchor: Math.min(plan.selection.anchor, view.state.doc.length + plan.changes.reduce((sum, change) => sum + ("insert" in change ? (change.insert as string)?.length ?? 0 : 0), 0)) },
     userEvent: "input.surround",
     scrollIntoView: true,
   });
+  // One transaction == one undo entry carrying its provenance evidence.
+  onApplied?.({ applied: true, provenance: plan.provenance });
   return true;
 }
 
@@ -538,7 +563,7 @@ function guessEditorLanguageId(view: EditorView): string | null {
 
 function editorCommandPort(view: EditorView): EditorCommandPort {
   return {
-    execute(commandId) {
+    execute(commandId, options) {
       switch (commandId) {
         case "cloneCaretAbove": return cloneCaretAbove(view);
         case "cloneCaretBelow": return cloneCaretBelow(view);
@@ -560,7 +585,12 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
         case "paste": return pasteSystemClipboard(view);
         case "selectAllOccurrences": return selectAllEditorOccurrences(view);
         case "selectNextOccurrence": return selectNextEditorOccurrence(view);
-        case "surroundWithTryCatch": return applySurroundWith(view, "try-catch");
+        case "surroundWith": {
+          // §8.19.8: every surround kind routes through this one entry point.
+          const kindId = options?.surroundKindId;
+          if (!kindId) return false;
+          return applySurroundWith(view, kindId, options?.onSemanticEditApplied);
+        }
         case "unfoldAll": return unfoldAll(view) ?? false;
       }
     },
@@ -1550,6 +1580,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         }),
         crosshairCursor(),
         history(),
+        // §8.19.8 treeRevision source for semantic-edit evidence envelopes.
+        treeRevisionField,
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),
