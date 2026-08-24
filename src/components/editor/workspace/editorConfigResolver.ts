@@ -22,7 +22,7 @@ import {
 } from "./codeStyleModel";
 
 export interface CodeStyleFieldProvenance {
-  source: "explicit" | "editorconfig" | "language" | "sniffed" | "fallback";
+  source: "explicit" | "editorconfig" | "scheme" | "language" | "sniffed" | "fallback";
   configPath?: string;
   rawValue?: string;
   reason?: string;

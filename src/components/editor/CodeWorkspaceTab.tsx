@@ -245,6 +245,14 @@ import {
   type PersistedEditorGroup,
 } from "./workspace/workspaceLayoutPersistence";
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
+import { CodeStyleSettingsDialog } from "./workspace/CodeStyleSettingsDialog";
+import {
+  activeSchemeForLanguage,
+  readCodeStyleSchemeStore,
+  schemeStyleFields,
+  writeCodeStyleSchemeStore,
+  type CodeStyleSchemeStoreState,
+} from "./workspace/workspaceCodeStyleSchemes";
 import { EditorSelectionAiToolbar } from "./workspace/EditorSelectionAiToolbar";
 import {
   CONTEXT_LINE_RADIUS,
@@ -896,6 +904,18 @@ export function CodeWorkspaceTab({
   const [tabPolicy, setTabPolicy] = useState<WorkspaceTabPolicyV3>(() => ({ ...DEFAULT_WORKSPACE_TAB_POLICY_V3 }));
   const tabPolicyRef = useRef(tabPolicy);
   tabPolicyRef.current = tabPolicy;
+  // §8.19.9 R8-D1: code style schemes — production store with persistence;
+  // the active scheme layers into effective-style resolution BELOW EditorConfig.
+  const [codeStyleSchemes, setCodeStyleSchemes] = useState<CodeStyleSchemeStoreState>(
+    () => readCodeStyleSchemeStore(),
+  );
+  const codeStyleSchemesRef = useRef(codeStyleSchemes);
+  codeStyleSchemesRef.current = codeStyleSchemes;
+  const changeCodeStyleSchemes = useCallback((next: CodeStyleSchemeStoreState) => {
+    setCodeStyleSchemes(next);
+    writeCodeStyleSchemeStore(next);
+  }, []);
+  const [codeStyleSettingsOpen, setCodeStyleSettingsOpen] = useState(false);
   const ensureWorkspaceUi = useCodeWorkspaceStore((s) => s.ensureInstance);
   const disposeWorkspaceUi = useCodeWorkspaceStore((s) => s.disposeInstance);
   const patchWorkspaceUi = useCodeWorkspaceStore((s) => s.patchInstance);
@@ -1793,10 +1813,15 @@ export function CodeWorkspaceTab({
     const asyncResolved = resolvedCodeStylesRef.current[file.key];
     if (asyncResolved) return asyncResolved;
     const explicitOverride = indentationOverridesRef.current[file.key];
+    // §8.19.9 R8-D1: the active scheme for the file's extension-keyed
+    // language participates below EditorConfig.
+    const languageKey = file.languagePath.split(".").pop()?.toLowerCase() ?? "";
+    const activeScheme = activeSchemeForLanguage(codeStyleSchemesRef.current, languageKey || null);
     return resolveEffectiveCodeStyle({
       filePath: file.languagePath,
       text: file.text,
       explicitOverride,
+      activeSchemeFields: schemeStyleFields(activeScheme),
     });
   }, []);
 
@@ -4604,10 +4629,14 @@ export function CodeWorkspaceTab({
     if (capabilities && useRange && !capabilities.rangeFormatting) return null;
 
     const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
+    const schemeLanguageKey = file.languagePath.split(".").pop()?.toLowerCase() ?? "";
     const codeStyle = await workspaceStyleControllerRef.current.resolveForFile({
       filePath: absPath,
       explicitOverride: indentationOverridesRef.current[file.key],
       text: file.text,
+      activeSchemeFields: schemeStyleFields(
+        activeSchemeForLanguage(codeStyleSchemesRef.current, schemeLanguageKey || null),
+      ),
     });
     resolvedCodeStylesRef.current[file.key] = codeStyle;
 
@@ -8282,6 +8311,18 @@ export function CodeWorkspaceTab({
       keywords: ["keymap", "shortcut", "scheme", "keybinding"],
       run: () => {
         setKeymapSettingsOpen(true);
+        return true;
+      },
+    },
+    {
+      // §8.19.9 R8-D1: scheme management surface (copy/rename/delete/reset +
+      // provenance); the active scheme feeds effective-style resolution.
+      id: "workspace.codeStyleSettings",
+      title: "Code Style Settings",
+      category: "View",
+      keywords: ["code style", "scheme", "indent", "spaces", "end of line"],
+      run: () => {
+        setCodeStyleSettingsOpen(true);
         return true;
       },
     },
@@ -13791,6 +13832,25 @@ export function CodeWorkspaceTab({
           onClose={() => setKeymapSettingsOpen(false)}
         />
       )}
+      <CodeStyleSettingsDialog
+        open={codeStyleSettingsOpen}
+        store={codeStyleSchemes}
+        activeLanguageId={(() => {
+          const ext = activeFile?.languagePath.split(".").pop()?.toLowerCase() ?? "";
+          return ext || null;
+        })()}
+        provenance={activeFile ? {
+          filePath: activeFile.subtitle,
+          effectiveLabel: getEffectiveCodeStyleForFile(activeFile)?.label ?? "—",
+          source: getEffectiveCodeStyleForFile(activeFile)?.source ?? "fallback",
+          schemeName: activeSchemeForLanguage(
+            codeStyleSchemes,
+            activeFile.languagePath.split(".").pop()?.toLowerCase() || null,
+          ).name,
+        } : null}
+        onChange={changeCodeStyleSchemes}
+        onClose={() => setCodeStyleSettingsOpen(false)}
+      />
       {dapGuideOpen && (
         <DapAdapterGuideDialog
           open={true}

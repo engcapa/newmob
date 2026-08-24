@@ -13,6 +13,7 @@ import { type EditorConfigProperties } from "./editorConfigParser";
 export type CodeStyleSource =
   | "explicit-override"
   | "editorconfig"
+  | "scheme"
   | "language-default"
   | "sniffed"
   | "fallback";
@@ -113,6 +114,8 @@ export function formatCodeStyleLabel(style: {
   switch (style.source) {
     case "editorconfig":
       return `${base} (EditorConfig)`;
+    case "scheme":
+      return `${base} (Scheme)`;
     case "explicit-override":
       return `${base} (Manual)`;
     case "sniffed":
@@ -127,13 +130,27 @@ export function formatCodeStyleLabel(style: {
 /**
  * Resolve effective code style using strict priority hierarchy.
  */
+/** Style fields an active scheme may set (§8.19.9 R8-D precedence layer). */
+export interface SchemeStyleFields {
+  tabSize?: number;
+  indentSize?: number;
+  continuationIndent?: number;
+  insertSpaces?: boolean;
+  endOfLine?: "lf" | "crlf" | "cr";
+  trimTrailingWhitespace?: boolean;
+  insertFinalNewline?: boolean;
+}
+
 export function resolveEffectiveCodeStyle(params: {
   filePath: string;
   text?: string;
   explicitOverride?: ExplicitIndentationOverride | null;
   editorConfigProperties?: EditorConfigProperties | null;
+  /** Active scheme for the file's language; sits BELOW EditorConfig. */
+  activeSchemeFields?: SchemeStyleFields | null;
 }): EffectiveCodeStyle {
   const { filePath, text, explicitOverride, editorConfigProperties } = params;
+  const scheme = params.activeSchemeFields ?? null;
 
   // 1. Explicit user override on this file/tab
   if (explicitOverride) {
@@ -173,20 +190,43 @@ export function resolveEffectiveCodeStyle(params: {
       indentSize,
       continuationIndent: indentSize * 2,
       insertSpaces,
-      endOfLine: editorConfigProperties.end_of_line,
+      // Scheme fills gaps only — EditorConfig entries always win.
+      endOfLine: editorConfigProperties.end_of_line ?? scheme?.endOfLine,
       charset: editorConfigProperties.charset,
-      trimTrailingWhitespace: editorConfigProperties.trim_trailing_whitespace,
-      insertFinalNewline: editorConfigProperties.insert_final_newline,
+      trimTrailingWhitespace:
+        editorConfigProperties.trim_trailing_whitespace ?? scheme?.trimTrailingWhitespace,
+      insertFinalNewline:
+        editorConfigProperties.insert_final_newline ?? scheme?.insertFinalNewline,
       source: "editorconfig",
       label: formatCodeStyleLabel({ insertSpaces, indentSize, tabSize, source: "editorconfig" }),
     };
   }
 
-  // 3. Language default
+  // 3. Active scheme for this language — explicit user intent, so it beats
+  // both the language defaults and sniffed detection (§8.19.9 R8-D).
   const langDefault = defaultLanguageCodeStyle(filePath);
+  const schemeDefinesIndentation = scheme != null
+    && (scheme.insertSpaces !== undefined || scheme.indentSize !== undefined);
+  if (scheme && Object.keys(scheme).length > 0) {
+    return {
+      tabSize: scheme.tabSize ?? langDefault.tabSize,
+      indentSize: scheme.indentSize ?? langDefault.indentSize,
+      continuationIndent: scheme.continuationIndent ?? langDefault.continuationIndent,
+      insertSpaces: scheme.insertSpaces ?? langDefault.insertSpaces,
+      endOfLine: scheme.endOfLine,
+      trimTrailingWhitespace: scheme.trimTrailingWhitespace,
+      insertFinalNewline: scheme.insertFinalNewline,
+      source: "scheme",
+      label: formatCodeStyleLabel({
+        insertSpaces: scheme.insertSpaces ?? langDefault.insertSpaces,
+        indentSize: scheme.indentSize ?? langDefault.indentSize,
+        tabSize: scheme.tabSize ?? langDefault.tabSize,
+        source: "scheme",
+      }),
+    };
+  }
 
-  // 4. Sniffed fallback from text (if available and differs from lang default)
-  if (text && text.trim().length > 0) {
+  if (text && text.trim().length > 0 && !schemeDefinesIndentation) {
     const sniffed = sniffIndentation(text);
     const sniffedInsertSpaces = sniffed.type === "spaces";
     if (sniffedInsertSpaces !== langDefault.insertSpaces || sniffed.size !== langDefault.indentSize) {

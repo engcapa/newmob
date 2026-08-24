@@ -87,3 +87,62 @@ describe("codeStyleModel", () => {
     expect(style.label).toBe("Tab: 4 (Manual)");
   });
 });
+
+describe("§8.19.9 R8-D scheme precedence layer", () => {
+  it("overrides language defaults and suppresses sniffing", () => {
+    const style = resolveEffectiveCodeStyle({
+      filePath: "App.java",
+      text: "def mixed_indent():\n  return 1\n",
+      activeSchemeFields: { insertSpaces: true, indentSize: 4, tabSize: 4 },
+    });
+    expect(style.source).toBe("scheme");
+    expect(style.insertSpaces).toBe(true);
+    expect(style.indentSize).toBe(4);
+    expect(style.label).toBe("Spaces: 4 (Scheme)");
+  });
+
+  it("fills unspecified fields from the language default", () => {
+    const style = resolveEffectiveCodeStyle({
+      filePath: "App.java",
+      activeSchemeFields: { endOfLine: "crlf", trimTrailingWhitespace: false },
+    });
+    expect(style.source).toBe("scheme");
+    expect(style.indentSize).toBe(4); // java default
+    expect(style.continuationIndent).toBe(8);
+    expect(style.endOfLine).toBe("crlf");
+    expect(style.trimTrailingWhitespace).toBe(false);
+  });
+
+  it("stays below EditorConfig and the explicit override", () => {
+    const editorConfigWins = resolveEffectiveCodeStyle({
+      filePath: "App.java",
+      editorConfigProperties: { indent_style: "tab", indent_size: 2 },
+      activeSchemeFields: { insertSpaces: true, indentSize: 8 },
+    });
+    expect(editorConfigWins.source).toBe("editorconfig");
+    expect(editorConfigWins.insertSpaces).toBe(false); // EditorConfig indent wins
+    // EditorConfig didn't set EOL → scheme fills the gap even in that branch.
+    const eolFilled = resolveEffectiveCodeStyle({
+      filePath: "App.java",
+      editorConfigProperties: { indent_style: "space" },
+      activeSchemeFields: { endOfLine: "lf", insertSpaces: false, indentSize: 9 },
+    });
+    expect(eolFilled.source).toBe("editorconfig");
+    expect(eolFilled.endOfLine).toBe("lf");
+    expect(eolFilled.indentSize).not.toBe(9); // scheme indentation does NOT win
+
+    const overrideWins = resolveEffectiveCodeStyle({
+      filePath: "App.java",
+      explicitOverride: { type: "tabs", size: 4 },
+      activeSchemeFields: { insertSpaces: true, indentSize: 8 },
+    });
+    expect(overrideWins.source).toBe("explicit-override");
+    expect(overrideWins.label).toBe("Tab: 4 (Manual)");
+  });
+
+  it("keeps plain resolution untouched when no scheme is active", () => {
+    const style = resolveEffectiveCodeStyle({ filePath: "main.go" });
+    expect(style.source).toBe("language-default");
+    expect(style.insertSpaces).toBe(false);
+  });
+});
