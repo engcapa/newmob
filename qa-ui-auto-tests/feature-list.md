@@ -4444,7 +4444,7 @@ controls:
   - id: link
     selector: '[data-testid="mail-compose-link"]'
     kind: interactive
-    optional: true       # opens a URL prompt; covered by component tests to avoid prompt timing in smoke
+    optional: true       # opens the text-input-dialog for the URL; covered by component tests to avoid dialog timing in smoke
   - id: insert-menu
     selector: '[data-testid="mail-compose-insert-menu"]'
     kind: interactive
@@ -4458,7 +4458,7 @@ controls:
   - id: insert-table
     selector: '[data-testid="mail-compose-insert-table"]'
     kind: interactive
-    optional: true       # opens a table-size prompt; covered by component tests
+    optional: true       # opens the text-input-dialog for the size; covered by component tests
   - id: emoji
     selector: '[data-testid="mail-compose-emoji"]'
     kind: interactive
