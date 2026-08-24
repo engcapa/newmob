@@ -328,8 +328,17 @@ function buildSurroundProvenance(
 /** Provider CodeAction kinds that count as generate candidates. */
 const GENERATE_ACTION_KIND_PREFIXES = ["source.generate.", "refactor.extract.", "source."];
 
-export function filterGenerateCodeActions(actions: readonly { title: string; kind?: string | null }[]): Array<{ title: string; kind: string }> {
-  return actions
-    .filter((action) => !!action.kind && GENERATE_ACTION_KIND_PREFIXES.some((prefix) => action.kind!.startsWith(prefix)))
-    .map((action) => ({ title: action.title, kind: action.kind! }));
+/**
+ * §8.19.8: keep only provider generate/refactor kinds, preserving the FULL
+ * original action so the workflow can execute exactly what the provider sent
+ * — no local member templates are ever synthesized from these titles.
+ */
+export function filterGenerateCodeActions<T extends { title: string; kind?: string | null }>(
+  actions: readonly T[],
+): Array<{ item: T; title: string; kind: string }> {
+  return actions.flatMap((action) => (
+    action.kind && GENERATE_ACTION_KIND_PREFIXES.some((prefix) => action.kind!.startsWith(prefix))
+      ? [{ item: action, title: action.title, kind: action.kind }]
+      : []
+  ));
 }

@@ -156,14 +156,18 @@ describe("§8.18.8 Surround With", () => {
   });
 });
 
-describe("§8.18.8 Generate Code candidates", () => {
-  it("keeps only provider generate/refactor kinds; local templates are separate", () => {
+describe("§8.19.8 Generate Code candidates", () => {
+  it("keeps only provider generate/refactor kinds and preserves the raw actions", () => {
     const actions = filterGenerateCodeActions([
-      { title: "Generate Constructor", kind: "source.generate.constructor" },
-      { title: "Extract variable", kind: "refactor.extract.variable" },
-      { title: "Quick fix import", kind: "quickfix.import" },
-      { title: "No kind at all" },
+      { title: "Generate Constructor", kind: "source.generate.constructor", raw: "a" },
+      { title: "Extract variable", kind: "refactor.extract.variable", raw: "b" },
+      { title: "Quick fix import", kind: "quickfix.import", raw: "c" },
+      { title: "No kind at all", kind: null, raw: "d" },
     ]);
-    expect(actions.map((action) => action.title)).toEqual(["Generate Constructor", "Extract variable"]);
+    expect(actions.map((entry) => entry.title)).toEqual(["Generate Constructor", "Extract variable"]);
+    // The original provider actions survive so apply runs exactly what the
+    // server sent — never a locally rebuilt template.
+    expect(actions[0].item.raw).toBe("a");
+    expect(actions[1].item.raw).toBe("b");
   });
 });

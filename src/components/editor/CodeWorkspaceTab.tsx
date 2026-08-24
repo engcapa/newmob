@@ -272,6 +272,12 @@ import {
   type EditorSelectionRange,
 } from "./workspace/CodeMirrorHost";
 import { SurroundWithDialog } from "./workspace/SurroundWithDialog";
+import { GenerateCodeDialog } from "./workspace/GenerateCodeDialog";
+import {
+  applyGenerateSelection,
+  type GenerateCandidate,
+} from "./workspace/generateCodeWorkflow";
+import { filterGenerateCodeActions } from "./workspace/workspaceSemanticEditing";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
@@ -1226,6 +1232,19 @@ export function CodeWorkspaceTab({
   const [recentLocationsOpen, setRecentLocationsOpen] = useState(false);
   // §8.19.8 Surround With dialog state (one entry, all kinds).
   const [surroundWithDialogOpen, setSurroundWithDialogOpen] = useState(false);
+  // §8.19.8 Generate Code workflow state: provider candidates + phase.
+  const [generateCode, setGenerateCode] = useState<{
+    open: boolean;
+    phase: "loading" | "ready" | "empty" | "running" | "error";
+    candidates: GenerateCandidate[];
+    error: string | null;
+  }>({ open: false, phase: "loading", candidates: [], error: null });
+  const generateCodeContextRef = useRef<{
+    file: OpenFileState;
+    range: LspRange;
+    semanticToken: WorkspaceSemanticIndexBuildToken | null;
+    actions: LspCodeAction[];
+  } | null>(null);
   const [recentLocationsChangedOnly, setRecentLocationsChangedOnly] = useState(false);
   const setStructureUnavailable = useCallback((reason: string | null) => {
     patchWorkspaceUi(workspaceInstanceId, { structureUnavailable: reason });
@@ -7457,11 +7476,17 @@ export function CodeWorkspaceTab({
       });
       if (result.status === "executed-command") {
         setStatusMessage(`Executed code action: ${executableAction.title}`);
+        return { ok: true, message: null };
       } else if (result.status === "empty") {
-        setStatusMessage("Code action had no edit or command to apply");
+        const message = "Code action had no edit or command to apply";
+        setStatusMessage(message);
+        return { ok: false, message };
       }
+      return { ok: true, message: null };
     } catch (error) {
-      setStatusMessage(errorMessage(error));
+      const message = errorMessage(error);
+      setStatusMessage(message);
+      return { ok: false, message };
     }
   }, [
     applyLspWorkspaceEdit,
@@ -7472,6 +7497,91 @@ export function CodeWorkspaceTab({
     setStatusMessage,
     updateLspStatusForFile,
   ]);
+
+  // §8.19.8 Generate Code: request provider source/generate CodeActions for
+  // the caret, list exactly what came back, and apply the selection through
+  // the existing runCodeAction pipeline (resolve → WorkspaceEdit/command with
+  // semantic staleness guards). No local member templates exist anywhere.
+  const requestGenerateCandidates = useCallback(async () => {
+    const file = activeFile;
+    if (!file || file.loading || file.library) {
+      setStatusMessage("Generate requires an active workspace file");
+      setGenerateCode((prev) => ({ ...prev, phase: "empty" }));
+      return;
+    }
+    const selection = editorSelectionRef.current;
+    const range: LspRange = {
+      start: selection.start,
+      end: selection.empty ? selection.start : selection.end,
+    };
+    setGenerateCode((prev) => ({ ...prev, open: true, phase: "loading", error: null }));
+    const requested = await requestCodeActions(file, range, [], ["source"]);
+    if (
+      requested.semanticToken
+      && !workspaceSemanticIndexBuildIsCurrent(semanticIndex.current(), requested.semanticToken)
+    ) {
+      setGenerateCode({ open: true, phase: "error", candidates: [], error: "Generation actions became stale because the workspace changed; retry to request them again" });
+      generateCodeContextRef.current = null;
+      return;
+    }
+    const filtered = filterGenerateCodeActions(requested.actions);
+    if (filtered.length === 0) {
+      generateCodeContextRef.current = null;
+      setGenerateCode({ open: true, phase: "empty", candidates: [], error: null });
+      return;
+    }
+    generateCodeContextRef.current = {
+      file,
+      range,
+      semanticToken: requested.semanticToken,
+      actions: filtered.map((entry) => entry.item),
+    };
+    setGenerateCode({
+      open: true,
+      phase: "ready",
+      candidates: filtered.map((entry, index) => ({
+        id: String(index),
+        title: entry.title,
+        kind: entry.kind,
+      })),
+      error: null,
+    });
+  }, [activeFile, requestCodeActions, semanticIndex.current, setStatusMessage]);
+
+  const closeGenerateDialog = useCallback(() => {
+    generateCodeContextRef.current = null;
+    setGenerateCode((prev) => ({ ...prev, open: false }));
+  }, []);
+
+  const applyGenerateCandidates = useCallback(async (ids: readonly string[]) => {
+    const context = generateCodeContextRef.current;
+    if (!context) return;
+    // Only ids that still map onto the captured provider actions.
+    const selection: GenerateCandidate[] = ids.flatMap((id) => {
+      const action = context.actions[Number(id)];
+      return action ? [{ id, title: action.title, kind: action.kind ?? "" }] : [];
+    });
+    if (selection.length === 0) return;
+    setGenerateCode((prev) => ({ ...prev, phase: "running", error: null }));
+    const outcome = await applyGenerateSelection(selection, {
+      actionFor: (candidate) => context.actions[Number(candidate.id)],
+      isStale: () => !!context.semanticToken
+        && !workspaceSemanticIndexBuildIsCurrent(semanticIndex.current(), context.semanticToken!),
+      run: (action) => runCodeAction(action, context.file, context.semanticToken),
+    });
+    if (outcome.failedIndex != null) {
+      // §8.19.8: resolve/apply failure keeps the dialog on Retry/Cancel and
+      // never falls back to inserting a fixed template.
+      setGenerateCode((prev) => ({
+        ...prev,
+        phase: "error",
+        error: outcome.message ?? "Generation failed",
+      }));
+      return;
+    }
+    setStatusMessage(`Generated via ${outcome.applied} language-server action${outcome.applied === 1 ? "" : "s"}`);
+    closeGenerateDialog();
+  }, [closeGenerateDialog, runCodeAction, semanticIndex.current, setStatusMessage]);
 
   const showCodeActionsMenu = useCallback(async (
     clientX: number,
@@ -7924,6 +8034,21 @@ export function CodeWorkspaceTab({
       when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
       run: () => {
         setSurroundWithDialogOpen(true);
+        return true;
+      },
+    },
+    {
+      // §8.19.8 Generate Code: the dialog lists exactly what the provider
+      // returned; without a provider this stays honestly empty.
+      id: "editor.generateCode",
+      title: "Generate Code…",
+      category: "Code",
+      keybinding: "Alt+Insert",
+      keybindings: ["Meta+n"],
+      keywords: ["generate", "constructor", "getter", "setter", "toString", "override"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: () => {
+        void requestGenerateCandidates();
         return true;
       },
     },
@@ -9106,6 +9231,7 @@ export function CodeWorkspaceTab({
     recentFilesOpen,
     refreshTree,
     reloadFile,
+    requestGenerateCandidates,
     revealEditorTabInTree,
     renameSelected,
     resolveEditorTarget,
@@ -13225,6 +13351,15 @@ export function CodeWorkspaceTab({
           }}
         />
       )}
+      <GenerateCodeDialog
+        open={generateCode.open}
+        phase={generateCode.phase}
+        candidates={generateCode.candidates}
+        error={generateCode.error}
+        onApply={(ids) => void applyGenerateCandidates(ids)}
+        onRetry={() => void requestGenerateCandidates()}
+        onCancel={closeGenerateDialog}
+      />
       <SurroundWithDialog
         open={surroundWithDialogOpen}
         languageId={activeLanguageId}
