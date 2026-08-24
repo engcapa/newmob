@@ -172,6 +172,7 @@ import {
 } from "./workspace/workspaceStyleController";
 import type {
   CompletionAcceptanceDiagnostic,
+  CompletionInvocationRequest,
   CompletionRequestIdentity,
   CompletionRequestToken,
 } from "./workspace/lspCompletion";
@@ -9548,6 +9549,8 @@ export function CodeWorkspaceTab({
       position: LspPosition,
       triggerCharacter: string | null,
       token: CompletionRequestToken,
+      // §8.19.4 repeated-call facts; forwarded to the provider adapter.
+      invocation?: CompletionInvocationRequest,
     ): Promise<LspCompletionResult | null> => {
       // Always resolve against the live buffer (openFilesRef), not the React
       // prop — typing is batched into the store and the prop is often one
@@ -9563,7 +9566,7 @@ export function CodeWorkspaceTab({
       if (!descriptor) return null;
       const epoch = lspDocumentEpochRef.current[live.key] ?? 0;
       try {
-        const result = await lspCompletion(descriptor, position, triggerCharacter);
+        const result = await lspCompletion(descriptor, position, triggerCharacter, invocation);
         // Drop only when the buffer moved again while IPC was in flight; CM
         // re-queries on the next keystroke / incomplete list.
         if (!openFilesRef.current[live.key]) return null;

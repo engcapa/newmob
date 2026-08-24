@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-24 · 版本：v4.52（R1 ActionHost/Keymap 唯一运行时真值实施记录；R0 已于 `52da0ebf` 提交）· 状态：**实施中；R0 已合入，R1 已按 §8.19.2 完成代码合同闭合（工作树未提交）；三端 native 前所有 keymap 能力保持 platform-unverified；G0 证据门禁红、G1 未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19.1/§8.19.2 的 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-24 · 版本：v4.53（R3-a/R3-b resolve gate + Basic invocation evidence 实施记录；R0 已于 `52da0ebf` 提交、R1 已于 `401d85e1` 提交）· 状态：**实施中；R3 生产代码合同已闭合（工作树未提交），真实 jdtls fixture/provider trace 未运行（R3-c 待做）；三端 native 前所有 keymap 能力保持 platform-unverified；G0 证据门禁红、G1 未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19.1/§8.19.2/§8.19.4 的 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4100,7 +4100,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 1 | [x] **R0 Save/recovery/WorkspaceEdit effect closure** | 生产缺陷已确认，G0 红 → **代码合同已闭合（v4.51，工作树），native/browser 证据未运行** | 所有写路径共享 effect result/recovery ledger，partial apply 可恢复 | 无 |
 | 2 | [x] **R1 Action/Keymap runtime single truth** | editable 基础已接，dispatcher 不完整 → **业务键位全部迁入 ActionHost + typed V2 gate/chord/mouse dispatcher（v4.52，工作树），三端 native 未运行** | 所有用户命令可发现、可改键、可拒绝 IME/AltGr 误触发 | R0 的 typed-result 命名约定 |
 | 3 | [ ] **R2 QA catalog 与可执行 workflow 修复** | audit 红、核心 YAML 占位 | catalog current，G0/G1 browser cases 真正操作并断言 | R0/R1 同步提供 testid；基线修复可先行 |
-| 4 | [ ] **R3 real jdtls Basic Completion acceptance** | synthetic L2，真实 Java 未验证 | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 | R1；effectful edits 依赖 R0 |
+| 4 | [ ] **R3 real jdtls Basic Completion acceptance** | synthetic L2，真实 Java 未验证 → **resolve gate/显式 Basic 入口/invocation evidence 生产合同已闭合（v4.53，工作树）；真实 fixture+provider trace 未运行（R3-c）** | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 | R1；effectful edits 依赖 R0 |
 | 5 | [ ] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial | G1 多光标/视觉列闭环，G3 history/reference 分项可用 | R1 |
 | 6 | [ ] **R5 Tool-window registry/tab policy/split operations** | layout wired，workflow partial | G1 Switcher/tabs/splits 使用真实状态并持久化 | R1 |
 | 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
@@ -4430,6 +4430,98 @@ interface CompletionInvocationEvidence {
 **真实 fixture。** 至少创建 `maven-single`、`maven-multi-module`、`gradle-single`、`gradle-multi-module`，固定 JDK 21、jdtls和 build tool版本；覆盖 JDK type、同名 type歧义、static member、generic/overload、main/test source set、跨模块、dependency source、broken classpath、provider restart。trace保存 initialize capability、completion/resolve/cancel摘要、document revision、classpath fingerprint、edit hashes和时序，不保存用户 home/源码全文。IDEA expected记录候选类别、scope扩展、import与undo结果，不强求私有排序逐项相同。
 
 **测试与 DoD。** pure/mounted覆盖 resolve success/timeout/fail/retry/explicit primary-only、overlap、choice、single undo、10k cap、restart/stale和非 Java负例；native runner对四个项目实际启动 jdtls并核对落盘/import/undo。Java Basic主路径全绿可写 **G1 Java Basic L2 provider-backed**；单 fixture与 IDEA对照达到完整矩阵后只对该 capability写 G2/L3。不得写 Smart、classpath-complete或“all Java completion”。
+
+**R3 as-built（v4.53，2026-08-24）。** 按 §8.19.11 回报模板，分两段：本段为 R3-a/R3-b 生产代码合同（resolve gate + invocation evidence + IPC scope 事实）；R3-c 真实 fixture/runner/trace 见下一段。
+
+```text
+包 ID / commit / capability ID
+    R3-a/R3-b / 工作树（基线 HEAD 401d85e1）/ java.basic-completion, completion.invocation-evidence
+As-built production call chain
+    显式调用: editor.basicCompletion (Ctrl+Space) → ActionHost dispatchKeydownV2
+      → CodeMirrorHost.startBasicCompletion: popup 未开→startCompletion(view)；
+      已开→closeCompletion+startCompletion（basicCompletionReopenRef 抑制一次
+      popup-close 重置）→ source 以 context.explicit 记录 reason="explicit"
+      → recordBasicCompletionInvocation（仅显式递增 ordinal；
+        revision/position/providerGeneration 变化重置）
+      → hooks.fetch(position, trigger, token,
+          {invocationOrdinal, requestedScope: ordinal>=2?"expanded":"default"})
+      → CodeWorkspaceTab.getLspCompletions → lspCompletion(invoke lsp_completion,
+          invocationOrdinal+requestedScope) → Rust validate_requested_scope
+          （default|expanded 白名单）→ ordinal>1 时 log::info 记录 provider 侧事实
+          （不进入 wire request，LSP 无 scope-expansion 通道）。
+    自动触发: typing/trigger 不递增 ordinal（继承现行序列）；popup 关闭由
+      CodeMirrorHost updateListener 监听 completionStatus active→null 调
+      resetBasicCompletionSession。
+    接受: option.apply → applyLspCompletion：
+      item 自带 additionalTextEdits 或无 resolve → 立即一次 dispatch 合并提交；
+      否则 race(resolve, 3s timeout)：
+        成功 → merge 后一次 dispatch（primary+snippet placeholders+
+          non-overlap additional edits），choice/tabstop 会话照旧 post-image 重映射；
+        timeout/failed/empty → presentResolveGate（不再静默插 primary-only）：
+          CodeMirrorHost 渲染 caret 锚定横幅（testid completion-resolve-gate*，
+          item label + "Auto-import unavailable — …" + Retry / Insert without
+          import / dismiss）；Retry 走 resolveFresh 绕过 info 缓存重试，成功则
+          合并提交并关横幅，再失败保持横幅显示 retry failed；
+          Insert without import 提交 {…item, additionalTextEdits:[]}（一次 dispatch）；
+          dismiss 不插任何内容。所有 gate 动作先 guardCurrent（identity+doc
+          未变），stale 一律拒绝并报 identity-mismatch；overlap 由
+          planCompletionChanges 拒绝整个 acceptance（invalid-additional-edits），
+          不部分应用。无 gate surface 的孤立宿主 = 仅阻断 + diagnostic，
+          同样不静默插入。
+Owner files
+    workspace/lspCompletion.ts（CompletionResolveState / CompletionAcceptancePlanV2 /
+      CompletionInvocationEvidence / CompletionInvocationRequest /
+      RecordedCompletionInvocation / providerScopeFor /
+      buildCompletionAcceptancePlanV2 / completionItemId / gate 化的
+      applyLspCompletion / 显式-only ordinal + generation/popup-close 重置 /
+      evidence ring recentCompletionInvocations）、workspace/CodeMirrorHost.tsx
+      （startBasicCompletion handler、popup-close 重置监听、gate 横幅 UI 与
+      fileKey 清理）、workspace/workspaceCodeMirrorKeymap.ts
+      （editor.basicCompletion 定义 + startBasicCompletion handler 槽位）、
+      CodeWorkspaceTab.tsx（getLspCompletions 转发 invocation）、
+      src/lib/editor/lsp.ts（lsp_completion invoke 增 invocationOrdinal/
+      requestedScope 可选参数）、src-tauri/src/lsp.rs（validate_requested_scope +
+      repeat-ordinal 日志 + 单测）。
+缺陷→修复映射（§8.19.4 列出的旧行为）
+  1) resolve 3s timeout/失败曾静默插入 primary 并只写 status diagnostic
+     → 改为 gate 强制显式选择（timeout/failed/empty 三路均不自动插入）。
+  2) recordBasicCompletionInvocation 曾 void input.reason——typing 也递增 ordinal
+     且无 generation/popup-close 重置 → 仅 explicit 递增；revision/position/
+     providerGeneration 变化与 popup 关闭均重置。
+  3) ordinal 只进过单测、从未进入生产链 → 现在 evidence ring
+     （recentCompletionInvocations，上限 50）+ fetch 第 4 参 + IPC 参数一路贯通。
+  4) Ctrl+Space 无生产入口（completionKeymap 已在 R1 移出 CM spread）且重复调用
+     被 CM 弹窗吞掉 → editor.basicCompletion action + close/reopen toggle。
+Schema/migration
+    无持久化 schema 变更；evidence ring 为进程内诊断面（resetCompletionTelemetry
+    一并清空）。lsp_completion 新增两个可选参数，旧调用方不传即行为不变。
+测试证据（已运行，2026-08-24）
+    - npx vitest run src/components/editor/ → 143 文件 1176 通过
+      （新增 lspCompletionResolveGate.test.ts 13 例：ordinal 语义×3、evidence ring、
+      plan 分类、gate timeout/dismiss/retry-success/retry-fail/stale 阻断/overlap
+      阻断/无 gate 阻断/成功无 gate）；lspCompletion.test.ts 原"失败仍插 primary"
+      断言按新契约改写为阻断断言。全量首跑时 CodeWorkspaceTab git-gutter 用例
+      3s 超时一次（负载抖动），单独与全量复跑均绿，非本包引入。
+    - pnpm build → ✓ built（tsc+vite）。
+    - cargo test --lib → 1298 通过 0 失败（含新增 requested_scope_validation_
+      accepts_only_known_tags）；cargo check --lib 绿。
+未运行项
+    - 真实 jdtls fixture/native runner（R3-c，见下一段）；browser workflow；
+      Windows/macOS native IME 行为（R9 门禁）。
+最高允许声明
+    “R3-a/R3-b 生产代码合同闭合：resolve gate + 显式 Basic 入口 + invocation
+    evidence 全链贯通（model+production，Vitest/build/cargo 绿）”。
+禁止声明
+    不得写 G1 Java Basic provider-backed/L2（缺 R3-c provider trace）、不得写
+    expanded scope 生效（providerScope 恒为 unchanged/unknown，除非未来 provider
+    明示广告）、不得写 cross-platform IME verified。
+残余风险
+    - CM 弹窗开启期间第二次 Ctrl+Space 通过 close+reopen 实现，弹窗有一次重建
+      （IDEA 为原地扩展）；若 provider 对连续两次请求有副作用需在 R3-c trace 中
+      观察。
+    - gate 横幅锚定在出现时刻的 caret 坐标，不随后续滚动移动（动作自身有
+      stale 守卫，不会误插）。
+```
 
 #### 8.19.5 R4：Clipboard History、Plain Paste、Copy Reference 与完整 Virtual Space
 

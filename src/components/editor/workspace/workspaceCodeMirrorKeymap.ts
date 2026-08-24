@@ -134,6 +134,12 @@ export interface EditorHostActionHandlers {
   save(): void;
   openReplacePanel(): boolean;
   expandSemanticSelection(): boolean;
+  /**
+   * Explicit Basic Completion (§8.19.4): opens the popup, or — when one is
+   * already open at this caret — restarts the query so the repeated call
+   * reaches the provider adapter as ordinal ≥ 2 / expanded scope.
+   */
+  startBasicCompletion(): boolean;
   /** Escape stack: snippet tabstop cancel → selection collapse → signature hide. */
   escapeStack(): boolean;
   /**
@@ -327,6 +333,22 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       keywords: ["complete", "statement", "heuristic"],
       requiresEditor: true,
       run: async () => runViaHandlers(handlers, completeCurrentStatement),
+    }),
+    // §8.19.4 explicit Basic Completion (IDEA Ctrl+Space). While a popup is
+    // already open the handler restarts the query at the same caret, which is
+    // what makes the second call arrive as ordinal ≥ 2 / requestedScope
+    // expanded instead of being swallowed by the active popup.
+    editorAction({
+      id: "editor.basicCompletion",
+      title: "Basic Completion",
+      category: "Edit",
+      defaultKeybinding: "Ctrl+Space",
+      keywords: ["complete", "suggest", "popup", "intellisense"],
+      requiresEditor: true,
+      run: async () => {
+        const handled = handlers.startBasicCompletion();
+        return handled ? { kind: "applied" } : { kind: "no-op", reason: "condition-not-met" };
+      },
     }),
     editorAction({
       id: "editor.joinLines",
@@ -545,6 +567,7 @@ const NOOP_HANDLERS = {
   save: () => {},
   openReplacePanel: () => false,
   expandSemanticSelection: () => false,
+  startBasicCompletion: () => false,
   escapeStack: () => false,
   runEditorCommand: () => false,
 };

@@ -6033,6 +6033,18 @@ pub async fn lsp_document_symbols(
     Ok(LspDocumentSymbolsResult { status, symbols })
 }
 
+/// §8.19.4 repeated-Basic-call facts: validate the requested-scope tag before
+/// it is recorded. Standard LSP has no scope-expansion channel, so these are
+/// logged for traceability and never forwarded inside the wire request.
+fn validate_requested_scope(requested_scope: Option<&str>) -> Result<(), String> {
+    match requested_scope {
+        None | Some("default") | Some("expanded") => Ok(()),
+        Some(other) => Err(format!(
+            "invalid requestedScope `{other}`; expected `default` or `expanded`"
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn lsp_completion(
     state: State<'_, AppState>,
@@ -6045,7 +6057,23 @@ pub async fn lsp_completion(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    // §8.19.4 repeated-Basic-call facts: the frontend's invocation ordinal
+    // (>= 2 = repeated explicit call at one caret) and its requested scope.
+    // Standard LSP has no scope-expansion channel, so these are recorded for
+    // traceability and never forwarded inside the wire request.
+    invocation_ordinal: Option<u32>,
+    requested_scope: Option<String>,
 ) -> Result<LspCompletionResult, String> {
+    validate_requested_scope(requested_scope.as_deref())?;
+    match (invocation_ordinal, requested_scope.as_deref()) {
+        (Some(ordinal), scope) if ordinal > 1 => {
+            log::info!(
+                "lsp: completion repeat ordinal={ordinal} requestedScope={} file={file_path}:{line}:{character}",
+                scope.unwrap_or("default")
+            );
+        }
+        _ => {}
+    }
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
     let session = match state
         .lsp
@@ -11126,6 +11154,15 @@ mod tests {
     /// Serializes tests that mutate the process-global jdtls vmargs / java settings
     /// (both feed `jdtls_vmargs()`), so parallel runs do not clobber each other.
     static JAVA_GLOBALS_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[test]
+    fn requested_scope_validation_accepts_only_known_tags() {
+        assert!(validate_requested_scope(None).is_ok());
+        assert!(validate_requested_scope(Some("default")).is_ok());
+        assert!(validate_requested_scope(Some("expanded")).is_ok());
+        let error = validate_requested_scope(Some("smart")).unwrap_err();
+        assert!(error.contains("invalid requestedScope `smart`"), "{error}");
+    }
 
     #[test]
     fn java_install_hint_is_platform_specific() {

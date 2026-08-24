@@ -21,6 +21,7 @@ const NOOP_HANDLERS = {
   save: () => {},
   openReplacePanel: () => false,
   expandSemanticSelection: () => false,
+  startBasicCompletion: () => false,
   escapeStack: () => false,
   runEditorCommand: () => false,
 };

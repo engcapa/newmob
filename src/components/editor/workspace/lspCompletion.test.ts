@@ -738,16 +738,30 @@ describe("createLspCompletionSource", () => {
       view.destroy();
     });
 
-    it("reports additional-edit-unavailable when resolve fails instead of inserting an import", async () => {
+    it("blocks on resolve failure and surfaces the gate instead of inserting an incomplete acceptance", async () => {
+      // §8.19.4: a failed resolve must NOT fall through to a silent
+      // primary-only insert — the gate waits for an explicit user choice.
       const { EditorView } = await import("@codemirror/view");
       const diagnostics: string[] = [];
+      const gates: Array<{ reason: string; insertWithoutImport(): boolean }> = [];
       const fetch = vi.fn(async (): Promise<LspCompletionResult> => completionResult(["Solo"]));
       const resolve = vi.fn(async () => { throw new Error("resolve blew up"); });
-      const source = createFixtureCompletionSource({
-        fetch,
-        resolve,
+      const source = createLspCompletionSource({
+        identity: () => ({
+          workspaceId: "fixture-workspace",
+          fileKey: "fixture-file",
+          filePath: "/fixture/file.ts",
+          uri: "file:///fixture/file.ts",
+          languageId: "fixture",
+          documentRevision: 0,
+          lspSessionGeneration: 0,
+        }),
+        fetch: () => fetch(),
+        resolve: () => resolve(),
         triggerCharacters: () => [],
+        getDocumentRevision: () => 0,
         reportDiagnostic: (kind, detail) => diagnostics.push(detail ? `${kind}:${detail}` : kind),
+        onResolveGate: (request) => gates.push(request),
       });
       const state = EditorState.create({ doc: "const a = Sol" });
       const view = new EditorView({ state });
@@ -757,7 +771,10 @@ describe("createLspCompletionSource", () => {
         option.apply(view, option, 10, 13);
       }
       await new Promise((r) => setTimeout(r, 10));
-      expect(view.state.doc.toString()).toBe("const a = Solo");
+      // Nothing inserted while the gate is pending.
+      expect(view.state.doc.toString()).toBe("const a = Sol");
+      expect(gates).toHaveLength(1);
+      expect(gates[0].reason).toBe("failed");
       expect(diagnostics).toContain("additional-edit-unavailable:resolve-failed");
       view.destroy();
     });
