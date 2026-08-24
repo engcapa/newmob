@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-24 · 版本：v4.56（R4 `2fcc9f47`；v4.55 R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R7 生产代码合同闭合（无真实 jdtls trace、无 IDEA 对照）；R4 生产代码合同闭合（History 设置界面未接、region 折叠标签未收口）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-24 · 版本：v4.57（R5-a `5cae5f7a`；v4.56 R4 `2fcc9f47`；v4.55 R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R7 生产代码合同闭合（无真实 jdtls trace、无 IDEA 对照）；R4 生产代码合同闭合（History 设置界面未接、region 折叠标签未收口）；R5 部分闭合（V3 policy/registry 模型完成，Switcher/persistence/split actions 未接）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4102,7 +4102,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 3 | [ ] **R2 QA catalog 与可执行 workflow 修复** | audit 红、核心 YAML 占位 | catalog current，G0/G1 browser cases 真正操作并断言 | R0/R1 同步提供 testid；基线修复可先行 |
 | 4 | [x] **R3 real jdtls Basic Completion acceptance** | synthetic L2 → **R3-a/b 生产代码合同（cb07c95c）+ R3-c 真实 fixture/runner/trace：五项目九场景 Linux 实机全绿，provider 层 G1 L2（v4.53）** | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 ✅（IDEA 对照录制与三端仍开放） | R1；effectful edits 依赖 R0 |
 | 5 | [x] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial → **history ring V2（sensitive/限额/单删）+ Paste-from-History 弹层、Paste-as-Plain-Text、Copy Reference 候选模型、VisualColumnPosition/overflow StateField + End/click/type/backspace/paste 消费（v4.56）；Settings 接线、region 折叠标签、native clipboard 权限未做** | G1 多光标/视觉列闭环 ✅（jsdom 级），G3 history/reference 分项可用 ✅ | R1 |
-| 6 | [ ] **R5 Tool-window registry/tab policy/split operations** | layout wired，workflow partial | G1 Switcher/tabs/splits 使用真实状态并持久化 | R1 |
+| 6 | [ ] **R5 Tool-window registry/tab policy/split operations** | layout wired，workflow partial → **Tab Policy V3 迁移/修复模型 + workspace 级 ToolWindow registry（MRU/cycle/Search 语义）已落地（v4.57 R5-a）；Switcher registry 接线、per-workspace persistence、split/equalize/stretch/move actions 未接** | G1 Switcher/tabs/splits 使用真实状态并持久化 | R1 |
 | 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial → **usages session 生产合同（真实 identity/rerun/pin/角色诚实/库过滤）+ 五 kind 类型化服务通道闭合（v4.54）；Parameter Info 改道、refactorApplyGate 第二消费方、真实 trace 未闭合** | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
 | 8 | [x] **R7 Semantic editing/Surround/Generate** | 谎报 syntax-tree / try-catch 硬编码 / Generate 只有 filter → **provenance 类型化（local-text/syntax-tree/provider，node evidence 强制）、Surround 五 kind 同一 action/dialog/单事务、Generate 全链路真实 provider CodeAction、Complete Statement Java 首批 syntax-backed + 其余 Local/Heuristic 标注（v4.55）；真实 jdtls trace 与 IDEA 对照未运行** | provenance 诚实，Java syntax/provider 子集可用 ✅（trace/对照仍开放） | R1、R3、R6 |
 | 9 | [ ] **R8 Advanced suite productionize-or-defer** | appearance wired，其余模型居多 | SSR/dependency/Full Line/code style 每项有明确产品决策 | R1；按子项依赖 R3/R6 |
@@ -4864,6 +4864,63 @@ Owner files
     §8.19.6），R2 catalog/workflow 修复亦可随时并行；R8 需先出四项 ADR；
     R9 为最终汇总门禁。本包的 overflow StateField 与 popup 测试基建可直接
     被 R5 的 Switcher/tab restore 断言复用。
+```
+
+**R5-a as-built（v4.57，2026-08-24，部分闭合——模型层完成，接线未做）。**
+
+```text
+包 ID / commit / capability ID
+    R5-a / 5cae5f7a / tab-policy.v3, tool-window.registry
+As-built production call chain
+    Tab Policy V3: workspaceTabPolicy.ts —— WorkspaceTabPolicyV3 在 V2 语义
+      （limit/order/openPosition/activateOnClose/pinnedRow/reusePreview）上
+      增加 schemaVersion:3 + previewMode；migrateWorkspaceTabPolicy(raw) 接受
+      任意持久化 JSON：v2 载荷按 previewEnabled→previewMode 迁移并记录
+      "previewMode(migrated-from-v2)"；错误类型字段逐个回落默认值、数值越界
+      钳制进合法域（1–100）；任何修复发生时返回原始载荷 backup，供调用方在
+      覆写前留档。enforceTabPolicy/orderTabsForDisplay/selectActivateOnClose
+      放宽为 AnyWorkspaceTabPolicy（只读共享字段），V2 行为零变化。
+    ToolWindow registry: toolWindowRegistry.ts —— workspace 级注册表，
+      register/unregister/setToolWindowState/setToolWindowBadge/touch 按
+      panel mount/open/hide/dispose 写入真实快照（§8.19.6 的
+      ToolWindowSnapshot 形状含 dock/state/lastActivatedAt/badge/canHide/
+      unavailableReason）；listToolWindows 输出 MRU 全量（Search 用），
+      listToolWindowsForCycle 过滤 unavailable——不可用窗口带 reason 只在
+      Search 可见，永不进入 cycle。
+Owner files
+    workspace/workspaceTabPolicy.ts（V3 类型/默认值/migration/签名放宽）、
+    workspace/toolWindowRegistry.ts（新）、对应两个测试文件。
+测试证据（已运行，2026-08-24）
+    - npx vitest run src/components/editor/ → 155 文件 1274 通过。新增：
+      workspaceTabPolicyV3.test.ts 5 例（v3 直通、v2 默认迁移、逐字段修复+
+      backup、非对象全回落、越界钳制）；toolWindowRegistry.test.ts 5 例
+      （MRU 排序、unavailable 不入 cycle 但 Search 可见、状态/激活时间、
+      badge 与 dispose、workspace 隔离）。既有 workspaceTabPolicy.test.ts
+      回归绿。
+    - pnpm build 绿（tsc -b + vite）。Rust 无改动。
+诚实边界（本包未闭合项 → R5-b）
+    - Switcher 尚未消费 registry（仍构造自身列表）；冻结 snapshot/MRU 后台
+      稳定性断言未落地。
+    - per-workspace policy 持久化未接：migrateWorkspaceTabPolicy 已就绪但无
+      读写调用方（workspaceLayoutPersistence 无 policy 字段）。
+    - split right/down / move tab to next/previous split / next/previous
+      split / equalize / stretch / unsplit actions 未新增；recursiveLayoutTree
+      的 splitLeaf/closeLeaf/adjacent/equalize 基元现状未审计补齐。
+    - Backspace close 分级（dirty 确认/pinned 按政策/tool window 仅 hide）
+      未接线；ReopenLocationV2{leafId/treeRoute/siblingFileKeys} 模型未建。
+    - detach 明确 defer 至 R5b/G3（controller/window ownership ADR 前不展示
+      可点击入口）——本包无相关改动，符合契约。
+最高允许声明
+    “R5-a：Tab Policy V3 迁移/修复模型与 workspace 级 ToolWindow registry
+    （MRU/cycle/Search 三语义）以纯函数+单测闭合”。
+禁止声明
+    不得写 R5 complete、Switcher 使用真实 registry、tab policy 已持久化、
+    split operations 已交付、G1 tabs/splits L2。
+残余风险与下一依赖包
+    R5-b 需按序接线：① Switcher 冻结 snapshot 消费 registry；
+    ② workspaceLayoutPersistence 增加 tabPolicy 字段（经 migration 读写，
+    backup 留档）；③ split/navigation/equalize/stretch actions +
+    recursiveLayoutTree reducer 审计；④ Backspace 分级关闭 + ReopenLocationV2。
 ```
 
 #### 8.19.5 R4：Clipboard History、Plain Paste、Copy Reference 与完整 Virtual Space
