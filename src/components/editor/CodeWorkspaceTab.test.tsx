@@ -19,7 +19,7 @@ import type {
 import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile, WorkspaceWriteAck } from "../../lib/editor/workspace";
 import { CodeWorkspaceTab, extractContextSnippet } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
-import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
+import { WORKSPACE_RECOVERY_STORAGE_PREFIX, hasBlockingDiskEffectResolution, listDiskEffectLedgerEntries, resolveDiskEffectLedgerEntry } from "./workspace/workspaceRecovery";
 import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
 import { confirmAppDialog } from "../../lib/appDialogs";
 import { workspaceActionRegistry } from "./workspace/workspaceActionRegistry";
@@ -5206,6 +5206,22 @@ end_of_record
       const uiAfter = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-save-race-close");
       expect(uiAfter.openFiles["root:app:src/main.ts"]).toBeUndefined();
       expect(lspMocks.lspSaveDocument).not.toHaveBeenCalled();
+
+      // §8.19.1: a discarded writeback must leave a committed ledger row so
+      // the recovery center can surface "saved to disk, buffer discarded".
+      const ledgerRows = listDiskEffectLedgerEntries("instance-save-race-close")
+        .filter((row) => row.path === "/repo/app/src/main.ts");
+      expect(ledgerRows).toHaveLength(1);
+      expect(ledgerRows[0]).toMatchObject({
+        diskEffect: "committed",
+        memoryEffect: "writeback-discarded",
+        providerEffect: "discarded",
+        resolution: "confirmed-committed",
+        intendedNewHash: "hash-closed-snapshot",
+        observedHash: "hash-closed-snapshot",
+      });
+      expect(hasBlockingDiskEffectResolution("instance-save-race-close", "/repo/app/src/main.ts")).toBe(false);
+      resolveDiskEffectLedgerEntry("instance-save-race-close", ledgerRows[0].transactionId, "/repo/app/src/main.ts");
     });
   });
 });

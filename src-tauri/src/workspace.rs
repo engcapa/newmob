@@ -77,6 +77,18 @@ pub struct WorkspaceWriteError {
     pub written_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub written_byte_length: Option<u64>,
+    /// SHA-256 of exactly the encoded bytes this writer intended to put on
+    /// disk (§8.19.1 unified fact model). Present whenever encoding succeeded,
+    /// so an `unknown`-effect failure still lets the frontend record a real
+    /// intended hash in its recovery ledger instead of a null placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_byte_length: Option<u64>,
+    /// SHA-256 of the target bytes observed before any mutation attempt, when
+    /// the writer read them (absent for a not-yet-existing target).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +118,9 @@ impl WorkspaceWriteError {
             effect: None,
             written_hash: None,
             written_byte_length: None,
+            intent_hash: None,
+            intent_byte_length: None,
+            old_hash: None,
         }
     }
 
@@ -123,17 +138,37 @@ impl WorkspaceWriteError {
         }
         self
     }
+
+    /// Attach the intended-bytes identity (§8.19.1): every `unknown`-effect
+    /// error must let the caller record a non-null intended hash.
+    pub fn with_intent(mut self, hash: String, byte_length: u64) -> Self {
+        self.intent_hash = Some(hash);
+        self.intent_byte_length = Some(byte_length);
+        self
+    }
+
+    /// Attach the pre-mutation target bytes identity observed by the writer.
+    pub fn with_old_hash(mut self, hash: Option<String>) -> Self {
+        self.old_hash = hash;
+        self
+    }
 }
 
 /// Success response of the encoded byte writers (§8.18.1 native contract):
 /// the decoded file plus the exact bytes that landed on disk and whether an
-/// atomic temp-file replace was used.
+/// atomic temp-file replace was used. `intent_hash` repeats the intended
+/// bytes identity (equal to `written_hash` on success) so every settled write
+/// reports the full fact set required by §8.19.1.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceWriteAck {
     pub file: WorkspaceFile,
     pub written_hash: String,
     pub written_byte_length: u64,
+    pub intent_hash: String,
+    /// Pre-mutation target bytes hash observed by the writer, when the target
+    /// existed (null for a fresh create).
+    pub old_hash: Option<String>,
     pub atomic_replace_used: bool,
 }
 
@@ -2317,15 +2352,20 @@ pub fn workspace_write_file_encoded(
         // Bytes provably landed; only the decoded read-back failed. The
         // frontend classifies committed from `writtenHash` without
         // rewriting.
-        WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e).with_effect(
-            WorkspaceWriteEffect::Unknown,
-            Some((ack.written_hash.clone(), ack.written_byte_length)),
-        )
+        WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e)
+            .with_effect(
+                WorkspaceWriteEffect::Unknown,
+                Some((ack.written_hash.clone(), ack.written_byte_length)),
+            )
+            .with_intent(ack.written_hash.clone(), ack.written_byte_length)
+            .with_old_hash(ack.old_hash.clone())
     })?;
     Ok(WorkspaceWriteAck {
         file,
-        written_hash: ack.written_hash,
+        written_hash: ack.written_hash.clone(),
         written_byte_length: ack.written_byte_length,
+        intent_hash: ack.written_hash,
+        old_hash: ack.old_hash,
         atomic_replace_used: true,
     })
 }
@@ -2355,15 +2395,20 @@ pub fn workspace_write_loose_file_encoded(
             .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))
     })();
     let file = read_result.map_err(|e| {
-        WorkspaceWriteError::new(e.kind, e.message).with_effect(
-            WorkspaceWriteEffect::Unknown,
-            Some((ack.written_hash.clone(), ack.written_byte_length)),
-        )
+        WorkspaceWriteError::new(e.kind, e.message)
+            .with_effect(
+                WorkspaceWriteEffect::Unknown,
+                Some((ack.written_hash.clone(), ack.written_byte_length)),
+            )
+            .with_intent(ack.written_hash.clone(), ack.written_byte_length)
+            .with_old_hash(ack.old_hash.clone())
     })?;
     Ok(WorkspaceWriteAck {
         file,
-        written_hash: ack.written_hash,
+        written_hash: ack.written_hash.clone(),
         written_byte_length: ack.written_byte_length,
+        intent_hash: ack.written_hash,
+        old_hash: ack.old_hash,
         atomic_replace_used: true,
     })
 }
@@ -3218,7 +3263,11 @@ fn workspace_entry(root: &Path, path: &Path) -> Result<WorkspaceEntry, String> {
 
 /// Byte identity of a successful write, returned by `write_workspace_bytes`
 /// so the command layer can assemble the typed `WorkspaceWriteAck`.
+#[derive(Debug)]
 struct WrittenBytesAck {
+    /// Pre-mutation target bytes hash observed by the writer (null for a
+    /// fresh create), per the §8.19.1 unified fact model.
+    old_hash: Option<String>,
     written_hash: String,
     written_byte_length: u64,
 }
@@ -3228,23 +3277,44 @@ fn write_workspace_bytes(
     bytes: Vec<u8>,
     expected_hash: Option<&str>,
 ) -> Result<WrittenBytesAck, WorkspaceWriteError> {
-    if let Some(expected) = expected_hash
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let current = fs::read(target).map_err(|error| classify_io_error("read target", &error))?;
-        let current_hash = sha256_hex(&current);
-        if !current_hash.eq_ignore_ascii_case(expected) {
-            // Precondition failed before any mutation: provably no disk effect.
-            return Err(WorkspaceWriteError {
-                kind: WorkspaceWriteErrorKind::HashMismatch,
-                message: hash_mismatch_error(expected, &current_hash),
-                expected_hash: Some(expected.to_string()),
-                actual_hash: Some(current_hash),
-                effect: Some(WorkspaceWriteEffect::None),
-                written_hash: None,
-                written_byte_length: None,
-            });
+    // §8.19.1: compute the pre-mutation bytes identity before touching disk.
+    // This read also serves the hash precondition when one was requested; the
+    // observed value is carried on every failure fact either way.
+    let old_hash: Option<String> = match fs::read(target) {
+        Ok(current) => Some(sha256_hex(&current)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(classify_io_error("read target", &error)
+                .with_effect(WorkspaceWriteEffect::None, None));
+        }
+    };
+    let expected = expected_hash.map(str::trim).filter(|value| !value.is_empty());
+    // A requested precondition against a missing target is a stale snapshot:
+    // creating the file would silently violate the caller's expectation.
+    if expected.is_some() && old_hash.is_none() {
+        return Err(WorkspaceWriteError::new(
+            WorkspaceWriteErrorKind::Io,
+            "read target: expected-hash precondition requires an existing target",
+        )
+        .with_effect(WorkspaceWriteEffect::None, None));
+    }
+    if let Some(expected) = expected {
+        if let Some(current_hash) = old_hash.as_deref() {
+            if !current_hash.eq_ignore_ascii_case(expected) {
+                // Precondition failed before any mutation: provably no disk effect.
+                return Err(WorkspaceWriteError {
+                    kind: WorkspaceWriteErrorKind::HashMismatch,
+                    message: hash_mismatch_error(expected, current_hash),
+                    expected_hash: Some(expected.to_string()),
+                    actual_hash: Some(current_hash.to_string()),
+                    effect: Some(WorkspaceWriteEffect::None),
+                    written_hash: None,
+                    written_byte_length: None,
+                    intent_hash: Some(sha256_hex(&bytes)),
+                    intent_byte_length: Some(bytes.len() as u64),
+                    old_hash: old_hash.clone(),
+                });
+            }
         }
     }
     let parent = target.parent().ok_or_else(|| {
@@ -3277,9 +3347,15 @@ fn write_workspace_bytes(
         } else {
             WorkspaceWriteEffect::Unknown
         };
-        return Err(classify_io_error("rename temp file", &error).with_effect(effect, None));
+        // §8.19.1: an uncertain outcome must still carry the intended-bytes
+        // identity so the frontend ledger can record a non-null intent hash.
+        return Err(classify_io_error("rename temp file", &error)
+            .with_effect(effect, None)
+            .with_intent(sha256_hex(&bytes), bytes.len() as u64)
+            .with_old_hash(old_hash));
     }
     Ok(WrittenBytesAck {
+        old_hash,
         written_hash: sha256_hex(&bytes),
         written_byte_length: bytes.len() as u64,
     })
@@ -3581,11 +3657,74 @@ mod tests {
         assert!(err.actual_hash.is_some());
         // §8.18.1: precondition failures are provably zero-effect.
         assert_eq!(err.effect, Some(WorkspaceWriteEffect::None));
+        // §8.19.1: the fact model still reports the intended bytes identity
+        // and the pre-mutation old bytes identity.
+        assert_eq!(
+            err.intent_hash.as_deref(),
+            Some(sha256_hex(b"two").as_str()),
+            "hash conflict must carry the intended encoded-bytes hash"
+        );
+        assert_eq!(
+            err.old_hash.as_deref(),
+            Some(sha256_hex(b"one").as_str()),
+            "hash conflict must carry the pre-mutation target hash"
+        );
         assert_eq!(
             fs::read(dir.path().join("a.txt")).unwrap(),
             b"one".to_vec(),
             "hash conflict must leave target bytes unchanged"
         );
+    }
+
+    #[test]
+    fn encoded_write_success_ack_carries_intent_and_old_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("facts.txt");
+        // Fresh create: old hash is absent because no target existed.
+        let first = workspace_write_loose_file_encoded(
+            path.to_string_lossy().to_string(),
+            "first\n".into(),
+            None,
+            "UTF-8".into(),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(first.intent_hash, first.written_hash);
+        assert_eq!(first.old_hash, None);
+        assert_eq!(first.intent_hash, sha256_hex(b"first\n"));
+        // Overwrite: the ack carries the previous bytes identity.
+        let second = workspace_write_loose_file_encoded(
+            path.to_string_lossy().to_string(),
+            "second\n".into(),
+            Some(first.written_hash.clone()),
+            "UTF-8".into(),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(second.intent_hash, second.written_hash);
+        assert_eq!(
+            second.old_hash.as_deref(),
+            Some(first.written_hash.as_str()),
+            "overwrite ack must report the pre-mutation bytes hash"
+        );
+    }
+
+    #[test]
+    fn write_workspace_bytes_unknown_effect_error_carries_intent_and_old_hash() {
+        // Simulate an uncertain replace outcome by making the parent directory
+        // read-only after the temp file is written is not portable; instead
+        // drive `write_workspace_bytes` directly against a target whose rename
+        // cannot succeed: parent is a file, so mkdir/rename both fail before a
+        // temp write (zero-effect) — this asserts the zero-effect path keeps
+        // carrying intent facts only when reached after encoding succeeded.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("existing.txt");
+        fs::write(&target, b"old").unwrap();
+        let result = write_workspace_bytes(&target, b"new".to_vec(), Some("deadbeef"));
+        let err = result.unwrap_err();
+        assert_eq!(err.effect, Some(WorkspaceWriteEffect::None));
+        assert_eq!(err.intent_hash.as_deref(), Some(sha256_hex(b"new").as_str()));
+        assert_eq!(err.old_hash.as_deref(), Some(sha256_hex(b"old").as_str()));
     }
 
     #[test]

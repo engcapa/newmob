@@ -501,6 +501,16 @@ export interface WorkspaceWriteErrorData {
   /** Set when bytes provably landed but the decoded read-back failed. */
   writtenHash?: string;
   writtenByteLength?: number;
+  /**
+   * §8.19.1 unified fact model: SHA-256 of exactly the encoded bytes the
+   * native writer intended to put on disk. Present on every byte-writer
+   * failure after encoding succeeded, so an `unknown`-effect failure can
+   * still record a non-null intended hash in the recovery ledger.
+   */
+  intentHash?: string;
+  intentByteLength?: number;
+  /** Pre-mutation target bytes hash observed by the native writer. */
+  oldHash?: string;
 }
 
 /** Success response of the encoded byte writers (native write ack). */
@@ -508,6 +518,10 @@ export interface WorkspaceWriteAck {
   file: WorkspaceFile;
   writtenHash: string;
   writtenByteLength: number;
+  /** §8.19.1: equals `writtenHash` on success (native always sends it). */
+  intentHash?: string;
+  /** Pre-mutation target bytes hash observed by the writer; null for creates. */
+  oldHash?: string | null;
   atomicReplaceUsed: boolean;
 }
 
@@ -518,6 +532,9 @@ export class WorkspaceWriteError extends Error implements WorkspaceWriteErrorDat
   readonly effect?: WorkspaceWriteEffect;
   readonly writtenHash?: string;
   readonly writtenByteLength?: number;
+  readonly intentHash?: string;
+  readonly intentByteLength?: number;
+  readonly oldHash?: string;
 
   constructor(
     kind: WorkspaceWriteErrorKind,
@@ -527,6 +544,9 @@ export class WorkspaceWriteError extends Error implements WorkspaceWriteErrorDat
     effect?: WorkspaceWriteEffect,
     writtenHash?: string,
     writtenByteLength?: number,
+    intentHash?: string,
+    intentByteLength?: number,
+    oldHash?: string,
   ) {
     super(message);
     this.name = "WorkspaceWriteError";
@@ -536,6 +556,9 @@ export class WorkspaceWriteError extends Error implements WorkspaceWriteErrorDat
     this.effect = effect;
     this.writtenHash = writtenHash;
     this.writtenByteLength = writtenByteLength;
+    this.intentHash = intentHash;
+    this.intentByteLength = intentByteLength;
+    this.oldHash = oldHash;
     Object.setPrototypeOf(this, WorkspaceWriteError.prototype);
   }
 }
@@ -579,11 +602,14 @@ export function parseWorkspaceWriteError(err: unknown): WorkspaceWriteError {
     const effect = raw.effect === "none" || raw.effect === "unknown" ? raw.effect : undefined;
     const writtenHash = typeof raw.writtenHash === "string" ? raw.writtenHash : undefined;
     const writtenByteLength = typeof raw.writtenByteLength === "number" ? raw.writtenByteLength : undefined;
+    const intentHash = typeof raw.intentHash === "string" ? raw.intentHash : undefined;
+    const intentByteLength = typeof raw.intentByteLength === "number" ? raw.intentByteLength : undefined;
+    const oldHash = typeof raw.oldHash === "string" ? raw.oldHash : undefined;
     if (kind === "hash-mismatch" || kind === "encoding" || kind === "permission" || kind === "io") {
       if (kind === "hash-mismatch") {
         return new WorkspaceHashMismatchError(message, String(raw.expectedHash ?? match?.[1] ?? ""), String(raw.actualHash ?? match?.[2] ?? ""));
       }
-      return new WorkspaceWriteError(kind, message, undefined, undefined, effect, writtenHash, writtenByteLength);
+      return new WorkspaceWriteError(kind, message, undefined, undefined, effect, writtenHash, writtenByteLength, intentHash, intentByteLength, oldHash);
     }
   }
   if (msg.startsWith("hash-mismatch:")) {

@@ -219,6 +219,9 @@ export function saveCommitResultFromError(
       ...(parsed.effect !== undefined ? { effect: parsed.effect } : {}),
       ...(parsed.writtenHash !== undefined ? { writtenHash: parsed.writtenHash } : {}),
       ...(parsed.writtenByteLength !== undefined ? { writtenByteLength: parsed.writtenByteLength } : {}),
+      ...(parsed.intentHash !== undefined ? { intentHash: parsed.intentHash } : {}),
+      ...(parsed.intentByteLength !== undefined ? { intentByteLength: parsed.intentByteLength } : {}),
+      ...(parsed.oldHash !== undefined ? { oldHash: parsed.oldHash } : {}),
     },
   };
 }
@@ -234,6 +237,40 @@ export type UnknownDiskEffectVerification =
   | { outcome: "committed" }
   | { outcome: "none" }
   | { outcome: "foreign"; observedHash: string };
+
+/**
+ * v4 disk-resolution state machine (§8.19.1). `pending-readback` and
+ * `foreign-blocked` block automatic retries against the path;
+ * `confirmed-*`/`user-resolved` never do. `lastVerifiedAt` no longer doubles
+ * as "unblocked" — only `resolution` decides.
+ */
+export type DiskResolution =
+  | "pending-readback"
+  | "confirmed-committed"
+  | "confirmed-none"
+  | "foreign-blocked"
+  | "user-resolved";
+
+/**
+ * Three-hash classification against a read-back snapshot (§8.19.1): observed
+ * == intended → confirmed-committed; observed == old → confirmed-none; any
+ * other hash → foreign-blocked; unreadable/absent → pending-readback.
+ * Hashes compare case-insensitively; null intent falls back to the writer's
+ * written hash when the bytes provably landed.
+ */
+export function resolveUnknownDiskResolution(input: {
+  intendedNewHash: string | null;
+  expectedOldHash: string | null;
+  observedHash: string | null;
+}): DiskResolution {
+  const observed = input.observedHash?.toLowerCase() ?? null;
+  if (!observed) return "pending-readback";
+  const intended = (input.intendedNewHash ?? null)?.toLowerCase() ?? null;
+  const old = input.expectedOldHash?.toLowerCase() ?? null;
+  if (intended && observed === intended) return "confirmed-committed";
+  if (old && observed === old) return "confirmed-none";
+  return "foreign-blocked";
+}
 
 export function classifyUnknownDiskEffect(input: {
   writtenHash: string | null | undefined;

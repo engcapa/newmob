@@ -46,6 +46,18 @@ import {
 } from "../../../lib/editor/workspace";
 import codeWorkspaceTabSource from "../CodeWorkspaceTab.tsx?raw";
 
+/** Typed committed result satisfying the §8.19.1 closed-file hook contract. */
+function committedDiskResult(): SaveCommitResult {
+  return {
+    kind: "saved-current",
+    transactionId: "tx-closed-test",
+    diskEffect: "committed",
+    memoryEffect: "saved-current",
+    providerEffect: "not-sent",
+    file: fakeWrittenFile("written"),
+  };
+}
+
 describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
   const eolModes: Array<{ name: string; eol: "lf" | "crlf" | "cr"; sep: string }> = [
     { name: "LF", eol: "lf", sep: "\n" },
@@ -125,7 +137,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
             savedText = next;
           },
           readDisk: async () => null,
-          writeDisk: async () => {},
+          writeDisk: async () => committedDiskResult(),
         };
 
         const edit = {
@@ -170,6 +182,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
           writeDisk: async (_path, text, _expectedHash, _encoding, _bom, passedEol) => {
             writtenDiskText = text;
             writtenDiskEol = passedEol;
+            return committedDiskResult();
           },
         };
 

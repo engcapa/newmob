@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  WORKSPACE_DISK_EFFECT_LEDGER_PREFIX,
   WORKSPACE_RECOVERY_MAX_ENTRIES,
   WORKSPACE_RECOVERY_STORAGE_PREFIX,
-  hasUnverifiedUnknownDiskEffect,
+  hasBlockingDiskEffectResolution,
   listDiskEffectLedgerEntries,
+  migrateDiskEffectLedgerRow,
   readWorkspaceRecoveryEntries,
   reconcileWorkspaceRecoveryEntries,
   recordDiskEffectLedgerEntry,
   removeWorkspaceRecoveryEntry,
   resolveDiskEffectLedgerEntry,
   writeWorkspaceRecoveryEntries,
+  type WorkspaceDiskEffectLedgerEntryV4,
   type WorkspaceRecoveryEntry,
 } from "./workspaceRecovery";
 
@@ -90,61 +93,184 @@ describe("workspace recovery persistence", () => {
   });
 });
 
-describe("§8.18.1 disk-effect recovery ledger (v3)", () => {
+function unknownRow(overrides: Partial<WorkspaceDiskEffectLedgerEntryV4>): WorkspaceDiskEffectLedgerEntryV4 {
+  return {
+    schemaVersion: 4,
+    workspaceId: "ws-ledger",
+    transactionId: "tx-u",
+    operationId: "save",
+    path: "/repo/app/a.ts",
+    fileIdentity: "root:app:a.ts",
+    expectedOldHash: "old",
+    intendedNewHash: "new",
+    observedHash: null,
+    diskEffect: "unknown",
+    memoryEffect: "unchanged",
+    providerEffect: "unknown",
+    resolution: "pending-readback",
+    createdAt: 1,
+    verifiedAt: null,
+    resolvedAt: null,
+    ...overrides,
+  };
+}
+
+describe("§8.19.1 disk-effect recovery ledger (v4)", () => {
   beforeEach(() => {
     window.localStorage.clear();
   });
 
-  it("records, scopes and clears unknown-effect rows per workspace/path", () => {
-    recordDiskEffectLedgerEntry({
-      workspaceId: "ws-ledger",
-      transactionId: "tx-u1",
-      path: "/repo/app/a.ts",
-      fileIdentity: "root:app:a.ts",
-      expectedOldHash: "old",
-      intendedNewHash: null,
-      observedHash: null,
-      diskEffect: "unknown",
-      createdAt: 1,
-      lastVerifiedAt: null,
-    });
-    recordDiskEffectLedgerEntry({
-      workspaceId: "ws-ledger",
+  it("blocks retry by resolution only and scopes records per workspace/path", () => {
+    // Pending read-back blocks.
+    recordDiskEffectLedgerEntry(unknownRow({ transactionId: "tx-u1" }));
+    // Foreign observed hash blocks even with a verified timestamp (v3 bug).
+    recordDiskEffectLedgerEntry(unknownRow({
       transactionId: "tx-u2",
       path: "/repo/app/b.ts",
       fileIdentity: "root:app:b.ts",
-      expectedOldHash: "old2",
-      intendedNewHash: null,
       observedHash: "zzz",
-      diskEffect: "unknown",
-      createdAt: 2,
-      lastVerifiedAt: 3,
-    });
+      resolution: "foreign-blocked",
+      verifiedAt: 3,
+    }));
+    // Confirmed-committed never blocks.
+    recordDiskEffectLedgerEntry(unknownRow({
+      transactionId: "tx-c1",
+      path: "/repo/app/c.ts",
+      fileIdentity: "root:app:c.ts",
+      diskEffect: "committed",
+      memoryEffect: "writeback-discarded",
+      providerEffect: "discarded",
+      resolution: "confirmed-committed",
+      observedHash: "new",
+      verifiedAt: 4,
+    }));
 
-    expect(listDiskEffectLedgerEntries("ws-ledger")).toHaveLength(2);
-    // Unverified unknown blocks auto-retry only for the exact path.
-    expect(hasUnverifiedUnknownDiskEffect("ws-ledger", "/repo/app/a.ts")).toBe(true);
-    expect(hasUnverifiedUnknownDiskEffect("ws-ledger", "/repo/app/b.ts")).toBe(false);
-    expect(hasUnverifiedUnknownDiskEffect("ws-ledger", "/repo/other/a.ts")).toBe(false);
+    expect(listDiskEffectLedgerEntries("ws-ledger")).toHaveLength(3);
+    expect(hasBlockingDiskEffectResolution("ws-ledger", "/repo/app/a.ts")).toBe(true);
+    expect(hasBlockingDiskEffectResolution("ws-ledger", "/repo/app/b.ts")).toBe(true);
+    expect(hasBlockingDiskEffectResolution("ws-ledger", "/repo/app/c.ts")).toBe(false);
+    expect(hasBlockingDiskEffectResolution("ws-ledger", "/repo/other/a.ts")).toBe(false);
 
-    // Clearing one transaction/path never touches the other row.
+    // Clearing one transaction/path never touches the other row. Newest
+    // records are kept first.
     resolveDiskEffectLedgerEntry("ws-ledger", "tx-u1", "/repo/app/a.ts");
     const rest = listDiskEffectLedgerEntries("ws-ledger");
-    expect(rest).toHaveLength(1);
-    expect(rest[0].transactionId).toBe("tx-u2");
+    expect(rest.map((row) => row.transactionId)).toEqual(["tx-c1", "tx-u2"]);
 
     // Other workspaces are untouched by either operation.
     expect(listDiskEffectLedgerEntries("ws-other")).toHaveLength(0);
   });
 
-  it("normalizes legacy rows without an effect fact as unknown (v2 migration)", () => {
-    window.localStorage.setItem(
-      `${WORKSPACE_RECOVERY_STORAGE_PREFIX.replace(/recovery\.v1$/, "recovery.diskEffects.v3")}:ws-mig`,
-      JSON.stringify([{ transactionId: "tx-legacy", path: "/p/f.txt" }]),
+  it("round-trips committed-writeback-discarded rows for the recovery center", () => {
+    const recorded = unknownRow({
+      transactionId: "tx-d1",
+      diskEffect: "committed",
+      memoryEffect: "writeback-discarded",
+      providerEffect: "discarded",
+      resolution: "confirmed-committed",
+      intendedNewHash: "abc",
+      observedHash: "abc",
+      expectedOldHash: "old",
+      createdAt: 10,
+      verifiedAt: 11,
+    });
+    recordDiskEffectLedgerEntry(recorded);
+    const [stored] = listDiskEffectLedgerEntries("ws-ledger");
+    expect(stored).toMatchObject({
+      schemaVersion: 4,
+      transactionId: "tx-d1",
+      operationId: "save",
+      diskEffect: "committed",
+      memoryEffect: "writeback-discarded",
+      providerEffect: "discarded",
+      resolution: "confirmed-committed",
+      intendedNewHash: "abc",
+      observedHash: "abc",
+      verifiedAt: 11,
+      resolvedAt: null,
+    });
+    expect(hasBlockingDiskEffectResolution("ws-ledger", stored.path)).toBe(false);
+  });
+
+  it("migrates v3 unknown rows without an intended hash to pending-readback", () => {
+    const migrated = migrateDiskEffectLedgerRow({
+      transactionId: "tx-v3a",
+      path: "/p/f.txt",
+      diskEffect: "unknown",
+      expectedOldHash: "old",
+      intendedNewHash: null,
+      observedHash: null,
+      lastVerifiedAt: null,
+      createdAt: 5,
+    }, "ws-mig");
+    expect(migrated).toMatchObject({
+      schemaVersion: 4,
+      resolution: "pending-readback",
+      diskEffect: "unknown",
+      intendedNewHash: null,
+      verifiedAt: null,
+    });
+  });
+
+  it("migrates v3 foreign-hash rows to foreign-blocked even when lastVerifiedAt was set", () => {
+    const migrated = migrateDiskEffectLedgerRow({
+      transactionId: "tx-v3b",
+      path: "/p/f.txt",
+      diskEffect: "unknown",
+      expectedOldHash: "old",
+      intendedNewHash: "intended",
+      observedHash: "foreign",
+      lastVerifiedAt: 99,
+      createdAt: 5,
+    }, "ws-mig");
+    expect(migrated).toMatchObject({
+      resolution: "foreign-blocked",
+      verifiedAt: null,
+      observedHash: "foreign",
+    });
+  });
+
+  it("migrates v3 rows whose hashes already prove the outcome without blocking", () => {
+    const committed = migrateDiskEffectLedgerRow({
+      transactionId: "tx-v3c",
+      path: "/p/g.txt",
+      diskEffect: "unknown",
+      expectedOldHash: "old",
+      intendedNewHash: "intended",
+      observedHash: "intended",
+      lastVerifiedAt: 42,
+      createdAt: 5,
+    }, "ws-mig");
+    expect(committed).toMatchObject({
+      resolution: "confirmed-committed",
+      verifiedAt: 42,
+    });
+    expect(hasBlockingDiskEffectResolution("ws-mig", committed!.path)).toBe(false);
+  });
+
+  it("migrates legacy rows without any effect fact as pending-readback (v2)", () => {
+    const migrated = migrateDiskEffectLedgerRow(
+      { transactionId: "tx-legacy", path: "/p/h.txt" },
+      "ws-mig2",
     );
-    const entries = listDiskEffectLedgerEntries("ws-mig");
-    expect(entries).toHaveLength(1);
-    expect(entries[0].diskEffect).toBe("unknown");
-    expect(entries[0].lastVerifiedAt).toBeNull();
+    expect(migrated).toMatchObject({
+      resolution: "pending-readback",
+      diskEffect: "unknown",
+    });
+  });
+
+  it("performs a one-shot v3 storage migration on first read", () => {
+    const legacyKey = `${WORKSPACE_DISK_EFFECT_LEDGER_PREFIX.replace(/\.v4$/, ".v3")}:ws-one`;
+    window.localStorage.setItem(legacyKey, JSON.stringify([
+      { transactionId: "tx-old1", path: "/p/x.txt", diskEffect: "unknown", intendedNewHash: null },
+      { transactionId: "tx-old2", path: "/p/y.txt", diskEffect: "committed-discarded", intendedNewHash: "i2", observedHash: "i2" },
+    ]));
+    const entries = listDiskEffectLedgerEntries("ws-one");
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ resolution: "pending-readback", schemaVersion: 4 });
+    expect(entries[1]).toMatchObject({ resolution: "confirmed-committed", memoryEffect: "writeback-discarded" });
+    // Migration is one-shot: resolving then re-reading must not resurrect it.
+    resolveDiskEffectLedgerEntry("ws-one", entries[0].transactionId, entries[0].path);
+    expect(listDiskEffectLedgerEntries("ws-one")).toHaveLength(1);
   });
 });
