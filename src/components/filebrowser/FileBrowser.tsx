@@ -138,6 +138,11 @@ export function FileBrowser(props: FileBrowserProps) {
   const requestedCwdVersionRef = useRef(props.cwdHintVersion ?? 0);
   const terminalSyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handledUploadRequestRef = useRef<number | null>(null);
+  const onPendingUploadRequestHandledRef = useRef(props.onPendingUploadRequestHandled);
+
+  useEffect(() => {
+    onPendingUploadRequestHandledRef.current = props.onPendingUploadRequestHandled;
+  }, [props.onPendingUploadRequestHandled]);
 
   const clearTerminalSyncTimeout = useCallback(() => {
     if (!terminalSyncTimeoutRef.current) return;
@@ -605,6 +610,12 @@ export function FileBrowser(props: FileBrowserProps) {
 
     handledUploadRequestRef.current = request.id;
     let cancelled = false;
+    let finished = false;
+    const finishRequest = () => {
+      if (finished) return;
+      finished = true;
+      onPendingUploadRequestHandledRef.current?.(request.id);
+    };
 
     void (async () => {
       const currentRemotePath = useSftpStore.getState().sessions[props.sessionId]?.remote.path ?? "/";
@@ -634,18 +645,18 @@ export function FileBrowser(props: FileBrowserProps) {
         }
       }
 
-      if (!cancelled) {
-        props.onPendingUploadRequestHandled?.(request.id);
-      }
+      finishRequest();
     })();
 
     return () => {
       cancelled = true;
+      // The request is one-shot. Closing the sidebar discards paths that have
+      // not started yet so remounting cannot enqueue the same batch again.
+      finishRequest();
     };
   }, [
     controller.upload,
     navigate,
-    props.onPendingUploadRequestHandled,
     props.pendingUploadRequest,
     props.sessionId,
     session?.attached,
