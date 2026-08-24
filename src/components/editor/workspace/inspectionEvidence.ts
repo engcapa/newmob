@@ -9,6 +9,12 @@ export interface ProviderAnalysisEvidence {
   confidence: "explicit" | "inferred";
   /** Evidence provenance; text inference is intentionally weaker than provider metadata. */
   proofLevel: "structured" | "related-location" | "text-inferred";
+  /**
+   * §8.19.7 DiagnosticPresentationHint: set exactly when the category came
+   * from message/source keyword regexes — UI must show that the category is
+   * keyword-inferred, and it never enters a semantic evidence ledger.
+   */
+  presentationHint?: "keyword inferred";
   relatedCount: number;
   /** Short, bounded source summary suitable for a compact panel. */
   source: string;
@@ -169,6 +175,7 @@ export function classifyProviderAnalysisEvidence(
     label: KIND_LABELS[kind],
     confidence: category.kind ? category.confidence : "explicit",
     proofLevel: category.kind ? category.proofLevel : "related-location",
+    ...(category.proofLevel === "text-inferred" ? { presentationHint: "keyword inferred" as const } : {}),
     relatedCount: diagnostic.relatedInformation?.length ?? 0,
     source,
     // RelatedInformation remains rendered by the panel's dedicated related

@@ -1,4 +1,5 @@
-import type { LspPosition } from "../../../lib/editor/lsp";
+import type { LspPosition, LspRange, LspSignatureInfo } from "../../../lib/editor/lsp";
+import { validateExternalDocUrl } from "./referenceDocumentation";
 import type { QuickDocContent } from "./referenceDocumentation";
 
 export type ReferenceInfoKind =
@@ -7,6 +8,68 @@ export type ReferenceInfoKind =
   | "type"
   | "context"
   | "external-documentation";
+
+/** §8.19.7 canonical names for the five reference kinds. */
+export type ReferenceKind =
+  | "parameter"
+  | "quick-documentation"
+  | "type-info"
+  | "context-info"
+  | "external-documentation";
+
+export function referenceKindFromInfoKind(kind: ReferenceInfoKind): ReferenceKind {
+  switch (kind) {
+    case "parameter": return "parameter";
+    case "documentation": return "quick-documentation";
+    case "type": return "type-info";
+    case "context": return "context-info";
+    case "external-documentation": return "external-documentation";
+  }
+}
+
+/**
+ * Typed per-kind payload (§8.19.7). Parameter Info carries its own signature
+ * payload — it never reuses the documentation envelope — while Type/Context
+ * stay plain text until a provider extension defines more.
+ */
+export type ReferencePayload =
+  | {
+    kind: "parameter";
+    signatures: readonly LspSignatureInfo[];
+    activeSignature: number;
+    activeParameter: number;
+  }
+  | { kind: "quick-documentation"; markdown: string; sourceLocation: ReferenceSourceLocationRef | null }
+  | { kind: "type-info"; text: string; languageId: string }
+  | { kind: "context-info"; text: string; languageId: string }
+  | { kind: "external-documentation"; url: string; title: string | null };
+
+export interface ReferenceSourceLocationRef {
+  uri: string;
+  path: string | null;
+  range: LspRange;
+}
+
+export interface ReferenceRequestIdentityV2 {
+  workspaceId: string;
+  fileKey: string;
+  uri: string;
+  position: LspPosition;
+  documentRevision: number;
+  providerGeneration: number;
+  requestId: string;
+}
+
+export type ReferenceResultV2 =
+  | {
+    state: "ready";
+    kind: ReferenceKind;
+    identity: ReferenceRequestIdentityV2;
+    payload: ReferencePayload;
+  }
+  | { state: "unavailable"; kind: ReferenceKind; reason: string }
+  | { state: "cancelled" | "stale"; requestId: string }
+  | { state: "failed"; kind: ReferenceKind; message: string };
 
 export interface ReferenceInfoRequest {
   kind: ReferenceInfoKind;
@@ -98,8 +161,71 @@ export class ReferenceInfoController {
     }
   }
 
-  cancel(kind?: ReferenceInfoKind): void {
-    if (kind) {
+  /**
+   * §8.19.7 typed entry: all five kinds flow through the same identity /
+   * AbortController / cancel machinery, but each returns its OWN payload —
+   * Parameter Info never borrows the documentation envelope. Only
+   * quick-documentation results feed the shared history stack.
+   */
+  async requestTyped(
+    request: ReferenceInfoRequest,
+    provider: (ticket: ReferenceRequestTicket) => Promise<ReferencePayload | null>,
+  ): Promise<ReferenceResultV2> {
+    const kind = referenceKindFromInfoKind(request.kind);
+    if (this.disposed || request.workspaceId !== this.workspaceId) {
+      return { state: "cancelled", requestId: "disposed" };
+    }
+    this.active.get(request.kind)?.abort.abort();
+    const abort = new AbortController();
+    const requestId = `${this.workspaceId}:${request.kind}:${++this.requestSequence}`;
+    this.active.set(request.kind, { request, requestId, abort });
+    try {
+      const payload = await provider({ requestId, signal: abort.signal });
+      const current = this.active.get(request.kind);
+      if (abort.signal.aborted || this.disposed) return { state: "cancelled", requestId };
+      if (!current || current.requestId !== requestId || !sameRequestIdentity(current.request, request)) {
+        return { state: "stale", requestId };
+      }
+      if (!payload) return { state: "unavailable", kind, reason: "no-symbol" };
+      if (payload.kind === "external-documentation") {
+        // URL policy is enforced at the service boundary, not by callers.
+        const decision = validateExternalDocUrl(payload.url);
+        if (decision.kind !== "allowed") {
+          return { state: "unavailable", kind, reason: `external-url-${decision.reason}` };
+        }
+      }
+      if (payload.kind === "quick-documentation" && !payload.markdown.trim()) {
+        return { state: "unavailable", kind, reason: "empty-documentation" };
+      }
+      return {
+        state: "ready",
+        kind,
+        identity: {
+          workspaceId: request.workspaceId,
+          fileKey: request.fileKey,
+          uri: request.uri,
+          position: request.position,
+          documentRevision: request.documentRevision,
+          providerGeneration: request.providerGeneration,
+          requestId,
+        },
+        payload,
+      };
+    } catch (error) {
+      if (abort.signal.aborted || this.disposed) return { state: "cancelled", requestId };
+      return {
+        state: "failed",
+        kind,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      if (this.active.get(request.kind)?.requestId === requestId) {
+        this.active.delete(request.kind);
+      }
+    }
+  }
+
+  cancel(kind?: ReferenceInfoKind): void {    if (kind) {
       this.active.get(kind)?.abort.abort();
       this.active.delete(kind);
       return;

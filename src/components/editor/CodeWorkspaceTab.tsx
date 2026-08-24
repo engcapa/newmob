@@ -315,6 +315,7 @@ import {
   type WorkspaceEditHistoryEntry,
   type WorkspaceEditPathSnapshot,
 } from "./workspace/workspaceEditHistory";
+import { makeSemanticRequestIdentity } from "./workspace/javaSemanticEvidence";
 import {
   buildSafeDeleteWorkspaceEdit,
   safeDeleteFileCount,
@@ -1536,6 +1537,18 @@ export function CodeWorkspaceTab({
     error: null,
   });
   const referencesRequestSequenceRef = useRef(0);
+  // §8.19.7: pin ownership + rerun origin marker live above the panel so a
+  // new Find Usages asks before replacing a pinned session and rerun targets
+  // the recorded symbol identity instead of the current caret.
+  const referencesPinnedRef = useRef(false);
+  const [referencesPinned, setReferencesPinned] = useState(false);
+  referencesPinnedRef.current = referencesPinned;
+  const referencesRerunRef = useRef<{
+    fileKey: string;
+    uri: string;
+    position: LspPosition;
+    symbolName: string;
+  } | null>(null);
   const findReferencesRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<void>>(async () => {});
   const [callHierarchyRoot, setCallHierarchyRoot] = useState<HierarchyRootState | null>(null);
   const [typeHierarchyRoot, setTypeHierarchyRoot] = useState<HierarchyRootState | null>(null);
@@ -10115,6 +10128,19 @@ export function CodeWorkspaceTab({
 
   const findReferences = useCallback(
     async (file: OpenFileState, position: LspPosition) => {
+      // §8.19.7 pin safety: a pinned session is never silently overwritten —
+      // the user decides whether this request replaces it.
+      if (referencesPinnedRef.current) {
+        const replacePinned = await confirmAppDialog({
+          title: "Replace Pinned Usages",
+          message: "The references result is pinned. Replace it with a new Find Usages session?",
+          confirmLabel: "Replace",
+        });
+        if (!replacePinned) {
+          setStatusMessage("Kept the pinned usages result; new request cancelled");
+          return;
+        }
+      }
       referencesRequestSequenceRef.current += 1;
       const requestId = referencesRequestSequenceRef.current;
       setBottomDockOpen(true);
@@ -10156,6 +10182,34 @@ export function CodeWorkspaceTab({
       }
       const buildToken = semanticIndex.beginBuild("language-server");
       try {
+        // §8.19.7 real identity + origin symbol key: name comes from the
+        // provider's rename range when available (fallback: word at caret),
+        // so rerun targets the same symbol rather than whatever sits under
+        // the caret later.
+        let symbolRange: LspRange | null = null;
+        try {
+          const prepared = await lspPrepareRename(descriptor, position);
+          symbolRange = prepared.range ?? null;
+        } catch {
+          symbolRange = null;
+        }
+        const lines = live.text.split("\n");
+        const lineText = lines[position.line] ?? "";
+        const symbolName = (symbolRange
+          && symbolRange.start.line === symbolRange.end.line
+          ? lineText.slice(symbolRange.start.character, symbolRange.end.character).trim()
+          : "")
+          || lineText.slice(position.character).match(/^[A-Za-z0-9_$]+/)?.[0]
+          || "";
+        const identity = makeSemanticRequestIdentity({
+          workspaceId: workspaceInstanceId,
+          fileKey: live.key,
+          uri: descriptor.documentUri ?? descriptor.filePath,
+          position,
+          documentRevision: live.documentRevision ?? 0,
+          providerGeneration: lspSessionGeneration(),
+          workspaceRoots: rootsRef.current.map((root) => root.path),
+        });
         const result = await lspReferences(descriptor, position, true);
         updateLspStatusForFile(live, result.status);
         const completion = semanticIndex.finishQuery(buildToken, {
@@ -10176,6 +10230,7 @@ export function CodeWorkspaceTab({
           return;
         }
         if (referencesRequestSequenceRef.current !== requestId) return;
+        referencesRerunRef.current = { fileKey: live.key, uri: identity.uri, position, symbolName };
         setReferencesResult({
           loading: false,
           origin: live.subtitle,
@@ -10183,6 +10238,8 @@ export function CodeWorkspaceTab({
           error: null,
           semanticGeneration: buildToken.generation,
           semanticRevision: buildToken.revision,
+          symbolName,
+          identity,
         });
         setStatusMessage(`${result.locations.length} reference${result.locations.length === 1 ? "" : "s"} found`);
       } catch (err) {
@@ -10210,6 +10267,19 @@ export function CodeWorkspaceTab({
     ],
   );
   findReferencesRef.current = findReferences;
+
+  // §8.19.7 rerun: replay against the recorded origin uri+position marker so
+  // the same symbol identity is re-queried even after the caret moved.
+  const rerunFindReferences = useCallback(() => {
+    const marker = referencesRerunRef.current;
+    if (!marker) return;
+    const live = openFilesRef.current[marker.fileKey];
+    if (!live) {
+      setStatusMessage("The usages session's origin buffer is closed; reopen it to rerun");
+      return;
+    }
+    void findReferences(live, marker.position);
+  }, [findReferences, setStatusMessage]);
 
   const showEditorContextMenu = useCallback((
     file: OpenFileState,
@@ -12676,6 +12746,9 @@ export function CodeWorkspaceTab({
                 roots={roots}
                 semanticIndex={semanticIndex.snapshot}
                 onOpenLocation={(location) => void openLspLocation(location)}
+                pinned={referencesPinned}
+                onPinChange={setReferencesPinned}
+                onRerun={rerunFindReferences}
               />
             ),
           },

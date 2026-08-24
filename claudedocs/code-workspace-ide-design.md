@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-24 · 版本：v4.53（R3 全包实施记录：a/b 生产代码合同已于 `cb07c95c` 提交，c 真实 fixture/runner/trace 工作树；R0 已于 `52da0ebf` 提交、R1 已于 `401d85e1` 提交）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机，五项目九场景全绿）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19.1/§8.19.2/§8.19.4 的 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-24 · 版本：v4.54（R6 usages session/reference service as-built；v4.53 R3 全包：a/b 于 `cb07c95c`、c 于 `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4103,7 +4103,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 4 | [x] **R3 real jdtls Basic Completion acceptance** | synthetic L2 → **R3-a/b 生产代码合同（cb07c95c）+ R3-c 真实 fixture/runner/trace：五项目九场景 Linux 实机全绿，provider 层 G1 L2（v4.53）** | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 ✅（IDEA 对照录制与三端仍开放） | R1；effectful edits 依赖 R0 |
 | 5 | [ ] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial | G1 多光标/视觉列闭环，G3 history/reference 分项可用 | R1 |
 | 6 | [ ] **R5 Tool-window registry/tab policy/split operations** | layout wired，workflow partial | G1 Switcher/tabs/splits 使用真实状态并持久化 | R1 |
-| 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
+| 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial → **usages session 生产合同（真实 identity/rerun/pin/角色诚实/库过滤）+ 五 kind 类型化服务通道闭合（v4.54）；Parameter Info 改道、refactorApplyGate 第二消费方、真实 trace 未闭合** | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
 | 8 | [ ] **R7 Semantic editing/Surround/Generate** | local heuristic / Smart unavailable | provenance 诚实，Java syntax/provider 子集可用 | R1、R3、R6 |
 | 9 | [ ] **R8 Advanced suite productionize-or-defer** | appearance wired，其余模型居多 | SSR/dependency/Full Line/code style 每项有明确产品决策 | R1；按子项依赖 R3/R6 |
 | 10 | [ ] **R9 Native three-platform/performance/IME/a11y gate** | 未执行 | G0/G1 发布证据；G2/G3 分项 evidence manifest | 各包持续补，最终汇总 |
@@ -4581,6 +4581,71 @@ Schema/migration
 ```
 
 下一依赖包：R6（Reference Information + Usages/refactor session，依赖 R0/R3 已就绪）。
+
+**R6 as-built（v4.54，2026-08-24，代码合同部分闭合）。**
+
+```text
+包 ID / commit / capability ID
+    R6 / 工作树（基线 HEAD 49d28d87）/ reference.service, usages.session,
+      diagnostics.presentation-hint
+As-built production call chain
+    Find Usages: 动作 → CodeWorkspaceTab.findReferences：
+      pin 守卫（referencesPinnedRef → confirmAppDialog"Replace Pinned
+      Usages"，拒绝则保留 pinned session 且不发出新请求）→ 语义同步 →
+      lspPrepareRename 取符号 range（fallback caret 词切片）→
+      makeSemanticRequestIdentity（真实 workspace/file/uri/position/revision/
+      providerGeneration + roots 参与的 projectFingerprint）→ lspReferences →
+      ReferencesResultState{symbolName, identity} → ReferencesPanel 用
+      buildUsageSession 建真实 session（不再是 pf-legacy）。
+    Rerun: referencesRerunRef 记录 origin fileKey+uri+position+symbolName；
+      面板 rerun 重放同一身份（origin buffer 关闭时明确提示，不静默换目标）。
+    Pin: 所有权上提到 tab；面板只上报 onPinChange。pinned 时新请求必须先询问。
+    过滤: Reads/Writes/Declarations 三开关按 roleClassificationAvailable=false
+      一律禁用并注明原因；Libraries 开关真实生效——owner 按 file:// path 是否
+      落在任一 root 内判定（Windows 盘符 URI 归一化），库外命中可被隐藏。
+    Reference service: ReferenceInfoController.requestTyped —— 五 kind 共享
+      identity/AbortController/cancel；每 kind 独立 payload
+      （parameter=signatures/activeSignature/activeParameter，
+      quick-documentation=markdown+sourceLocation，
+      type-info/context-info=text+languageId，
+      external-documentation=url+title）；external URL 在服务边界强制
+      https-only 策略（validateExternalDocUrl，http/带凭据/畸形一律
+      unavailable external-url-*）；空文档 unavailable empty-documentation；
+      history 仅 quick-documentation 消费，requestTyped 本身从不写 history。
+    Diagnostics: classifyProviderAnalysisEvidence 的 text-inferred 分类现携带
+      presentationHint:"keyword inferred"，AnalysisPanel 在 proof-level 徽标
+      内联显示——关键词推断永不进入 semantic evidence ledger。
+Owner files
+    workspace/javaSemanticEvidence.ts（makeSemanticRequestIdentity）、
+    workspace/panels/ReferencesPanel.tsx（identity/symbolName 消费、过滤行、
+    pin 上提、library owner 判定）、CodeWorkspaceTab.tsx（findReferences
+    身份/符号名/pin 门/rerun marker）、workspace/referenceInfoController.ts
+    （ReferenceKind/ReferenceRequestIdentityV2/ReferencePayload/
+    ReferenceResultV2/requestTyped）、workspace/inspectionEvidence.ts +
+    panels/AnalysisPanel.tsx（presentationHint）。
+测试证据（已运行，2026-08-24）
+    - npx vitest run src/components/editor/ → 1206 通过（新增
+      referenceInfoServiceV2.test.ts 6 例：per-kind payload、history 隔离、
+      URL 边界、supersede-cancel/stale、kind 映射、failed 透传；
+      ReferencesPanel.test.tsx 新增角色禁用+库过滤+pin 上提 2 例）。
+    - pnpm build 绿。Rust 无改动。
+诚实边界（本包未闭合项）
+    - Parameter Info 生产命令仍走既有 signatureHelp 管线（CodeMirrorHost
+      signature compartment）；requestTyped 是类型化服务通道并有测试，但生产
+      parameter 流尚未改道——保持单一真值，不做双通道假迁移。
+    - Safe Delete 完整性门由既有 buildSafeDeleteWorkspaceEdit.complete 承担；
+      refactorApplyGate 目前无第二个消费方（rename/codeAction apply 待接）。
+    - Show Usages 未单独建轻量 popup 组件：现有 UX 即 tool-window 优先，
+      首批分页由 ReferencesPanel 的 batch/"Show more"承担，避免第二真值。
+    - 真实 jdtls usages/rename/quick-fix trace 未在本包重跑（R3-c runner 当前
+      只覆盖 completion 场景）；browser/native 层未运行。
+最高允许声明
+    “Usages session 生产合同闭合（真实 identity/rerun/pin/诚实角色/库过滤）
+    + 五 kind reference 服务通道类型化闭合（model+production 测试）”。
+禁止声明
+    不得写 Reference suite complete、Find Usages complete、Parameter Info
+    provider-backed L3、IntelliJ inspections 对齐。
+```
 
 #### 8.19.5 R4：Clipboard History、Plain Paste、Copy Reference 与完整 Virtual Space
 
