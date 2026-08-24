@@ -278,6 +278,9 @@ import {
   type GenerateCandidate,
 } from "./workspace/generateCodeWorkflow";
 import { filterGenerateCodeActions } from "./workspace/workspaceSemanticEditing";
+import { copyReferenceCandidates } from "./workspace/workspaceCopyReference";
+import { ClipboardHistoryPopup } from "./workspace/ClipboardHistoryPopup";
+import { clipboardStoreForWorkspace, type EditorClipboardSession } from "./workspace/workspaceClipboardSession";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
@@ -1239,6 +1242,9 @@ export function CodeWorkspaceTab({
     candidates: GenerateCandidate[];
     error: string | null;
   }>({ open: false, phase: "loading", candidates: [], error: null });
+  // §8.19.5 Paste-from-History popup state (session-only ring snapshot).
+  const [clipboardHistoryOpen, setClipboardHistoryOpen] = useState(false);
+  const [clipboardHistoryEntries, setClipboardHistoryEntries] = useState<EditorClipboardSession[]>([]);
   const generateCodeContextRef = useRef<{
     file: OpenFileState;
     range: LspRange;
@@ -7583,6 +7589,86 @@ export function CodeWorkspaceTab({
     closeGenerateDialog();
   }, [closeGenerateDialog, runCodeAction, semanticIndex.current, setStatusMessage]);
 
+  // §8.19.5 Copy Reference: workspace-relative `path:line` from real file
+  // facts, plus a symbol candidate only when the provider names one via its
+  // rename range. Qualified names are never synthesized — without a
+  // provider channel they stay an explicit unavailable reason.
+  const copyReferenceAtCursor = useCallback(async () => {
+    const file = activeFile;
+    if (!file) return;
+    const path = absolutePathForOpenFile(file);
+    const outcome = copyReferenceCandidates({
+      path,
+      isLibrary: !!file.library,
+      roots: rootsRef.current.map((root) => root.path),
+      line: editorSelectionRef.current.start.line,
+      symbolName: null,
+    });
+    if (outcome.kind === "unavailable") {
+      setStatusMessage(`Copy Reference unavailable (${outcome.reason}): ${outcome.detail}`);
+      return;
+    }
+    // Best-effort provider symbol identity; failure degrades to path-only
+    // rather than blocking the copy.
+    let symbolName: string | null = null;
+    if (!file.library) {
+      try {
+        const live = openFilesRef.current[file.key];
+        const descriptor = live ? lspDescriptorForFile(live) : null;
+        if (descriptor) {
+          const position = editorSelectionRef.current.start;
+          const prepared = await lspPrepareRename(descriptor, position);
+          const range = prepared.range ?? null;
+          const lineText = live?.text.split("\n")[position.line] ?? "";
+          symbolName = (range && range.start.line === range.end.line
+            ? lineText.slice(range.start.character, range.end.character).trim()
+            : "")
+            || lineText.slice(position.character).match(/^[A-Za-z0-9_$]+/)?.[0]
+            || null;
+        }
+      } catch {
+        symbolName = null;
+      }
+    }
+    const final = symbolName
+      ? copyReferenceCandidates({
+        path,
+        isLibrary: !!file.library,
+        roots: rootsRef.current.map((root) => root.path),
+        line: editorSelectionRef.current.start.line,
+        symbolName,
+      })
+      : outcome;
+    if (final.kind === "unavailable") {
+      setStatusMessage(`Copy Reference unavailable (${final.reason}): ${final.detail}`);
+      return;
+    }
+    if (final.candidates.length === 1) {
+      await writeText(final.candidates[0].text);
+      setStatusMessage(`Copied reference: ${final.candidates[0].text}`);
+      return;
+    }
+    const rect = editorPaneRef.current?.getBoundingClientRect();
+    openTreeContextMenuAt(
+      (rect?.left ?? 0) + 80,
+      (rect?.top ?? 0) + 80,
+      final.candidates.map((candidate) => ({
+        label: `${candidate.label}: ${candidate.text}`,
+        onClick: () => {
+          void writeText(candidate.text).then(() => {
+            setStatusMessage(`Copied reference: ${candidate.text}`);
+          });
+        },
+      })),
+    );
+  }, [
+    absolutePathForOpenFile,
+    activeFile,
+    lspDescriptorForFile,
+    openTreeContextMenuAt,
+    setStatusMessage,
+  ]);
+
   const showCodeActionsMenu = useCallback(async (
     clientX: number,
     clientY: number,
@@ -8256,6 +8342,55 @@ export function CodeWorkspaceTab({
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
       run: (context) => { executeEditorCommand("paste", context); },
+    },
+    {
+      // §8.19.5 Plain Paste: rectangular/segment metadata is dropped; the
+      // plain text replaces the selection like any ordinary paste.
+      id: "workspace.editor.pasteAsPlainText",
+      title: "Paste as Plain Text",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+Alt+V",
+      keybindings: ["Meta+Shift+Alt+V"],
+      keywords: ["clipboard", "plain text", "paste without formatting"],
+      when: (context) => {
+        const state = editorCommandStateFor(context);
+        return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
+      },
+      run: (context) => { executeEditorCommand("pasteAsPlainText", context); },
+    },
+    {
+      // §8.19.5 Copy Reference: workspace-relative path:line, with a symbol
+      // candidate only when the provider actually names one.
+      id: "workspace.editor.copyReference",
+      title: "Copy Reference",
+      category: "Edit",
+      keybinding: "Ctrl+Alt+Shift+C",
+      keybindings: ["Meta+Alt+Shift+C"],
+      keywords: ["copy reference", "path line", "qualified name", "symbol"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile,
+      run: () => { void copyReferenceAtCursor(); },
+    },
+    {
+      // §8.19.5 Paste from History: session-only ring, searchable popup;
+      // Enter dispatches the full segment plan at the caret as one undo.
+      id: "editor.pasteFromHistory",
+      title: "Paste from History…",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+V",
+      keybindings: ["Meta+Shift+V"],
+      keywords: ["clipboard history", "paste history", "recent copies"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile
+        && !context.readOnly,
+      run: () => {
+        const store = clipboardStoreForWorkspace(workspaceInstanceId);
+        if (!store.isHistoryEnabled() || store.historyEntries().length === 0) {
+          setStatusMessage("Clipboard history is empty or disabled");
+          return true;
+        }
+        setClipboardHistoryEntries([...store.historyEntries()]);
+        setClipboardHistoryOpen(true);
+        return true;
+      },
     },
     {
       id: "workspace.editor.moveStatementUp",
@@ -13351,6 +13486,22 @@ export function CodeWorkspaceTab({
           }}
         />
       )}
+      <ClipboardHistoryPopup
+        open={clipboardHistoryOpen}
+        entries={clipboardHistoryEntries}
+        onPaste={(index) => {
+          executeActiveEditorCommand("pasteFromHistory", { historyIndex: index });
+        }}
+        onDelete={(index) => {
+          clipboardStoreForWorkspace(workspaceInstanceId).removeHistoryEntry(index);
+          setClipboardHistoryEntries([...clipboardStoreForWorkspace(workspaceInstanceId).historyEntries()]);
+        }}
+        onClear={() => {
+          clipboardStoreForWorkspace(workspaceInstanceId).clearHistory();
+          setClipboardHistoryEntries([]);
+        }}
+        onClose={() => setClipboardHistoryOpen(false)}
+      />
       <GenerateCodeDialog
         open={generateCode.open}
         phase={generateCode.phase}
