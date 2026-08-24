@@ -4991,6 +4991,53 @@ end_of_record
   });
 
   describe("P0-S / N1.7 Atomic Save Commit Host Race Tests", () => {
+    it("deletes a Java line with Ctrl+Y and saves from the editor surface", async () => {
+      const path = "src/main/java/com/example/App.java";
+      const initialText = "class App {\n  int value = 1;\n}\n";
+      const savedText = "  int value = 1;\n}\n";
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-editor-delete-save",
+        workspaceInstanceId: "instance-editor-delete-save",
+        name: "Editor Delete Save",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+      workspaceMocks.workspaceReadFile.mockResolvedValue(file(path, initialText));
+      workspaceMocks.workspaceWriteFileEncoded.mockImplementation(async (
+        _root: string,
+        writtenPath: string,
+        text: string,
+      ) => writeAck(file(writtenPath, text, { hash: `hash-saved-${writtenPath}` })));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle(`app / ${path}`);
+      const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+      expect(content).not.toBeNull();
+
+      fireEvent.keyDown(content!, { key: "y", code: "KeyY", ctrlKey: true });
+      await waitFor(() => {
+        const fileState = selectCodeWorkspaceUi(
+          useCodeWorkspaceStore.getState(),
+          "instance-editor-delete-save",
+        ).openFiles[`root:app:${path}`];
+        expect(fileState?.text).toBe(savedText);
+        expect(fileState?.dirty).toBe(true);
+      });
+
+      fireEvent.keyDown(content!, { key: "s", code: "KeyS", ctrlKey: true });
+      await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
+        "/repo/app",
+        path,
+        savedText,
+        `hash-${path}`,
+        "UTF-8",
+        false,
+      ));
+    });
+
     it("cancels save with 0 disk writes when user edits buffer during historySnapshot await", async () => {
       let resolveHistory: () => void = () => {};
       const historyDeferred = new Promise<null>((r) => {

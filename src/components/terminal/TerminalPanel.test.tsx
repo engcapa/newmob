@@ -554,7 +554,7 @@ describe("TerminalPanel focus behavior", () => {
     });
   });
 
-  it("handles macOS Cmd+V through the native paste event without reading clipboard permissions", async () => {
+  it("handles macOS Cmd+V through the active clipboard path without double-pasting", async () => {
     const originalPlatform = window.navigator.platform;
     const originalClipboard = window.navigator.clipboard;
     const readText = vi.fn(async () => "permission paste");
@@ -576,10 +576,13 @@ describe("TerminalPanel focus behavior", () => {
       });
 
       fireEvent.keyDown(window, { key: "v", metaKey: true });
-      await Promise.resolve();
-
-      expect(readText).not.toHaveBeenCalled();
-      expect(ipcMocks.writeTerminal).not.toHaveBeenCalled();
+      await waitFor(() => {
+        expect(ipcMocks.writeTerminal).toHaveBeenCalledWith(
+          "terminal-session",
+          btoa("permission paste"),
+        );
+      });
+      expect(readText).toHaveBeenCalledTimes(1);
 
       const screenEl = screen.getByTestId("terminal-pane").querySelector(".xterm-screen");
       expect(screenEl).toBeTruthy();
@@ -588,14 +591,9 @@ describe("TerminalPanel focus behavior", () => {
         clipboardData: { getData },
       });
 
-      await waitFor(() => {
-        expect(ipcMocks.writeTerminal).toHaveBeenCalledWith(
-          "terminal-session",
-          btoa("native paste"),
-        );
-      });
-      expect(readText).not.toHaveBeenCalled();
-      expect(getData).toHaveBeenCalledWith("text/plain");
+      await Promise.resolve();
+      expect(ipcMocks.writeTerminal).toHaveBeenCalledTimes(1);
+      expect(getData).not.toHaveBeenCalled();
     } finally {
       Object.defineProperty(window.navigator, "platform", {
         configurable: true,

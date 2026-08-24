@@ -131,7 +131,6 @@ export function createCodeMirrorActionKeymap(
  * Everywhere and the Keymap settings surface (§8.18.2 单一 catalog).
  */
 export interface EditorHostActionHandlers {
-  save(): void;
   openReplacePanel(): boolean;
   expandSemanticSelection(): boolean;
   /**
@@ -181,19 +180,6 @@ function editorAction(input: {
  */
 export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
   return [
-    editorAction({
-      id: "editor.save",
-      title: "Save File",
-      category: "File",
-      defaultKeybinding: "Ctrl+s",
-      secondary: ["Meta+s"],
-      keywords: ["write", "persist"],
-      requiresEditor: true,
-      run: async () => {
-        handlers.save();
-        return { kind: "applied" };
-      },
-    }),
     editorAction({
       id: "editor.replace",
       title: "Replace in File",
@@ -406,7 +392,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       title: "Redo",
       category: "Edit",
       defaultKeybinding: "Ctrl+Shift+z",
-      secondary: ["Meta+Shift+z", "Ctrl+y", "Meta+y"],
+      secondary: ["Meta+Shift+z"],
       keywords: ["history", "redo"],
       requiresEditor: true,
       run: async () => runViaHandlers(handlers, redo),
@@ -460,7 +446,6 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
  * CM primitive Escape stack.
  */
 export const EDITOR_HOST_ACTION_IDS = [
-  "editor.save",
   "editor.replace",
   "editor.expandSelection",
   "editor.escapeSelectionStack",
@@ -564,7 +549,6 @@ function actionOwnedPatterns(): Set<string> {
 }
 
 const NOOP_HANDLERS = {
-  save: () => {},
   openReplacePanel: () => false,
   expandSemanticSelection: () => false,
   startBasicCompletion: () => false,

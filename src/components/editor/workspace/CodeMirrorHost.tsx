@@ -1862,7 +1862,6 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       // Handlers close over this mount's view instance; the registration is
       // removed in cleanup so a remount re-binds against the fresh view.
       unregisterEditorActions = actionHost.registerActions(buildEditorHostActions({
-        save: saveHandler,
         openReplacePanel: () => openReplacePanel(view),
         expandSemanticSelection: () => expandSemanticSelection(view),
         // §8.19.4 explicit Basic Completion. With a popup already open at

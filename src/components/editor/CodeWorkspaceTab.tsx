@@ -8798,8 +8798,11 @@ export function CodeWorkspaceTab({
       title: "Save Active File",
       category: "File",
       keybinding: "Ctrl+S",
-      when: () => !!activeFile?.dirty && !activeFile.loading && !activeFile.saving,
-      run: () => void saveFile(),
+      when: () => {
+        const file = openFilesRef.current[activeKeyRef.current ?? ""];
+        return !!file?.dirty && !file.loading && !file.saving;
+      },
+      run: () => void saveFile(activeKeyRef.current),
     },
     {
       id: "workspace.closeActiveEditorTab",
