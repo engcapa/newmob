@@ -51,6 +51,9 @@ import {
   Columns3,
   ShieldCheck,
   Link2,
+  AlignHorizontalJustifyCenter,
+  Maximize2,
+  Square,
 } from "lucide-react";
 import {
   workspaceListDir,
@@ -201,6 +204,8 @@ import {
 import {
   enforceTabPolicy,
   pushClosedTab,
+  buildReopenTreeRoute,
+  resolveReopenLocation,
   DEFAULT_WORKSPACE_TAB_POLICY_V3,
   type ClosedTabEntry,
   type WorkspaceTabPolicyV3,
@@ -221,7 +226,9 @@ import {
 } from "./workspace/navigationHistoryModel";
 import {
   createSingleLeafLayout,
+  findLeafNode,
   getAllLeafNodes,
+  navigateLeafOrder,
   panelLayoutToRatios,
   cloneLayoutTree,
   type LayoutNode,
@@ -903,6 +910,10 @@ export function CodeWorkspaceTab({
   const setStoreActiveEditorGroup = useCodeWorkspaceStore((s) => s.setActiveEditorGroup);
   const splitLayoutLeaf = useCodeWorkspaceStore((s) => s.splitLayoutLeaf);
   const closeLayoutLeaf = useCodeWorkspaceStore((s) => s.closeLayoutLeaf);
+  const moveLayoutTabStore = useCodeWorkspaceStore((s) => s.moveLayoutTab);
+  const equalizeLayoutRatiosStore = useCodeWorkspaceStore((s) => s.equalizeLayoutRatios);
+  const stretchLayoutLeafStore = useCodeWorkspaceStore((s) => s.stretchLayoutLeaf);
+  const unsplitAllLayoutStore = useCodeWorkspaceStore((s) => s.unsplitAllLayout);
   const setLayoutTreeV2Store = useCodeWorkspaceStore((s) => s.setLayoutTreeV2);
   const closeLayoutTabInLeaf = useCodeWorkspaceStore((s) => s.closeLayoutTabInLeaf);
   const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
@@ -5013,6 +5024,10 @@ export function CodeWorkspaceTab({
       if (file) {
         closeLspDocument(file);
         // §8.18.5 reopen stack: session-only, capped, never persisted.
+        // §8.19.6: capture structured relocation evidence so a later reopen
+        // can find the closest surviving editor even after splits close.
+        const closedTree = currentUi.layoutTreeV2;
+        const closedLeaf = findLeafNode(closedTree, groupId);
         setClosedTabsStack((stack) => pushClosedTab(stack, {
           fileIdentity: workspaceFileIdentity(file.ref),
           ref: file.ref,
@@ -5020,6 +5035,11 @@ export function CodeWorkspaceTab({
           subtitle: file.subtitle,
           leafPath: [groupId],
           closedAt: Date.now(),
+          location: {
+            leafId: groupId,
+            treeRoute: buildReopenTreeRoute(closedTree, groupId),
+            siblingFileKeys: (closedLeaf?.openFileKeys ?? []).filter((entryKey) => entryKey !== key),
+          },
         }));
       }
       setOpenFiles((current) => {
@@ -5171,6 +5191,63 @@ export function CodeWorkspaceTab({
   const closeSplit = useCallback(() => {
     closeLayoutLeaf(workspaceInstanceId, activeEditorGroupId);
   }, [activeEditorGroupId, closeLayoutLeaf, workspaceInstanceId]);
+
+  // §8.19.6 R5-b: split management actions — navigation, tab moves between
+  // splits, equalize/stretch proportions and unsplit-all. All layout truth
+  // flows through the recursive-tree store reducers.
+  const goToAdjacentSplit = useCallback((direction: 1 | -1): boolean => {
+    const target = navigateLeafOrder(workspaceUi.layoutTreeV2, activeEditorGroupId, direction);
+    if (!target || target.id === activeEditorGroupId) return false;
+    setStoreActiveEditorGroup(workspaceInstanceId, target.id);
+    setStatusMessage(`${direction === 1 ? "Next" : "Previous"} editor: ${target.id}`);
+    return true;
+  }, [activeEditorGroupId, setStoreActiveEditorGroup, setStatusMessage, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+
+  const moveActiveTabToAdjacentSplit = useCallback((direction: 1 | -1): boolean => {
+    // Read through the store so a stale closure never moves the wrong tab.
+    const liveUi = useCodeWorkspaceStore.getState().byInstanceId[workspaceInstanceId];
+    const sourceId = liveUi?.activeEditorGroupId ?? activeEditorGroupId;
+    const key = sourceId ? (liveUi?.editorGroups[sourceId]?.activeKey ?? null) : null;
+    if (!key) return false;
+    const target = navigateLeafOrder(workspaceUi.layoutTreeV2, sourceId, direction);
+    if (!target || target.id === sourceId) return false;
+    moveLayoutTabStore(workspaceInstanceId, sourceId, target.id, key);
+    setStatusMessage(`Moved ${openFilesRef.current[key]?.title ?? key} to the ${direction === 1 ? "next" : "previous"} split`);
+    return true;
+  }, [activeEditorGroupId, moveLayoutTabStore, openFilesRef, setStatusMessage, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+
+  const moveTabToAdjacentSplitFrom = useCallback((
+    sourceLeafId: EditorGroupId,
+    key: string,
+    direction: 1 | -1,
+  ): boolean => {
+    const target = navigateLeafOrder(workspaceUi.layoutTreeV2, sourceLeafId, direction);
+    if (!target || target.id === sourceLeafId) return false;
+    moveLayoutTabStore(workspaceInstanceId, sourceLeafId, target.id, key);
+    return true;
+  }, [moveLayoutTabStore, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+
+  const equalizeActiveSplitRatios = useCallback((): boolean => {
+    equalizeLayoutRatiosStore(workspaceInstanceId, activeEditorGroupId);
+    setStatusMessage("Split proportions equalized");
+    return true;
+  }, [activeEditorGroupId, equalizeLayoutRatiosStore, setStatusMessage, workspaceInstanceId]);
+
+  const stretchActiveSplit = useCallback((): boolean => {
+    stretchLayoutLeafStore(workspaceInstanceId, activeEditorGroupId);
+    return true;
+  }, [activeEditorGroupId, stretchLayoutLeafStore, workspaceInstanceId]);
+
+  const unsplitAllWindows = useCallback((): boolean => {
+    if (getAllLeafNodes(useCodeWorkspaceStore.getState().byInstanceId[workspaceInstanceId]?.layoutTreeV2
+      ?? workspaceUi.layoutTreeV2).length <= 1) {
+      setStatusMessage("No splits to close");
+      return false;
+    }
+    unsplitAllLayoutStore(workspaceInstanceId);
+    setStatusMessage("Closed all splits — tabs kept in one editor");
+    return true;
+  }, [setStatusMessage, unsplitAllLayoutStore, workspaceInstanceId, workspaceUi.layoutTreeV2]);
 
   const activeFile = activeKey ? openFiles[activeKey] ?? null : null;
   // Large-file mode (M6-B): above the size/line threshold, skip the per-edit
@@ -8171,11 +8248,26 @@ export function CodeWorkspaceTab({
       keywords: ["reopen", "closed", "tab", "undo close"],
       run: () => {
         // §8.18.5: pop the newest entry that still resolves to a real file.
+        // §8.19.6: resolve against the LIVE tree — original leaf, then the
+        // nearest surviving ancestor along the recorded route, then the leaf
+        // owning the most former siblings, then the active editor.
         while (closedTabsStack.length > 0) {
           const [entry, ...rest] = closedTabsStack;
+          const resolution = entry?.ref && entry.location
+            ? resolveReopenLocation(workspaceUi.layoutTreeV2, entry.location, activeEditorGroupId)
+            : null;
           setClosedTabsStack(rest);
           if (entry && entry.ref) {
-            void openFile(entry.ref as never);
+            void openFile(entry.ref as never, resolution ? { groupId: resolution.leafId } : undefined);
+            if (resolution?.kind === "relocated") {
+              setStatusMessage(
+                resolution.reason === "route"
+                  ? `Reopened ${entry.title} in the nearest surviving split`
+                  : resolution.reason === "sibling"
+                    ? `Reopened ${entry.title} next to its former tab group`
+                    : `Reopened ${entry.title} in the active editor`,
+              );
+            }
             return true;
           }
         }
@@ -9142,6 +9234,83 @@ export function CodeWorkspaceTab({
         });
       },
     },
+    // §8.19.6 R5-b split management actions.
+    {
+      id: "workspace.splitRight",
+      title: "Split Editor Right",
+      category: "View",
+      keywords: ["split", "vertical", "editor"],
+      when: () => !!activeKey,
+      run: () => {
+        splitEditor("vertical");
+        return true;
+      },
+    },
+    {
+      id: "workspace.splitDown",
+      title: "Split Editor Down",
+      category: "View",
+      keywords: ["split", "horizontal", "editor"],
+      when: () => !!activeKey,
+      run: () => {
+        splitEditor("horizontal");
+        return true;
+      },
+    },
+    {
+      id: "workspace.goToNextSplit",
+      title: "Go to Next Split",
+      category: "View",
+      keywords: ["next", "splitter", "navigate"],
+      run: () => goToAdjacentSplit(1),
+    },
+    {
+      id: "workspace.goToPreviousSplit",
+      title: "Go to Previous Split",
+      category: "View",
+      keywords: ["previous", "splitter", "navigate"],
+      run: () => goToAdjacentSplit(-1),
+    },
+    {
+      id: "workspace.moveTabToNextSplit",
+      title: "Move Tab to Next Split",
+      category: "View",
+      keywords: ["move", "tab", "next", "split"],
+      when: () => !!activeKey,
+      run: () => moveActiveTabToAdjacentSplit(1),
+    },
+    {
+      id: "workspace.moveTabToPreviousSplit",
+      title: "Move Tab to Previous Split",
+      category: "View",
+      keywords: ["move", "tab", "previous", "split"],
+      when: () => !!activeKey,
+      run: () => moveActiveTabToAdjacentSplit(-1),
+    },
+    {
+      id: "workspace.equalizeSplitProportions",
+      title: "Equalize Split Proportions",
+      category: "View",
+      keywords: ["equalize", "proportions", "ratios", "split"],
+      when: () => !!splitOrientation,
+      run: equalizeActiveSplitRatios,
+    },
+    {
+      id: "workspace.stretchActiveSplit",
+      title: "Stretch Active Split",
+      category: "View",
+      keywords: ["stretch", "widen", "grow", "split"],
+      when: () => !!splitOrientation,
+      run: stretchActiveSplit,
+    },
+    {
+      id: "workspace.unsplitAll",
+      title: "Unsplit All",
+      category: "View",
+      keywords: ["unsplit", "close splits", "single editor"],
+      when: () => !!splitOrientation,
+      run: unsplitAllWindows,
+    },
     {
       id: "workspace.tree.openLooseFile",
       title: "Open Loose File",
@@ -9350,20 +9519,30 @@ export function CodeWorkspaceTab({
     addRoot,
     closeFile,
     closedTabsStack,
+    columnSelectionMode,
     copyTreePath,
     createDir,
     createFile,
     deleteSelected,
     editorCommandStateFor,
+    equalizeActiveSplitRatios,
     executeActiveEditorCommand,
     executeEditorCommand,
     findInDirectory,
     formatActiveFile,
     gitRoots.length,
     gitRootsLoading,
+    goToAdjacentSplit,
     ignoreWorkspacePath,
+    intelligencePreferences.formatOnSave,
+    intelligencePreferences.inlayHintsEnabled,
+    intelligencePreferences.inlineBlameEnabled,
+    activeFileSoftWrap,
+    languagePanelOpen,
+    moveActiveTabToAdjacentSplit,
     navCan.back,
     navCan.forward,
+    navigateDiagnostic,
     navigateHistory,
     onOpenGitManager,
     openCodeActionsAtCursor,
@@ -9377,6 +9556,7 @@ export function CodeWorkspaceTab({
     openRecentFiles,
     openSearchEverywhere,
     openStructurePopup,
+    optimizeImports,
     recentFilesOpen,
     refreshTree,
     reloadFile,
@@ -9385,39 +9565,35 @@ export function CodeWorkspaceTab({
     renameSelected,
     resolveEditorTarget,
     roots.length,
+    runEditorAiActionAtCursor,
     saveFile,
+    scanWorkspaceCoverage,
     seSymbolsAvailable,
     selected,
     selectedRootDirectory,
-    intelligencePreferences.inlayHintsEnabled,
-    intelligencePreferences.inlineBlameEnabled,
-    activeFileSoftWrap,
-    columnSelectionMode,
-    intelligencePreferences.formatOnSave,
+    setBottomDockOpen,
+    setBottomDockTab,
     setFormatOnSave,
+    setClosedTabsStack,
+    setStatusMessage,
+    splitOrientation,
+    stretchActiveSplit,
+    t,
+    toggleBookmarkAtCursor,
+    toggleColumnSelectionMode,
     toggleInlayHints,
     toggleInlayHintsForActiveLanguage,
     toggleInlineBlame,
-    toggleSoftWrap,
-    toggleColumnSelectionMode,
-    toggleBookmarkAtCursor,
-    languagePanelOpen,
-    runEditorAiActionAtCursor,
-    t,
-    toggleProjectTree,
     toggleOutlinePane,
+    toggleProjectTree,
+    toggleSoftWrap,
     toggleTodosPane,
-    navigateDiagnostic,
-    optimizeImports,
     undoWorkspaceEdit,
     redoWorkspaceEdit,
+    unsplitAllWindows,
     workspaceEditHistoryState,
+    workspaceUi.layoutTreeV2,
     coverageReport,
-    scanWorkspaceCoverage,
-    setBottomDockOpen,
-    setBottomDockTab,
-    setClosedTabsStack,
-    setStatusMessage,
   ]);
 
   const commandFocusForTarget = useCallback((target: EventTarget | null): WorkspaceFocus => {
@@ -9609,9 +9785,9 @@ export function CodeWorkspaceTab({
     : 0;
 
   /**
-   * Leaf-aware switcher close (§8.18.5 Backspace): clean tabs close directly,
-   * dirty tabs go through the same confirm path as the tab strip; tool
-   * windows hide instead of being destroyed.
+   * Leaf-aware switcher close, graded per §8.19.6: pinned tabs refuse with a
+   * reason (protected work is never silently closed), dirty tabs go through
+   * the same confirm path as the tab strip, and tool windows only hide.
    */
   const closeFromTabSwitcher = useCallback(async () => {
     const snapshot = switcherSnapshotRef.current;
@@ -9620,18 +9796,26 @@ export function CodeWorkspaceTab({
       tabSwitcherIndexRef.current,
       snapshot.editors.length + snapshot.tools.length - 1,
     );
-    setTabSwitcherOpen(false);
-    setSwitcherSnapshot(null);
     const editorEntry = snapshot.editors[index];
     if (editorEntry) {
+      if (editorEntry.pinned) {
+        setStatusMessage(`${editorEntry.title} is pinned — unpin it before closing`);
+        return;
+      }
+      setTabSwitcherOpen(false);
+      setSwitcherSnapshot(null);
       await closeFile(editorEntry.key, editorEntry.leafId ?? activeEditorGroupId);
       return;
     }
+    setTabSwitcherOpen(false);
+    setSwitcherSnapshot(null);
     const toolWindow = snapshot.tools[index - snapshot.editors.length];
     if (toolWindow) {
+      // Single-tab dock: hiding the dock IS hiding this window; it stays
+      // registered as hidden and reopens through the Switcher.
       setBottomDockOpen(false);
     }
-  }, [activeEditorGroupId, closeFile, setBottomDockOpen]);
+  }, [activeEditorGroupId, closeFile, setBottomDockOpen, setStatusMessage]);
 
   const commitTabSwitcher = useCallback((index: number) => {
     const snapshot = switcherSnapshotRef.current;
@@ -12268,6 +12452,9 @@ export function CodeWorkspaceTab({
     return () => setTabCodeWorkspaceContext(tabId, null);
   }, [setTabCodeWorkspaceContext, tabId]);
 
+  // §8.19.6: move-tab menu entries only make sense with another split target.
+  const leafCountForMenu = getAllLeafNodes(workspaceUi.layoutTreeV2).length;
+
   const renderEditorGroup = (groupId: EditorGroupId) => {
     const group = editorGroups[groupId] ?? createEditorGroup(groupId);
     const groupFile = group.activeKey ? openFiles[group.activeKey] ?? null : null;
@@ -12431,6 +12618,8 @@ export function CodeWorkspaceTab({
         }}
         onSplitRight={(key) => splitEditor("vertical", key, groupId)}
         onSplitDown={(key) => splitEditor("horizontal", key, groupId)}
+        onMoveTabToNextSplit={leafCountForMenu > 1 ? (key) => moveTabToAdjacentSplitFrom(groupId, key, 1) : undefined}
+        onMoveTabToPreviousSplit={leafCountForMenu > 1 ? (key) => moveTabToAdjacentSplitFrom(groupId, key, -1) : undefined}
         onCopyPath={(key, absolute) => void copyEditorTabPath(key, absolute)}
         onRevealInTree={revealEditorTabInTree}
         onRevealInSystem={revealEditorTabInExplorer}
@@ -12727,6 +12916,24 @@ export function CodeWorkspaceTab({
                   return next;
                 });
               }}
+            />
+            <IconButton
+              label="Equalize split proportions"
+              testId="code-workspace-split-equalize"
+              icon={<AlignHorizontalJustifyCenter className="h-3.5 w-3.5" />}
+              onClick={() => executeWorkspaceCommand("workspace.equalizeSplitProportions")}
+            />
+            <IconButton
+              label="Stretch active split"
+              testId="code-workspace-split-stretch"
+              icon={<Maximize2 className="h-3.5 w-3.5" />}
+              onClick={() => executeWorkspaceCommand("workspace.stretchActiveSplit")}
+            />
+            <IconButton
+              label="Unsplit all (keep tabs)"
+              testId="code-workspace-split-unsplit-all"
+              icon={<Square className="h-3.5 w-3.5" />}
+              onClick={() => executeWorkspaceCommand("workspace.unsplitAll")}
             />
             <IconButton
               label="Close editor split"

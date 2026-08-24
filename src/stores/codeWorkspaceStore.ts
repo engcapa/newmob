@@ -18,10 +18,15 @@ import {
   atomicSplitLeaf,
   commitLayoutMutation,
   createSingleLeafLayout,
+  equalizeLeafParentSplit,
+  getAllLeafNodes,
   setLeafTabs,
   remapLayoutTreeKeys,
+  stretchLeafInTree,
+  unsplitAllLeaves,
   updateSplitNodeRatios,
   validateLayoutTree,
+  type LayoutMutationResult,
   type LayoutNode,
 } from "../components/editor/workspace/recursiveLayoutTree";
 import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/codeWorkspaceModel";
@@ -252,6 +257,16 @@ interface CodeWorkspaceStoreState {
   setSplitOrientation: (instanceId: string, orientation: EditorSplitOrientation | null) => void;
   setLayoutTreeV2: (instanceId: string, layoutTree: LayoutNode) => void;
   setLayoutNodeRatios: (instanceId: string, splitId: string, ratios: number[]) => void;
+  /** §8.19.6: even out the ratios of the split directly containing the leaf. */
+  equalizeLayoutRatios: (instanceId: string, leafId: string) => void;
+  /** §8.19.6: grow the leaf's share inside its parent split (repeatable, capped). */
+  stretchLayoutLeaf: (
+    instanceId: string,
+    leafId: string,
+    options?: { step?: number; max?: number },
+  ) => void;
+  /** §8.19.6: collapse every split into the first leaf, migrating all tabs. */
+  unsplitAllLayout: (instanceId: string) => void;
   splitLayoutLeaf: (
     instanceId: string,
     leafId: string,
@@ -610,6 +625,115 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           [instanceId]: {
             ...current,
             layoutTreeV2: validation.tree,
+          },
+        },
+      };
+    });
+  },
+
+  equalizeLayoutRatios: (instanceId, leafId) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      const nextTree = equalizeLeafParentSplit(current.layoutTreeV2, leafId);
+      if (nextTree === current.layoutTreeV2) return state;
+      const validation = commitLayoutMutation(
+        current.layoutTreeV2,
+        current.editorGroups,
+        current.activeEditorGroupId,
+        { kind: "changed", tree: nextTree, groups: current.editorGroups, activeGroupId: current.activeEditorGroupId },
+      );
+      if (validation.kind !== "changed") return state;
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: validation.tree,
+          },
+        },
+      };
+    });
+  },
+
+  stretchLayoutLeaf: (instanceId, leafId, options) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      const nextTree = stretchLeafInTree(current.layoutTreeV2, leafId, options);
+      if (nextTree === current.layoutTreeV2) return state;
+      const validation = commitLayoutMutation(
+        current.layoutTreeV2,
+        current.editorGroups,
+        current.activeEditorGroupId,
+        { kind: "changed", tree: nextTree, groups: current.editorGroups, activeGroupId: current.activeEditorGroupId },
+      );
+      if (validation.kind !== "changed") return state;
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: validation.tree,
+          },
+        },
+      };
+    });
+  },
+
+  unsplitAllLayout: (instanceId) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      const merged = unsplitAllLeaves(current.layoutTreeV2, current.activeEditorGroupId);
+      if (!merged) return state;
+      const survivorId = merged.tree.id;
+      const openOrder = [...merged.mergedKeys];
+      // Union pinned tabs from every absorbed leaf; drop anything not merged.
+      const pinnedKeys: string[] = [];
+      for (const leaf of getAllLeafNodes(current.layoutTreeV2)) {
+        for (const key of current.editorGroups[leaf.id]?.pinnedKeys ?? []) {
+          if (openOrder.includes(key) && !pinnedKeys.includes(key)) pinnedKeys.push(key);
+        }
+      }
+      const previewCandidate = current.editorGroups[survivorId]?.previewKey ?? null;
+      const previewKey = previewCandidate != null && openOrder.includes(previewCandidate)
+        ? previewCandidate
+        : null;
+
+      const nextGroups: Record<string, CodeWorkspaceEditorGroupState> = {};
+      // Dormant empty legacy slots carry no layout truth — keep them as-is.
+      for (const [id, group] of Object.entries(current.editorGroups)) {
+        if (group && id !== survivorId && group.openOrder.length === 0) nextGroups[id] = group;
+      }
+      nextGroups[survivorId] = {
+        id: survivorId,
+        openOrder,
+        activeKey: merged.tree.activeKey,
+        previewKey,
+        pinnedKeys,
+      };
+
+      const rawResult: LayoutMutationResult = {
+        kind: "changed",
+        tree: merged.tree,
+        groups: nextGroups,
+        activeGroupId: survivorId,
+      };
+      const result = commitLayoutMutation(current.layoutTreeV2, current.editorGroups, current.activeEditorGroupId, rawResult);
+      if (result.kind !== "changed") return state;
+      const activeGroup = result.groups[result.activeGroupId];
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: result.tree,
+            editorGroups: result.groups,
+            activeEditorGroupId: result.activeGroupId,
+            splitOrientation: result.tree.type === "split" ? result.tree.orientation : null,
+            openOrder: activeGroup?.openOrder ?? current.openOrder,
+            activeKey: activeGroup?.activeKey ?? null,
           },
         },
       };

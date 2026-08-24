@@ -2,14 +2,17 @@ import { describe, expect, it } from "vitest";
 import {
   CLOSED_TAB_STACK_LIMIT,
   DEFAULT_WORKSPACE_TAB_POLICY,
+  buildReopenTreeRoute,
   enforceTabPolicy,
   orderTabsForDisplay,
   pushClosedTab,
+  resolveReopenLocation,
   selectActivateOnClose,
   type ClosedTabEntry,
   type TabEvictionMeta,
   type WorkspaceTabPolicyV2,
 } from "./workspaceTabPolicy";
+import type { LayoutNode } from "./recursiveLayoutTree";
 
 function meta(key: string, overrides: Partial<TabEvictionMeta> = {}): TabEvictionMeta {
   return { key, dirty: false, pinned: false, preview: false, lastUsedAt: 0, ...overrides };
@@ -100,5 +103,76 @@ describe("§8.18.5 closed-tab reopen stack", () => {
 
     const withDup = pushClosedTab(stack, entry(`f-${CLOSED_TAB_STACK_LIMIT + 9}`));
     expect(withDup.length).toBe(stack.length);
+  });
+});
+
+describe("§8.19.6 ReopenLocationV2 resolution", () => {
+  // root-split[ l-a | right-split[ l-b | inner-split[ l-c | l-d ] ] ]
+  const tree: LayoutNode = {
+    type: "split",
+    id: "root",
+    orientation: "horizontal",
+    ratios: [0.5, 0.5],
+    children: [
+      { type: "leaf", id: "l-a", openFileKeys: ["a.ts"], activeKey: "a.ts" },
+      {
+        type: "split",
+        id: "right",
+        orientation: "vertical",
+        ratios: [0.5, 0.5],
+        children: [
+          { type: "leaf", id: "l-b", openFileKeys: [], activeKey: null },
+          {
+            type: "split",
+            id: "inner",
+            orientation: "horizontal",
+            ratios: [0.5, 0.5],
+            children: [
+              { type: "leaf", id: "l-c", openFileKeys: ["c.ts"], activeKey: "c.ts" },
+              { type: "leaf", id: "l-d", openFileKeys: ["d.ts"], activeKey: null },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  it("records first/second routes from the root to a leaf", () => {
+    expect(buildReopenTreeRoute(tree, "l-a")).toEqual(["first"]);
+    expect(buildReopenTreeRoute(tree, "l-b")).toEqual(["second", "first"]);
+    expect(buildReopenTreeRoute(tree, "l-d")).toEqual(["second", "second", "second"]);
+  });
+
+  it("restores directly when the original leaf still exists", () => {
+    expect(resolveReopenLocation(tree, { leafId: "l-c", treeRoute: ["second", "second", "second"], siblingFileKeys: [] }, "l-a"))
+      .toEqual({ kind: "restored", leafId: "l-c" });
+  });
+
+  it("relocates along the nearest surviving ancestor route when the leaf is gone", () => {
+    // l-d closed away; the whole right side collapsed to a single leaf l-b.
+    const collapsed: LayoutNode = {
+      type: "split",
+      id: "root",
+      orientation: "horizontal",
+      ratios: [0.5, 0.5],
+      children: [
+        { type: "leaf", id: "l-a", openFileKeys: ["a.ts"], activeKey: "a.ts" },
+        { type: "leaf", id: "l-b", openFileKeys: [], activeKey: null },
+      ],
+    };
+    expect(resolveReopenLocation(collapsed, { leafId: "l-d", treeRoute: ["second", "second", "second"], siblingFileKeys: [] }, "l-a"))
+      .toEqual({ kind: "relocated", leafId: "l-b", reason: "route" });
+  });
+
+  it("falls back to the leaf owning the most former siblings", () => {
+    const single: LayoutNode = { type: "leaf", id: "only", openFileKeys: ["c.ts", "d.ts", "x.ts"], activeKey: "x.ts" };
+    expect(resolveReopenLocation(single, { leafId: "l-d", treeRoute: ["second", "second", "second"], siblingFileKeys: ["c.ts", "d.ts"] }, null))
+      .toEqual({ kind: "relocated", leafId: "only", reason: "sibling" });
+  });
+
+  it("finally falls back to the active leaf when nothing else matches", () => {
+    const single: LayoutNode = { type: "leaf", id: "only", openFileKeys: [], activeKey: null };
+    expect(resolveReopenLocation(single, { leafId: null, treeRoute: [], siblingFileKeys: [] }, "only"))
+      .toEqual({ kind: "relocated", leafId: "only", reason: "active" });
   });
 });
