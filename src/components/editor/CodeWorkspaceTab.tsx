@@ -201,9 +201,15 @@ import {
 import {
   enforceTabPolicy,
   pushClosedTab,
-  DEFAULT_WORKSPACE_TAB_POLICY,
+  DEFAULT_WORKSPACE_TAB_POLICY_V3,
   type ClosedTabEntry,
+  type WorkspaceTabPolicyV3,
 } from "./workspace/workspaceTabPolicy";
+import {
+  listToolWindowsForCycle,
+  syncBottomDockToolWindows,
+  unregisterAllToolWindows,
+} from "./workspace/toolWindowRegistry";
 import { attachWorkspaceMouseDispatcher } from "./workspace/workspaceMouseDispatcher";
 import {
   createWorkspaceLocationController,
@@ -318,7 +324,7 @@ import {
   writeKeymapSchemes,
   type KeymapSchemeV3,
 } from "./workspace/workspaceKeymapScheme";
-import { TabSwitcher } from "./workspace/TabSwitcher";
+import { TabSwitcher, type TabSwitcherEntry, type TabSwitcherToolWindow } from "./workspace/TabSwitcher";
 import { DapAdapterGuideDialog } from "./workspace/DapAdapterGuideDialog";
 import {
   buildWorkspacePathSnapshotEdit,
@@ -877,6 +883,12 @@ export function CodeWorkspaceTab({
   const [bookmarks, setBookmarks] = useState<WorkspaceBookmark[]>(
     () => readWorkspaceBookmarks(workspaceInstanceId),
   );
+  // §8.19.6 per-workspace tab policy: restored from the layout snapshot
+  // (migrated/repaired on read) and consumed by open-time limit enforcement.
+  // Editing UI is deferred — restored values already govern eviction.
+  const [tabPolicy, setTabPolicy] = useState<WorkspaceTabPolicyV3>(() => ({ ...DEFAULT_WORKSPACE_TAB_POLICY_V3 }));
+  const tabPolicyRef = useRef(tabPolicy);
+  tabPolicyRef.current = tabPolicy;
   const ensureWorkspaceUi = useCodeWorkspaceStore((s) => s.ensureInstance);
   const disposeWorkspaceUi = useCodeWorkspaceStore((s) => s.disposeInstance);
   const patchWorkspaceUi = useCodeWorkspaceStore((s) => s.patchInstance);
@@ -917,6 +929,7 @@ export function CodeWorkspaceTab({
       if (snapshot.layoutRecovered) {
         setStatusMessage("Recovered invalid workspace layout into a single editor leaf");
       }
+      setTabPolicy(snapshot.tabPolicy ?? { ...DEFAULT_WORKSPACE_TAB_POLICY_V3 });
       patchWorkspaceUi(workspaceInstanceId, {
         bottomDockOpen: snapshot.bottomDockOpen,
         bottomDockTab: snapshot.bottomDockTab,
@@ -2180,7 +2193,7 @@ export function CodeWorkspaceTab({
               lastUsedAt: 1_000_000 - mruFileKeysRef.current.indexOf(entryKey),
             },
           ]));
-          const eviction = enforceTabPolicy(groupAfter.openOrder, meta, DEFAULT_WORKSPACE_TAB_POLICY);
+          const eviction = enforceTabPolicy(groupAfter.openOrder, meta, tabPolicyRef.current);
           if (eviction.kind === "evicted") {
             for (const evictedKey of eviction.evictedKeys) {
               if (evictedKey !== key) void closeFileRef.current?.(evictedKey, groupId, { discard: true });
@@ -2627,6 +2640,7 @@ export function CodeWorkspaceTab({
         expandedDirKeys,
         editorGroups: persistableGroups,
         layoutTreeV2: workspaceUi.layoutTreeV2,
+        tabPolicy: tabPolicyRef.current,
       }), {
         // §8.17.4 step 3: persistence refusals surface as a recovery
         // diagnostic, not only a console line.
@@ -9524,12 +9538,6 @@ export function CodeWorkspaceTab({
   const tabSwitcherIndexRef = useRef(0);
   tabSwitcherOpenRef.current = tabSwitcherOpen;
   tabSwitcherIndexRef.current = tabSwitcherIndex;
-  // §8.18.5: session MRU for tool windows in the Switcher.
-  const dockMruRef = useRef(new Map<BottomDockTabId, number>());
-  useEffect(() => {
-    if (!bottomDockTab) return;
-    dockMruRef.current.set(bottomDockTab, Date.now());
-  }, [bottomDockTab]);
   const mruFileKeysRef = useRef<string[]>([]);
   useEffect(() => {
     if (!activeKey) return;
@@ -9539,8 +9547,26 @@ export function CodeWorkspaceTab({
     ].slice(0, 24);
   }, [activeKey]);
 
-  const tabSwitcherEntries = useMemo(() => {
-    if (!tabSwitcherOpen) return [];
+  // §8.19.6: bottom-dock panels mirror their REAL dock state into the
+  // workspace-scoped tool-window registry; the Switcher consumes registry
+  // snapshots instead of constructing its own list.
+  useEffect(() => {
+    syncBottomDockToolWindows(workspaceInstanceId, { open: bottomDockOpen, activeTab: bottomDockTab });
+  }, [workspaceInstanceId, bottomDockOpen, bottomDockTab]);
+  useEffect(() => () => unregisterAllToolWindows(workspaceInstanceId), [workspaceInstanceId]);
+
+  // §8.17.5 step 4 + §8.19.6: the popup cycles over ONE frozen snapshot
+  // captured at open time — editor MRU entries plus registry cycle snapshots.
+  // Tool windows opened/closed in the background cannot shift the index
+  // space or reorder entries mid-cycle; release commits against the snapshot.
+  const [switcherSnapshot, setSwitcherSnapshot] = useState<{
+    editors: TabSwitcherEntry[];
+    tools: TabSwitcherToolWindow[];
+  } | null>(null);
+  const switcherSnapshotRef = useRef(switcherSnapshot);
+  switcherSnapshotRef.current = switcherSnapshot;
+
+  const buildSwitcherSnapshot = useCallback(() => {
     // §8.18.5 leaf identity: resolve which layout leaf currently owns each
     // file so commit reactivates the ORIGINAL view instead of the active one.
     const ownerByFileKey = new Map<string, string>();
@@ -9549,12 +9575,11 @@ export function CodeWorkspaceTab({
         if (!ownerByFileKey.has(key)) ownerByFileKey.set(key, leaf.id);
       }
     }
-    const groupMeta = editorGroups;
-    return mruFileKeysRef.current
+    const editors: TabSwitcherEntry[] = mruFileKeysRef.current
       .map((key) => openFiles[key])
       .filter((entry): entry is NonNullable<typeof entry> => !!entry)
       .map((entry) => {
-        const owningGroup = Object.values(groupMeta).find(
+        const owningGroup = Object.values(editorGroups).find(
           (group) => group.openOrder.includes(entry.key),
         );
         return {
@@ -9568,32 +9593,20 @@ export function CodeWorkspaceTab({
           preview: owningGroup?.previewKey === entry.key,
         };
       });
-  }, [tabSwitcherOpen, openFiles, activeKey, workspaceUi.layoutTreeV2, editorGroups]);
-
-  // §8.17.5 step 4: the Switcher lists editor MRU entries AND open tool
-  // windows, exactly like IDEA. Tool-window activation is part of the same
-  // cycle/commit index space.
-  const tabSwitcherToolWindows = useMemo(() => {
-    // §8.18.5: entries carry real open state and a session MRU ordering.
-    const mru = dockMruRef.current;
-    const items = ([
-      ["problems", "Problems"],
-      ["search", "Find in Files"],
-      ["terminal", "Terminal"],
-      ["run", "Run"],
-      ["references", "References"],
-      ["call-hierarchy", "Call Hierarchy"],
-      ["type-hierarchy", "Type Hierarchy"],
-    ] as readonly [BottomDockTabId, string][]).map(([id, label]) => ({
-      id,
-      label,
-      open: bottomDockOpen && bottomDockTab === id,
+    const tools: TabSwitcherToolWindow[] = listToolWindowsForCycle(workspaceInstanceId).map((snapshot) => ({
+      id: snapshot.id,
+      label: snapshot.title,
+      open: snapshot.state === "open",
     }));
-    return items.sort((left, right) =>
-      (mru.get(right.id) ?? 0) - (mru.get(left.id) ?? 0));
-  }, [bottomDockOpen, bottomDockTab]);
+    return { editors, tools };
+  }, [activeKey, editorGroups, openFiles, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+  const buildSwitcherSnapshotRef = useRef(buildSwitcherSnapshot);
+  buildSwitcherSnapshotRef.current = buildSwitcherSnapshot;
+
   const switcherTotalCountRef = useRef(0);
-  switcherTotalCountRef.current = tabSwitcherEntries.length + tabSwitcherToolWindows.length;
+  switcherTotalCountRef.current = switcherSnapshot
+    ? switcherSnapshot.editors.length + switcherSnapshot.tools.length
+    : 0;
 
   /**
    * Leaf-aware switcher close (§8.18.5 Backspace): clean tabs close directly,
@@ -9601,30 +9614,37 @@ export function CodeWorkspaceTab({
    * windows hide instead of being destroyed.
    */
   const closeFromTabSwitcher = useCallback(async () => {
-    const index = Math.min(tabSwitcherIndexRef.current, switcherTotalCountRef.current - 1);
-    const editorEntry = tabSwitcherEntries[index];
+    const snapshot = switcherSnapshotRef.current;
+    if (!snapshot) return;
+    const index = Math.min(
+      tabSwitcherIndexRef.current,
+      snapshot.editors.length + snapshot.tools.length - 1,
+    );
     setTabSwitcherOpen(false);
+    setSwitcherSnapshot(null);
+    const editorEntry = snapshot.editors[index];
     if (editorEntry) {
       await closeFile(editorEntry.key, editorEntry.leafId ?? activeEditorGroupId);
       return;
     }
-    const toolWindow = tabSwitcherToolWindows[index - tabSwitcherEntries.length];
+    const toolWindow = snapshot.tools[index - snapshot.editors.length];
     if (toolWindow) {
       setBottomDockOpen(false);
     }
-  }, [activeEditorGroupId, closeFile, tabSwitcherEntries, tabSwitcherToolWindows]);
+  }, [activeEditorGroupId, closeFile, setBottomDockOpen]);
 
   const commitTabSwitcher = useCallback((index: number) => {
-    const entries = tabSwitcherEntries;
+    const snapshot = switcherSnapshotRef.current;
     setTabSwitcherOpen(false);
-    const toolWindow = tabSwitcherToolWindows[index - entries.length];
+    setSwitcherSnapshot(null);
+    if (!snapshot) return;
+    const toolWindow = snapshot.tools[index - snapshot.editors.length];
     if (toolWindow) {
-      dockMruRef.current.set(toolWindow.id, Date.now());
       setBottomDockOpen(true);
-      setBottomDockTab(toolWindow.id);
+      setBottomDockTab(toolWindow.id as BottomDockTabId);
       return;
     }
-    const target = entries[index];
+    const target = snapshot.editors[index];
     if (!target) return;
     const targetRef = openFilesRef.current[target.key]?.ref ?? null;
     if (target.key === activeKeyRef.current && target.leafId) {
@@ -9643,7 +9663,7 @@ export function CodeWorkspaceTab({
       setStatusMessage(`${target.title}: its split was closed — reopened in the current editor`);
     }
     if (targetRef) void openFile(targetRef);
-  }, [workspaceUi.layoutTreeV2, openFile, setStoreActiveEditorGroup, setLeafActiveTab, setStatusMessage, tabSwitcherEntries, tabSwitcherToolWindows, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
+  }, [workspaceUi.layoutTreeV2, openFile, setStoreActiveEditorGroup, setLeafActiveTab, setStatusMessage, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
   const commitTabSwitcherRef = useRef(commitTabSwitcher);
   commitTabSwitcherRef.current = commitTabSwitcher;
   const closeFromTabSwitcherRef = useRef(closeFromTabSwitcher);
@@ -9663,13 +9683,12 @@ export function CodeWorkspaceTab({
         event.preventDefault();
         event.stopPropagation();
         if (!tabSwitcherOpenRef.current) {
-          // Openable when there are editor entries OR tool windows to list.
-          if (switcherTotalCountRef.current === 0) return;
-          const editorCount = mruFileKeysRef.current
-            .map((key) => openFilesRef.current[key])
-            .filter((entry): entry is NonNullable<typeof entry> => !!entry)
-            .length;
-          setTabSwitcherIndex(editorCount > 1 ? 1 : 0);
+          // Openable when there are editor entries OR tool windows to list;
+          // the snapshot is frozen here for the whole cycle (§8.19.6).
+          const snapshot = buildSwitcherSnapshotRef.current();
+          if (snapshot.editors.length + snapshot.tools.length === 0) return;
+          setSwitcherSnapshot(snapshot);
+          setTabSwitcherIndex(snapshot.editors.length > 1 ? 1 : 0);
           setTabSwitcherOpen(true);
           return;
         }
@@ -13239,12 +13258,15 @@ export function CodeWorkspaceTab({
       />
       <TabSwitcher
         open={tabSwitcherOpen}
-        entries={tabSwitcherEntries}
-        toolWindows={tabSwitcherToolWindows}
+        entries={switcherSnapshot?.editors ?? []}
+        toolWindows={switcherSnapshot?.tools ?? []}
         selectedIndex={tabSwitcherIndex}
         onHover={setTabSwitcherIndex}
         onCommit={commitTabSwitcher}
-        onCancel={() => setTabSwitcherOpen(false)}
+        onCancel={() => {
+          setTabSwitcherOpen(false);
+          setSwitcherSnapshot(null);
+        }}
       />
       <WorkspacePopupsHost
         searchEverywhereOpen={searchEverywhereOpen}

@@ -8,6 +8,11 @@ import type {
 } from "../../../stores/codeWorkspaceStore";
 import { fileKey } from "./codeWorkspaceModel";
 import {
+  DEFAULT_WORKSPACE_TAB_POLICY_V3,
+  migrateWorkspaceTabPolicy,
+  type WorkspaceTabPolicyV3,
+} from "./workspaceTabPolicy";
+import {
   type LayoutNode,
   createSingleLeafLayout,
   validateLayoutTree,
@@ -56,6 +61,18 @@ export interface WorkspaceLayoutSnapshotV2 {
   expandedDirKeys: string[];
   layoutTreeV2: LayoutNode;
   editorGroups: Record<string, PersistedEditorGroup>;
+  /**
+   * §8.19.6 per-workspace tab policy (schema v3). Optional on raw input;
+   * normalization always materializes it: corrupt/v2 payloads migrate
+   * field-by-field to defaults.
+   */
+  tabPolicy?: WorkspaceTabPolicyV3;
+  /**
+   * Raw pre-repair `tabPolicy` payload, archived whenever this normalization
+   * repaired anything so the original stays inspectable until the next clean
+   * write overwrites the snapshot.
+   */
+  tabPolicyBackup?: unknown;
   layoutRecovered?: boolean;
 }
 
@@ -152,6 +169,7 @@ export function defaultWorkspaceLayoutSnapshot(): WorkspaceLayoutSnapshotV2 {
     expandedRootIds: [],
     expandedDirKeys: [],
     layoutTreeV2: createSingleLeafLayout("primary", [], null),
+    tabPolicy: { ...DEFAULT_WORKSPACE_TAB_POLICY_V3 },
     editorGroups: {
       primary: createEmptyPersistedGroup(),
       secondary: createEmptyPersistedGroup(),
@@ -254,6 +272,13 @@ export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayou
     activeEditorGroupId = leaves[0]?.id ?? "primary";
   }
 
+  // §8.19.6: per-workspace tab policy migrates field-by-field; any repair
+  // archives the raw payload as `tabPolicyBackup`. An archived backup from an
+  // earlier generation carries forward through re-normalization until the
+  // next clean live write (which sends no backup field) drops it.
+  const policyMigration = migrateWorkspaceTabPolicy(source.tabPolicy);
+  const policyBackup = policyMigration.backup ?? source.tabPolicyBackup ?? null;
+
   return {
     version: 2,
     bottomDockOpen: source.bottomDockOpen !== false,
@@ -266,6 +291,8 @@ export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayou
     expandedRootIds: asStringArray(source.expandedRootIds, 64),
     expandedDirKeys: asStringArray(source.expandedDirKeys, 256),
     layoutTreeV2,
+    tabPolicy: policyMigration.policy,
+    ...(policyBackup != null ? { tabPolicyBackup: policyBackup } : {}),
     editorGroups: normalizedGroups,
     layoutRecovered,
   };
@@ -403,6 +430,8 @@ export function snapshotFromWorkspaceUi(input: {
   expandedDirKeys: string[];
   editorGroups: Record<string, CodeWorkspaceEditorGroupState>;
     layoutTreeV2: LayoutNode;
+  /** §8.19.6 per-workspace tab policy (v3); normalized on write. */
+  tabPolicy?: WorkspaceTabPolicyV3;
 
 }): WorkspaceLayoutSnapshotV2 {
   const toPersisted = (group: CodeWorkspaceEditorGroupState): PersistedEditorGroup => ({
@@ -439,6 +468,7 @@ export function snapshotFromWorkspaceUi(input: {
     expandedRootIds: input.expandedRootIds,
     expandedDirKeys: input.expandedDirKeys,
     layoutTreeV2: layoutTree,
+    tabPolicy: input.tabPolicy ?? { ...DEFAULT_WORKSPACE_TAB_POLICY_V3 },
     editorGroups: persistedGroups,
   });
 }
