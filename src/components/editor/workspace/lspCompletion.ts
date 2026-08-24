@@ -50,12 +50,27 @@ export interface LspCompletionHooks {
     position: LspPosition,
     triggerCharacter: string | null,
     token: CompletionRequestToken,
+    /** Repeated-call facts (§8.19.4); ordinal ≥ 2 requests expanded scope. */
+    invocation?: CompletionInvocationRequest,
   ) => Promise<LspCompletionResult | null>;
   resolve?: (raw: unknown, token: CompletionRequestToken) => Promise<LspCompletionItem | null>;
   triggerCharacters: () => string[];
   getDocumentRevision: () => number;
+  /**
+   * Whether the provider advertises a scope-expansion channel for repeated
+   * Basic calls. Standard LSP has none, so hosts omit this and every
+   * expanded request is recorded honestly as providerScope:"unchanged".
+   */
+  advertisesScopeExpansion?: () => boolean;
   /** Observable acceptance diagnostics for status/QA surfaces. */
   reportDiagnostic: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
+  /**
+   * Resolve gate surface (§8.19.4). When wired, a resolve timeout/failure
+   * presents Retry / Insert-without-import instead of inserting anything.
+   * Hosts without a gate surface get the block-only behaviour: nothing is
+   * inserted and the diagnostic reports the unavailable import.
+   */
+  onResolveGate?: (request: CompletionResolveGateRequest) => void;
 }
 
 /**
@@ -136,28 +151,65 @@ export function recentCompletionTelemetry(): readonly CompletionRequestTelemetry
 export function resetCompletionTelemetry(): void {
   completionTelemetryRing.length = 0;
   lastBasicInvocation.clear();
+  completionInvocationRing.length = 0;
 }
 
 // ---------------------------------------------------------------------------
-// §8.18.3 Basic invocation modes + repeated-invocation ordinal
+// §8.19.4 Basic invocation modes + repeated-invocation evidence
 // ---------------------------------------------------------------------------
 
 export type CompletionInvocationReason = "typing" | "trigger" | "explicit";
 
+/**
+ * Per-invocation facts the provider adapter receives and QA surfaces read
+ * (§8.19.4). `requestedScope:"expanded"` marks a repeated explicit Basic call;
+ * `providerScope` records what the provider actually did — LSP has no standard
+ * expansion channel, so an unadvertised expansion stays honestly "unchanged"
+ * instead of inheriting the requested scope.
+ */
+export interface CompletionInvocationEvidence {
+  invocationOrdinal: number;
+  requestedScope: "default" | "expanded";
+  providerScope: "expanded" | "unchanged" | "unknown";
+  itemCount: number;
+  isIncomplete: boolean;
+}
+
+/** Facts handed to the fetch hook so they can travel to the backend. */
+export interface CompletionInvocationRequest {
+  invocationOrdinal: number;
+  requestedScope: "default" | "expanded";
+}
+
+/** One recorded invocation in the bounded evidence ring. */
+export interface RecordedCompletionInvocation extends CompletionInvocationEvidence {
+  requestId: string;
+  workspaceId: string;
+  fileKey: string;
+  languageId: string;
+  documentRevision: number;
+  providerGeneration: number;
+  reason: CompletionInvocationReason;
+  at: number;
+}
+
 interface LastBasicInvocation {
   revision: number;
   positionKey: string;
+  providerGeneration: number;
   ordinal: number;
 }
 
 const lastBasicInvocation = new Map<string, LastBasicInvocation>();
+const completionInvocationRing: RecordedCompletionInvocation[] = [];
+const COMPLETION_INVOCATION_RING_MAX = 50;
 
 /**
- * Record one Basic invocation and return its ordinal (§8.18.3): a second
- * explicit invocation at the SAME revision+position gets ordinal >= 2 — the
- * IDEA repeated-call expansion signal. Any other change resets to 1. The
- * caller surfaces `ordinal >= 2` with an honest "provider scope unchanged"
- * label unless the provider advertises expansion.
+ * Record one Basic invocation and return its ordinal (§8.18.3 / §8.19.4).
+ * Only EXPLICIT invocations advance the repeated-call counter — typing or
+ * trigger-char popups inherit the live sequence without bumping it. Any edit
+ * (revision change), caret move (position change) or provider restart
+ * (generation change) resets the next explicit call back to ordinal 1.
  */
 export function recordBasicCompletionInvocation(input: {
   workspaceId: string;
@@ -166,19 +218,24 @@ export function recordBasicCompletionInvocation(input: {
   /** Approximate caret identity; callers pass `${line}:${character}`. */
   positionKey: string;
   reason: CompletionInvocationReason;
+  providerGeneration?: number;
 }): number {
-  void input.reason;
   const key = `${input.workspaceId} ${input.fileKey}`;
   const previous = lastBasicInvocation.get(key);
-  if (
-    previous
+  const generation = input.providerGeneration ?? previous?.providerGeneration ?? 0;
+  const sameIdentity = !!previous
     && previous.revision === input.documentRevision
     && previous.positionKey === input.positionKey
-  ) {
-    const ordinal = previous.ordinal + 1;
+    && previous.providerGeneration === generation;
+  if (input.reason !== "explicit") {
+    return sameIdentity ? previous!.ordinal : 1;
+  }
+  if (sameIdentity) {
+    const ordinal = previous!.ordinal + 1;
     lastBasicInvocation.set(key, {
       revision: input.documentRevision,
       positionKey: input.positionKey,
+      providerGeneration: generation,
       ordinal,
     });
     return ordinal;
@@ -186,15 +243,148 @@ export function recordBasicCompletionInvocation(input: {
   lastBasicInvocation.set(key, {
     revision: input.documentRevision,
     positionKey: input.positionKey,
+    providerGeneration: generation,
     ordinal: 1,
   });
   return 1;
 }
 
+/**
+ * Popup closed: the repeated-call sequence ends, so the next explicit call is
+ * a fresh ordinal-1 Basic request even at the same revision + position.
+ */
+export function resetBasicCompletionSession(workspaceId: string, fileKey: string): void {
+  lastBasicInvocation.delete(`${workspaceId} ${fileKey}`);
+}
+
+/** What the provider did with a requested scope expansion. */
+export function providerScopeFor(
+  requestedScope: "default" | "expanded",
+  providerAdvertisesExpansion: boolean,
+): CompletionInvocationEvidence["providerScope"] {
+  if (requestedScope !== "expanded") return "unknown";
+  return providerAdvertisesExpansion ? "expanded" : "unchanged";
+}
+
+function recordCompletionInvocationEvidence(entry: RecordedCompletionInvocation): void {
+  completionInvocationRing.push(entry);
+  if (completionInvocationRing.length > COMPLETION_INVOCATION_RING_MAX) {
+    completionInvocationRing.splice(0, completionInvocationRing.length - COMPLETION_INVOCATION_RING_MAX);
+  }
+}
+
+/** Snapshot of recent invocation evidence (oldest first); copy, not live. */
+export function recentCompletionInvocations(): readonly RecordedCompletionInvocation[] {
+  return [...completionInvocationRing];
+}
+
+// ---------------------------------------------------------------------------
+// §8.19.4 typed resolve state + acceptance plan (R3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lifecycle of one item's completionItem/resolve round-trip (§8.19.4).
+ * `timed-out` / `failed` never fall through to a silent primary-only insert:
+ * they surface the resolve gate and wait for an explicit user choice.
+ */
+export type CompletionResolveState =
+  | { kind: "not-required" }
+  | { kind: "ready"; resolvedAt: number; hasAdditionalEdits: boolean }
+  | { kind: "timed-out"; canRetry: true }
+  | { kind: "failed"; canRetry: true; message: string }
+  | { kind: "stale" };
+
+/** Stable-enough identity for QA surfaces; providers rarely send item ids. */
+export function completionItemId(item: LspCompletionItem): string {
+  return [item.label, item.kind ?? "", item.sortText ?? ""].join("#");
+}
+
+export interface CompletionAcceptancePlanV2 {
+  identity: CompletionRequestIdentity;
+  itemId: string;
+  primary: LspTextEdit;
+  additional: readonly LspTextEdit[];
+  /** Parsed placeholder spans when the primary is a snippet; null otherwise. */
+  snippet: ReturnType<typeof parseLspSnippet>["placeholders"] | null;
+  resolve: CompletionResolveState;
+  disposition:
+    | "ready"
+    | "needs-explicit-primary-only"
+    | "blocked-stale"
+    | "blocked-overlap";
+}
+
+/**
+ * Pure acceptance classifier (§8.19.4): given the item and its resolve state,
+ * decide whether the merged acceptance may commit, must wait for an explicit
+ * "insert without import" choice, or is blocked outright.
+ */
+export function buildCompletionAcceptancePlanV2(input: {
+  identity: CompletionRequestIdentity;
+  item: LspCompletionItem;
+  resolveState: CompletionResolveState;
+  /** Set when the range planner rejected provider edits as overlapping/illegal. */
+  overlapRejected?: boolean;
+}): CompletionAcceptancePlanV2 {
+  const rawInsert = input.item.textEdit
+    ? input.item.textEdit.newText
+    : (input.item.insertText ?? input.item.label);
+  const snippet = input.item.insertTextFormat === 2 ? parseLspSnippet(rawInsert).placeholders : null;
+  const additional = input.item.additionalTextEdits ?? [];
+  const disposition: CompletionAcceptancePlanV2["disposition"] = input.overlapRejected
+    ? "blocked-overlap"
+    : input.resolveState.kind === "stale"
+      ? "blocked-stale"
+      : input.resolveState.kind === "timed-out" || input.resolveState.kind === "failed"
+        ? "needs-explicit-primary-only"
+        : "ready";
+  return {
+    identity: input.identity,
+    itemId: completionItemId(input.item),
+    primary: input.item.textEdit ?? {
+      range: {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 0 },
+      },
+      newText: rawInsert,
+    },
+    additional,
+    snippet,
+    resolve: input.resolveState,
+    disposition,
+  };
+}
+
+/** Why the resolve gate opened; both mean the import edits are unavailable. */
+export type CompletionResolveGateReason = "timeout" | "failed";
+
+/**
+ * Handed to the host UI when an acceptance needs its import/additional edits
+ * but the provider resolve did not deliver them in time (§8.19.4). The gate
+ * keeps the item visible with Retry / Insert-without-import choices; nothing
+ * is inserted until the user picks one.
+ */
+export interface CompletionResolveGateRequest {
+  item: LspCompletionItem;
+  range: { from: number; to: number };
+  reason: CompletionResolveGateReason;
+  message: string;
+  /**
+   * Fresh resolve attempt (bypasses the info-panel cache). Resolves to
+   * `"committed"` when the merged acceptance landed in one dispatch, or
+   * `"unavailable"` when the retry also failed to produce usable import
+   * edits — the gate stays open in that case.
+   */
+  retry(): Promise<"committed" | "unavailable">;
+  /** User chose primary-only insertion: one dispatch, no import edits. */
+  insertWithoutImport(): boolean;
+  /** Close the banner without inserting anything. */
+  dismiss(): void;
+}
+
 // ---------------------------------------------------------------------------
 // §8.18.3 typed provider result envelope + capability evidence
 // ---------------------------------------------------------------------------
-
 export type CapabilityLevel = "unavailable" | "available-partial" | "available-complete";
 export type CompletionUnavailableReason =
   | "no-provider" | "capability-not-advertised" | "provider-starting"
@@ -850,6 +1040,7 @@ function applyLspCompletion(
   isStillCurrent: (token: CompletionRequestToken) => boolean,
   getDocumentRevision: (() => number) | undefined,
   reportDiagnostic: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
+  onResolveGate?: ((request: CompletionResolveGateRequest) => void) | undefined,
 ): void {
   if (item.additionalTextEdits?.length || !resolve) {
     commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
@@ -858,6 +1049,102 @@ function applyLspCompletion(
 
   const revisionAtAccept = getDocumentRevision?.();
   const docAtAccept = view.state.doc;
+
+  // §8.19.4 resolve gate: a timeout/failure keeps the chosen item visible and
+  // waits for an explicit Retry or Insert-without-import choice. Nothing is
+  // inserted until the user picks; stale/overlap blocks stay hard no-ops.
+  let settled = false;
+  const guardCurrent = (): boolean => {
+    if (!isStillCurrent(token)) {
+      reportDiagnostic?.("identity-mismatch", "resolve-gate");
+      return false;
+    }
+    if (
+      view.state.doc !== docAtAccept
+      || (getDocumentRevision && revisionAtAccept !== undefined && getDocumentRevision() !== revisionAtAccept)
+    ) {
+      reportDiagnostic?.("identity-mismatch", "resolve-gate-doc");
+      return false;
+    }
+    return true;
+  };
+  const insertWithoutImport = (): boolean => {
+    if (settled) return false;
+    settled = true;
+    if (!guardCurrent()) return false;
+    return commitLspCompletion(
+      view,
+      { ...item, additionalTextEdits: [] },
+      from,
+      to,
+      token,
+      isStillCurrent,
+      reportDiagnostic,
+    );
+  };
+  const retryResolve = async (): Promise<"committed" | "unavailable"> => {
+    if (settled) return "unavailable";
+    if (!guardCurrent()) {
+      settled = true;
+      return "unavailable";
+    }
+    let resolved: LspCompletionItem | null;
+    try {
+      // Fresh round-trip: bypasses the info-panel's memoized promise so a
+      // failed first attempt gets a real second chance.
+      resolved = await resolve();
+    } catch {
+      return "unavailable";
+    }
+    if (settled) return "unavailable";
+    if (!isStillCurrent(token) || view.state.doc !== docAtAccept) {
+      reportDiagnostic?.("identity-mismatch", "resolve-retry");
+      settled = true;
+      return "unavailable";
+    }
+    if (!resolved) return "unavailable";
+    settled = true;
+    const committed = commitLspCompletion(
+      view,
+      {
+        ...item,
+        ...resolved,
+        additionalTextEdits: resolved.additionalTextEdits ?? item.additionalTextEdits,
+      },
+      from,
+      to,
+      token,
+      isStillCurrent,
+      reportDiagnostic,
+    );
+    return committed ? "committed" : "unavailable";
+  };
+  const presentGate = (
+    reason: CompletionResolveGateReason,
+    detail: string,
+  ): void => {
+    if (settled) return;
+    reportDiagnostic?.("additional-edit-unavailable", detail);
+    if (!onResolveGate) {
+      // No gate surface wired (isolated embedder): blocking beats silently
+      // inserting an acceptance that lost its import edits.
+      return;
+    }
+    onResolveGate({
+      item,
+      range: { from, to },
+      reason,
+      message: reason === "timeout"
+        ? "Auto-import unavailable — provider resolve timed out"
+        : "Auto-import unavailable — provider resolve failed",
+      retry: retryResolve,
+      insertWithoutImport,
+      dismiss: () => {
+        settled = true;
+      },
+    });
+  };
+
   let timeoutId: number | null = null;
   const timeout = new Promise<{ kind: "timeout" }>((resolveTimeout) => {
     timeoutId = window.setTimeout(
@@ -883,14 +1170,12 @@ function applyLspCompletion(
         return;
       }
       if (outcome.kind === "timeout") {
-        reportDiagnostic?.("additional-edit-unavailable", "resolve-timeout");
-        commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
+        presentGate("timeout", "resolve-timeout");
         return;
       }
       const resolved = outcome.resolved;
       if (!resolved) {
-        reportDiagnostic?.("additional-edit-unavailable", "resolve-empty");
-        commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
+        presentGate("failed", "resolve-empty");
         return;
       }
       commitLspCompletion(
@@ -913,8 +1198,7 @@ function applyLspCompletion(
         reportDiagnostic?.("identity-mismatch", "resolve");
         return;
       }
-      reportDiagnostic?.("additional-edit-unavailable", "resolve-failed");
-      commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
+      presentGate("failed", "resolve-failed");
     });
 }
 
@@ -1028,12 +1312,32 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       : afterTrigger
         ? context.state.sliceDoc(word!.from - 1, word!.from)
         : null;
+    // §8.19.4 invocation evidence: explicit repeated calls at one caret carry
+    // requestedScope:"expanded" into the provider adapter; typing/trigger
+    // popups inherit the live sequence without advancing it.
+    const reason: CompletionInvocationReason = context.explicit
+      ? "explicit"
+      : (triggerOnly || afterTrigger)
+        ? "trigger"
+        : "typing";
+    const position = lspPositionFromOffset(context.state.doc, context.pos);
+    const invocationOrdinal = recordBasicCompletionInvocation({
+      workspaceId: token.workspaceId,
+      fileKey: token.fileKey,
+      documentRevision: token.documentRevision,
+      positionKey: `${position.line}:${position.character}`,
+      reason,
+      providerGeneration: token.lspSessionGeneration,
+    });
+    const requestedScope: CompletionInvocationRequest["requestedScope"] =
+      invocationOrdinal >= 2 ? "expanded" : "default";
     let result: LspCompletionResult | null = null;
     try {
       result = await hooks.fetch(
-        lspPositionFromOffset(context.state.doc, context.pos),
+        position,
         triggerCharacter,
         token,
+        { invocationOrdinal, requestedScope },
       );
     } catch {
       result = null;
@@ -1056,6 +1360,26 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       recordCompletionTelemetry(token, "unavailable", { reason: "provider-inactive" });
       return completeAnyWord(context);
     }
+
+    recordCompletionInvocationEvidence({
+      requestId: token.requestId,
+      workspaceId: token.workspaceId,
+      fileKey: token.fileKey,
+      languageId: token.languageId,
+      documentRevision: token.documentRevision,
+      providerGeneration: token.lspSessionGeneration,
+      reason,
+      invocationOrdinal,
+      requestedScope,
+      providerScope: providerScopeFor(
+        requestedScope,
+        hooks.advertisesScopeExpansion?.() ?? false,
+      ),
+      itemCount: result.items.length,
+      isIncomplete: result.isIncomplete === true,
+      at: Date.now(),
+    });
+
     if (result.items.length === 0) {
       recordCompletionTelemetry(token, "popup", { itemCount: 0 });
       return null;
@@ -1092,6 +1416,16 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             return resolvedItemPromise;
           }
         : undefined;
+      // Acceptance/retry resolver: reuses a successful memoized resolve but
+      // gives a failed or empty one a real fresh round-trip (§8.19.4 Retry).
+      const resolveFresh: CompletionItemResolver | undefined = hooks.resolve
+        ? () => {
+            if (!resolvedItemPromise) return hooks.resolve!(item.raw, token);
+            return resolvedItemPromise.then((resolved) =>
+              resolved ? resolved : hooks.resolve!(item.raw, token)
+            );
+          }
+        : undefined;
       mapped.push({
         label,
         displayLabel,
@@ -1108,11 +1442,12 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             item,
             from,
             to,
-            resolveItem,
+            resolveFresh,
             token,
             isStillCurrent,
             hooks.getDocumentRevision,
             hooks.reportDiagnostic,
+            hooks.onResolveGate,
           ),
       });
       mappedItems.push(item);

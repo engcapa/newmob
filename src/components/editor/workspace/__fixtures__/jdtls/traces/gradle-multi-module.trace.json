@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "gradle-multi-module",
+  "generatedAt": "2026-08-24T07:17:39.996Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21
+      }
+    },
+    "jdtls": {
+      "home": "~/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    },
+    "gradle": {
+      "version": "9.5.1",
+      "home": "~/.gradle/wrapper/dists/gradle-9.5.1-bin/bvvv0hnjcinfezlom7fy9dbyi/gradle-9.5.1"
+    },
+    "mavenCliDetected": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)"
+  },
+  "buildModelFingerprint": "8baa21c80eaa134a8e373ed42551b34c23b4616f3d3546c3a70a5f041687e882",
+  "scenarios": [
+    {
+      "caseId": "cross-module-type",
+      "file": "app/src/main/java/org/example/gapp/GMain.java",
+      "position": {
+        "line": 14,
+        "character": 15
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 4596,
+          "itemCount": 1,
+          "isIncomplete": false,
+          "satisfied": true,
+          "matchedDetail": "org.example.gcore.GCore",
+          "evaluationReason": null
+        }
+      ],
+      "resolve": {
+        "ms": 345,
+        "additionalEditCount": 1,
+        "additionalEditTexts": [
+          "\n\nimport org.example.gcore.GCore;\n\n"
+        ]
+      },
+      "acceptance": {
+        "originalSha256": "e5c2a8e5c40fc5d66063513c842464b18e34a0e1d6887f4220cff7f3fb66cc30",
+        "appliedSha256": "6c43305d6bb7c450cd76c8dd1cc553e68d5e370cb54d76306963fb77db3ce1e3",
+        "revertedSha256": "e5c2a8e5c40fc5d66063513c842464b18e34a0e1d6887f4220cff7f3fb66cc30",
+        "revertRestoresOriginalHash": true
+      },
+      "notes": null
+    }
+  ],
+  "failures": []
+}

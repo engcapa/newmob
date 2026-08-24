@@ -68,6 +68,8 @@ export interface PreparedActionEvaluation {
   readonly ownerToken: symbol;
   /** Runtime action identity. A late disposer or replacement invalidates the evaluation. */
   readonly action: WorkspaceActionDefinition | null;
+  /** Stable per-evaluation identity (§8.19.2 KeyDispatchResult.evaluationId). */
+  readonly evaluationId: string;
 }
 
 export interface ActionBindingConflictDiagnostic {
@@ -245,6 +247,70 @@ function focusByPriority(
 /** Default chord wait window before a pending first stroke expires. */
 const CHORD_TIMEOUT_MS = 1200;
 
+/**
+ * §8.19.2 dispatch context. `composing`/`deadKey`/`altGraph` are resolved by
+ * the host from the event when the caller does not supply them; the caller
+ * may override for tests or platform quirks. `targetViewId` must be a view
+ * registered on this host (EditorActionBridge), or null for non-editor
+ * surfaces.
+ */
+export interface KeyDispatchContextV2 {
+  event: KeyboardEventLike;
+  workspaceId: string;
+  targetViewId: string | null;
+  composing?: boolean;
+  deadKey?: boolean;
+  altGraph?: boolean;
+}
+
+/** §8.19.2 typed dispatch result — every outcome is explicit. */
+export type KeyDispatchResult =
+  | { kind: "executed"; actionId: string; evaluationId: string }
+  | { kind: "pending-chord"; prefix: ShortcutStroke; expiresAt: number }
+  | {
+    kind: "rejected";
+    reason: "composing" | "dead-key" | "alt-graph" | "conflict" | "disabled" | "no-match" | "stale-owner";
+  };
+
+/**
+ * Synchronously consume a matched event (preventDefault/stopPropagation) and
+ * run the prepared action. Execution is async; the event must be consumed in
+ * the same tick the match was decided.
+ */
+function executeConsuming(
+  host: WorkspaceActionHost,
+  evaluation: PreparedActionEvaluation,
+  event: KeyboardEventLike,
+): Promise<ActionResult> {
+  event.preventDefault();
+  event.stopPropagation();
+  return host.executePrepared(evaluation);
+}
+
+/** A mounted editor view registered with the host's action bridge. */
+export interface EditorActionBridgeViewRegistration {
+  viewId: string;
+  dispose(): void;
+}
+
+/**
+ * §8.19.2 EditorActionBridge: every mounted EditorView registers here so
+ * keyboard dispatch knows the live view set and unmounts release their
+ * registrations. The host owns the registry; the bridge is the registration
+ * vocabulary used by CodeMirrorHost and the window dispatcher.
+ */
+export class EditorActionBridge {
+  constructor(private readonly host: WorkspaceActionHost) {}
+
+  registerView(viewId: string): EditorActionBridgeViewRegistration {
+    this.host.registerDispatchView(viewId);
+    return {
+      viewId,
+      dispose: () => this.host.unregisterDispatchView(viewId),
+    };
+  }
+}
+
 export class WorkspaceActionHost {
   private readonly workspaceId: string;
   private readonly ownerToken = Symbol("workspace-action-host-owner");
@@ -259,6 +325,10 @@ export class WorkspaceActionHost {
   private inFlightActions = new Set<string>();
   private generation = 0;
   private disposed = false;
+  /** Monotonic per-host evaluation identity (§8.19.2 evaluationId). */
+  private evaluationCounter = 0;
+  /** Live editor view ids registered through the EditorActionBridge. */
+  private readonly registeredViewIds = new Set<string>();
 
   /** User-editable keymap delta over definition defaults (§8.18.2). */
   private keymapScheme: KeymapSchemeV3 | null = null;
@@ -296,6 +366,7 @@ export class WorkspaceActionHost {
     this.chordTimer = null;
     this.pendingChordStroke = null;
     this.inFlightActions.clear();
+    this.registeredViewIds.clear();
     this.actions.clear();
     this.commands.clear();
   }
@@ -322,6 +393,20 @@ export class WorkspaceActionHost {
 
   hasPendingChord(): boolean {
     return this.pendingChordStroke !== null;
+  }
+
+  /** EditorActionBridge registration: a live mounted editor view. */
+  registerDispatchView(viewId: string): void {
+    if (this.disposed) return;
+    this.registeredViewIds.add(viewId);
+  }
+
+  unregisterDispatchView(viewId: string): void {
+    this.registeredViewIds.delete(viewId);
+  }
+
+  isDispatchViewRegistered(viewId: string): boolean {
+    return this.registeredViewIds.has(viewId);
   }
 
   cancelPendingChord(reason = "cancelled"): void {
@@ -570,6 +655,7 @@ export class WorkspaceActionHost {
     kind: ActionInvocationKind,
   ): PreparedActionEvaluation {
     const action = this.actions.get(id) ?? null;
+    this.evaluationCounter += 1;
     return Object.freeze({
       workspaceId: this.workspaceId,
       hostGeneration: this.generation,
@@ -579,6 +665,7 @@ export class WorkspaceActionHost {
       state: this.evaluateAction(action ?? undefined, context),
       ownerToken: this.ownerToken,
       action,
+      evaluationId: `${this.workspaceId}:e${this.evaluationCounter}`,
     });
   }
 
@@ -847,6 +934,68 @@ export class WorkspaceActionHost {
       id: enabled.actionId,
       result: await this.executePrepared(enabled.evaluation, invocationSignal),
     };
+  }
+
+  /**
+   * §8.19.2 typed dispatch entry. The gate runs BEFORE any binding match:
+   * IME composition, dead keys and AltGr are rejected without triggering an
+   * action or swallowing the character (no preventDefault on rejection).
+   * Matching stays physical (`KeyboardEvent.code`); chord waits report
+   * `pending-chord` with an absolute expiry.
+   */
+  dispatchKeydownV2(context: KeyDispatchContextV2): KeyDispatchResult {
+    const { event } = context;
+    if (this.disposed) {
+      return { kind: "rejected", reason: "stale-owner" };
+    }
+    if (context.composing || event.isComposing === true) {
+      return { kind: "rejected", reason: "composing" };
+    }
+    if (event.key === "Dead" || context.deadKey) {
+      return { kind: "rejected", reason: "dead-key" };
+    }
+    if (context.altGraph || event.getModifierState?.("AltGraph") === true) {
+      return { kind: "rejected", reason: "alt-graph" };
+    }
+
+    if (context.targetViewId !== null && !this.registeredViewIds.has(context.targetViewId)) {
+      // A stale view id must never let a foreign surface consume this stroke.
+      return { kind: "rejected", reason: "stale-owner" };
+    }
+
+    const resolved = this.prepareBinding(event, {
+      kind: "keyboard",
+      eventTarget: (event as KeyboardEventLike & { target?: EventTarget | null }).target ?? null,
+    });
+    if (resolved.resolution === "shadowed" && resolved.reason === "chord-pending") {
+      return {
+        kind: "pending-chord",
+        prefix: resolved.stroke,
+        expiresAt: Date.now() + CHORD_TIMEOUT_MS,
+      };
+    }
+    if (resolved.resolution === "conflict") {
+      return { kind: "rejected", reason: "conflict" };
+    }
+    const enabled = resolved.candidates.find(
+      (candidate) => candidate.evaluation.state.availability === "available",
+    );
+    if (!enabled) {
+      if (
+        eventLogicalKey(event) === "escape"
+        && this.hasPendingChord()
+        && resolved.resolution === "none"
+      ) {
+        this.cancelPendingChord("escape");
+      }
+      return {
+        kind: "rejected",
+        reason: resolved.resolution === "unavailable" ? "disabled" : "no-match",
+      };
+    }
+    this.cancelPendingChord("executed");
+    void executeConsuming(this, enabled.evaluation, event);
+    return { kind: "executed", actionId: enabled.actionId, evaluationId: enabled.evaluation.evaluationId };
   }
 
   getBindingDiagnostics(

@@ -56,6 +56,10 @@ export interface KeyboardEventLike {
   shiftKey: boolean;
   altKey: boolean;
   metaKey: boolean;
+  /** True while an IME composition is in flight (§8.19.2 dispatch gate). */
+  isComposing?: boolean;
+  /** Modifier-state probe used for AltGraph detection when provided. */
+  getModifierState?: (key: string) => boolean;
   preventDefault: () => void;
   stopPropagation: () => void;
 }

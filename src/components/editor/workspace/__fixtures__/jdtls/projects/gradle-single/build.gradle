@@ -1,0 +1,10 @@
+// Gradle single-module fixture: JDK-only, core plugins only, so the import
+// works fully offline against a cached Gradle distribution.
+plugins {
+    id 'java'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}

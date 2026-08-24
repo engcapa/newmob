@@ -11,7 +11,13 @@ import {
   type WorkspaceCommandRegistration,
   type KeyboardEventLike,
 } from "./workspaceCommands";
-import { type ActionInvocation, type ActionSnapshotItem, WorkspaceActionHost } from "./workspaceActionHost";
+import {
+  type ActionInvocation,
+  type ActionSnapshotItem,
+  type KeyDispatchContextV2,
+  type KeyDispatchResult,
+  WorkspaceActionHost,
+} from "./workspaceActionHost";
 
 export interface UseWorkspaceActionsControllerOptions {
   workspaceId?: string;
@@ -31,6 +37,8 @@ export interface WorkspaceActionsController {
     event: KeyboardEventLike,
     options?: { eventTarget?: EventTarget | null } | ActionInvocation,
   ) => Promise<{ id: string; result: ActionResult } | null>;
+  /** §8.19.2 typed gated entry (composing/dead-key/AltGr/chord results). */
+  dispatchKeydownV2: (context: KeyDispatchContextV2) => KeyDispatchResult;
   getActionState: (commandId: string, payload?: unknown) => ActionState;
   menuItems: WorkspaceCommandMenuItem[];
   /** Instance-scoped snapshot: the single runtime truth for all surfaces. */
@@ -151,6 +159,15 @@ export function useWorkspaceActionsController({
     [ensureLiveHost],
   );
 
+  /** §8.19.2: typed gated dispatch; workspaceId is enforced by the host. */
+  const dispatchKeydownV2 = useCallback(
+    (context: KeyDispatchContextV2): KeyDispatchResult => {
+      const live = ensureLiveHost();
+      return live.dispatchKeydownV2({ ...context, workspaceId: live.getWorkspaceId() });
+    },
+    [ensureLiveHost],
+  );
+
   const getActionState = useCallback(
     (commandId: string, payload?: unknown): ActionState => {
       return ensureLiveHost().getState(commandId, payload);
@@ -192,6 +209,7 @@ export function useWorkspaceActionsController({
     executeCommand,
     executeAction,
     dispatchKeydown,
+    dispatchKeydownV2,
     getActionState,
     menuItems,
     snapshot,

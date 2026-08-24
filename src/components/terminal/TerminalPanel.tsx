@@ -1774,10 +1774,16 @@ export function TerminalPanel({
         return true; // no selection: pass through (sends ETX)
       }
       if (event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "v") {
-        // Let macOS/WKWebView deliver a real `paste` event with clipboardData.
-        // Calling navigator.clipboard.readText() from keydown triggers the
-        // native "Paste" confirmation popover in WKWebView.
-        return true;
+        event.preventDefault();
+        if (!readOnlyRef.current) {
+          // The desktop clipboard helper uses native IPC on macOS, so Cmd+V
+          // does not depend on WKWebView synthesizing a paste event or prompt
+          // for navigator.clipboard permission. Ignore a late native event to
+          // keep the shortcut from inserting the same text twice.
+          suppressNativePasteUntilRef.current = Date.now() + 500;
+          void pasteFromClipboard();
+        }
+        return false;
       }
     } else {
       // Windows / Linux

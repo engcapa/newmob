@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "gradle-single",
+  "generatedAt": "2026-08-24T07:17:23.756Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21
+      }
+    },
+    "jdtls": {
+      "home": "~/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    },
+    "gradle": {
+      "version": "9.5.1",
+      "home": "~/.gradle/wrapper/dists/gradle-9.5.1-bin/bvvv0hnjcinfezlom7fy9dbyi/gradle-9.5.1"
+    },
+    "mavenCliDetected": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)"
+  },
+  "buildModelFingerprint": "e3974bb1ad1faa14e0d1a068ece4fe74de52127cfb7f41f0f196bf764c98f106",
+  "scenarios": [
+    {
+      "caseId": "gradle-import-sanity",
+      "file": "src/main/java/org/example/gsingle/GApp.java",
+      "position": {
+        "line": 11,
+        "character": 16
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 4989,
+          "itemCount": 50,
+          "isIncomplete": true,
+          "satisfied": true,
+          "matchedDetail": "java.lang.String",
+          "evaluationReason": null
+        }
+      ],
+      "resolve": null,
+      "acceptance": null,
+      "notes": null
+    }
+  ],
+  "failures": []
+}

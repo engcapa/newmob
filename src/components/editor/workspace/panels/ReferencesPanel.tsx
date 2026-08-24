@@ -11,8 +11,10 @@ import { relativePathWithinRoot } from "../codeWorkspaceModel";
 import {
   applyUsageFilters,
   buildUsageSession,
+  DEFAULT_USAGE_FILTERS,
   usageBatch,
   type SemanticRequestIdentity,
+  type UsageFilters,
   type UsageSession,
 } from "../javaSemanticEvidence";
 
@@ -34,6 +36,12 @@ interface ReferencesPanelProps {
   semanticIndex: WorkspaceSemanticIndexSnapshot;
   onOpenLocation: (location: LspLocation) => void;
   onRerun?: () => void;
+  /**
+   * §8.19.7 pin ownership lives above the panel so a new Find Usages request
+   * can ask before replacing a pinned session instead of clobbering it.
+   */
+  pinned?: boolean;
+  onPinChange?: (pinned: boolean) => void;
 }
 
 function displayLocationPath(location: LspLocation, roots: CodeWorkspaceRootInfo[]): string {
@@ -49,13 +57,26 @@ function displayLocationPath(location: LspLocation, roots: CodeWorkspaceRootInfo
  * Find Usages tool-window panel (§8.18.7): grouped results with explicit
  * batch continuation (never a silent cap), pin, and provider-identity rerun.
  */
-export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, onRerun }: ReferencesPanelProps) {
-  const [pinned, setPinned] = useState(false);
+export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, onRerun, pinned, onPinChange }: ReferencesPanelProps) {
+  const [pinState, setPinState] = useState(false);
+  const isPinned = pinned ?? pinState;
   const [cursor, setCursor] = useState(0);
+  const [filters, setFilters] = useState<UsageFilters>({ ...DEFAULT_USAGE_FILTERS });
 
   // The session model is derived from the flat provider response; roles stay
   // unknown because plain LSP references carry no read/write classification.
+  // Library/external ownership uses the real URI-vs-roots test (§8.19.7).
   const session: UsageSession = useMemo(() => {
+    // §8.19.7: library filter classifies by real URI owner — a location is a
+    // workspace hit only when its file:// path resolves inside some root.
+    const libraryUri = (uri: string) => {
+      if (!/^file:/i.test(uri)) return true;
+      let path = decodeURIComponent(uri.replace(/^file:\/\//i, ""));
+      // file:///C:/… decodes to /C:/…; drop the leading slash so Windows
+      // drive paths compare against root paths.
+      if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1);
+      return !roots.some((root) => relativePathWithinRoot(root.path, path) !== null);
+    };
     if (!result.identity || !result.symbolName) {
       // Legacy shape: synthesize a minimal identity so grouping still works.
       return buildUsageSession({
@@ -71,16 +92,18 @@ export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, 
         },
         symbolName: result.symbolName ?? "",
         locations: result.locations,
+        isLibraryUri: libraryUri,
       });
     }
     return buildUsageSession({
       identity: result.identity,
       symbolName: result.symbolName,
       locations: result.locations,
+      isLibraryUri: libraryUri,
     });
-  }, [result]);
+  }, [result, roots]);
 
-  const { visibleIds } = applyUsageFilters(session);
+  const { visibleIds } = applyUsageFilters(session, filters);
   const batch = usageBatch(session, visibleIds, cursor);
   const itemsById = new Map(session.items.map((item) => [item.id, item]));
   const groupsByKey = new Map(session.groups.map((group) => [group.key, group]));
@@ -110,11 +133,15 @@ export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, 
         <button
           type="button"
           data-testid="references-pin-toggle"
-          aria-label={pinned ? "Unpin usages result" : "Pin usages result"}
+          aria-label={isPinned ? "Unpin usages result" : "Pin usages result"}
           className="rounded p-0.5 hover:bg-[var(--taomni-code-active-line-bg)]"
-          onClick={() => setPinned((value) => !value)}
+          onClick={() => {
+            const next = !isPinned;
+            if (pinned === undefined) setPinState(next);
+            onPinChange?.(next);
+          }}
         >
-          {pinned ? <Pin className="h-3 w-3" /> : <PinOff className="h-3 w-3" />}
+          {isPinned ? <Pin className="h-3 w-3" /> : <PinOff className="h-3 w-3" />}
         </button>
         {onRerun && (
           <button
@@ -142,6 +169,37 @@ export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, 
       {result.origin && (
         <div className="truncate px-3 py-1 text-[10px] text-[var(--taomni-code-muted)]" title={result.origin}>
           {result.origin}
+        </div>
+      )}
+      {/* §8.19.7: read/write/declaration stay DISABLED while roles are
+          unknown — plain LSP references carry no classification, so enabled
+          toggles could only pretend to filter. The libraries toggle is real:
+          it classifies by URI owner against the workspace roots. */}
+      {!result.loading && result.locations.length > 0 && (
+        <div
+          className="flex items-center gap-2 border-b border-[var(--taomni-code-border)] px-3 py-1 text-[10px] text-[var(--taomni-code-muted)]"
+          data-testid="references-filters"
+        >
+          {(["reads", "writes", "declarations"] as const).map((key) => (
+            <label
+              key={key}
+              className="cursor-not-allowed opacity-40"
+              title="Read/write/declaration roles are unknown: the language server does not classify reference roles"
+            >
+              <input type="checkbox" disabled checked={false} className="mr-0.5 align-middle" />
+              {key === "reads" ? "Reads" : key === "writes" ? "Writes" : "Declarations"}
+            </label>
+          ))}
+          <label className="ml-auto flex items-center gap-0.5">
+            <input
+              type="checkbox"
+              data-testid="references-filter-libraries"
+              checked={filters.libraries}
+              onChange={(event) => setFilters((current) => ({ ...current, libraries: event.target.checked }))}
+              className="align-middle"
+            />
+            Libraries
+          </label>
         </div>
       )}
       {result.error && (
@@ -194,9 +252,10 @@ export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, 
           Show more ({batch.totalVisible - batch.items.length} remaining of {batch.totalVisible})
         </button>
       )}
-      {/* Pinned marker is informational; the store keeps the session alive. */}
-      {pinned && (
-        <div className="px-3 py-1 text-[10px] text-[var(--taomni-code-muted)]">Result pinned — navigation will not replace it.</div>
+      {/* Pinned marker: ownership lives in the tab so new requests must ask
+          before replacing this session (§8.19.7). */}
+      {isPinned && (
+        <div className="px-3 py-1 text-[10px] text-[var(--taomni-code-muted)]">Result pinned — a new Find Usages will ask before replacing it.</div>
       )}
       {itemsById.size === 0 && !result.loading && null}
     </div>

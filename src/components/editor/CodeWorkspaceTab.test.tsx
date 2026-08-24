@@ -19,7 +19,7 @@ import type {
 import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile, WorkspaceWriteAck } from "../../lib/editor/workspace";
 import { CodeWorkspaceTab, extractContextSnippet } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
-import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
+import { WORKSPACE_RECOVERY_STORAGE_PREFIX, hasBlockingDiskEffectResolution, listDiskEffectLedgerEntries, resolveDiskEffectLedgerEntry } from "./workspace/workspaceRecovery";
 import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
 import { confirmAppDialog } from "../../lib/appDialogs";
 import { workspaceActionRegistry } from "./workspace/workspaceActionRegistry";
@@ -4991,6 +4991,53 @@ end_of_record
   });
 
   describe("P0-S / N1.7 Atomic Save Commit Host Race Tests", () => {
+    it("deletes a Java line with Ctrl+Y and saves from the editor surface", async () => {
+      const path = "src/main/java/com/example/App.java";
+      const initialText = "class App {\n  int value = 1;\n}\n";
+      const savedText = "  int value = 1;\n}\n";
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-editor-delete-save",
+        workspaceInstanceId: "instance-editor-delete-save",
+        name: "Editor Delete Save",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+      workspaceMocks.workspaceReadFile.mockResolvedValue(file(path, initialText));
+      workspaceMocks.workspaceWriteFileEncoded.mockImplementation(async (
+        _root: string,
+        writtenPath: string,
+        text: string,
+      ) => writeAck(file(writtenPath, text, { hash: `hash-saved-${writtenPath}` })));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle(`app / ${path}`);
+      const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+      expect(content).not.toBeNull();
+
+      fireEvent.keyDown(content!, { key: "y", code: "KeyY", ctrlKey: true });
+      await waitFor(() => {
+        const fileState = selectCodeWorkspaceUi(
+          useCodeWorkspaceStore.getState(),
+          "instance-editor-delete-save",
+        ).openFiles[`root:app:${path}`];
+        expect(fileState?.text).toBe(savedText);
+        expect(fileState?.dirty).toBe(true);
+      });
+
+      fireEvent.keyDown(content!, { key: "s", code: "KeyS", ctrlKey: true });
+      await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
+        "/repo/app",
+        path,
+        savedText,
+        `hash-${path}`,
+        "UTF-8",
+        false,
+      ));
+    });
+
     it("cancels save with 0 disk writes when user edits buffer during historySnapshot await", async () => {
       let resolveHistory: () => void = () => {};
       const historyDeferred = new Promise<null>((r) => {
@@ -5206,6 +5253,22 @@ end_of_record
       const uiAfter = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-save-race-close");
       expect(uiAfter.openFiles["root:app:src/main.ts"]).toBeUndefined();
       expect(lspMocks.lspSaveDocument).not.toHaveBeenCalled();
+
+      // §8.19.1: a discarded writeback must leave a committed ledger row so
+      // the recovery center can surface "saved to disk, buffer discarded".
+      const ledgerRows = listDiskEffectLedgerEntries("instance-save-race-close")
+        .filter((row) => row.path === "/repo/app/src/main.ts");
+      expect(ledgerRows).toHaveLength(1);
+      expect(ledgerRows[0]).toMatchObject({
+        diskEffect: "committed",
+        memoryEffect: "writeback-discarded",
+        providerEffect: "discarded",
+        resolution: "confirmed-committed",
+        intendedNewHash: "hash-closed-snapshot",
+        observedHash: "hash-closed-snapshot",
+      });
+      expect(hasBlockingDiskEffectResolution("instance-save-race-close", "/repo/app/src/main.ts")).toBe(false);
+      resolveDiskEffectLedgerEntry("instance-save-race-close", ledgerRows[0].transactionId, "/repo/app/src/main.ts");
     });
   });
 });

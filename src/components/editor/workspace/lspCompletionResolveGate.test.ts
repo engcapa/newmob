@@ -1,0 +1,428 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { EditorState } from "@codemirror/state";
+import { CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+import { EditorView } from "@codemirror/view";
+import { history, undo } from "@codemirror/commands";
+import type { LspCompletionItem, LspCompletionResult, LspDocumentStatus } from "../../../lib/editor/lsp";
+import {
+  buildCompletionAcceptancePlanV2,
+  completionItemId,
+  createLspCompletionSource,
+  providerScopeFor,
+  recentCompletionInvocations,
+  recordBasicCompletionInvocation,
+  resetBasicCompletionSession,
+  resetCompletionTelemetry,
+  type CompletionRequestIdentity,
+  type CompletionResolveGateRequest,
+  type LspCompletionHooks,
+} from "./lspCompletion";
+
+const IDENTITY: CompletionRequestIdentity = {
+  workspaceId: "ws-r3",
+  fileKey: "A.java",
+  filePath: "/repo/A.java",
+  uri: "file:///repo/A.java",
+  languageId: "java",
+  documentRevision: 7,
+  lspSessionGeneration: 3,
+};
+
+function status(active: boolean): LspDocumentStatus {
+  return {
+    path: "/repo/A.java",
+    uri: "file:///repo/A.java",
+    presetId: "java",
+    languageId: "java",
+    displayName: "Java",
+    available: true,
+    active,
+    selectedCommandId: null,
+    selectedCommand: null,
+    installHint: null,
+    error: null,
+  };
+}
+
+function makeItem(overrides: Partial<LspCompletionItem> = {}): LspCompletionItem {
+  return {
+    label: "asList",
+    kind: 3,
+    detail: "java.util.Arrays.asList",
+    documentation: null,
+    insertText: null,
+    insertTextFormat: 1,
+    filterText: null,
+    sortText: "0001",
+    textEdit: {
+      range: { start: { line: 1, character: 0 }, end: { line: 1, character: 3 } },
+      newText: "asList",
+    },
+    additionalTextEdits: [],
+    raw: { label: "asList" },
+    ...overrides,
+  };
+}
+
+function resultWith(items: LspCompletionItem[]): LspCompletionResult {
+  return { status: status(true), isIncomplete: false, items };
+}
+
+function makeHooks(overrides: Partial<LspCompletionHooks> = {}): LspCompletionHooks {
+  return {
+    identity: () => ({ ...IDENTITY }),
+    fetch: async () => resultWith([makeItem()]),
+    triggerCharacters: () => [],
+    getDocumentRevision: () => IDENTITY.documentRevision,
+    reportDiagnostic: vi.fn(),
+    ...overrides,
+  };
+}
+
+function mountView(docText: string): EditorView {
+  const state = EditorState.create({
+    doc: docText,
+    extensions: [history()],
+  });
+  return new EditorView({ state, parent: document.body });
+}
+
+async function runSource(
+  view: EditorView,
+  hooks: LspCompletionHooks,
+  position = 4,
+  explicit = true,
+): Promise<CompletionResult | null> {
+  const source = createLspCompletionSource(hooks);
+  return source(new CompletionContext(view.state, position, explicit));
+}
+
+function applyFirstOption(view: EditorView, result: unknown): void {
+  const options = (result as { options?: Array<{ apply?: (v: EditorView, o: unknown, f: number, t: number) => void }> }).options ?? [];
+  const option = options[0];
+  if (!option || typeof option.apply !== "function") throw new Error("no applicable option");
+  option.apply(view, option, 1, 4);
+}
+
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("§8.19.4 Basic invocation ordinal", () => {
+  it("advances only on explicit invocations; typing/trigger inherit without bumping", () => {
+    resetCompletionTelemetry();
+    const base = {
+      workspaceId: "ws",
+      fileKey: "f",
+      documentRevision: 4,
+      positionKey: "0:10",
+      providerGeneration: 1,
+    };
+    expect(recordBasicCompletionInvocation({ ...base, reason: "explicit" })).toBe(1);
+    expect(recordBasicCompletionInvocation({ ...base, reason: "typing" })).toBe(1);
+    expect(recordBasicCompletionInvocation({ ...base, reason: "trigger" })).toBe(1);
+    expect(recordBasicCompletionInvocation({ ...base, reason: "explicit" })).toBe(2);
+    // Inherit the live sequence once an explicit call is open.
+    expect(recordBasicCompletionInvocation({ ...base, reason: "typing" })).toBe(2);
+    expect(recordBasicCompletionInvocation({ ...base, reason: "explicit" })).toBe(3);
+  });
+
+  it("resets on revision change, caret move, provider restart and popup close", () => {
+    resetCompletionTelemetry();
+    const base = { workspaceId: "ws", fileKey: "f", positionKey: "0:10", providerGeneration: 1 };
+    recordBasicCompletionInvocation({ ...base, documentRevision: 4, reason: "explicit" });
+    recordBasicCompletionInvocation({ ...base, documentRevision: 4, reason: "explicit" });
+    // Any edit resets the next explicit call.
+    expect(recordBasicCompletionInvocation({ ...base, documentRevision: 5, reason: "explicit" })).toBe(1);
+    recordBasicCompletionInvocation({ ...base, documentRevision: 5, reason: "explicit" });
+    // Caret move resets.
+    expect(recordBasicCompletionInvocation({ ...base, documentRevision: 5, positionKey: "0:11", reason: "explicit" })).toBe(1);
+    recordBasicCompletionInvocation({ ...base, documentRevision: 5, positionKey: "0:11", reason: "explicit" });
+    // Provider restart (session generation change) resets even at one caret.
+    expect(recordBasicCompletionInvocation({ ...base, documentRevision: 5, positionKey: "0:11", providerGeneration: 2, reason: "explicit" })).toBe(1);
+    // Popup close ends the sequence entirely.
+    resetBasicCompletionSession("ws", "f");
+    expect(recordBasicCompletionInvocation({ ...base, documentRevision: 5, positionKey: "0:11", providerGeneration: 2, reason: "explicit" })).toBe(1);
+  });
+
+  it("maps requested scope to honest provider scope facts", () => {
+    expect(providerScopeFor("default", false)).toBe("unknown");
+    expect(providerScopeFor("default", true)).toBe("unknown");
+    // LSP/jdtls has no expansion channel: expanded stays honestly unchanged.
+    expect(providerScopeFor("expanded", false)).toBe("unchanged");
+    expect(providerScopeFor("expanded", true)).toBe("expanded");
+  });
+});
+
+describe("§8.19.4 invocation evidence ring", () => {
+  it("records ordinal/scope facts and forwards them to fetch", async () => {
+    resetCompletionTelemetry();
+    const seenInvocations: Array<{ invocationOrdinal: number; requestedScope: string } | undefined> = [];
+    const view = mountView("\nasL");
+    const hooks = makeHooks({
+      fetch: async (_position, _trigger, _token, invocation) => {
+        seenInvocations.push(invocation ? { ...invocation } : undefined);
+        return resultWith([makeItem()]);
+      },
+    });
+
+    const first = await runSource(view, hooks);
+    expect(seenInvocations[0]).toEqual({ invocationOrdinal: 1, requestedScope: "default" });
+
+    const second = await runSource(view, hooks);
+    expect(seenInvocations[1]).toEqual({ invocationOrdinal: 2, requestedScope: "expanded" });
+    expect(first && second).toBeTruthy();
+
+    const ring = recentCompletionInvocations();
+    const lastTwo = ring.slice(-2);
+    expect(lastTwo.map((entry) => entry.invocationOrdinal)).toEqual([1, 2]);
+    expect(lastTwo.map((entry) => entry.requestedScope)).toEqual(["default", "expanded"]);
+    // Honest default: jdtls cannot express scope expansion over standard LSP.
+    expect(lastTwo.map((entry) => entry.providerScope)).toEqual(["unknown", "unchanged"]);
+    expect(new Set(lastTwo.map((entry) => entry.reason))).toEqual(new Set(["explicit"]));
+    expect(lastTwo[0].providerGeneration).toBe(IDENTITY.lspSessionGeneration);
+
+    // A typing-triggered popup inherits the live sequence without advancing.
+    const third = await runSource(view, hooks, 4, false);
+    expect(third).not.toBeNull();
+    expect(seenInvocations[2]?.invocationOrdinal).toBe(2);
+    expect(recentCompletionInvocations().at(-1)?.invocationOrdinal).toBe(2);
+    view.destroy();
+  });
+});
+
+describe("§8.19.4 acceptance plan classifier", () => {
+  it("classifies ready, needs-explicit-primary-only, stale and overlap dispositions", () => {
+    const base = { identity: IDENTITY, item: makeItem() };
+    expect(
+      buildCompletionAcceptancePlanV2({
+        ...base,
+        resolveState: { kind: "ready", resolvedAt: 1, hasAdditionalEdits: true },
+      }).disposition,
+    ).toBe("ready");
+    expect(
+      buildCompletionAcceptancePlanV2({ ...base, resolveState: { kind: "timed-out", canRetry: true } }).disposition,
+    ).toBe("needs-explicit-primary-only");
+    expect(
+      buildCompletionAcceptancePlanV2({
+        ...base,
+        resolveState: { kind: "failed", canRetry: true, message: "boom" },
+      }).disposition,
+    ).toBe("needs-explicit-primary-only");
+    expect(buildCompletionAcceptancePlanV2({ ...base, resolveState: { kind: "stale" } }).disposition)
+      .toBe("blocked-stale");
+    expect(buildCompletionAcceptancePlanV2({ ...base, resolveState: { kind: "not-required" }, overlapRejected: true }).disposition)
+      .toBe("blocked-overlap");
+
+    const snippetPlan = buildCompletionAcceptancePlanV2({
+      identity: IDENTITY,
+      item: makeItem({
+        label: "run",
+        insertText: "run(${1:x});",
+        insertTextFormat: 2,
+        textEdit: null,
+      }),
+      resolveState: { kind: "not-required" },
+    });
+    expect(snippetPlan.snippet).toHaveLength(1);
+    expect(snippetPlan.itemId).toBe(completionItemId(makeItem({ label: "run", insertText: "run(${1:x});", insertTextFormat: 2, textEdit: null })));
+  });
+});
+
+describe("§8.19.4 resolve gate acceptance", () => {
+  it("timeout presents the gate; Insert without import commits exactly the primary once", async () => {
+    vi.useFakeTimers();
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    let resolveCalls = 0;
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => {
+        resolveCalls += 1;
+        return new Promise<LspCompletionItem | null>(() => {}); // hangs → 3s timeout
+      },
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(gates).toHaveLength(1);
+    expect(gates[0].reason).toBe("timeout");
+    // Nothing inserted while waiting: the buffer still shows typed text only.
+    expect(view.state.doc.toString()).toBe("\nasL");
+
+    expect(gates[0].insertWithoutImport()).toBe(true);
+    expect(view.state.doc.toString()).toBe("\nasList");
+    // Settled gate refuses a second insertion.
+    expect(gates[0].insertWithoutImport()).toBe(false);
+    expect(view.state.doc.toString()).toBe("\nasList");
+    expect(await gates[0].retry()).toBe("unavailable");
+    expect(resolveCalls).toBe(1);
+    view.destroy();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("failed resolve presents the gate; dismiss inserts nothing", async () => {
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    const diagnostics: Array<[string, string | undefined]> = [];
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => {
+        throw new Error("resolve exploded");
+      },
+      reportDiagnostic: (kind, detail) => diagnostics.push([kind, detail]),
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(gates).toHaveLength(1);
+    expect(gates[0].reason).toBe("failed");
+    gates[0].dismiss();
+    await settle();
+    expect(view.state.doc.toString()).toBe("\nasL");
+    expect(diagnostics.some(([kind]) => kind === "additional-edit-unavailable")).toBe(true);
+    view.destroy();
+  });
+
+  it("retry performs a fresh resolve and lands import + primary as one dispatch/one undo", async () => {
+    const view = mountView("\nasL");
+    const originalDoc = view.state.doc.toString();
+    const gates: CompletionResolveGateRequest[] = [];
+    let attempts = 0;
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => {
+        attempts += 1;
+        if (attempts === 1) return null; // first attempt empty → gate
+        return makeItem({
+          additionalTextEdits: [{
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+            newText: "import java.util.Arrays;\n",
+          }],
+        });
+      },
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(gates).toHaveLength(1);
+    const outcome = await gates[0].retry();
+    expect(outcome).toBe("committed");
+    expect(attempts).toBe(2);
+    expect(view.state.doc.toString()).toBe("import java.util.Arrays;\n\nasList");
+    // One undo removes the whole merged acceptance.
+    undo(view);
+    expect(view.state.doc.toString()).toBe(originalDoc);
+    view.destroy();
+  });
+
+  it("retry failure keeps the gate open with an honest failed note", async () => {
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => null,
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(await gates[0].retry()).toBe("unavailable");
+    expect(view.state.doc.toString()).toBe("\nasL");
+    // The gate closures are not settled by a failed retry: the user can still
+    // choose primary-only afterwards.
+    expect(gates[0].insertWithoutImport()).toBe(true);
+    expect(view.state.doc.toString()).toBe("\nasList");
+    view.destroy();
+  });
+
+  it("blocks stale gate actions after the buffer moved on", async () => {
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    const diagnostics: Array<[string, string | undefined]> = [];
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => null,
+      reportDiagnostic: (kind, detail) => diagnostics.push([kind, detail]),
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+    expect(gates).toHaveLength(1);
+
+    // User kept typing while the banner was up: the gate becomes inert.
+    view.dispatch({ changes: { from: 4, to: 4, insert: "X" } });
+    expect(gates[0].insertWithoutImport()).toBe(false);
+    expect(view.state.doc.toString()).toBe("\nasLX");
+    expect(await gates[0].retry()).toBe("unavailable");
+    expect(diagnostics.some(([kind]) => kind === "identity-mismatch")).toBe(true);
+    view.destroy();
+  });
+
+  it("overlapping provider edits block the whole acceptance instead of partial apply", async () => {
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    const diagnostics: Array<[string, string | undefined]> = [];
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => makeItem({
+        // Overlaps the primary span [1,0)-[1,3): must reject the entire item.
+        additionalTextEdits: [{
+          range: { start: { line: 1, character: 1 }, end: { line: 1, character: 3 } },
+          newText: "XX",
+        }],
+      }),
+      reportDiagnostic: (kind, detail) => diagnostics.push([kind, detail]),
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(view.state.doc.toString()).toBe("\nasL");
+    expect(gates).toHaveLength(0);
+    expect(diagnostics.some(([kind]) => kind === "invalid-additional-edits")).toBe(true);
+    view.destroy();
+  });
+
+  it("without a gate surface a failing resolve blocks instead of silently inserting", async () => {
+    const view = mountView("\nasL");
+    const diagnostics: Array<[string, string | undefined]> = [];
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => null,
+      reportDiagnostic: (kind, detail) => diagnostics.push([kind, detail]),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(view.state.doc.toString()).toBe("\nasL");
+    expect(diagnostics.some(([kind, detail]) => kind === "additional-edit-unavailable" && !!detail)).toBe(true);
+    view.destroy();
+  });
+
+  it("successful resolve commits the merged acceptance without any gate", async () => {
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => makeItem({
+        additionalTextEdits: [{
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+          newText: "import java.util.Arrays;\n",
+        }],
+      }),
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(gates).toHaveLength(0);
+    expect(view.state.doc.toString()).toBe("import java.util.Arrays;\n\nasList");
+    view.destroy();
+  });
+});

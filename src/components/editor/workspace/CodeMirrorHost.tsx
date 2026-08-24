@@ -4,6 +4,7 @@ import {
   useEffect,
   useLayoutEffect,
   useRef,
+  useState,
   type MutableRefObject,
 } from "react";
 import { Compartment, EditorState, Prec, type Extension, type Text } from "@codemirror/state";
@@ -34,16 +35,15 @@ import {
   type WindowResizeSession,
 } from "./windowResizeSession";
 import {
-  defaultKeymap,
   history,
-  historyKeymap,
-  indentWithTab,
 } from "@codemirror/commands";
+import type { KeyBinding } from "@codemirror/view";
 import {
   acceptCompletion,
   autocompletion,
   closeBrackets,
-  closeBracketsKeymap,
+  closeCompletion,
+  completionStatus,
   startCompletion,
 } from "@codemirror/autocomplete";
 import {
@@ -59,7 +59,7 @@ import {
   indentUnit,
   unfoldAll,
 } from "@codemirror/language";
-import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
+import { openSearchPanel, search } from "@codemirror/search";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
 import { readTextResult, writeText } from "../../../lib/clipboard";
 import { codeViewExtensions } from "../../../lib/codeViewTheme";
@@ -85,9 +85,12 @@ import {
   cycleLspSnippetChoice,
   createLspCompletionSource,
   lspSnippetSessionInvalidator,
+  resetBasicCompletionSession,
   type CompletionAcceptanceDiagnostic,
+  type CompletionInvocationRequest,
   type CompletionRequestIdentity,
   type CompletionRequestToken,
+  type CompletionResolveGateRequest,
 } from "./lspCompletion";
 import { createDiagnosticChrome } from "./lspDiagnosticChrome";
 import {
@@ -126,12 +129,13 @@ import {
   selectAllEditorOccurrences,
   selectNextEditorOccurrence,
   selectionHistoryField,
-  workspaceEditorKeymap,
   type EditorClipboardPayload,
 } from "./workspaceEditorCommands";
 import {
   buildEditorHostActions,
+  buildEditorPrimitiveKeybindings,
 } from "./workspaceCodeMirrorKeymap";
+import { EditorActionBridge } from "./workspaceActionHost";
 import {
   surroundWithPlan,
   type SurroundKind,
@@ -200,6 +204,8 @@ interface CodeMirrorHostProps {
     position: LspPosition,
     triggerCharacter: string | null,
     token: CompletionRequestToken,
+    /** Repeated-call facts (§8.19.4); ordinal ≥ 2 requests expanded scope. */
+    invocation?: CompletionInvocationRequest,
   ) => Promise<LspCompletionResult | null>;
   onCompleteResolve?: (
     raw: unknown,
@@ -1232,6 +1238,22 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const parameterInfoDelayMsRef = useRef(parameterInfoDelayMs);
   const parameterInfoShowFullSignaturesRef = useRef(parameterInfoShowFullSignatures);
   const pathRef = useRef(path);
+  // §8.19.4: set around the editor.basicCompletion close+reopen toggle so the
+  // popup-close listener does not reset the repeated-call ordinal mid-toggle.
+  const basicCompletionReopenRef = useRef(false);
+  // §8.19.4 resolve gate banner state; the closures inside the request guard
+  // staleness themselves, this only drives presentation.
+  const [resolveGateUi, setResolveGateUi] = useState<{
+    label: string;
+    message: string;
+    failed: boolean;
+    retrying: boolean;
+    top: number;
+    left: number;
+    retry: () => Promise<"committed" | "unavailable">;
+    insertWithoutImport: () => boolean;
+    dismiss: () => void;
+  } | null>(null);
   onChangeRef.current = onChange;
   onSaveRef.current = onSave;
   onHoverRef.current = onHover;
@@ -1343,6 +1365,28 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   useEffect(() => {
     if (!hostRef.current) return;
     const initialDoc = EditorState.create({ doc }).doc;
+    // §8.19.4 resolve gate banner: anchored to the caret at presentation time.
+    // The gate request's own closures re-verify identity/doc before acting, so
+    // a stale banner is inert — this only decides where it shows.
+    const presentResolveGate = (request: CompletionResolveGateRequest) => {
+      const view = viewRef.current;
+      const coords = view?.coordsAtPos(request.range.from);
+      const container = hostRef.current?.getBoundingClientRect();
+      setResolveGateUi({
+        label: request.item.label,
+        message: request.message,
+        failed: false,
+        retrying: false,
+        top: coords && container ? Math.max(0, coords.bottom - container.top + 4) : 28,
+        left: coords && container ? Math.max(0, coords.left - container.left) : 12,
+        retry: request.retry,
+        insertWithoutImport: request.insertWithoutImport,
+        dismiss: () => {
+          request.dismiss();
+          setResolveGateUi(null);
+        },
+      });
+    };
     const clearPendingSelectionEmit = () => {
       if (selectionEmitTimerRef.current === null) return;
       window.clearTimeout(selectionEmitTimerRef.current);
@@ -1531,13 +1575,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
             createLiveTemplateCompletionSource(() => pathRef.current),
             createLspCompletionSource({
               identity: () => getCompletionIdentityRef.current(),
-              fetch: (position, trigger, token) =>
-                onCompleteRef.current?.(position, trigger, token) ?? Promise.resolve(null),
+              fetch: (position, trigger, token, invocation) =>
+                onCompleteRef.current?.(position, trigger, token, invocation) ?? Promise.resolve(null),
               resolve: (raw, token) =>
                 onCompleteResolveRef.current?.(raw, token) ?? Promise.resolve(null),
               triggerCharacters: () => completionTriggersRef.current,
               getDocumentRevision: () => getCompletionIdentityRef.current()?.documentRevision ?? -1,
               reportDiagnostic: (kind, detail) => onCompletionDiagnosticRef.current(kind, detail),
+              onResolveGate: (request) => presentResolveGate(request),
             }),
           ],
         }),
@@ -1558,6 +1603,17 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
             if (last && triggers.includes(last)) typedTrigger = true;
           });
           if (typedTrigger) startCompletion(update.view);
+        }),
+        // §8.19.4: closing the completion popup ends the repeated-Basic-call
+        // sequence, so the next explicit invocation is a fresh ordinal-1
+        // request. The editor.basicCompletion toggle suppresses this once.
+        EditorView.updateListener.of((update) => {
+          const previous = completionStatus(update.startState);
+          const current = completionStatus(update.state);
+          if (previous === current || previous === null || current !== null) return;
+          if (basicCompletionReopenRef.current) return;
+          const identity = getCompletionIdentityRef.current();
+          if (identity) resetBasicCompletionSession(identity.workspaceId, identity.fileKey);
         }),
         search({ top: true, createPanel: createWorkspaceSearchPanel }),
         selectionHistoryField,
@@ -1639,28 +1695,28 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           },
         ])),
         keymap.of([
-          // §8.18.2: with a workspace action host, business bindings resolve
-          // exclusively through the host's scheme-aware dispatcher; only
-          // generic editor primitives remain in this spread.
-          ...(workspaceActionHost ? [] : [
-            { key: "Mod-s", run: saveHandler },
-            { key: "Mod-r", run: openReplacePanel },
-            { key: "Mod-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
-            { key: "Ctrl-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
-            { key: "Mod-Shift-Space", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
-            { key: "Mod-w", run: expandSemanticSelection },
-          ]),
-          // Escape stack stays an editor-local primitive (snippet/signature/
-          // selection state is not part of WorkspaceActionContext).
-          { key: "Escape", run: (view) => cancelLspSnippetSession(view) },
-          { key: "Escape", run: escapeEditorSelections },
-          { key: "Escape", run: () => hideSignature() },
-          ...workspaceEditorKeymap,
-          ...searchKeymap,
-          ...closeBracketsKeymap,
-          ...defaultKeymap,
-          ...historyKeymap,
-          indentWithTab,
+          // §8.19.2 retained primitives: with a host, ONLY the allowlisted
+          // set remains here (Escape panel-close stack, closeBrackets typing,
+          // defaultKeymap cursor/selection, indentWithTab); every user-visible
+          // business binding resolves through the workspace action host.
+          ...(buildEditorPrimitiveKeybindings(!!workspaceActionHost) as KeyBinding[]),
+          ...(workspaceActionHost
+            ? [
+                { key: "Escape", run: (view: EditorView) => cancelLspSnippetSession(view) },
+                { key: "Escape", run: escapeEditorSelections },
+                { key: "Escape", run: () => hideSignature() },
+              ]
+            : [
+                // Transitional unhosted fallback: standalone embedders/tests
+                // without an action host keep the pre-R1 inline bindings.
+                // Must never grow new entries (see LEGACY_UNHOSTED_SPREAD).
+                { key: "Mod-s", run: saveHandler },
+                { key: "Mod-r", run: openReplacePanel },
+                { key: "Mod-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+                { key: "Ctrl-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+                { key: "Mod-Shift-Space", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+                { key: "Mod-w", run: expandSemanticSelection },
+              ]),
         ]),
         EditorView.domEventHandlers({
           copy(event, view) {
@@ -1801,21 +1857,46 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     // (isolated usage), the legacy inline bindings below stay active.
     const actionHost = workspaceActionHostRef.current;
     let unregisterEditorActions: (() => void) | null = null;
+    let bridgeRegistration: { dispose(): void } | null = null;
     if (actionHost && !actionHost.isDisposed()) {
       // Handlers close over this mount's view instance; the registration is
       // removed in cleanup so a remount re-binds against the fresh view.
       unregisterEditorActions = actionHost.registerActions(buildEditorHostActions({
-        save: saveHandler,
         openReplacePanel: () => openReplacePanel(view),
         expandSemanticSelection: () => expandSemanticSelection(view),
+        // §8.19.4 explicit Basic Completion. With a popup already open at
+        // this caret, close + restart so the second explicit call re-runs the
+        // source (ordinal ≥ 2 → requestedScope expanded); the reopen flag
+        // stops the popup-close listener from resetting the ordinal between
+        // the two halves of the toggle.
+        startBasicCompletion: () => {
+          if (!viewRef.current) return false;
+          if (completionStatus(view.state) === null) {
+            startCompletion(view);
+            return true;
+          }
+          basicCompletionReopenRef.current = true;
+          try {
+            closeCompletion(view);
+            startCompletion(view);
+          } finally {
+            basicCompletionReopenRef.current = false;
+          }
+          return true;
+        },
         escapeStack: () =>
           cancelLspSnippetSession(view)
           || escapeEditorSelections(view)
           || hideSignature(),
+        runEditorCommand: (command) => command(view),
       }));
+      // §8.19.2 EditorActionBridge: register this mounted view so keyboard
+      // dispatch knows the live view set; unmount releases it.
+      bridgeRegistration = new EditorActionBridge(actionHost).registerView(fileKey);
     }
 
     return () => {
+      bridgeRegistration?.dispose();
       unregisterEditorActions?.();
       clearPendingSelectionEmit();
       clearSignatureDelay();
@@ -1858,6 +1939,12 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     onCommandPortChange({ fileKey, token, port: editorCommandPort(view) });
     return () => onCommandPortChange({ fileKey, token, port: null });
   }, [fileKey, onCommandPortChange]);
+
+  // §8.19.4: a resolve gate belongs to one buffer identity; switching files
+  // drops the banner (the request closures would refuse to act anyway).
+  useEffect(() => {
+    setResolveGateUi(null);
+  }, [fileKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2103,7 +2190,67 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       ref={hostRef}
       data-soft-wrap={softWrap || undefined}
       data-column-selection={columnSelectionMode || undefined}
-      className="h-full w-full"
-    />
+      className="relative h-full w-full"
+    >
+      {resolveGateUi && (
+        <div
+          data-testid="completion-resolve-gate"
+          className="cm-lsp-resolve-gate absolute z-50 flex max-w-md items-center gap-2 rounded border border-dashed border-amber-500/70 bg-[var(--taomni-bg-elevated,#1f2228)] px-2 py-1.5 text-xs shadow-lg"
+          style={{ top: resolveGateUi.top, left: resolveGateUi.left }}
+        >
+          <span className="text-amber-400">⚠</span>
+          <span className="min-w-0 truncate" title={`${resolveGateUi.label} — ${resolveGateUi.message}`}>
+            <strong className="font-medium">{resolveGateUi.label}</strong>
+            {" — "}
+            {resolveGateUi.message}
+          </span>
+          <button
+            type="button"
+            data-testid="completion-resolve-gate-retry"
+            disabled={resolveGateUi.retrying}
+            className="shrink-0 rounded border border-[var(--taomni-border,#3a3f4b)] px-1.5 py-0.5 hover:bg-[var(--taomni-hover,#2a2e36)] disabled:opacity-50"
+            onClick={() => {
+              setResolveGateUi((gate) => gate ? { ...gate, retrying: true, failed: false } : gate);
+              void resolveGateUi.retry().then((outcome) => {
+                if (outcome === "committed") {
+                  setResolveGateUi(null);
+                  return;
+                }
+                // Retry also failed: keep the item visible with its choices.
+                setResolveGateUi((gate) => gate ? { ...gate, retrying: false, failed: true } : gate);
+              });
+            }}
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            data-testid="completion-resolve-gate-insert-without-import"
+            disabled={resolveGateUi.retrying}
+            className="shrink-0 rounded border border-[var(--taomni-border,#3a3f4b)] px-1.5 py-0.5 hover:bg-[var(--taomni-hover,#2a2e36)] disabled:opacity-50"
+            onClick={() => {
+              const inserted = resolveGateUi.insertWithoutImport();
+              if (inserted) setResolveGateUi(null);
+            }}
+          >
+            Insert without import
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            data-testid="completion-resolve-gate-dismiss"
+            className="shrink-0 px-1 text-[var(--taomni-text-secondary,#9aa0aa)] hover:text-[var(--taomni-text,#e6e6e6)]"
+            onClick={resolveGateUi.dismiss}
+          >
+            ✕
+          </button>
+          {resolveGateUi.failed && (
+            <span className="shrink-0 text-red-400" data-testid="completion-resolve-gate-failed-note">
+              retry failed
+            </span>
+          )}
+        </div>
+      )}
+    </div>
   );
 }, areCodeMirrorHostPropsEqual);

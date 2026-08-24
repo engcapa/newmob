@@ -520,16 +520,33 @@ export function lspDocumentSymbols(
   return invoke<LspDocumentSymbolsResult>("lsp_document_symbols", documentArgs(descriptor));
 }
 
+/**
+ * Repeated-Basic-call facts (§8.19.4). The second explicit invocation at one
+ * caret requests expanded scope; the backend records what it received so the
+ * provider side of the expansion story is traceable.
+ */
+export interface LspCompletionInvocation {
+  invocationOrdinal: number;
+  requestedScope: "default" | "expanded";
+}
+
 export function lspCompletion(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
   triggerCharacter?: string | null,
+  invocation?: LspCompletionInvocation,
 ): Promise<LspCompletionResult> {
   return invoke<LspCompletionResult>("lsp_completion", {
     ...documentArgs(descriptor),
     line: position.line,
     character: position.character,
     triggerCharacter: triggerCharacter ?? null,
+    ...(invocation
+      ? {
+          invocationOrdinal: invocation.invocationOrdinal,
+          requestedScope: invocation.requestedScope,
+        }
+      : {}),
   });
 }
 

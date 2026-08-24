@@ -1,0 +1,9 @@
+# Runner sessions (jdtls import / Gradle) generate IDE metadata and build
+# output inside the fixture projects; only hand-written sources are tracked.
+.gradle/
+.project
+.classpath
+.settings/
+bin/
+target/
+build/

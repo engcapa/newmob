@@ -7,9 +7,11 @@ import {
   setActionDisabled,
   strokeFromKeyboardEvent,
   isReservedStroke,
+  formatShortcut,
   type KeymapBaseSchemeId,
   type KeymapSchemeV3,
   type Shortcut,
+  type ShortcutStroke,
 } from "./workspaceKeymapScheme";
 import { disabledReasonLabel } from "./workspaceCodeMirrorKeymap";
 
@@ -50,8 +52,12 @@ export function KeymapSettingsDialog({
 }: KeymapSettingsDialogProps) {
   const [filter, setFilter] = useState("");
   const [capture, setCapture] = useState<CaptureTarget | null>(null);
+  /** §8.19.2: strokes recorded so far (one or two) in the active capture. */
+  const [capturedStrokes, setCapturedStrokes] = useState<ShortcutStroke[]>([]);
   const captureRef = useRef<CaptureTarget | null>(null);
   captureRef.current = capture;
+  const capturedStrokesRef = useRef<ShortcutStroke[]>([]);
+  capturedStrokesRef.current = capturedStrokes;
 
   const activeScheme = schemes.find((scheme) => scheme.id === activeSchemeId) ?? null;
 
@@ -92,30 +98,53 @@ export function KeymapSettingsDialog({
         }
         return;
       }
-      // Keystroke recording: first key press after "Add" becomes the binding.
+      // §8.19.2 keystroke recording: a full one- or two-stroke sequence.
+      // Backspace removes the last stroke, Esc cancels the capture, Enter
+      // confirms; modifier-only presses wait for the stroked key.
       event.preventDefault();
       event.stopPropagation();
+
+      const commitStrokes = (strokes: readonly ShortcutStroke[]) => {
+        const scheme = ensureMutableScheme();
+        if (!scheme || strokes.length === 0) return;
+        const shortcut: Shortcut = {
+          kind: "keyboard",
+          strokes: strokes.length === 2
+            ? ([strokes[0], strokes[1]] as [ShortcutStroke, ShortcutStroke])
+            : [strokes[0]],
+        };
+        const current = [...(scheme.bindings[target.actionId] ?? [])];
+        let next: typeof current;
+        if (target.replaceIndex !== null) {
+          next = current.map((binding, index) => (index === target.replaceIndex ? shortcut : binding));
+        } else {
+          next = [...current, shortcut];
+        }
+        onApplyScheme(setActionBindings(scheme, target.actionId, next));
+        setCapture(null);
+        setCapturedStrokes([]);
+      };
+
       if (event.key === "Escape") {
         setCapture(null);
+        setCapturedStrokes([]);
         return;
       }
       if (["Control", "Meta", "Alt", "Shift"].includes(event.key)) return;
-      if (isReservedStroke(strokeFromKeyboardEvent(event))) return;
-      const scheme = ensureMutableScheme();
-      if (!scheme) return;
-      const shortcut: Shortcut = {
-        kind: "keyboard",
-        strokes: [strokeFromKeyboardEvent(event)],
-      };
-      const current = [...(scheme.bindings[target.actionId] ?? [])];
-      let next: typeof current;
-      if (target.replaceIndex !== null) {
-        next = current.map((binding, index) => (index === target.replaceIndex ? shortcut : binding));
-      } else {
-        next = [...current, shortcut];
+
+      if (event.key === "Backspace") {
+        setCapturedStrokes((strokes) => strokes.slice(0, -1));
+        return;
       }
-      onApplyScheme(setActionBindings(scheme, target.actionId, next));
-      setCapture(null);
+      if (event.key === "Enter") {
+        commitStrokes(capturedStrokesRef.current);
+        return;
+      }
+
+      const stroke = strokeFromKeyboardEvent(event);
+      // Reserved strokes cannot be bound at all.
+      if (isReservedStroke(stroke)) return;
+      setCapturedStrokes((strokes) => (strokes.length >= 2 ? strokes : [...strokes, stroke]));
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
@@ -294,6 +323,18 @@ export function KeymapSettingsDialog({
                       title={info?.conflictsWith.length
                         ? `Also used by: ${info.conflictsWith.join(", ")}`
                         : undefined}
+                      {...(mutable && !capturing
+                        ? {
+                            role: "button",
+                            tabIndex: 0,
+                            "aria-label": `Replace shortcut ${binding} on ${item.title}`,
+                            "data-testid": `keymap-replace-${item.id}-${index}`,
+                            onClick: () => {
+                              setCapturedStrokes([]);
+                              setCapture({ actionId: item.id, replaceIndex: index });
+                            },
+                          }
+                        : {})}
                     >
                       {binding}
                       {info?.conflictsWith.length ? (
@@ -322,10 +363,26 @@ export function KeymapSettingsDialog({
                       type="button"
                       data-testid={`keymap-add-${item.id}`}
                       aria-label={capturing ? `Recording shortcut for ${item.title}` : `Add shortcut to ${item.title}`}
-                      className="rounded border border-[var(--taomni-code-border)] px-1.5 py-0.5 text-[11px] hover:bg-[var(--taomni-code-hover)]"
-                      onClick={() => setCapture({ actionId: item.id, replaceIndex: null })}
+                      className="inline-flex items-center gap-1 rounded border border-[var(--taomni-code-border)] px-1.5 py-0.5 text-[11px] hover:bg-[var(--taomni-code-hover)]"
+                      onClick={() => {
+                        setCapturedStrokes([]);
+                        setCapture({ actionId: item.id, replaceIndex: null });
+                      }}
                     >
-                      {capturing ? "press keys… (Esc cancels)" : "+ Add"}
+                      {capturing ? (
+                        <>
+                          <span className="font-mono">
+                            {capturedStrokes.length > 0
+                              ? capturedStrokes.map((stroke) => formatShortcut({ kind: "keyboard", strokes: [stroke] })).join(" ")
+                              : "press keys…"}
+                          </span>
+                          <span className="opacity-60">
+                            {capturedStrokes.length > 0
+                              ? `[${capturedStrokes.map((stroke) => stroke.code).join(", ")}] ${layoutLabel()}`
+                              : "1–2 keys · Enter confirms · Esc cancels"}
+                          </span>
+                        </>
+                      ) : "+ Add"}
                     </button>
                   )}
                   <label className="ml-1 flex items-center gap-1 text-[11px]">
@@ -380,4 +437,10 @@ function parseDisplayBindings(item: ActionSnapshotItem): readonly Shortcut[] {
 
 function guessBase(): KeymapBaseSchemeId {
   return navigator.platform.toLowerCase().includes("mac") ? "idea-macos" : "idea-windows-linux";
+}
+
+/** Honest layout label for the recorder: platform family, not a layout claim. */
+function layoutLabel(): string {
+  const platform = typeof navigator !== "undefined" ? navigator.platform : "";
+  return platform.toLowerCase().includes("mac") ? "layout: mac" : "layout: pc";
 }

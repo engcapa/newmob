@@ -5,6 +5,7 @@ import type {
   LspWorkspaceEditOperation,
 } from "../../../lib/editor/lsp";
 import { applyLspTextEditsToString } from "./lspTextEdits";
+import type { SaveCommitResult } from "./saveCommit";
 import { normalizeLineEndings } from "./saveNormalizationPipeline";
 import {
   buildWorkspaceEditPreview,
@@ -14,7 +15,7 @@ import {
 
 export type WorkspaceEditApplyOutcome =
   | { operationIndex: number; path: string; status: "applied-open"; dirty: boolean }
-  | { operationIndex: number; path: string; status: "applied-disk" }
+  | { operationIndex: number; path: string; status: "applied-disk"; result?: SaveCommitResult }
   | { operationIndex: number; path: string; status: "applied-create" }
   | { operationIndex: number; path: string; status: "applied-rename" }
   | { operationIndex: number; path: string; status: "applied-delete" }
@@ -26,6 +27,177 @@ export interface WorkspaceEditApplyResponse {
   applied: boolean;
   failureReason: string | null;
   failedChange: number | null;
+}
+
+/**
+ * Typed result of one settled resource operation (§8.19.1). Resource hooks
+ * report success/failure through the shell, so the applier assembles the
+ * same fact shape the save committer produces for text writes.
+ */
+export type ResourceOperationResult =
+  | { kind: "committed"; diskEffect: "committed"; path: string }
+  | {
+    kind: "conflict" | "failed";
+    diskEffect: "none" | "unknown";
+    path: string;
+    message: string;
+    recoveryId: string | null;
+  };
+
+/** Per-operation effect fact (§8.19.1 WorkspaceEditOperationEffect). */
+export interface WorkspaceEditOperationEffect {
+  operationId: string;
+  index: number;
+  kind: "text" | "create" | "rename" | "delete";
+  sourcePath: string | null;
+  targetPath: string;
+  /**
+   * Full typed result when a disk transaction ran (closed-file write or
+   * open-clean save pipeline). Null means the operation changed only
+   * in-memory state (open dirty buffer) — no disk/provider effect occurred.
+   */
+  result: SaveCommitResult | ResourceOperationResult | null;
+  undoState: "available" | "unavailable";
+}
+
+/** Whole-transaction apply result (§8.19.1 WorkspaceEditApplyResultV2). */
+export interface WorkspaceEditApplyResultV2 {
+  transactionId: string;
+  disposition: "committed" | "partial" | "blocked" | "cancelled";
+  effects: readonly WorkspaceEditOperationEffect[];
+  nextOperationIndex: number | null;
+  resumeToken: string | null;
+}
+
+export function workspaceEditResumeToken(transactionId: string, operationIndex: number): string {
+  return `${transactionId}:${operationIndex}`;
+}
+
+export function parseWorkspaceEditResumeToken(token: string): {
+  transactionId: string;
+  operationIndex: number;
+} | null {
+  const match = token.match(/^(.*):(\d+)$/);
+  if (!match || !match[1]) return null;
+  const index = Number(match[2]);
+  if (!Number.isInteger(index) || index < 0) return null;
+  return { transactionId: match[1], operationIndex: index };
+}
+
+/**
+ * Slice an edit to the operations from `startOperationIndex` onward so a
+ * resume re-runs only the unapplied suffix. Fresh per-operation hash/version
+ * re-validation happens naturally because every remaining text operation
+ * re-reads disk or re-checks the open buffer before writing (§8.19.1).
+ */
+export function sliceWorkspaceEditForResume(
+  edit: LspWorkspaceEdit,
+  startOperationIndex: number,
+): LspWorkspaceEdit {
+  if (edit.operations?.length) {
+    return { ...edit, operations: edit.operations.slice(startOperationIndex) };
+  }
+  return { ...edit, documentEdits: edit.documentEdits.slice(startOperationIndex) };
+}
+
+/**
+ * Assemble the v2 whole-transaction result from ordered outcomes (§8.19.1):
+ * a first blocked/failed boundary stops the run, everything before it is
+ * committed or a confirmed no-op, and the resume token names the boundary.
+ */
+export function buildWorkspaceEditApplyResultV2(input: {
+  transactionId: string;
+  operations: readonly LspWorkspaceEditOperation[];
+  outcomes: readonly WorkspaceEditApplyOutcome[];
+  /** Shell-reported per-operation undo availability; defaults to unavailable. */
+  undoAvailability?: (
+    index: number,
+    kind: WorkspaceEditOperationEffect["kind"],
+    targetPath: string,
+  ) => "available" | "unavailable";
+}): WorkspaceEditApplyResultV2 {
+  const { transactionId, operations, outcomes, undoAvailability } = input;
+
+  // A null operationIndex means validation/confirmation refused before any
+  // mutation: declined previews are cancelled, hard failures are blocked.
+  const preMutation = outcomes.find((outcome) => outcome.operationIndex === null);
+  if (preMutation) {
+    return {
+      transactionId,
+      disposition: preMutation.status === "skipped" ? "cancelled" : "blocked",
+      effects: [],
+      nextOperationIndex: null,
+      resumeToken: null,
+    };
+  }
+
+  const effects: WorkspaceEditOperationEffect[] = [];
+  let failureBoundary: number | null = null;
+  for (const outcome of outcomes) {
+    if (outcome.operationIndex === null) continue;
+    const index = outcome.operationIndex;
+    const operation = operations[index];
+    const kind = operation?.kind ?? "text";
+    const targetPath = operation
+      ? (operation.kind === "rename"
+        ? operation.newPath ?? operation.newUri
+        : operation.kind === "text"
+          ? operation.document.path ?? operation.document.uri
+          : operation.path ?? operation.uri)
+      : outcome.path;
+    const sourcePath = operation?.kind === "rename"
+      ? operation.oldPath ?? operation.oldUri
+      : null;
+    const appliedOrSettled = outcome.status.startsWith("applied") || outcome.status === "noop";
+    if (!appliedOrSettled && failureBoundary === null) {
+      failureBoundary = index;
+    }
+    let result: WorkspaceEditOperationEffect["result"];
+    if (outcome.status === "applied-disk") {
+      result = outcome.result ?? null;
+    } else if (kind !== "text") {
+      result = outcome.status.startsWith("applied")
+        ? { kind: "committed", diskEffect: "committed", path: targetPath }
+        : {
+          kind: "failed",
+          diskEffect: "none",
+          path: targetPath,
+          message: outcome.status === "noop" ? "no-op" : ("reason" in outcome ? outcome.reason : "operation failed"),
+          recoveryId: null,
+        };
+    } else {
+      // Open-buffer-only edits carry no disk transaction fact.
+      result = null;
+    }
+    effects.push({
+      operationId: `${transactionId}:op-${index}`,
+      index,
+      kind,
+      sourcePath,
+      targetPath,
+      result,
+      undoState: appliedOrSettled
+        ? undoAvailability?.(index, kind, targetPath) ?? "unavailable"
+        : "unavailable",
+    });
+  }
+
+  if (failureBoundary === null) {
+    return {
+      transactionId,
+      disposition: "committed",
+      effects,
+      nextOperationIndex: null,
+      resumeToken: null,
+    };
+  }
+  return {
+    transactionId,
+    disposition: "partial",
+    effects,
+    nextOperationIndex: failureBoundary,
+    resumeToken: workspaceEditResumeToken(transactionId, failureBoundary),
+  };
 }
 
 export interface WorkspaceEditApplyHooks {
@@ -59,7 +231,12 @@ export interface WorkspaceEditApplyHooks {
     encoding?: string;
     bom?: boolean;
   } | null>;
-  /** Write disk contents for a closed file (with hash precheck when available). */
+  /**
+   * Write disk contents for a closed file through the shared save committer
+   * (§8.19.1): the hook returns the full typed effect result — including
+   * unknown-effect read-back classification and recovery ledger rows — and
+   * the caller must consume it instead of assuming success.
+   */
   writeDisk: (
     absolutePath: string,
     text: string,
@@ -67,7 +244,7 @@ export interface WorkspaceEditApplyHooks {
     encoding?: string,
     bom?: boolean,
     eol?: "lf" | "crlf" | "cr",
-  ) => Promise<void>;
+  ) => Promise<SaveCommitResult>;
   /** Apply LSP CreateFile semantics and synchronize workspace UI state. */
   createFile?: (operation: Extract<LspWorkspaceEditOperation, { kind: "create" }>) => Promise<void>;
   /** Apply LSP RenameFile semantics and synchronize workspace UI state. */
@@ -89,6 +266,11 @@ export interface WorkspaceEditApplyHooks {
    * file fallbacks for provider-supplied edits.
    */
   validateOperationPaths?: (operations: readonly LspWorkspaceEditOperation[]) => string | null;
+  /**
+   * Observes the edit actually applied after preview filtering/unchecking —
+   * resume slicing must use this edit, never the pre-confirmation original.
+   */
+  onActiveEditResolved?: (edit: LspWorkspaceEdit) => void;
 }
 
 async function applyTextDocumentEdit(
@@ -146,8 +328,23 @@ async function applyTextDocumentEdit(
       (disk.text.includes("\r\n") ? "crlf" : disk.text.includes("\r") && !disk.text.includes("\n") ? "cr" : "lf");
     const nextRaw = applyLspTextEditsToString(disk.text, file.edits);
     const next = normalizeLineEndings(nextRaw, diskEol);
-    await hooks.writeDisk(path, next, disk.hash, disk.encoding, disk.bom, diskEol);
-    return { operationIndex, path, status: "applied-disk" };
+    // §8.19.1: the shared committer's typed result decides the outcome — an
+    // uncertain write is never reported as applied.
+    const writeResult = await hooks.writeDisk(path, next, disk.hash, disk.encoding, disk.bom, diskEol);
+    if (writeResult.diskEffect === "committed") {
+      return { operationIndex, path, status: "applied-disk", result: writeResult };
+    }
+    const failureReason = writeResult.kind === "cancelled"
+      ? `closed-file write cancelled before write: ${writeResult.reason}`
+      : writeResult.error.message;
+    return {
+      operationIndex,
+      path,
+      status: "failed",
+      reason: writeResult.diskEffect === "unknown"
+        ? `${failureReason}; result unknown — resolve the file in the recovery center before retrying`
+        : failureReason,
+    };
   } catch (error) {
     return {
       operationIndex,
@@ -233,6 +430,7 @@ export async function applyWorkspaceEdit(
   }
   let activeEdit = edit;
   const preview = buildWorkspaceEditPreview(edit);
+  hooks.onActiveEditResolved?.(activeEdit);
   if (preview.requiresConfirmation && hooks.confirmWorkspaceEdit) {
     try {
       const confirmed = await hooks.confirmWorkspaceEdit(preview, edit);
@@ -247,6 +445,7 @@ export async function applyWorkspaceEdit(
       if (typeof confirmed === "object" && confirmed !== null) {
         activeEdit = confirmed;
       }
+      hooks.onActiveEditResolved?.(activeEdit);
     } catch (error) {
       return [{
         operationIndex: null,

@@ -6,6 +6,7 @@ import {
   isLegalSaveCommitTransition,
   nextSaveTransactionId,
   normalizeSaveEol,
+  resolveUnknownDiskResolution,
   resolveWritePolicy,
   SaveTransactionRegistry,
   saveCommitResultFromError,
@@ -348,5 +349,45 @@ describe("§8.18.1 unknown disk-effect verification", () => {
     const untyped = saveCommitResultFromError("tx-y", new Error("sync temp file: os error 5"));
     expect(untyped.error.kind).toBe("io");
     expect(untyped.diskEffect).toBeUndefined();
+  });
+});
+
+describe("§8.19.1 resolveUnknownDiskResolution (three-hash classification)", () => {
+  it("classifies observed == intended as confirmed-committed (case-insensitive)", () => {
+    expect(resolveUnknownDiskResolution({
+      intendedNewHash: "ABC123",
+      expectedOldHash: "old",
+      observedHash: "abc123",
+    })).toBe("confirmed-committed");
+  });
+
+  it("classifies observed == old as confirmed-none", () => {
+    expect(resolveUnknownDiskResolution({
+      intendedNewHash: "new",
+      expectedOldHash: "old",
+      observedHash: "old",
+    })).toBe("confirmed-none");
+  });
+
+  it("classifies any other hash as foreign-blocked", () => {
+    expect(resolveUnknownDiskResolution({
+      intendedNewHash: "new",
+      expectedOldHash: "old",
+      observedHash: "foreign",
+    })).toBe("foreign-blocked");
+  });
+
+  it("falls back to pending-readback when the read-back failed or intent is unknown", () => {
+    expect(resolveUnknownDiskResolution({
+      intendedNewHash: "new",
+      expectedOldHash: "old",
+      observedHash: null,
+    })).toBe("pending-readback");
+    // v3-migrated rows without a captured intent can only ever be pending.
+    expect(resolveUnknownDiskResolution({
+      intendedNewHash: null,
+      expectedOldHash: "old",
+      observedHash: "something",
+    })).toBe("foreign-blocked");
   });
 });

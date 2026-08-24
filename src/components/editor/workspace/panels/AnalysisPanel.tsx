@@ -314,7 +314,10 @@ export function AnalysisPanel({
               <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--taomni-code-muted)]">
                 <span data-testid={`analysis-evidence-kind-${evidence.kind}`}>{evidence.label}</span>
                 <span>{evidence.confidence} provider evidence</span>
-                <span data-testid="analysis-evidence-proof-level">{evidence.proofLevel}</span>
+                <span data-testid="analysis-evidence-proof-level">
+                  {evidence.proofLevel}
+                  {evidence.presentationHint ? ` (${evidence.presentationHint})` : ""}
+                </span>
                 <span>{evidence.source}</span>
               </div>
               {evidence.flowSteps.length > 0 && (

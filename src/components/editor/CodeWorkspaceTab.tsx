@@ -172,6 +172,7 @@ import {
 } from "./workspace/workspaceStyleController";
 import type {
   CompletionAcceptanceDiagnostic,
+  CompletionInvocationRequest,
   CompletionRequestIdentity,
   CompletionRequestToken,
 } from "./workspace/lspCompletion";
@@ -180,18 +181,22 @@ import {
   classifySaveWriteback,
   classifyUnknownDiskEffect,
   nextSaveTransactionId,
+  resolveUnknownDiskResolution,
   resolveWritePolicy,
   saveCommitResultFromError,
   SaveTransactionRegistry,
   validatePreparedSaveBoundary,
+  type DiskResolution,
   type PreparedSave,
   type SaveCommitResult,
 } from "./workspace/saveCommit";
 import {
-  hasUnverifiedUnknownDiskEffect,
+  hasBlockingDiskEffectResolution,
+  listDiskEffectLedgerEntries,
   recordDiskEffectLedgerEntry,
   resolveDiskEffectLedgerEntry,
   workspaceFileIdentity,
+  type WorkspaceDiskEffectLedgerEntryV4,
 } from "./workspace/workspaceRecovery";
 import {
   enforceTabPolicy,
@@ -199,6 +204,7 @@ import {
   DEFAULT_WORKSPACE_TAB_POLICY,
   type ClosedTabEntry,
 } from "./workspace/workspaceTabPolicy";
+import { attachWorkspaceMouseDispatcher } from "./workspace/workspaceMouseDispatcher";
 import {
   createWorkspaceLocationController,
   isPathContainedInRoot,
@@ -280,8 +286,12 @@ import { applyLspTextEditsToString } from "./workspace/lspTextEdits";
 import { isLargeFileContent } from "./workspace/largeFile";
 import {
   applyWorkspaceEdit,
+  buildWorkspaceEditApplyResultV2,
+  sliceWorkspaceEditForResume,
   summarizeWorkspaceEditOutcomes,
   workspaceEditApplyResponse,
+  type WorkspaceEditApplyHooks,
+  type WorkspaceEditApplyOutcome,
 } from "./workspace/workspaceEditApply";
 import { validateSemanticWorkspaceEditPaths } from "./workspace/semanticWorkspaceEdit";
 import {
@@ -305,6 +315,7 @@ import {
   type WorkspaceEditHistoryEntry,
   type WorkspaceEditPathSnapshot,
 } from "./workspace/workspaceEditHistory";
+import { makeSemanticRequestIdentity } from "./workspace/javaSemanticEvidence";
 import {
   buildSafeDeleteWorkspaceEdit,
   safeDeleteFileCount,
@@ -1144,6 +1155,16 @@ export function CodeWorkspaceTab({
   const pendingExternalFileEventsRef = useRef(new Map<string, PendingExternalFileEvent>());
   const [workspaceRecoveryEntries, setWorkspaceRecoveryEntries] = useState<WorkspaceRecoveryEntry[]>([]);
   const [workspaceRecoveryOpen, setWorkspaceRecoveryOpen] = useState(false);
+  /** §8.19.1 disk-effect ledger view state; bumped whenever rows are recorded/resolved. */
+  const [diskEffectLedgerRevision, setDiskEffectLedgerRevision] = useState(0);
+  const bumpDiskEffectLedger = useCallback(() => {
+    setDiskEffectLedgerRevision((revision) => revision + 1);
+  }, []);
+  const diskEffectLedgerEntries = useMemo(
+    () => listDiskEffectLedgerEntries(workspaceInstanceId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- revision drives refresh; rows only change through recorded/resolved events or workspace switches
+    [workspaceInstanceId, diskEffectLedgerRevision],
+  );
   const [fileEncodingDialogOpen, setFileEncodingDialogOpen] = useState(false);
   const pendingWorkspaceRecoveryKeysRef = useRef(new Set<string>());
   const invalidateSemanticAfterLspRestart = useCallback(() => {
@@ -1516,6 +1537,18 @@ export function CodeWorkspaceTab({
     error: null,
   });
   const referencesRequestSequenceRef = useRef(0);
+  // §8.19.7: pin ownership + rerun origin marker live above the panel so a
+  // new Find Usages asks before replacing a pinned session and rerun targets
+  // the recorded symbol identity instead of the current caret.
+  const referencesPinnedRef = useRef(false);
+  const [referencesPinned, setReferencesPinned] = useState(false);
+  referencesPinnedRef.current = referencesPinned;
+  const referencesRerunRef = useRef<{
+    fileKey: string;
+    uri: string;
+    position: LspPosition;
+    symbolName: string;
+  } | null>(null);
   const findReferencesRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<void>>(async () => {});
   const [callHierarchyRoot, setCallHierarchyRoot] = useState<HierarchyRootState | null>(null);
   const [typeHierarchyRoot, setTypeHierarchyRoot] = useState<HierarchyRootState | null>(null);
@@ -1782,7 +1815,11 @@ export function CodeWorkspaceTab({
     const entries = readWorkspaceRecoveryEntries(workspaceInstanceId);
     pendingWorkspaceRecoveryKeysRef.current = new Set(entries.map((entry) => entry.key));
     setWorkspaceRecoveryEntries(entries);
-    setWorkspaceRecoveryOpen(entries.length > 0);
+    // §8.19.1: unresolved disk-effect rows also open the recovery center so a
+    // previous session's committed-discarded/unknown writes are surfaced.
+    setWorkspaceRecoveryOpen(
+      entries.length > 0 || listDiskEffectLedgerEntries(workspaceInstanceId).length > 0,
+    );
   }, [workspaceInstanceId]);
 
   useEffect(() => {
@@ -2301,6 +2338,46 @@ export function CodeWorkspaceTab({
     setWorkspaceRecoveryOpen(remaining.length > 0);
     if (recovered > 1) setStatusMessage(`Recovered ${recovered} unsaved files`);
   }, [recoverWorkspaceEntry, setStatusMessage, workspaceInstanceId]);
+
+  /** §8.19.1: Acknowledge clears only the explicitly selected ledger row. */
+  const acknowledgeDiskEffectLedgerEntry = useCallback((entry: WorkspaceDiskEffectLedgerEntryV4) => {
+    resolveDiskEffectLedgerEntry(entry.workspaceId, entry.transactionId, entry.path);
+    bumpDiskEffectLedger();
+    setStatusMessage(`Acknowledged disk result for ${entry.path}`);
+  }, [bumpDiskEffectLedger, setStatusMessage]);
+
+  /** §8.19.1: Reopen loads the file as it exists on disk right now. */
+  const reopenDiskEffectLedgerFile = useCallback((entry: WorkspaceDiskEffectLedgerEntryV4) => {
+    // fileIdentity is `root:<rootId>:<path>` / `loose:<id>:<path>`; fall back
+    // to a root scan when only the absolute path is known.
+    const identity = entry.fileIdentity;
+    let ref: CodeWorkspaceFileRef | null = null;
+    if (identity.startsWith("root:")) {
+      const [, rootId, ...rest] = identity.split(":");
+      if (rootId && rest.length > 0) ref = { kind: "root", rootId, path: rest.join(":") };
+    } else if (identity.startsWith("loose:")) {
+      const [, id, ...rest] = identity.split(":");
+      if (id && rest.length > 0) ref = { kind: "loose", id, path: rest.join(":") };
+    }
+    if (!ref) {
+      const matchingRoot = roots.find(
+        (root) => entry.path.startsWith(root.path + "/") || entry.path === root.path,
+      );
+      if (matchingRoot) {
+        ref = {
+          kind: "root",
+          rootId: matchingRoot.id,
+          path: entry.path.slice(matchingRoot.path.length).replace(/^\/+/, ""),
+        };
+      }
+    }
+    if (!ref) {
+      setStatusMessage(`Cannot reopen ${entry.path}: it is outside the workspace roots`);
+      return;
+    }
+    void openFile(ref, { preview: true });
+    setStatusMessage(`Opened ${entry.path} from disk; compare it with your editor state before acknowledging`);
+  }, [openFile, roots, setStatusMessage]);
 
   const revealNavLocation = useCallback((key: string, position: { line: number; character: number }) => {
     revealNonceRef.current += 1;
@@ -3781,28 +3858,263 @@ export function CodeWorkspaceTab({
 
   /**
    * Record one unresolved unknown-effect ledger row for the recovery center
-   * (§8.18.1): blocks automatic retries against this path until verified.
+   * (§8.19.1): the row carries the native intent hash (non-null whenever the
+   * encoded bytes were computed) and its blocking is decided by `resolution`
+   * — a foreign observed hash never counts as verified.
    */
   const recordUnknownDiskEffect = useCallback((
     prepared: PreparedSave,
     observedHash: string | null,
+    intendedNewHash: string | null,
   ): void => {
+    const resolution: DiskResolution = resolveUnknownDiskResolution({
+      intendedNewHash,
+      expectedOldHash: prepared.expectedDiskHash,
+      observedHash,
+    });
     recordDiskEffectLedgerEntry({
+      schemaVersion: 4,
       workspaceId: prepared.workspaceId,
       transactionId: prepared.transactionId,
+      operationId: "save",
       path: prepared.filePath,
       fileIdentity: (() => {
         const file = openFilesRef.current[prepared.fileKey];
         return file ? workspaceFileIdentity(file.ref) : prepared.filePath;
       })(),
       expectedOldHash: prepared.expectedDiskHash,
-      intendedNewHash: null,
+      intendedNewHash,
       observedHash,
       diskEffect: "unknown",
+      memoryEffect: "unchanged",
+      providerEffect: "unknown",
+      resolution,
       createdAt: Date.now(),
-      lastVerifiedAt: observedHash !== null ? Date.now() : null,
+      // Only confirmed resolutions may claim verification; blocked rows keep
+      // a null timestamp so no legacy field can act as "unblocked".
+      verifiedAt: resolution === "confirmed-committed" || resolution === "confirmed-none"
+        ? Date.now()
+        : null,
+      resolvedAt: null,
     });
-  }, []);
+    bumpDiskEffectLedger();
+  }, [bumpDiskEffectLedger]);
+
+  /**
+   * Record the fact that bytes provably landed on disk but every editor
+   * writeback was discarded (§8.19.1): the recovery center shows
+   * "saved to disk, buffer state discarded" with Reopen/Acknowledge instead
+   * of silently dropping a real disk effect.
+   */
+  const recordCommittedDiscardLedgerEntry = useCallback((
+    prepared: PreparedSave,
+    writtenHash: string,
+  ): void => {
+    const now = Date.now();
+    const entry: WorkspaceDiskEffectLedgerEntryV4 = {
+      schemaVersion: 4,
+      workspaceId: prepared.workspaceId,
+      transactionId: prepared.transactionId,
+      operationId: "save",
+      path: prepared.filePath,
+      fileIdentity: prepared.fileKey.startsWith("closed:")
+        ? prepared.fileKey.slice("closed:".length)
+        : (() => {
+          const file = openFilesRef.current[prepared.fileKey];
+          return file ? workspaceFileIdentity(file.ref) : prepared.filePath;
+        })(),
+      expectedOldHash: prepared.expectedDiskHash,
+      intendedNewHash: writtenHash,
+      observedHash: writtenHash,
+      diskEffect: "committed",
+      memoryEffect: "writeback-discarded",
+      providerEffect: "discarded",
+      resolution: "confirmed-committed",
+      createdAt: now,
+      verifiedAt: now,
+      resolvedAt: null,
+    };
+    recordDiskEffectLedgerEntry(entry);
+    bumpDiskEffectLedger();
+  }, [bumpDiskEffectLedger]);
+
+  /**
+   * Shared closed-file committer (§8.19.1). Closed-file WorkspaceEdit writes
+   * go through the same PreparedSave identity, byte writer, unknown-effect
+   * read-back, recovery ledger and generation-gated watcher effects as
+   * open-buffer saves, and return the full typed result — callers must never
+   * treat an uncertain write as success.
+   */
+  const commitClosedFilePreparedSave = useCallback(async (
+    prepared: PreparedSave,
+  ): Promise<SaveCommitResult> => {
+    const registry = saveTransactionRegistryRef.current;
+    const owner = registry.begin(prepared.workspaceId, prepared.fileKey, prepared.transactionId);
+    try {
+      // Snapshot current disk contents before bulk WorkspaceEdit writes.
+      try {
+        let oldText: string | null = null;
+        for (const root of rootsRef.current) {
+          const rel = relativePathWithinRoot(root.path, prepared.filePath);
+          if (rel === null) continue;
+          try {
+            oldText = (await workspaceReadFile(root.path, rel)).text;
+          } catch {
+            oldText = null;
+          }
+          break;
+        }
+        if (oldText == null) {
+          try {
+            oldText = (await workspaceReadLooseFile(prepared.filePath)).text;
+          } catch {
+            oldText = null;
+          }
+        }
+        if (oldText != null && oldText.length <= 2 * 1024 * 1024) {
+          await historySnapshot(prepared.filePath, oldText, "replace").catch(() => null);
+        }
+      } catch {
+        // Best-effort history; never block the edit write.
+      }
+
+      let ack: WorkspaceWriteAck;
+      try {
+        ack = await writeTextSnapshot({
+          filePath: prepared.filePath,
+          logicalText: prepared.text,
+          expectedDiskHash: prepared.expectedDiskHash,
+          policy: prepared.policy,
+        });
+      } catch (writeError) {
+        // Same typed classification as open-buffer commits (§8.19.1).
+        const mapped = saveCommitResultFromError(prepared.transactionId, writeError);
+        if (mapped.diskEffect !== "unknown") {
+          return mapped.kind === "conflict"
+            ? {
+              kind: "conflict",
+              transactionId: prepared.transactionId,
+              diskEffect: "none",
+              memoryEffect: "unchanged",
+              providerEffect: "not-sent",
+              error: mapped.error,
+            }
+            : {
+              kind: "failed",
+              transactionId: prepared.transactionId,
+              diskEffect: "none",
+              memoryEffect: "unchanged",
+              providerEffect: "not-sent",
+              error: mapped.error,
+            };
+        }
+        // The bridge could not prove whether bytes landed: verify against the
+        // real on-disk hash before reporting anything.
+        const observed = await readBackDiskSnapshot(prepared);
+        const verification = classifyUnknownDiskEffect({
+          writtenHash: mapped.error.writtenHash,
+          expectedOldHash: prepared.expectedDiskHash,
+          observedHash: observed?.hash ?? null,
+        });
+        const intendedHash = mapped.error.intentHash ?? mapped.error.writtenHash ?? null;
+        if (verification.outcome === "committed" && observed) {
+          // Intended bytes are provably on disk; continue as committed.
+          ack = {
+            file: {
+              path: prepared.filePath,
+              text: observed.text,
+              encoding: observed.encoding ?? prepared.policy.encoding,
+              bom: observed.bom ?? prepared.policy.bom,
+              size: observed.size ?? 0,
+              mtime: observed.mtime ?? 0,
+              hash: observed.hash,
+            },
+            writtenHash: mapped.error.writtenHash ?? observed.hash,
+            writtenByteLength: mapped.error.writtenByteLength ?? 0,
+            atomicReplaceUsed: true,
+          };
+        } else if (verification.outcome === "none") {
+          // Verified zero disk effect — clear any stale ledger row for this
+          // exact transaction/path only.
+          resolveDiskEffectLedgerEntry(prepared.workspaceId, prepared.transactionId, prepared.filePath);
+          return {
+            kind: mapped.kind,
+            transactionId: prepared.transactionId,
+            diskEffect: "none",
+            memoryEffect: "unchanged",
+            providerEffect: "not-sent",
+            error: mapped.error,
+          } as SaveCommitResult;
+        } else {
+          recordUnknownDiskEffect(
+            prepared,
+            verification.outcome === "foreign" ? verification.observedHash : observed?.hash ?? null,
+            intendedHash,
+          );
+          return {
+            kind: "failed",
+            transactionId: prepared.transactionId,
+            diskEffect: "unknown",
+            memoryEffect: "unchanged",
+            providerEffect: "unknown",
+            error: mapped.error,
+            recoveryId: prepared.transactionId,
+          };
+        }
+      }
+
+      // Disk acknowledged. Watcher notify is generation-gated like every
+      // other writeback side effect.
+      if (!registry.check(owner).active) {
+        recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
+        return {
+          kind: "committed-writeback-discarded",
+          transactionId: prepared.transactionId,
+          diskEffect: "committed",
+          memoryEffect: "writeback-discarded",
+          providerEffect: "discarded",
+          file: ack.file,
+          reason: "Closed-file write owner was discarded during the write",
+        };
+      }
+      await lspWorkspaceDidChangeWatchedFiles(prepared.workspaceId, [{
+        path: prepared.filePath,
+        type: 2,
+      }]).catch(() => 0);
+      if (!registry.check(owner).active) {
+        recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
+        return {
+          kind: "committed-writeback-discarded",
+          transactionId: prepared.transactionId,
+          diskEffect: "committed",
+          memoryEffect: "writeback-discarded",
+          providerEffect: "discarded",
+          file: ack.file,
+          reason: "Owner lost after watcher notify",
+        };
+      }
+      // A settled closed-file write clears its own ledger row for this path
+      // only (§8.19.1).
+      resolveDiskEffectLedgerEntry(prepared.workspaceId, prepared.transactionId, prepared.filePath);
+      // No open buffer owns this write: no didSave is sent and nothing merges
+      // back into memory ("saved-current" reports only the disk fact).
+      return {
+        kind: "saved-current",
+        transactionId: prepared.transactionId,
+        diskEffect: "committed",
+        memoryEffect: "saved-current",
+        providerEffect: "not-sent",
+        file: ack.file,
+      };
+    } finally {
+      registry.settle(owner);
+    }
+  }, [
+    readBackDiskSnapshot,
+    recordCommittedDiscardLedgerEntry,
+    recordUnknownDiskEffect,
+    writeTextSnapshot,
+  ]);
 
   /** Typed cancellation with provably zero disk effect (§8.18.1). */
   function cancelledSaveCommit(
@@ -3936,11 +4248,13 @@ export function CodeWorkspaceTab({
                   error: mapped.error,
                 };
             } else {
-              // Foreign content or unreadable: create a recovery entry and
-              // never auto-retry this path until a user verifies it.
+              // Foreign content or unreadable: create a recovery entry with
+              // the native intent hash and never auto-retry this path until a
+              // user resolves it (§8.19.1).
               recordUnknownDiskEffect(
                 prepared,
                 verification.outcome === "foreign" ? verification.observedHash : observed?.hash ?? null,
+                mapped.error.intentHash ?? mapped.error.writtenHash ?? null,
               );
               return {
                 kind: "failed",
@@ -3977,7 +4291,9 @@ export function CodeWorkspaceTab({
         const ownerAfterWrite = registry.check(owner);
         if (!ownerAfterWrite.active) {
           // Bytes landed on disk, but the owning buffer/tab/workspace is gone:
-          // discard writeback, watcher, git/semantic and LSP side effects.
+          // discard writeback, watcher, git/semantic and LSP side effects and
+          // leave a recovery row the user can Reopen/Acknowledge (§8.19.1).
+          recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
           return {
             kind: "committed-writeback-discarded",
             transactionId: prepared.transactionId,
@@ -3996,6 +4312,7 @@ export function CodeWorkspaceTab({
         if (writeback.kind === "discarded") {
           // Buffer closed while the writer was in flight: the disk write is
           // real, but no buffer or provider state may be resurrected.
+          recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
           return {
             kind: "committed-writeback-discarded",
             transactionId: prepared.transactionId,
@@ -4018,6 +4335,7 @@ export function CodeWorkspaceTab({
           }]).catch(() => 0);
         }
         if (!registry.check(owner).active) {
+          recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
           return {
             kind: "committed-writeback-discarded",
             transactionId: prepared.transactionId,
@@ -4055,7 +4373,9 @@ export function CodeWorkspaceTab({
         );
 
         if (!registry.check(owner).active) {
-          // Closed between merge and provider sync; skip didSave/didChange.
+          // Closed between merge and provider sync; skip didSave/didChange
+          // and leave the committed recovery row for Reopen/Acknowledge.
+          recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
           return {
             kind: "committed-writeback-discarded",
             transactionId: prepared.transactionId,
@@ -4148,6 +4468,7 @@ export function CodeWorkspaceTab({
     mutateOpenBuffer,
     notifyWorkspacePathGitChanged,
     readBackDiskSnapshot,
+    recordCommittedDiscardLedgerEntry,
     recordUnknownDiskEffect,
     saveLspDocument,
     semanticIndex.invalidate,
@@ -4173,10 +4494,11 @@ export function CodeWorkspaceTab({
       throw new Error(`${file.title} is a read-only library source`);
     }
 
-    // §8.18.1: an unverified unknown-effect ledger row blocks automatic
-    // retries against the same path until a re-read confirms the real bytes.
+    // §8.19.1: a `pending-readback`/`foreign-blocked` ledger row blocks
+    // automatic retries against the same path until a re-read confirms the
+    // real bytes or the user resolves the row.
     const pendingUnknownPath = absolutePathForOpenFile(file) ?? file.path ?? file.title;
-    if (hasUnverifiedUnknownDiskEffect(workspaceInstanceId, pendingUnknownPath)) {
+    if (hasBlockingDiskEffectResolution(workspaceInstanceId, pendingUnknownPath)) {
       throw new Error(
         `A previous save of ${file.subtitle} has an unverified disk result. Confirm the file contents in the recovery center before saving again.`,
       );
@@ -6577,7 +6899,10 @@ export function CodeWorkspaceTab({
     const beforeTabs = beforeSnapshots
       ? captureWorkspaceEditTabSnapshot(beforeSnapshots.map((snapshot) => snapshot.path))
       : null;
-    const outcomes = await applyWorkspaceEdit(edit, {
+    // §8.19.1: the edit actually applied after preview filtering drives any
+    // resume slicing — never the pre-confirmation original.
+    let resolvedEdit = edit;
+    const buildHooks = (allowPreview: boolean): WorkspaceEditApplyHooks => ({
       resolvePath: (file) => {
         if (file.path) return normalizeFsPath(file.path);
         return null;
@@ -6648,8 +6973,8 @@ export function CodeWorkspaceTab({
         // Replay metadata is the authoritative prior state for undo; it wins
         // over applier defaults but both flow through the single policy
         // resolution shared with open-buffer saves (§8.17.1 step 1). The
-        // closed-file path builds the same PreparedSave identity and byte
-        // writer contract as open-buffer commits.
+        // closed-file path goes through the same shared committer as every
+        // other write and returns its full typed result (§8.19.1).
         const prepared = buildPreparedSave({
           transactionId: nextSaveTransactionId(),
           workspaceId: workspaceInstanceId,
@@ -6667,52 +6992,7 @@ export function CodeWorkspaceTab({
             },
           }),
         });
-        const registry = saveTransactionRegistryRef.current;
-        const owner = registry.begin(prepared.workspaceId, prepared.fileKey, prepared.transactionId);
-        try {
-          // Snapshot current disk contents before bulk WorkspaceEdit writes.
-          try {
-            let oldText: string | null = null;
-            for (const root of rootsRef.current) {
-              const rel = relativePathWithinRoot(root.path, absolutePath);
-              if (rel === null) continue;
-              try {
-                oldText = (await workspaceReadFile(root.path, rel)).text;
-              } catch {
-                oldText = null;
-              }
-              break;
-            }
-            if (oldText == null) {
-              try {
-                oldText = (await workspaceReadLooseFile(absolutePath)).text;
-              } catch {
-                oldText = null;
-              }
-            }
-            if (oldText != null && oldText.length <= 2 * 1024 * 1024) {
-              await historySnapshot(absolutePath, oldText, "replace").catch(() => null);
-            }
-          } catch {
-            // Best-effort history; never block the edit write.
-          }
-          await writeTextSnapshot({
-            filePath: prepared.filePath,
-            logicalText: prepared.text,
-            expectedDiskHash: prepared.expectedDiskHash,
-            policy: prepared.policy,
-          });
-
-          // Watcher notify is generation-gated like every other writeback side
-          // effect; a discarded owner must not resurrect provider state.
-          if (!registry.check(owner).active) return;
-          await lspWorkspaceDidChangeWatchedFiles(prepared.workspaceId, [{
-            path: absolutePath,
-            type: 2,
-          }]).catch(() => 0);
-        } finally {
-          registry.settle(owner);
-        }
+        return commitClosedFilePreparedSave(prepared);
       },
       confirmChangeAnnotations: async (annotations) => {
         const visible = annotations.slice(0, 8);
@@ -6730,7 +7010,7 @@ export function CodeWorkspaceTab({
           confirmLabel: "Apply",
         });
       },
-      confirmWorkspaceEdit: options.preview
+      confirmWorkspaceEdit: allowPreview && options.preview
         ? (preview: WorkspaceEditPreview, edit: LspWorkspaceEdit) => {
             if (preview.usages.length > 0) {
               return new Promise<boolean | LspWorkspaceEdit>((resolve) => {
@@ -6780,6 +7060,49 @@ export function CodeWorkspaceTab({
       renameFile: (operation) => applyLspResourceOperation(operation),
       deleteFile: (operation) => applyLspResourceOperation(operation),
     });
+    let outcomes = await applyWorkspaceEdit(edit, buildHooks(true));
+    // §8.19.1: per-operation effect ledger with an explicit resume boundary.
+    // A partial run stops at the failed operation; the user may re-run the
+    // unapplied suffix, and every remaining text operation re-validates its
+    // disk hash / open-buffer version before writing.
+    const applyTransactionId = nextSaveTransactionId("tx-wedit");
+    const historySafePaths = new Set(
+      (beforeSnapshots ?? [])
+        .filter((snapshot) => snapshot.exists && snapshot.text !== null)
+        .map((snapshot) => fsPathComparisonKey(snapshot.path)),
+    );
+    const buildApplyResult = (runs: WorkspaceEditApplyOutcome[]) => buildWorkspaceEditApplyResultV2({
+      transactionId: applyTransactionId,
+      operations: workspaceEditOperations(resolvedEdit),
+      outcomes: runs,
+      undoAvailability: beforeSnapshots
+        ? (_index, _kind, targetPath) => historySafePaths.has(fsPathComparisonKey(targetPath)) ? "available" : "unavailable"
+        : undefined,
+    });
+    {
+      const applyResult = buildApplyResult(outcomes);
+      if (
+        applyResult.disposition === "partial"
+        && applyResult.nextOperationIndex !== null
+        && options.recordHistory !== false
+      ) {
+        // Bounded resume loop; each pass re-applies only the unapplied suffix.
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const totalCount = workspaceEditOperations(resolvedEdit).length;
+          const resume = await confirmAppDialog({
+            title: "Workspace edit partially applied",
+            message: `${applyResult.nextOperationIndex} of ${totalCount} changes were applied. `
+              + `Retry the remaining ${totalCount - applyResult.nextOperationIndex} from the failed boundary?`,
+            confirmLabel: "Retry remaining changes",
+          });
+          if (!resume) break;
+          resolvedEdit = sliceWorkspaceEditForResume(resolvedEdit, applyResult.nextOperationIndex);
+          outcomes = await applyWorkspaceEdit(resolvedEdit, buildHooks(false));
+          const nextResult = buildApplyResult(outcomes);
+          if (nextResult.disposition !== "partial" || nextResult.nextOperationIndex === null) break;
+        }
+      }
+    }
     if (outcomes.some((outcome) => (
       outcome.status === "applied-create"
       || outcome.status === "applied-rename"
@@ -6841,6 +7164,7 @@ export function CodeWorkspaceTab({
     applyLspResourceOperation,
     captureWorkspaceEditPathSnapshots,
     captureWorkspaceEditTabSnapshot,
+    commitClosedFilePreparedSave,
     formatWorkspaceEditPreview,
     isLspDocumentSynced,
     lspDocumentVersion,
@@ -8474,8 +8798,11 @@ export function CodeWorkspaceTab({
       title: "Save Active File",
       category: "File",
       keybinding: "Ctrl+S",
-      when: () => !!activeFile?.dirty && !activeFile.loading && !activeFile.saving,
-      run: () => void saveFile(),
+      when: () => {
+        const file = openFilesRef.current[activeKeyRef.current ?? ""];
+        return !!file?.dirty && !file.loading && !file.saving;
+      },
+      run: () => void saveFile(activeKeyRef.current),
     },
     {
       id: "workspace.closeActiveEditorTab",
@@ -8893,6 +9220,18 @@ export function CodeWorkspaceTab({
     actionsController.host.setKeymapScheme(activeKeymapScheme);
   }, [actionsController.host, activeKeymapScheme]);
 
+  // §8.19.2: one workspace-root mouse dispatcher; unbound gestures (text
+  // selection, editing) pass through untouched. Re-attach only when the
+  // element or host instance changes.
+  const mouseHostRef = useRef(actionsController.host);
+  mouseHostRef.current = actionsController.host;
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return undefined;
+    const attached = attachWorkspaceMouseDispatcher(mouseHostRef.current, root);
+    return () => attached.dispose();
+  }, [visible]);
+
   const applyKeymapScheme = useCallback((scheme: KeymapSchemeV3) => {
     setKeymapSchemes((schemes) => {
       const exists = schemes.some((entry) => entry.id === scheme.id);
@@ -9085,7 +9424,14 @@ export function CodeWorkspaceTab({
         void closeFromTabSwitcherRef.current();
         return;
       }
-      void actionsController.dispatchKeydown(event, { eventTarget: event.target });
+      // §8.19.2: dispatch through the typed V2 entry — IME composition,
+      // dead keys and AltGr are rejected before any binding match and never
+      // swallow characters; chord waits/conflicts are explicit results.
+      void actionsController.dispatchKeydownV2({
+        event,
+        workspaceId: workspaceInstanceId,
+        targetViewId: activeEditorCommandOwner()?.fileKey ?? null,
+      });
     };
     // Modifier-release commit cannot be a keydown action; it stays a keyup
     // listener and commits on whichever platform modifier started the cycle.
@@ -9219,6 +9565,8 @@ export function CodeWorkspaceTab({
       position: LspPosition,
       triggerCharacter: string | null,
       token: CompletionRequestToken,
+      // §8.19.4 repeated-call facts; forwarded to the provider adapter.
+      invocation?: CompletionInvocationRequest,
     ): Promise<LspCompletionResult | null> => {
       // Always resolve against the live buffer (openFilesRef), not the React
       // prop — typing is batched into the store and the prop is often one
@@ -9234,7 +9582,7 @@ export function CodeWorkspaceTab({
       if (!descriptor) return null;
       const epoch = lspDocumentEpochRef.current[live.key] ?? 0;
       try {
-        const result = await lspCompletion(descriptor, position, triggerCharacter);
+        const result = await lspCompletion(descriptor, position, triggerCharacter, invocation);
         // Drop only when the buffer moved again while IPC was in flight; CM
         // re-queries on the next keystroke / incomplete list.
         if (!openFilesRef.current[live.key]) return null;
@@ -9783,6 +10131,19 @@ export function CodeWorkspaceTab({
 
   const findReferences = useCallback(
     async (file: OpenFileState, position: LspPosition) => {
+      // §8.19.7 pin safety: a pinned session is never silently overwritten —
+      // the user decides whether this request replaces it.
+      if (referencesPinnedRef.current) {
+        const replacePinned = await confirmAppDialog({
+          title: "Replace Pinned Usages",
+          message: "The references result is pinned. Replace it with a new Find Usages session?",
+          confirmLabel: "Replace",
+        });
+        if (!replacePinned) {
+          setStatusMessage("Kept the pinned usages result; new request cancelled");
+          return;
+        }
+      }
       referencesRequestSequenceRef.current += 1;
       const requestId = referencesRequestSequenceRef.current;
       setBottomDockOpen(true);
@@ -9824,6 +10185,34 @@ export function CodeWorkspaceTab({
       }
       const buildToken = semanticIndex.beginBuild("language-server");
       try {
+        // §8.19.7 real identity + origin symbol key: name comes from the
+        // provider's rename range when available (fallback: word at caret),
+        // so rerun targets the same symbol rather than whatever sits under
+        // the caret later.
+        let symbolRange: LspRange | null = null;
+        try {
+          const prepared = await lspPrepareRename(descriptor, position);
+          symbolRange = prepared.range ?? null;
+        } catch {
+          symbolRange = null;
+        }
+        const lines = live.text.split("\n");
+        const lineText = lines[position.line] ?? "";
+        const symbolName = (symbolRange
+          && symbolRange.start.line === symbolRange.end.line
+          ? lineText.slice(symbolRange.start.character, symbolRange.end.character).trim()
+          : "")
+          || lineText.slice(position.character).match(/^[A-Za-z0-9_$]+/)?.[0]
+          || "";
+        const identity = makeSemanticRequestIdentity({
+          workspaceId: workspaceInstanceId,
+          fileKey: live.key,
+          uri: descriptor.documentUri ?? descriptor.filePath,
+          position,
+          documentRevision: live.documentRevision ?? 0,
+          providerGeneration: lspSessionGeneration(),
+          workspaceRoots: rootsRef.current.map((root) => root.path),
+        });
         const result = await lspReferences(descriptor, position, true);
         updateLspStatusForFile(live, result.status);
         const completion = semanticIndex.finishQuery(buildToken, {
@@ -9844,6 +10233,7 @@ export function CodeWorkspaceTab({
           return;
         }
         if (referencesRequestSequenceRef.current !== requestId) return;
+        referencesRerunRef.current = { fileKey: live.key, uri: identity.uri, position, symbolName };
         setReferencesResult({
           loading: false,
           origin: live.subtitle,
@@ -9851,6 +10241,8 @@ export function CodeWorkspaceTab({
           error: null,
           semanticGeneration: buildToken.generation,
           semanticRevision: buildToken.revision,
+          symbolName,
+          identity,
         });
         setStatusMessage(`${result.locations.length} reference${result.locations.length === 1 ? "" : "s"} found`);
       } catch (err) {
@@ -9878,6 +10270,19 @@ export function CodeWorkspaceTab({
     ],
   );
   findReferencesRef.current = findReferences;
+
+  // §8.19.7 rerun: replay against the recorded origin uri+position marker so
+  // the same symbol identity is re-queried even after the caret moved.
+  const rerunFindReferences = useCallback(() => {
+    const marker = referencesRerunRef.current;
+    if (!marker) return;
+    const live = openFilesRef.current[marker.fileKey];
+    if (!live) {
+      setStatusMessage("The usages session's origin buffer is closed; reopen it to rerun");
+      return;
+    }
+    void findReferences(live, marker.position);
+  }, [findReferences, setStatusMessage]);
 
   const showEditorContextMenu = useCallback((
     file: OpenFileState,
@@ -12344,6 +12749,9 @@ export function CodeWorkspaceTab({
                 roots={roots}
                 semanticIndex={semanticIndex.snapshot}
                 onOpenLocation={(location) => void openLspLocation(location)}
+                pinned={referencesPinned}
+                onPinChange={setReferencesPinned}
+                onRerun={rerunFindReferences}
               />
             ),
           },
@@ -12675,7 +13083,7 @@ export function CodeWorkspaceTab({
           onCancel={() => dismissExternalFileConflict(externalFileConflicts[0]!.key)}
         />
       )}
-      {visible && workspaceRecoveryOpen && workspaceRecoveryEntries.length > 0 && externalFileConflicts.length === 0 && (
+      {visible && workspaceRecoveryOpen && (workspaceRecoveryEntries.length > 0 || diskEffectLedgerEntries.length > 0) && externalFileConflicts.length === 0 && (
         <WorkspaceRecoveryDialog
           entries={workspaceRecoveryEntries}
           onRecover={(entry) => {
@@ -12685,6 +13093,9 @@ export function CodeWorkspaceTab({
           onRecoverAll={recoverAllWorkspaceEntries}
           onDiscardAll={discardAllWorkspaceRecoveryEntries}
           onClose={() => setWorkspaceRecoveryOpen(false)}
+          ledgerEntries={diskEffectLedgerEntries}
+          onAcknowledgeLedgerEntry={acknowledgeDiskEffectLedgerEntry}
+          onReopenLedgerEntry={reopenDiskEffectLedgerFile}
         />
       )}
       {visible && fileEncodingDialogOpen && activeFile && !activeFile.library && (

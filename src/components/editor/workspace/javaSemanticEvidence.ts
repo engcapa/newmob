@@ -59,8 +59,42 @@ export function projectFingerprint(inputs: ProjectFingerprintInputs): string {
   return `pf-${hash.toString(16)}-${parts.length}`;
 }
 
-export type UsageRole = "declaration" | "read" | "write" | "unknown";
-export type UsageOwner = "workspace" | "dependency-source" | "decompiled" | "external";
+/**
+ * Mint a real request identity for one semantic call (§8.19.7). Callers pass
+ * whatever fingerprint inputs they actually track; untracked inputs stay
+ * honestly empty instead of being fabricated, so the fingerprint covers
+ * exactly the state the caller can prove.
+ */
+export function makeSemanticRequestIdentity(input: {
+  workspaceId: string;
+  fileKey: string;
+  uri: string;
+  position: LspPosition;
+  documentRevision: number;
+  providerGeneration: number;
+  workspaceRoots?: readonly string[];
+  buildFileStates?: readonly { path: string; hash: string | null }[];
+}): SemanticRequestIdentity {
+  return {
+    workspaceId: input.workspaceId,
+    fileKey: input.fileKey,
+    uri: input.uri,
+    position: input.position,
+    documentRevision: input.documentRevision,
+    providerGeneration: input.providerGeneration,
+    requestId: `${input.workspaceId}:${input.fileKey}:${input.documentRevision}:${input.position.line}:${input.position.character}`,
+    projectFingerprint: projectFingerprint({
+      workspaceRoots: input.workspaceRoots ?? [],
+      buildFileStates: input.buildFileStates ?? [],
+      languageLevel: null,
+      jdkVersion: null,
+      classpathGeneration: null,
+      providerGeneration: input.providerGeneration,
+    }),
+  };
+}
+
+export type UsageRole = "declaration" | "read" | "write" | "unknown";export type UsageOwner = "workspace" | "dependency-source" | "decompiled" | "external";
 
 export interface UsageItem {
   id: string;
