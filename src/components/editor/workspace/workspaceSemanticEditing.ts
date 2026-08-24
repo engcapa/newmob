@@ -7,6 +7,8 @@
  */
 
 import type { ChangeSpec } from "@codemirror/state";
+import type { LspRange } from "../../../lib/editor/lsp";
+import type { SemanticRequestIdentity } from "./javaSemanticEvidence";
 
 export type CompletionMode = "basic" | "smart-type-matching";
 
@@ -48,6 +50,45 @@ export function smartCompletionGate(input: {
 }
 
 // ---------------------------------------------------------------------------
+// §8.19.8 typed provenance — every semantic edit names where its edits came
+// from, and syntax-tree provenance REQUIRES real node facts.
+// ---------------------------------------------------------------------------
+
+/**
+ * Provenance of a semantic edit (§8.19.8). A plan may only claim
+ * `syntax-tree` when the caller actually resolved a live parse node aligned
+ * to the edited range; whole-line text templates stay `local-text`, and
+ * provider-backed edits carry their command/action identity.
+ */
+export type SemanticEditSource =
+  | { kind: "local-text"; ruleId: string }
+  | { kind: "syntax-tree"; languageId: string; nodeType: string; treeRevision: number }
+  | { kind: "provider"; providerId: string; generation: number; commandOrKind: string };
+
+/**
+ * Evidence envelope attached to an applied semantic edit. `identity` is null
+ * for purely local edits (no provider request exists to identify) — the type
+ * in the contract is honoured by provider-backed plans, which always mint one.
+ */
+export interface SemanticEditEvidenceV2 {
+  identity: SemanticRequestIdentity | null;
+  source: SemanticEditSource;
+  selectionNodeRange: LspRange | null;
+  parseErrorsInScope: boolean;
+  completeness: "partial" | "complete";
+}
+
+/** Syntax facts a caller observed from a live parse tree (may be absent). */
+export interface SemanticSyntaxFacts {
+  /** Node type exactly aligned to the edited range, or null when none matches. */
+  alignedNodeType: string | null;
+  /** Document/tree generation counter of the observing editor state. */
+  treeRevision: number;
+  selectionNodeRange: LspRange | null;
+  parseErrorsInScope: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // SemanticEditPlan union shared by statement/surround/generate entries
 // ---------------------------------------------------------------------------
 
@@ -58,10 +99,27 @@ export type SemanticEditPlan =
     changes: readonly ChangeSpec[];
     /** Selection anchor/head in POST-image coordinates. */
     selection: { anchor: number; head: number };
-    source: "syntax-tree";
-    evidence: { languageId: string; rule: string };
+    provenance: SemanticEditSource;
+    evidenceV2: SemanticEditEvidenceV2;
   }
   | { kind: "unavailable"; reason: string; detail: string };
+
+function localEvidence(ruleId: string, syntax: SemanticSyntaxFacts | null | undefined): {
+  provenance: SemanticEditSource;
+  evidenceV2: SemanticEditEvidenceV2;
+} {
+  const source: SemanticEditSource = { kind: "local-text", ruleId };
+  return {
+    provenance: source,
+    evidenceV2: {
+      identity: null,
+      source,
+      selectionNodeRange: syntax?.selectionNodeRange ?? null,
+      parseErrorsInScope: syntax?.parseErrorsInScope ?? false,
+      completeness: "partial",
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Complete Statement (conservative; uncertain cases no-op with a reason)
@@ -116,6 +174,12 @@ export const SURROUND_KINDS: readonly SurroundKind[] = [
   { id: "runnable", title: "Surround with Runnable", languages: ["java"] },
 ];
 
+/** Kinds the Surround dialog may offer for one language (§8.19.8). */
+export function surroundKindsForLanguage(languageId: string | null): readonly SurroundKind[] {
+  if (!languageId) return [];
+  return SURROUND_KINDS.filter((kind) => kind.languages.includes(languageId));
+}
+
 export interface SurroundSelectionFacts {
   text: string;
   /** Absolute document offsets of the selected range. */
@@ -126,6 +190,12 @@ export interface SurroundSelectionFacts {
   rangeCount: number;
   readOnly: boolean;
   languageId: string;
+  /**
+   * Facts observed from a live parse tree, when the caller has one. Absent
+   * (or non-aligned / error-containing) facts keep the plan honest as a
+   * `local-text` template — never syntax-tree provenance.
+   */
+  syntax?: SemanticSyntaxFacts | null;
 }
 
 const TEMPLATES: Record<SurroundKind["id"], (_body: string, indent: string) => { head: string[]; bodyIndent: string; foot: string[] }> = {
@@ -209,8 +279,165 @@ export function surroundWithPlan(
     title: kind.title,
     changes: [{ from: facts.from, to: facts.to, insert }],
     selection: { anchor: facts.from + caretInInsert, head: facts.from + caretInInsert },
-    source: "syntax-tree",
-    evidence: { languageId: facts.languageId, rule: `surround.${kind.id}` },
+    ...buildSurroundProvenance(kindId, facts),
+  };
+}
+
+/**
+ * §8.19.8 provenance for a surround plan. Syntax-tree claims require an
+ * exactly-aligned parse node with no parse errors in scope; everything else
+ * — including every whole-line template applied without tree evidence — is
+ * labelled local-text and never displayed as Semantic.
+ */
+function buildSurroundProvenance(
+  kindId: SurroundKind["id"],
+  facts: SurroundSelectionFacts,
+): { provenance: SemanticEditSource; evidenceV2: SemanticEditEvidenceV2 } {
+  const ruleId = `surround.${kindId}`;
+  const syntax = facts.syntax;
+  if (
+    !syntax
+    || !syntax.alignedNodeType
+    || syntax.parseErrorsInScope
+    || !syntax.selectionNodeRange
+  ) {
+    return localEvidence(ruleId, syntax);
+  }
+  const source: SemanticEditSource = {
+    kind: "syntax-tree",
+    languageId: facts.languageId,
+    nodeType: syntax.alignedNodeType,
+    treeRevision: syntax.treeRevision,
+  };
+  return {
+    provenance: source,
+    evidenceV2: {
+      identity: null,
+      source,
+      selectionNodeRange: syntax.selectionNodeRange,
+      parseErrorsInScope: false,
+      completeness: "complete",
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §8.19.8 Complete Statement strategy (per-language)
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of the Complete Statement strategy. `exact` carries syntax-tree
+ * provenance backed by real node facts; `local` delegates to the shipped
+ * local heuristic which UI/telemetry MUST label Local/Heuristic; anything
+ * ambiguous is an explicit `unavailable` with a reason instead of a guess.
+ */
+export type CompleteStatementOutcome =
+  | {
+    kind: "exact";
+    /** Absolute offset of the inserted terminator. */
+    insertSemicolonAt: number;
+    provenance: SemanticEditSource;
+    evidenceV2: SemanticEditEvidenceV2;
+  }
+  | { kind: "local"; ruleId: string }
+  | { kind: "unavailable"; reason: string };
+
+/** Java statement nodes whose terminator is unambiguous (first batch). */
+const JAVA_TERMINATED_NODES = new Set([
+  "ExpressionStatement",
+  "ReturnStatement",
+  "ThrowStatement",
+]);
+
+function lineHasUnterminatedStringOrComment(lineText: string): boolean {
+  const trimmedStart = lineText.trimStart();
+  const code = trimmedStart.replace(/\/\/.*$/, "");
+  if (/\/\*/.test(code) && !code.includes("*/")) return true;
+  let escaped = false;
+  let open: string | null = null;
+  for (const char of code) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (open) {
+      if (char === open) open = null;
+    } else if (char === '"' || char === "'") {
+      open = char;
+    }
+  }
+  return open !== null;
+}
+
+/**
+ * Decide how Complete Statement may run for the caret line (§8.19.8).
+ * Java first batch: explicit expression statements and return/throw get a
+ * syntax-tree-proven `;` only when the live tree aligns exactly and parses
+ * cleanly; every other shape stays on the clearly-labelled local heuristic.
+ */
+export function completeStatementStrategy(input: {
+  languageId: string;
+  readOnly: boolean;
+  caretCount: number;
+  lineText: string;
+  syntax: SemanticSyntaxFacts | null;
+}): CompleteStatementOutcome {
+  if (input.readOnly) return { kind: "unavailable", reason: "Read-only editor" };
+  if (!input.lineText.trim()) return { kind: "local", ruleId: "completeStatement.blank-line" };
+  if (input.caretCount > 1) {
+    return { kind: "unavailable", reason: "Multi-caret statement completion is ambiguous" };
+  }
+
+  if (input.languageId !== "java") {
+    // First batch is Java-only; other languages stay on the labelled
+    // local heuristic rather than borrowing Java's node vocabulary.
+    return { kind: "local", ruleId: "completeStatement.local" };
+  }
+
+  if (lineHasUnterminatedStringOrComment(input.lineText)) {
+    return { kind: "unavailable", reason: "Unterminated string or comment on the caret line" };
+  }
+
+  const syntax = input.syntax;
+  if (!syntax || !syntax.alignedNodeType) {
+    // No node evidence available (parser missing or tree not parsed yet):
+    // the conservative local heuristic remains, labelled Local/Heuristic.
+    return { kind: "local", ruleId: "completeStatement.local" };
+  }
+  if (syntax.parseErrorsInScope) {
+    return { kind: "unavailable", reason: "Parse errors in scope prevent a safe statement completion" };
+  }
+
+  if (!JAVA_TERMINATED_NODES.has(syntax.alignedNodeType)) {
+    // Block boundaries, headers and declarations are NOT upgraded to
+    // semantics — they remain local-template work under an honest label.
+    return { kind: "local", ruleId: "completeStatement.local" };
+  }
+  if (/;\s*$/.test(input.lineText)) {
+    return { kind: "local", ruleId: "completeStatement.newline-below" };
+  }
+
+  const source: SemanticEditSource = {
+    kind: "syntax-tree",
+    languageId: input.languageId,
+    nodeType: syntax.alignedNodeType,
+    treeRevision: syntax.treeRevision,
+  };
+  return {
+    kind: "exact",
+    insertSemicolonAt: input.lineText.replace(/\s+$/, "").length,
+    provenance: source,
+    evidenceV2: {
+      identity: null,
+      source,
+      selectionNodeRange: syntax.selectionNodeRange,
+      parseErrorsInScope: false,
+      completeness: "complete",
+    },
   };
 }
 
@@ -221,8 +448,17 @@ export function surroundWithPlan(
 /** Provider CodeAction kinds that count as generate candidates. */
 const GENERATE_ACTION_KIND_PREFIXES = ["source.generate.", "refactor.extract.", "source."];
 
-export function filterGenerateCodeActions(actions: readonly { title: string; kind?: string | null }[]): Array<{ title: string; kind: string }> {
-  return actions
-    .filter((action) => !!action.kind && GENERATE_ACTION_KIND_PREFIXES.some((prefix) => action.kind!.startsWith(prefix)))
-    .map((action) => ({ title: action.title, kind: action.kind! }));
+/**
+ * §8.19.8: keep only provider generate/refactor kinds, preserving the FULL
+ * original action so the workflow can execute exactly what the provider sent
+ * — no local member templates are ever synthesized from these titles.
+ */
+export function filterGenerateCodeActions<T extends { title: string; kind?: string | null }>(
+  actions: readonly T[],
+): Array<{ item: T; title: string; kind: string }> {
+  return actions.flatMap((action) => (
+    action.kind && GENERATE_ACTION_KIND_PREFIXES.some((prefix) => action.kind!.startsWith(prefix))
+      ? [{ item: action, title: action.title, kind: action.kind }]
+      : []
+  ));
 }

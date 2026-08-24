@@ -4988,6 +4988,106 @@ end_of_record
       const active = rendered.container.querySelector("[data-editor-tab-key][data-active=true]");
       expect(active?.getAttribute("data-editor-tab-key")).toBe("root:app:other.ts");
     });
+
+    it("refuses Backspace close for pinned tabs and keeps the switcher open (§8.19.6)", async () => {
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-switcher-pin",
+        workspaceInstanceId: "instance-switcher-pin",
+        name: "Switcher Pin",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([
+        entry("src", "src", "dir"),
+        entry("other.ts", "other.ts"),
+      ]);
+      workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) =>
+        file(path, "const value = 1;\n"));
+
+      renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+      fireEvent.click(screen.getByTestId("code-workspace-tree-file"));
+      await screen.findByTitle("app / other.ts");
+
+      // MRU is [other, main]: index 1 preselects main.ts. Pin it directly in
+      // its group so Backspace must refuse instead of closing protected work.
+      // The Switcher freezes its snapshot at open time, so the pin must be
+      // committed to the tree BEFORE the popup opens to be part of it.
+      await act(async () => {
+        useCodeWorkspaceStore.getState().updateEditorGroup("instance-switcher-pin", "primary", (group) => ({
+          ...group,
+          pinnedKeys: [...group.pinnedKeys, "root:app:src/main.ts"],
+        }));
+      });
+
+      fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+      const switcher = await screen.findByTestId("workspace-tab-switcher");
+      expect(switcher.querySelector('[data-switcher-selected="true"]')?.textContent).toContain("main.ts");
+      expect(switcher.querySelector('[data-switcher-selected="true"]')?.textContent).toContain("📌");
+
+      fireEvent.keyDown(window, { key: "Backspace" });
+      await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("pinned"));
+      // Protected work stays open and the popup remains up for another pick.
+      expect(screen.getByTestId("workspace-tab-switcher")).toBeInTheDocument();
+      expect(
+        selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-switcher-pin")
+          .editorGroups.primary?.openOrder,
+      ).toContain("root:app:src/main.ts");
+
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+
+    it("reopens a closed tab into the nearest surviving split after its leaf closes (§8.19.6)", async () => {
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-switcher-reopen",
+        workspaceInstanceId: "instance-switcher-reopen",
+        name: "Switcher Reopen",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([
+        entry("src", "src", "dir"),
+        entry("other.ts", "other.ts"),
+      ]);
+      workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) =>
+        file(path, path === "src/main.ts" ? "const main = 1;\n" : "const other = 2;\n"));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+      // Split right: the new leaf owns main.ts and becomes active…
+      fireEvent.click(screen.getByTestId("code-workspace-split-right"));
+      await waitFor(() => expect(
+        selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-switcher-reopen").splitOrientation,
+      ).toBe("vertical"));
+      // …then other.ts opens in THAT leaf, recording its location evidence.
+      fireEvent.click(screen.getByTestId("code-workspace-tree-file"));
+      await screen.findByTitle("app / other.ts");
+
+      // Close other.ts (clean tab → direct close, captures ReopenLocationV2).
+      fireEvent.keyDown(window, { key: "f4", ctrlKey: true });
+      await waitFor(() => {
+        const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-switcher-reopen");
+        expect(Object.values(ui.editorGroups).some((g) => g.openOrder.includes("root:app:other.ts"))).toBe(false);
+      });
+
+      // Collapse the split: other.ts's owning leaf disappears entirely.
+      fireEvent.click(screen.getByTestId("code-workspace-split-close"));
+      await waitFor(() => expect(
+        selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-switcher-reopen").splitOrientation,
+      ).toBeNull());
+
+      // Reopen resolves against the LIVE collapsed tree → relocated sibling.
+      fireEvent.keyDown(window, { key: "t", shiftKey: true, ctrlKey: true });
+      await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("former tab group"));
+      await waitFor(() => {
+        const active = rendered.container.querySelector("[data-editor-tab-key][data-active=true]");
+        expect(active?.getAttribute("data-editor-tab-key")).toBe("root:app:other.ts");
+      });
+    }, 20000);
   });
 
   describe("P0-S / N1.7 Atomic Save Commit Host Race Tests", () => {

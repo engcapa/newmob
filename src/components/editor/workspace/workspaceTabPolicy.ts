@@ -7,6 +7,8 @@
  * only computes decisions so property tests can pin the semantics.
  */
 
+import { getAllLeafNodes, type LayoutNode, type LeafGroupNode } from "./recursiveLayoutTree";
+
 export interface WorkspaceTabPolicyV2 {
   schemaVersion: 2;
   limitPerLeaf: number;
@@ -28,6 +30,115 @@ export const DEFAULT_WORKSPACE_TAB_POLICY: WorkspaceTabPolicyV2 = {
   previewEnabled: true,
   reusePreview: true,
 };
+
+// ---------------------------------------------------------------------------
+// §8.19.6 Tab Policy V3: per-workspace persistence with field-level repair
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceTabPolicyV3 {
+  schemaVersion: 3;
+  limitPerLeaf: number;
+  order: "mru" | "alphabetical" | "open-order";
+  openPosition: "end" | "after-active";
+  activateOnClose: "mru" | "left" | "right";
+  pinnedRow: "same" | "separate";
+  /** §8.19.6 previewMode: single-click opens a reusable preview tab. */
+  previewMode: boolean;
+  reusePreview: boolean;
+}
+
+export const DEFAULT_WORKSPACE_TAB_POLICY_V3: WorkspaceTabPolicyV3 = {
+  schemaVersion: 3,
+  limitPerLeaf: 12,
+  order: "open-order",
+  openPosition: "end",
+  activateOnClose: "mru",
+  pinnedRow: "same",
+  previewMode: true,
+  reusePreview: true,
+};
+
+/** Helpers accept either generation — they only read shared fields. */
+export type AnyWorkspaceTabPolicy = WorkspaceTabPolicyV2 | WorkspaceTabPolicyV3;
+
+const POLICY_ORDERS: readonly WorkspaceTabPolicyV3["order"][] = ["mru", "alphabetical", "open-order"];
+const POLICY_OPEN_POSITIONS: readonly WorkspaceTabPolicyV3["openPosition"][] = ["end", "after-active"];
+const POLICY_ACTIVATE_ON_CLOSE: readonly WorkspaceTabPolicyV3["activateOnClose"][] = ["mru", "left", "right"];
+const POLICY_PINNED_ROWS: readonly WorkspaceTabPolicyV3["pinnedRow"][] = ["same", "separate"];
+
+/**
+ * §8.19.6 migration/normalization. Accepts persisted JSON of any shape:
+ * v2 objects migrate (previewEnabled→previewMode), v3 passes through, and
+ * every unknown/corrupt field falls back individually to its default. The
+ * raw payload is returned as `backup` whenever ANY repair happened, so the
+ * caller can keep the original on disk before overwriting.
+ */
+export function migrateWorkspaceTabPolicy(raw: unknown): {
+  policy: WorkspaceTabPolicyV3;
+  repairedFields: readonly string[];
+  backup: unknown;
+} {
+  const repairedFields: string[] = [];
+  const source = (raw != null && typeof raw === "object" && !Array.isArray(raw)
+    ? raw
+    : {}) as Record<string, unknown>;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { policy: { ...DEFAULT_WORKSPACE_TAB_POLICY_V3 }, repairedFields: ["*"], backup: raw ?? null };
+  }
+
+  const pickEnum = <T extends string>(field: string, allowed: readonly T[], fallback: T): T => {
+    const value = source[field];
+    if (typeof value === "string" && (allowed as readonly string[]).includes(value)) return value as T;
+    repairedFields.push(field);
+    return fallback;
+  };
+  const pickNumber = (field: string, fallback: number, min: number, max: number): number => {
+    const value = source[field];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const clamped = Math.min(max, Math.max(min, Math.round(value)));
+      if (clamped !== value) repairedFields.push(field);
+      return clamped;
+    }
+    repairedFields.push(field);
+    return fallback;
+  };
+  const pickBoolean = (field: string, fallback: boolean): boolean => {
+    const value = source[field];
+    if (typeof value === "boolean") return value;
+    repairedFields.push(field);
+    return fallback;
+  };
+
+  // v2 payloads carry previewEnabled instead of previewMode.
+  let previewMode = pickBoolean("previewMode", DEFAULT_WORKSPACE_TAB_POLICY_V3.previewMode);
+  if (!("previewMode" in source) && typeof source.previewEnabled === "boolean") {
+    previewMode = source.previewEnabled;
+    repairedFields.push("previewMode(migrated-from-v2)");
+  }
+
+  const schemaVersion: WorkspaceTabPolicyV3["schemaVersion"] = source.schemaVersion === 3
+    ? 3
+    : (() => {
+      repairedFields.push("schemaVersion");
+      return 3 as const;
+    })();
+
+  const policy: WorkspaceTabPolicyV3 = {
+    schemaVersion,
+    limitPerLeaf: pickNumber("limitPerLeaf", DEFAULT_WORKSPACE_TAB_POLICY_V3.limitPerLeaf, 1, 100),
+    order: pickEnum("order", POLICY_ORDERS, DEFAULT_WORKSPACE_TAB_POLICY_V3.order),
+    openPosition: pickEnum("openPosition", POLICY_OPEN_POSITIONS, DEFAULT_WORKSPACE_TAB_POLICY_V3.openPosition),
+    activateOnClose: pickEnum("activateOnClose", POLICY_ACTIVATE_ON_CLOSE, DEFAULT_WORKSPACE_TAB_POLICY_V3.activateOnClose),
+    pinnedRow: pickEnum("pinnedRow", POLICY_PINNED_ROWS, DEFAULT_WORKSPACE_TAB_POLICY_V3.pinnedRow),
+    previewMode,
+    reusePreview: pickBoolean("reusePreview", DEFAULT_WORKSPACE_TAB_POLICY_V3.reusePreview),
+  };
+  return {
+    policy,
+    repairedFields,
+    backup: repairedFields.length > 0 ? raw : null,
+  };
+}
 
 /** Metadata the eviction decision needs for one open tab. */
 export interface TabEvictionMeta {
@@ -56,7 +167,7 @@ export type TabEvictionResult =
 export function enforceTabPolicy(
   keys: readonly string[],
   meta: ReadonlyMap<string, TabEvictionMeta>,
-  policy: WorkspaceTabPolicyV2,
+  policy: AnyWorkspaceTabPolicy,
 ): TabEvictionResult {
   if (policy.limitPerLeaf <= 0 || keys.length <= policy.limitPerLeaf) {
     return { kind: "within-limit" };
@@ -89,7 +200,7 @@ export function enforceTabPolicy(
 export function orderTabsForDisplay(
   keys: readonly string[],
   meta: ReadonlyMap<string, TabEvictionMeta>,
-  policy: WorkspaceTabPolicyV2,
+  policy: AnyWorkspaceTabPolicy,
 ): readonly string[] {
   if (policy.order === "open-order") return keys;
   const sorted = [...keys].sort((left, right) => {
@@ -117,7 +228,7 @@ export function selectActivateOnClose(
   closedKey: string,
   activeKey: string | null,
   lastUsedByKey: ReadonlyMap<string, number>,
-  policy: WorkspaceTabPolicyV2,
+  policy: AnyWorkspaceTabPolicy,
 ): string | null {
   if (activeKey !== closedKey) return null;
   const index = keys.indexOf(closedKey);
@@ -156,6 +267,117 @@ export interface ClosedTabEntry {
   subtitle: string;
   leafPath: readonly string[];
   closedAt: number;
+}
+
+export interface ClosedTabEntry {
+  /** Stable identity (`root:<rootId>:<path>` / `loose:<id>:<path>`). */
+  fileIdentity: string;
+  ref: unknown;
+  title: string;
+  subtitle: string;
+  leafPath: readonly string[];
+  closedAt: number;
+  /**
+   * §8.19.6 structured relocation evidence captured at close time; entries
+   * without one fall back to plain reactivation.
+   */
+  location?: ReopenLocationV2;
+}
+
+/**
+ * §8.19.6 structured location of a closed tab, resolved against the CURRENT
+ * tree at reopen time so splits closed/reshuffled afterwards still land the
+ * file in the closest surviving editor.
+ */
+export interface ReopenLocationV2 {
+  /** Leaf that owned the tab at close time (may no longer exist). */
+  leafId: string | null;
+  /** Child-index route from the root, recorded as first/second steps. */
+  treeRoute: readonly ("first" | "second")[];
+  /** Other tabs that shared the closed tab's leaf — relocation evidence. */
+  siblingFileKeys: readonly string[];
+}
+
+/** Record the root→leaf child-index route as first/second steps. */
+export function buildReopenTreeRoute(
+  tree: LayoutNode,
+  leafId: string,
+): ReadonlyArray<"first" | "second"> {
+  const route: Array<"first" | "second"> = [];
+  let node: LayoutNode = tree;
+  while (node.type === "split") {
+    const index = node.children.findIndex((child) => containsLeaf(child, leafId));
+    if (index < 0) break;
+    route.push(index === 0 ? "first" : "second");
+    node = node.children[Math.min(Math.max(index, 0), node.children.length - 1)];
+  }
+  return route;
+}
+
+function containsLeaf(node: LayoutNode, leafId: string): boolean {
+  if (node.type === "leaf") return node.id === leafId;
+  return node.children.some((child) => containsLeaf(child, leafId));
+}
+
+export type ReopenResolution =
+  | { kind: "restored"; leafId: string }
+  | { kind: "relocated"; leafId: string; reason: "route" | "sibling" | "active" };
+
+/**
+ * Resolve where a closed tab should reopen against the LIVE tree (§8.19.6
+ * order): original leafId → nearest surviving ancestor along treeRoute →
+ * leaf owning the most siblingFileKeys → active leaf. Always resolves to a
+ * real leaf of a non-empty tree.
+ */
+export function resolveReopenLocation(
+  tree: LayoutNode,
+  location: ReopenLocationV2,
+  activeLeafId: string | null,
+): ReopenResolution {
+  const leaves = getAllLeafNodes(tree);
+  if (leaves.length === 0) {
+    // Unreachable while §8.16.4 guarantees a materialized single-leaf tree.
+    throw new Error("resolveReopenLocation requires a non-empty layout tree");
+  }
+  if (location.leafId != null) {
+    const original = leaves.find((leaf) => leaf.id === location.leafId);
+    if (original) return { kind: "restored", leafId: original.id };
+  }
+
+  // Nearest surviving ancestor along the recorded route — only counts as a
+  // route match when we actually DESCENDED from the root; a fully-collapsed
+  // tree carries no route signal and defers to sibling/active evidence.
+  let node: LayoutNode = tree;
+  let descended = false;
+  for (const step of location.treeRoute) {
+    if (node.type !== "split") break;
+    const index = step === "first" ? 0 : Math.min(1, node.children.length - 1);
+    const next = node.children[index];
+    if (!next) break;
+    node = next;
+    descended = true;
+  }
+  if (descended) {
+    const byRoute = node.type === "leaf"
+      ? node
+      : getAllLeafNodes(node)[0] ?? null;
+    if (byRoute) return { kind: "relocated", leafId: byRoute.id, reason: "route" };
+  }
+
+  // Leaf currently owning the most sibling tabs.
+  let best: LeafGroupNode | null = null;
+  let bestCount = 0;
+  for (const leaf of leaves) {
+    const count = leaf.openFileKeys.filter((key) => location.siblingFileKeys.includes(key)).length;
+    if (count > bestCount) {
+      bestCount = count;
+      best = leaf;
+    }
+  }
+  if (best) return { kind: "relocated", leafId: best.id, reason: "sibling" };
+
+  const fallback = leaves.find((leaf) => leaf.id === activeLeafId) ?? leaves[0];
+  return { kind: "relocated", leafId: fallback!.id, reason: "active" };
 }
 
 /**

@@ -18,6 +18,7 @@ import {
   formatCodeStyleLabel,
   type ExplicitIndentationOverride,
   type CodeStyleSource,
+  type SchemeStyleFields,
 } from "./codeStyleModel";
 import type {
   CodeStyleProvenance,
@@ -52,6 +53,8 @@ export interface ResolveStyleOptions {
   filePath: string;
   explicitOverride?: ExplicitIndentationOverride | null;
   text?: string;
+  /** §8.19.9 R8-D1 active scheme fields; layered BELOW EditorConfig. */
+  activeSchemeFields?: SchemeStyleFields | null;
 }
 
 export interface DiskTextSnapshot {
@@ -244,6 +247,11 @@ export class WorkspaceStyleController {
 
   async resolveForFile(options: ResolveStyleOptions): Promise<ResolvedCodeStyle> {
     const { filePath, explicitOverride, text } = options;
+    // §8.19.9 R8-D1: the active scheme layers below EditorConfig — its
+    // indentation fields also suppress sniffed detection (explicit intent).
+    const scheme = options.activeSchemeFields ?? null;
+    const schemeDefinesIndentation = scheme != null
+      && (scheme.insertSpaces !== undefined || scheme.indentSize !== undefined);
     const matchingRoot = this.findMatchingRoot(filePath);
     const langDefault = defaultLanguageCodeStyle(filePath);
     const provenance: CodeStyleProvenance = {};
@@ -328,6 +336,14 @@ export class WorkspaceStyleController {
         tabSize = insertSpaces ? indentSize : 4;
         provenance.tab_width = { source: "language", rawValue: String(tabSize) };
       }
+    } else if (scheme && schemeDefinesIndentation) {
+      insertSpaces = scheme.insertSpaces ?? langDefault.insertSpaces;
+      indentSize = scheme.indentSize ?? langDefault.indentSize;
+      tabSize = scheme.tabSize ?? (insertSpaces ? indentSize : 4);
+      effectiveSource = "scheme";
+      provenance.indent_style = { source: "scheme", rawValue: insertSpaces ? "space" : "tab" };
+      provenance.indent_size = { source: "scheme", rawValue: String(indentSize) };
+      provenance.tab_width = { source: "scheme", rawValue: String(tabSize) };
     } else {
       provenance.indent_style = { source: "language", rawValue: insertSpaces ? "space" : "tab" };
       provenance.indent_size = { source: "language", rawValue: String(indentSize) };
@@ -366,7 +382,7 @@ export class WorkspaceStyleController {
       };
     }
 
-    if (!explicitOverride && !hasEditorConfigIndent && text && text.trim().length > 0) {
+    if (!explicitOverride && !hasEditorConfigIndent && !schemeDefinesIndentation && text && text.trim().length > 0) {
       const sniffed = sniffIndentation(text);
       const sniffedSpaces = sniffed.type === "spaces";
       if (sniffedSpaces !== langDefault.insertSpaces || sniffed.size !== langDefault.indentSize) {
@@ -392,12 +408,15 @@ export class WorkspaceStyleController {
     return {
       tabSize,
       indentSize,
-      continuationIndent: indentSize * 2,
+      continuationIndent: scheme?.continuationIndent ?? indentSize * 2,
       insertSpaces,
-      endOfLine: mergedProperties.end_of_line,
+      // Scheme fills gaps only — EditorConfig entries always win.
+      endOfLine: mergedProperties.end_of_line ?? scheme?.endOfLine,
       charset: mergedProperties.charset,
-      trimTrailingWhitespace: mergedProperties.trim_trailing_whitespace,
-      insertFinalNewline: mergedProperties.insert_final_newline,
+      trimTrailingWhitespace:
+        mergedProperties.trim_trailing_whitespace ?? scheme?.trimTrailingWhitespace,
+      insertFinalNewline:
+        mergedProperties.insert_final_newline ?? scheme?.insertFinalNewline,
       source: effectiveSource,
       label,
       provenance,

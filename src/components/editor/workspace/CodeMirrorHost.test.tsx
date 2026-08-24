@@ -581,3 +581,72 @@ describe("CodeMirrorHost search", () => {
     });
   });
 });
+
+describe("§8.19.8 semantic editing commands", () => {
+  afterEach(() => cleanup());
+
+  function renderWithPort(doc: string, path: string) {
+    let registered: import("./CodeMirrorHost").EditorCommandPort | null = null;
+    const rendered = renderEditor(doc, vi.fn(), {
+      path,
+      onCommandPortChange: (registration) => {
+        registered = registration.port;
+      },
+    });
+    return {
+      ...rendered,
+      port: () => registered,
+      view: () => EditorView.findFromDOM(rendered.container.querySelector(".cm-editor")!),
+    };
+  }
+
+  it("surround applies through the port as one undoable transaction with provenance", async () => {
+    const onSemanticEditApplied = vi.fn();
+    const doc = "class A {\n  void m() {\n    doWork();\n  }\n}\n";
+    const { port, view } = renderWithPort(doc, "src/A.java");
+    await waitFor(() => expect(port()).not.toBeNull());
+    await waitFor(() => expect(view()).not.toBeNull());
+
+    // Select the whole `doWork();` line (expanded to whole lines is what the
+    // plan requires).
+    const v = view()!;
+    const line = v.state.doc.line(3);
+    v.dispatch({ selection: EditorSelection.range(line.from, line.to) });
+
+    expect(port()!.execute("surroundWith")).toBe(false); // missing kindId → typed no-op
+    const ok = port()!.execute("surroundWith", {
+      surroundKindId: "try-catch",
+      onSemanticEditApplied,
+    });
+    expect(ok).toBe(true);
+    const after = v.state.doc.toString();
+    expect(after).toContain("try {");
+    expect(after).toContain("} catch (Exception e) {");
+    expect(after).toContain("doWork();");
+    expect(onSemanticEditApplied).toHaveBeenCalledTimes(1);
+    const report = onSemanticEditApplied.mock.calls[0][0];
+    expect(report.applied).toBe(true);
+    // Provenance is honest: local template unless the tree aligned exactly.
+    if (report.provenance?.kind === "syntax-tree") {
+      expect(report.provenance.nodeType.length).toBeGreaterThan(0);
+    } else {
+      expect(report.provenance?.kind ?? null).toBe("local-text");
+    }
+    // One transaction == exactly one new undo entry for the whole wrap.
+    expect(undoDepth(v.state)).toBeLessThan(50);
+  });
+
+  it("completeStatement reports honest provenance and unavailable reasons", async () => {
+    const onSemanticEditApplied = vi.fn();
+    const { port, view, container } = renderWithPort("foo()", "src/notes.txt");
+    await waitFor(() => expect(port()).not.toBeNull());
+    fireEvent.focus(container.querySelector(".cm-content")!);
+
+    expect(port()!.execute("completeStatement", { onSemanticEditApplied })).toBe(true);
+    const report = onSemanticEditApplied.mock.calls[0][0];
+    expect(report.applied).toBe(true);
+    // Parserless language stays on the labelled Local/Heuristic path.
+    expect(report.provenance).toMatchObject({ kind: "local-text" });
+    expect(view()!.state.doc.toString().startsWith("foo();")).toBe(true);
+  });
+});

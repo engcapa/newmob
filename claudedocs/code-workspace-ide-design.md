@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-24 · 版本：v4.54（R6 usages session/reference service as-built；v4.53 R3 全包：a/b 于 `cb07c95c`、c 于 `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-25 · 版本：v4.60（R8-D1 `5ef8609e`、D2 `62a52adc`；v4.59 R8 四项 ADR；v4.58 R5-b ①② `827fec82`、③④ `64a43314`；v4.57 R5-a `5cae5f7a`；v4.56 R4 `2fcc9f47`；v4.55 R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R8 决策完成且 Code Style 交付——SSR/dependency/Full Line defer（typed unavailable + 重开条件），R8-D1 scheme store/UI+provenance 与 D2 reformat planner 以单测/集成闭合（jsdom 级，三端未跑）；R7 生产代码合同闭合（无真实 jdtls trace、无 IDEA 对照）；R4 生产代码合同闭合（History 设置界面未接、region 折叠标签未收口）；R5 生产代码合同闭合（jsdom 级；policy 编辑 UI、display-order/activateOnClose 接线、QA C4 全流程与三端 native 开放）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4101,11 +4101,11 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 2 | [x] **R1 Action/Keymap runtime single truth** | editable 基础已接，dispatcher 不完整 → **业务键位全部迁入 ActionHost + typed V2 gate/chord/mouse dispatcher（v4.52，工作树），三端 native 未运行** | 所有用户命令可发现、可改键、可拒绝 IME/AltGr 误触发 | R0 的 typed-result 命名约定 |
 | 3 | [ ] **R2 QA catalog 与可执行 workflow 修复** | audit 红、核心 YAML 占位 | catalog current，G0/G1 browser cases 真正操作并断言 | R0/R1 同步提供 testid；基线修复可先行 |
 | 4 | [x] **R3 real jdtls Basic Completion acceptance** | synthetic L2 → **R3-a/b 生产代码合同（cb07c95c）+ R3-c 真实 fixture/runner/trace：五项目九场景 Linux 实机全绿，provider 层 G1 L2（v4.53）** | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 ✅（IDEA 对照录制与三端仍开放） | R1；effectful edits 依赖 R0 |
-| 5 | [ ] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial | G1 多光标/视觉列闭环，G3 history/reference 分项可用 | R1 |
-| 6 | [ ] **R5 Tool-window registry/tab policy/split operations** | layout wired，workflow partial | G1 Switcher/tabs/splits 使用真实状态并持久化 | R1 |
+| 5 | [x] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial → **history ring V2（sensitive/限额/单删）+ Paste-from-History 弹层、Paste-as-Plain-Text、Copy Reference 候选模型、VisualColumnPosition/overflow StateField + End/click/type/backspace/paste 消费（v4.56）；Settings 接线、region 折叠标签、native clipboard 权限未做** | G1 多光标/视觉列闭环 ✅（jsdom 级），G3 history/reference 分项可用 ✅ | R1 |
+| 6 | [x] **R5 Tool-window registry/tab policy/split operations** | 模型+接线 → **R5-a 模型（v4.57）之上，R5-b 全部接线：Switcher 冻结 registry 快照、tabPolicy 随 layout snapshot 迁移读写（backup 留档）、equalize/stretch/unsplit-all/navigation/move-tab reducers+actions、Backspace 分级关闭 + ReopenLocationV2 结构化重开（v4.58）；policy 编辑 UI、order projection/activateOnClose 接线、QA C4 全流程与三端 native 未做** | G1 Switcher/tabs/splits 使用真实状态并持久化 ✅（jsdom 级；L2 待 QA C4 实跑） | R1 |
 | 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial → **usages session 生产合同（真实 identity/rerun/pin/角色诚实/库过滤）+ 五 kind 类型化服务通道闭合（v4.54）；Parameter Info 改道、refactorApplyGate 第二消费方、真实 trace 未闭合** | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
-| 8 | [ ] **R7 Semantic editing/Surround/Generate** | local heuristic / Smart unavailable | provenance 诚实，Java syntax/provider 子集可用 | R1、R3、R6 |
-| 9 | [ ] **R8 Advanced suite productionize-or-defer** | appearance wired，其余模型居多 | SSR/dependency/Full Line/code style 每项有明确产品决策 | R1；按子项依赖 R3/R6 |
+| 8 | [x] **R7 Semantic editing/Surround/Generate** | 谎报 syntax-tree / try-catch 硬编码 / Generate 只有 filter → **provenance 类型化（local-text/syntax-tree/provider，node evidence 强制）、Surround 五 kind 同一 action/dialog/单事务、Generate 全链路真实 provider CodeAction、Complete Statement Java 首批 syntax-backed + 其余 Local/Heuristic 标注（v4.55）；真实 jdtls trace 与 IDEA 对照未运行** | provenance 诚实，Java syntax/provider 子集可用 ✅（trace/对照仍开放） | R1、R3、R6 |
+| 9 | [x] **R8 Advanced suite productionize-or-defer** | 决策+交付：四项 ADR（v4.59）A/B/C **defer**（typed unavailable、零误导入口、重开条件挂账）；R8-D1 scheme 生产 store/管理 UI/provenance（`5ef8609e`）、R8-D2 reformat planner 接管 Format 动作（`62a52adc`）（v4.60）；scheme.saveActions 未消费、exclusion/directory scope 关闭、三端 native 未跑 | 每项有明确产品决策 ✅；Code Style 首批 selection/file 可用 ✅（jsdom 级） | R1；按子项依赖 R3/R6 |
 | 10 | [ ] **R9 Native three-platform/performance/IME/a11y gate** | 未执行 | G0/G1 发布证据；G2/G3 分项 evidence manifest | 各包持续补，最终汇总 |
 
 固定接口顺序为 `R0 -> R1 -> R3 -> R6 -> R7`。R2 的 catalog ownership 修复可立即进行，随后随每包同步更新；R4/R5 在 R1 action IDs 冻结后可独立实施；R8 子项不能以“整包”领取。触碰 `CodeWorkspaceTab.tsx` 时按 save、action/keymap、completion/reference、layout/tabs、execution 五个区域分提交，X 轨道代码除非是当前包的必要回归不得修改。
@@ -4647,6 +4647,375 @@ Owner files
     provider-backed L3、IntelliJ inspections 对齐。
 ```
 
+**R7 as-built（v4.55，2026-08-24，生产代码合同闭合；a/b/c 三提交）。**
+
+```text
+包 ID / commits / capability ID
+    R7-a ffe7808b / R7-b da583cf9 / R7-c 101c4980 /
+      semantic-edit.provenance, surround.with-dialog, generate.provider-
+      workflow, complete-statement.strategy
+As-built production call chain
+    Provenance（R7-a）: workspaceSemanticEditing.ts 定义契约类型
+      SemanticEditSource{local-text|syntax-tree|provider} +
+      SemanticEditEvidenceV2{identity,source,selectionNodeRange,
+      parseErrorsInScope,completeness}。editor-transaction 计划的旧
+      source:"syntax-tree" 字面量删除；surroundWithPlan 只有当调用方传入
+      syntax facts 且 alignedNodeType/selectionNodeRange 非空且 scope 内无
+      parse error 时才允许 syntax-tree provenance（completeness=complete），
+      其余一律 local-text（completeness=partial，identity=null——本地编辑
+      没有 provider request 可标识，不伪造 identity）。
+    Syntax facts: workspaceSyntaxFacts.ts —— treeRevisionField
+      （StateField，docChanged 递增，注册于 CodeMirrorHost 扩展）提供证据
+      revision；observeSyntaxFacts 以 syntaxTreeAvailable 门控（绝不强制同步
+      reparse），先对整行展开边界做空白 trim（Lezer 节点不含缩进/换行），
+      再用边界侧正确的 resolveInner(from,1)/resolveInner(to,-1) 双锚点上溯
+      查找 EXACT 对齐节点（side 反了会落在持有空白的祖先上——已由 fixture
+      探针证实并修复）；parse-error 用 type.isError 有界子树扫描（512 节点
+      预算）。
+    Surround（R7-a）: editor.surroundWith.tryCatch 硬编码命令删除；新 action
+      editor.surroundWith（Ctrl+Alt+T / Meta+Alt+T，when=editor+file+可写）
+      打开 SurroundWithDialog——只列 surroundKindsForLanguage(languageId)
+      给出的 adapter kind（Java 全五种 if/while/try-catch/synchronized/
+      runnable；TS/JS 三种；其余语言明确空态），每个 kind 标注 "template"
+      徽标，dialog 从不宣称 Semantic。onPick → executeActiveEditorCommand
+      ("surroundWith",{surroundKindId,onSemanticEditApplied}) →
+      applySurroundWith 在整行展开边界观察 syntax facts → 单事务 dispatch
+      （一次 undo）→ provenance 经回调上抛，tab 状态栏如实区分
+      "syntax node <type>" 与 "local template"。
+    Generate（R7-b）: 新 action editor.generateCode（Alt+Insert / Meta+N）→
+      requestGenerateCandidates 复用 requestCodeActions(file,caret range,
+      only:["source"])（语义同步/staleness token 全套既有守卫）→
+      filterGenerateCodeActions 改为泛型透传 {item,title,kind}（保留 raw
+      provider action，绝不本地重建模板）→ GenerateCodeDialog 按 phase
+      loading/ready/empty/running/error 渲染真实 title/kind 复选列表；
+      placement/conflict/imports 如实声明"由 provider edit 决定"。Apply →
+      applyGenerateSelection 逐个执行且每次执行前重查 semantic staleness →
+      runCodeAction（扩展为返回 {ok,message}；resolve data → WorkspaceEdit/
+      executeCommand 走 R0 effect applier + preview）——单个 provider action
+      = 一条 history entry。失败停在首个 failedIndex，dialog 保持打开显示
+      Retry/Cancel，绝无固定模板兜底；Retry 重发请求而非重放旧结果。
+    Complete Statement（R7-c）: completeStatementStrategy 输入 languageId/
+      readOnly/caretCount/lineText/syntax facts，输出三态：
+      exact——Java 首批仅 ExpressionStatement/ReturnStatement/
+      ThrowStatement 且 exact 对齐 + 无 parse error 时插 ";"，
+      provenance=syntax-tree（携带 nodeType+treeRevision 的 evidenceV2），
+      dispatch userEvent=input.completeStatement.syntax；
+      local——空行/block 边界/控制流头/声明行/无 tree facts/非 Java 语言
+      一律回落既有 completeCurrentStatement 启发式，ruleId 明确
+      （completeStatement.local/.blank-line/.newline-below），provenance
+      local-text，UI/遥测按 Local/Heuristic 记账（action keywords 已含
+      "heuristic"，userEvent 不冒充 syntax）；
+      unavailable——read-only/multi-caret/unterminated string 或 comment/
+      parse errors in scope 均为带 reason 的显式 no-op 并经
+      onSemanticEditApplied(applied:false) 上报。
+Owner files
+    workspace/workspaceSemanticEditing.ts（SemanticEditSource/EvidenceV2、
+    surroundKindsForLanguage、completeStatementStrategy、泛型
+    filterGenerateCodeActions）、workspace/workspaceSyntaxFacts.ts（新）、
+    workspace/SurroundWithDialog.tsx（新）、workspace/GenerateCodeDialog.tsx
+    （新）、workspace/generateCodeWorkflow.ts（新，applyGenerateSelection）、
+    workspace/CodeMirrorHost.tsx（treeRevisionField 注册、command port
+    options/onSemanticEditApplied、surround/completeStatement 重写）、
+    CodeWorkspaceTab.tsx（editor.surroundWith/editor.generateCode 命令、两
+    dialog 状态与渲染、runCodeAction 返回值、状态栏 provenance 文案）。
+测试证据（已运行，2026-08-24）
+    - npx vitest run src/components/editor/ → 149 文件 1238 通过（每提交后
+      全绿）。新增：workspaceSyntaxFacts.test.ts 7 例（exact 对齐含缩进
+      trim、partial 无对齐、unterminated string、treeRevision 递增、
+      parserless null、CRLF 行映射、JS 负例——均用真 @codemirror/lang-java
+      解析器）；SurroundWithDialog.test.tsx 5 例；generateCodeWorkflow.test.ts
+      4 例（顺序应用、每步 staleness 重查、首败即停、空选择）；
+      GenerateCodeDialog.test.tsx 6 例；CodeMirrorHost.test.tsx 新增 2 例
+      （经 EditorView.findFromDOM 驱动 command port：surround 单事务+
+      provenance 回调、completeStatement local-text 上报）；workspaceSemantic
+      Editing.test.ts 重写 surround 断言（local-text 默认/错误 scope 拒绝/
+      对齐升级/kinds-per-language）+ strategy 8 例 + generate 过滤保留 raw。
+    - pnpm build 绿（tsc -b + vite）。Rust 无改动。
+诚实边界（本包未闭合项）
+    - 真实 jdtls surround/generate trace 未运行：R3-c runner 目前只覆盖
+      completion 场景；本包全部证据为纯函数 + jsdom mounted 测试，
+      provider 行为由 LspCodeAction 抽象隔离。
+    - IDEA 对照逐 action 录制未做（§8.19.10 统一门禁）。
+    - Generate 多选 = N 个 provider action 依次执行 = N 条 history entry；
+      "单条 WorkspaceEdit entry"仅在单个 provider action 粒度成立（契约
+      语句按此理解，多选合并为单 entry 未实现也未声称）。
+    - Smart gate 维持 v4.50 语义（capability-not-advertised 即 unavailable，
+      不以 fuzzy Basic 冒充）；provider expected-type evidence 出现前的
+      Smart badge 仍不存在。
+    - Surround placeholder 仅落 caret 于第一个占位符，Tab 逐占位符跳转、
+      choice 占位未实现；本地模板的 imports/shorten 由用户手动处理（契约
+      中"由 provider edit 承担"指 provider 路径，本地模板不适用）。
+    - treeRevision 是视图局部计数器，不是跨会话 parse generation；
+      selectionNodeRange 为编辑器内 LSP 形状坐标，不跨进程发送。
+    - Lezer node 名（ExpressionStatement 等）是语法内部名，仅出现在状态栏
+      provenance 文案中，不构成 PSI 等价声明。
+最高允许声明
+    “R7 生产代码合同闭合：semantic-edit provenance 类型化且不再谎报
+    syntax-tree；Surround 五 Java kind 同一 action/dialog/单事务；Generate
+    全链路只走真实 provider CodeAction（resolve 失败 Retry/Cancel、无本地
+    模板兜底）；Complete Statement Java 首批 syntax-backed、其余显式
+    Local/Heuristic”。
+禁止声明
+    不得写 Semantic Editing complete、surround/generate 的 provider 层 L2/L3
+    （无真实 jdtls trace）、all-language Generate/Surround、Smart badge 已
+    实现、IDEA-equivalent、statement-aware parsing beyond Lezer node facts。
+残余风险与下一依赖包
+    固定接口顺序 R0→R1→R3→R6→R7 已全部 [x]。剩余包均可独立领取：R4/R5
+    依赖的 R1 action IDs 已冻结，R2 catalog 修复随时可做，R8 必须先出四项
+    ADR，R9 为最终门禁汇总。建议下一包按表序领取 R4（Clipboard History/
+    Plain Paste/Copy Reference/Virtual Space），其 G1 多光标断言可直接复用
+    本包 command-port 测试基建（EditorView.findFromDOM + port.execute）。
+```
+
+**R4 as-built（v4.56，2026-08-24，生产代码合同闭合，单提交）。**
+
+```text
+包 ID / commit / capability ID
+    R4 / 2fcc9f47 / clipboard.history-v2, paste.plain-text, copy.reference,
+      virtual-space.model
+As-built production call chain
+    Clipboard history（R4-a）: WorkspaceClipboardStore 扩为 §8.19.5 事实源——
+      write 接受 sensitive（敏感载荷只进 live slot，绝不入 ring），返回侧以
+      historyExclusion() 暴露 recorded|history-disabled|oversized-item|
+      sensitive 四态非阻断说明（CodeMirrorHost.rememberEditorClipboardPayload
+      经 onUnavailable 上抛）；setHistoryLimits 把条目上限钳制在 1–50、总字
+      节下限 1024；removeHistoryEntry 支持单条 Delete。
+      editor.pasteFromHistory action（Ctrl+Shift+V / Meta+Shift+V）→
+      ClipboardHistoryPopup 可搜索 listbox（首行/segment 数/相对时间，
+      role=option+aria-selected）；Enter → executeActiveEditorCommand
+      ("pasteFromHistory",{historyIndex}) → host 从 workspace store 取回该
+      条 promote 到 live slot 后直接 pasteEditorClipboardPayload 完整
+      segment plan——刻意绕过系统剪贴板（系统内容可能更新），单事务一次
+      undo；Delete 单删、Clear 两段确认、ring 依旧 session-only 且最后一个
+      handle release 即清空（refcount 语义不变）。
+    Plain Paste / Copy Reference（R4-b）: editor.pasteAsPlainText
+      （Ctrl+Shift+Alt+V）→ pasteAsPlainText 丢弃 rectangular/segment 元数
+      据，系统剪贴板失败回落 session plainText，按 caret 升序一次 dispatch
+      全文替换（userEvent=input.paste.plain）。editor.copyReference
+      （Ctrl+Alt+Shift+C）→ copyReferenceCandidates 纯函数：root 内给
+      workspace-relative path:line（显示行号 +1）、跨 root 给显式 absolute
+      格式、library 一律 unavailable library-source、无路径 no-file；
+      symbol 候选只在 provider rename range/词边界真实给出时追加——模型里
+      不存在 qualified-name kind，不伪造类名。多候选经 openTreeContextMenuAt
+      菜单选择，单候选直接写剪贴板并回报文本。
+    Virtual Space（R4-c）: workspaceVirtualSpace.ts —— facet 与 StateField
+      同址（消除 import cycle，workspaceEditorCommands 仅再导出）；
+      virtualSpaceOverflowField 按 CLAMPED head 记录溢出可视列：policy 关闭
+      或 docChanged 一律坍缩到合法 document column，selection-only 移动保留
+      未移动 head 的溢出。End/Shift+End 以 Prec.high 绑定但严格 defer——任一
+      caret 未达行末即 return false 交给默认 keymap（保住 soft-wrap 边界语
+      义），全部到行末后每次 +1 列走进虚拟区；click-past-EOL handler 用
+      posAtCoords/coordsAtPos 像素过冲估算列数（atFileBottom 只对最后一行放
+      行）；typing inputHandler 在 IME composing 时直接 defer，溢出存在时用
+      changeByRange 同事务产出 padding+text；pasteEditorClipboardPayload 在
+      同一 changes 数组内为各 caret 前置 padding 并清空 overflow map——多
+      caret padding+text 单 dispatch。measureVisualPositions 输出契约的
+      VisualColumnPosition{line,documentColumn,visualColumn,virtualColumns}，
+      tab stop 对齐 + CJK/emoji 双宽估算。
+Owner files
+    workspace/workspaceClipboardSession.ts（sensitive/exclusion/limits/
+    removeEntry）、workspace/ClipboardHistoryPopup.tsx（新）、
+    CodeMirrorHost.tsx（exclusion 通知、pasteAsPlainText/pasteFromHistory
+    命令、virtual space 扩展注册）、workspace/workspaceCopyReference.ts
+    （新）、workspace/workspaceVirtualSpace.ts（新）、workspace/
+    workspaceEditorCommands.ts（facet 迁址再导出、paste padding 消费）、
+    CodeWorkspaceTab.tsx（三个新 action + 弹层状态/渲染）。
+测试证据（已运行，2026-08-24）
+    - npx vitest run src/components/editor/ → 153 文件 1264 通过。新增：
+      workspaceVirtualSpace.test.ts 7 例（tab/双宽测量、policy 门控测量、
+      溢出记录不动 doc/history、typing 单事务物化、无溢出 defer、backspace
+      递减不动 doc、End 走虚拟区且关闭即失效、multi-caret 保留）；
+      workspaceCopyReference.test.ts 7 例（relative/absolute/library/no-file/
+      symbol 候选/Windows 盘符/最小 root）；workspaceClipboardHistory.test.ts
+      7 例（refcount 清空、限额驱逐与钳制、sensitive 排除、oversized 排除、
+      单删+去重晋升、promote、disable/clear）；ClipboardHistoryPopup.test.tsx
+      5 例（首行/段数/时间、过滤与空态、Enter 粘贴、Delete 与 Clear 确认、
+      关闭渲染 null）。
+    - pnpm build 绿（tsc -b + vite）。Rust 无改动。
+诚实边界（本包未闭合项）
+    - Settings 中 Disable/Clear/限制 UI 未接线：store API
+      （setHistoryEnabled/setHistoryLimits/clearHistory）已生产暴露并有测试，
+      但外观/剪贴板设置对话框尚未提供入口——避免在无 consumer 时造第二真值。
+    - sensitive 标记当前无生产 producer（编辑器内暂无密钥类复制来源）；排除
+      路径由 store 级测试覆盖，机制先行、声明为零。
+    - 虚拟空间 up/down 移动沿用既有 cloneCaretVertically 的 policy 消费；
+      方向键跨行保持溢出仅通过 field 的 selection-only 保留语义部分成立，
+      未做完整 IDEA 式 column 记忆。
+    - click-past-EOL 依赖 coordsAtPos 像素估算，jsdom 无法构造真实几何——
+      该路径仅有模块级单元覆盖（handler 注册），像素行为归 R9 native 验证。
+    - region folding 的 "Text marker folding (heuristic)" 标签收口未在本包
+      处理（R4 合同列出但属折叠子系统，避免与本包剪贴板/虚拟空间改动混
+      提交）。
+    - rectangular drag 新建（Alt+Shift 拖拽矩形选区）沿用 CM 既有
+      rectangularSelection；本包未新增 rectangle drag 专属逻辑。
+    - native clipboard permission 场景归 R9 三端门禁。
+最高允许声明
+    “R4 生产代码合同闭合：clipboard history V2 事实（sensitive/限额/单删/
+    typed exclusion）+ 会话级 Paste-from-History 弹层（绕过系统剪贴板的单
+    事务 segment plan）；Plain Paste 与 Copy Reference 候选模型不伪造任何
+    provider 未给出的身份；Virtual Space 以 overflow StateField 实现
+    End/click/type/backspace/paste 全消费链且多 caret padding 单事务”。
+禁止声明
+    不得写 Clipboard suite complete、History Settings UI 已可用、virtual
+    space IDEA-equivalent（up/down column 记忆不全、像素行为未经 native
+    验证）、Copy Reference qualifiedName 已支持、G3 clipboard L2 合并声明。
+残余风险与下一依赖包
+    表序下一包为 R5（真实 ToolWindow Registry、Tab Policy V3、Split 操作，
+    §8.19.6），R2 catalog/workflow 修复亦可随时并行；R8 需先出四项 ADR；
+    R9 为最终汇总门禁。本包的 overflow StateField 与 popup 测试基建可直接
+    被 R5 的 Switcher/tab restore 断言复用。
+```
+
+**R5-a as-built（v4.57，2026-08-24，部分闭合——模型层完成，接线未做）。**
+
+```text
+包 ID / commit / capability ID
+    R5-a / 5cae5f7a / tab-policy.v3, tool-window.registry
+As-built production call chain
+    Tab Policy V3: workspaceTabPolicy.ts —— WorkspaceTabPolicyV3 在 V2 语义
+      （limit/order/openPosition/activateOnClose/pinnedRow/reusePreview）上
+      增加 schemaVersion:3 + previewMode；migrateWorkspaceTabPolicy(raw) 接受
+      任意持久化 JSON：v2 载荷按 previewEnabled→previewMode 迁移并记录
+      "previewMode(migrated-from-v2)"；错误类型字段逐个回落默认值、数值越界
+      钳制进合法域（1–100）；任何修复发生时返回原始载荷 backup，供调用方在
+      覆写前留档。enforceTabPolicy/orderTabsForDisplay/selectActivateOnClose
+      放宽为 AnyWorkspaceTabPolicy（只读共享字段），V2 行为零变化。
+    ToolWindow registry: toolWindowRegistry.ts —— workspace 级注册表，
+      register/unregister/setToolWindowState/setToolWindowBadge/touch 按
+      panel mount/open/hide/dispose 写入真实快照（§8.19.6 的
+      ToolWindowSnapshot 形状含 dock/state/lastActivatedAt/badge/canHide/
+      unavailableReason）；listToolWindows 输出 MRU 全量（Search 用），
+      listToolWindowsForCycle 过滤 unavailable——不可用窗口带 reason 只在
+      Search 可见，永不进入 cycle。
+Owner files
+    workspace/workspaceTabPolicy.ts（V3 类型/默认值/migration/签名放宽）、
+    workspace/toolWindowRegistry.ts（新）、对应两个测试文件。
+测试证据（已运行，2026-08-24）
+    - npx vitest run src/components/editor/ → 155 文件 1274 通过。新增：
+      workspaceTabPolicyV3.test.ts 5 例（v3 直通、v2 默认迁移、逐字段修复+
+      backup、非对象全回落、越界钳制）；toolWindowRegistry.test.ts 5 例
+      （MRU 排序、unavailable 不入 cycle 但 Search 可见、状态/激活时间、
+      badge 与 dispose、workspace 隔离）。既有 workspaceTabPolicy.test.ts
+      回归绿。
+    - pnpm build 绿（tsc -b + vite）。Rust 无改动。
+诚实边界（本包未闭合项 → R5-b）
+    - Switcher 尚未消费 registry（仍构造自身列表）；冻结 snapshot/MRU 后台
+      稳定性断言未落地。
+    - per-workspace policy 持久化未接：migrateWorkspaceTabPolicy 已就绪但无
+      读写调用方（workspaceLayoutPersistence 无 policy 字段）。
+    - split right/down / move tab to next/previous split / next/previous
+      split / equalize / stretch / unsplit actions 未新增；recursiveLayoutTree
+      的 splitLeaf/closeLeaf/adjacent/equalize 基元现状未审计补齐。
+    - Backspace close 分级（dirty 确认/pinned 按政策/tool window 仅 hide）
+      未接线；ReopenLocationV2{leafId/treeRoute/siblingFileKeys} 模型未建。
+    - detach 明确 defer 至 R5b/G3（controller/window ownership ADR 前不展示
+      可点击入口）——本包无相关改动，符合契约。
+最高允许声明
+    “R5-a：Tab Policy V3 迁移/修复模型与 workspace 级 ToolWindow registry
+    （MRU/cycle/Search 三语义）以纯函数+单测闭合”。
+禁止声明
+    不得写 R5 complete、Switcher 使用真实 registry、tab policy 已持久化、
+    split operations 已交付、G1 tabs/splits L2。
+残余风险与下一依赖包
+    R5-b 需按序接线：① Switcher 冻结 snapshot 消费 registry；
+    ② workspaceLayoutPersistence 增加 tabPolicy 字段（经 migration 读写，
+    backup 留档）；③ split/navigation/equalize/stretch actions +
+    recursiveLayoutTree reducer 审计；④ Backspace 分级关闭 + ReopenLocationV2。
+```
+
+**R5-b as-built（v4.58，2026-08-25，①② `827fec82` + ③④ `64a43314`，R5 接线闭合）。**
+
+```text
+包 ID / commit / capability ID
+    R5-b / 827fec82（①②）、64a43314（③④） /
+    tool-window.registry-wired, tab-policy.v3-persisted, split.management,
+    reopen.location-v2
+As-built production call chain
+    ① Registry→Switcher: toolWindowRegistry.ts 新增
+      WORKSPACE_BOTTOM_DOCK_WINDOWS 全量目录（13 个 dock tab，id 对齐
+      BottomDockTabId、title 对齐 BottomDock 标签）+ syncBottomDockToolWindows
+      （把真实 dock 状态镜像进注册表：可见 tab=open、其余=hidden；重同步保留
+      badge/lastActivatedAt，hidden→open 触发激活时间戳 bump）+
+      unregisterAllToolWindows（dispose 清理）。CodeWorkspaceTab 每次实例/
+      bottomDockOpen/bottomDockTab 变化调用 sync；卸载时 unregisterAll。
+      Switcher 打开瞬间用 buildSwitcherSnapshot 冻结一份快照：编辑器 MRU 条目
+      + listToolWindowsForCycle 输出（unavailable 永不入 cycle）；此后
+      cycle/hover/commit/Backspace 全部只读该快照——后台开/关窗口不能改变
+      当前索引空间或重排条目。硬编码七项数组与 dockMruRef 已删除。
+    ② Policy persistence: WorkspaceLayoutSnapshotV2 增加 tabPolicy（可选入参，
+      normalize 后必有）与 tabPolicyBackup；normalize 调
+      migrateWorkspaceTabPolicy 做逐字段迁移/修复，任何修复归档原始载荷为
+      backup，且 backup 随再 normalize 向前携带、直到下一次干净 live 写入
+      （不带 backup 字段）自然清除。snapshotFromWorkspaceUi 接受并透传
+      tabPolicy；CodeWorkspaceTab 挂载恢复 snapshot.tabPolicy，openFile 的
+      limit 驱逐改用 per-workspace policyRef（不再使用编译期默认值常量）。
+    ③ Split management: recursiveLayoutTree.ts 新增四个原子纯 reducer：
+      equalizeLeafParentSplit（仅均衡直接包含目标 leaf 的同层 split；已均衡
+      时返回同一引用）、stretchLeafInTree（可重复拉伸：目标份额 +step、兄弟
+      等比收缩保持 ratios 归一，封顶 max=0.8，无空间/到顶为 no-op）、
+      navigateLeafOrder（preorder next/previous 且首尾回绕）、unsplitAllLeaves
+      （折叠进第一个 preorder leaf，全部 tab 保序去重合并——绝不丢 tab；
+      幸存者保留原 id）。store 新增 equalizeLayoutRatios/stretchLayoutLeaf/
+      unsplitAllLayout，全部经 commitLayoutMutation 的 validate+consistency
+      门禁提交（unsplit 合并所有 pinned 并集、保留 dormant 空 legacy 组）。
+      ActionHost 注册九个 action（workspace.splitRight/splitDown/goToNextSplit/
+      goToPreviousSplit/moveTabToNextSplit/moveTabToPreviousSplit/
+      equalizeSplitProportions/stretchActiveSplit/unsplitAll），header 在
+      splitOrientation 存在时新增 equalize/stretch/unsplit-all 三个按钮；
+      编辑器 tab 右键菜单增加 Move Tab to Next/Previous Split（多 leaf 时）。
+    ④ Graded close + ReopenLocationV2: workspaceTabPolicy.ts 新增
+      ReopenLocationV2{leafId, treeRoute(first/second 步), siblingFileKeys}、
+      buildReopenTreeRoute（root→leaf 子索引路由）与 resolveReopenLocation
+      （按 §8.19.6 顺序：原 leafId 存活→route 最近存活祖先（仅当真正下降过
+      至少一步；整树塌缩时 route 无信号，跳过）→拥有最多 sibling 的 leaf→
+      active leaf）。closeFile 关闭时记录 location 证据进 reopen 栈；
+      workspace.reopenClosedTab 用 LIVE tree 解析并以状态栏消息披露 relocated
+      原因（nearest surviving split / next to its former tab group / active
+      editor）。Switcher Backspace 分级：pinned 拒绝并给原因（弹层保持打开）、
+      dirty 走既有确认路径、clean 直接关闭、tool window 仅 hide。
+Owner files
+    workspace/toolWindowRegistry.ts、workspace/workspaceTabPolicy.ts、
+    workspace/recursiveLayoutTree.ts、workspace/workspaceLayoutPersistence.ts、
+    src/stores/codeWorkspaceStore.ts、CodeWorkspaceTab.tsx、
+    workspace/EditorGroup.tsx 及对应测试文件。
+测试证据（已运行，2026-08-25）
+    - npx vitest run src/components/editor/ → 155 文件 1292 通过。本包新增：
+      toolWindowRegistry +3（全目录镜像 open/hidden、hidden→open 激活 bump 与
+      badge 保留、dispose 只清本 workspace）；workspaceLayoutPersistence +4
+      （缺省物化 v3 默认、自定义 policy round-trip、v2/corrupt 修复且 backup
+      归档并在干净写入后消失）；recursiveLayoutTree +4（三层 mixed tree 上
+      equalize 只动父层、stretch 可重复至 0.8 封顶且归一、navigate 回绕、
+      unsplit 合并不丢 tab 且幸存 id 不变、幂等返回同一引用）；
+      workspaceTabPolicy.test +5（first/second 路由记录、restored/route/
+      sibling/active 四级解析）；集成 +2（pinned Backspace 拒绝且 📌 出现在
+      冻结行、弹层不关闭；Ctrl+F4 关闭→split 折叠销毁原 leaf→Ctrl+Shift+T
+      重开 relocation 到 former tab group 并激活）。
+    - pnpm build 绿（tsc -b + vite），两个 commit 各自构建验证。Rust 无改动。
+诚实边界（本包未闭合项）
+    - policy 编辑设置界面未做：restored policy 目前只有 openFile 驱逐消费；
+      orderTabsForDisplay（display projection）与 selectActivateOnClose 仍无
+      production consumer——display order/activateOnClose 行为依旧硬编码。
+    - 九个 split action 未设默认键位绑定（Search Everywhere 可发现、Keymap
+      Settings 可绑定）；nav/equalize/stretch 仅按钮+action 入口，无 IDEA
+      对照录制。
+    - QA C4 完整流程未实跑（R2 范畴）；200% zoom/focus 场景、三端 native
+      均未执行。detach 维持 defer（controller/window ownership ADR 前 UI
+      不展示入口），本包无相关改动。
+最高允许声明
+    “R5-b：Switcher 冻结 registry 快照、per-workspace policy 迁移持久化+
+    驱逐消费、equalize/stretch/unsplit/navigation/move reducers+actions、
+    Backspace 分级与 ReopenLocationV2 结构化重开，以纯函数单测+jsdom 集成
+    测试闭合”。
+禁止声明
+    不得写 G1 tabs/splits L2 达成（QA C4 未跑）、tab policy 有编辑界面、
+    display order/activateOnClose 已生效、三端已验证、detach 已交付、
+    IDEA 对照已完成。
+残余风险与下一依赖包
+    表序下一包为 R8（§8.19.9 四项 productionize-or-defer ADR 先行），R2
+    catalog/workflow 修复随时并行；R9 最终汇总门禁。本包的 frozen-snapshot
+    断言与 reopen relocation 集成测试可直接被 R2/QA C4 browser case 复用。
+```
+
 #### 8.19.5 R4：Clipboard History、Plain Paste、Copy Reference 与完整 Virtual Space
 
 **状态与范围。** 保留 refcount workspace store、segments/rectangular plan和 session-only history ring。C3a 的多光标正确性属于 G1；History/Paste Plain/Copy Reference作为 G3分项，但本包共用同一 action和privacy owner。region folding只做标签/证据收口，不在无 parser语言自研 grammar。
@@ -4809,6 +5178,169 @@ R8不是“补更多类型”的包。第一提交必须给四个子项各做一
 Appearance不是第五个空模型：现有 `editorAppearanceProfile.ts` 已生产接线，后续只补 font actual-hit、high contrast对比度、200% zoom、state-preserving reconfigure和三端 evidence，归 R9；不要重建另一套 appearance store。
 
 每个 implement-now 子项沿用 §8.18.9 的 typed schema作为设计输入，但必须补 production call chain、settings、failure UI、security/privacy、migration、unit/mounted/native/performance和 IDEA expected。每项独立 DoD/commit/evidence；一个子项完成不能提升其它子项或 G1。若全部 defer，R8仍可“决策完成”，但四项能力保持 L0/L1 unavailable，不得写 Advanced Profile complete。
+
+**R8 ADR（v4.59，2026-08-25）：四项 production reachability 决策。**
+依据均为 2026-08-25 工作树（R5-b `64a43314` 之后）的代码事实；每个 defer 记录重开条件（re-entry），满足前对应能力保持 L0/L1 typed-unavailable。
+
+```text
+ADR R8-A Java SSR —— defer
+    代码事实
+      - companionCapabilities.ts 已定型 StructuralQuery schema 与可用性门禁，
+        但 SSR_SUPPORTED_LANGUAGES 为空集，availability union 把唯一合法后端
+        钉在 backend:"tree-sitter"；package.json / Cargo.toml 均无 tree-sitter
+        依赖。工作树内确有 @lezer/java（highlighting 级增量解析），但它不是
+        模型契约声明的后端：改用 Lezer 属于未记录的后端替换，且 SSR 需要
+        pattern query 解析器 + 变量绑定 matcher + 替换模板引擎 + R0
+        preview/apply 全链路与 false-positive=0 fixture，均不存在。
+      - 无性能预算测量、无 query schema migration 路径——正是本节写明的
+        defer 条件（“无 Java parser/provider、性能预算或 query schema
+        migration”）。
+      - UI 审计：components 下无任何消费 structuralSearch* 的入口，无误导性
+        UI 需要移除。
+    决策
+      defer。能力保持 L0 unavailable：structuralSearchAvailability(id,false)
+      → { available:false, reason:"backend-missing" } 即为对用户契约。
+    重开条件
+      引入 tree-sitter-java（或显式修订 schema 的 backend union 并补 migration）
+      + pattern/query service 设计 + 性能预算（文件级扫描上限）确立后，
+      方可按 §8.19.9 implement-now 最小 owner 重排入待办。
+    禁止声明（持续生效）
+      绝不 regex 换皮冒充 SSR；不得因 schema 存在宣称 SSR 可用。
+
+ADR R8-B Maven/Gradle dependency completion —— defer
+    代码事实
+      - companionCapabilities.ts 有 DependencyCompletionRequest/Candidate 与
+        repositoryUrlPolicy（https 才 trustedRead），但全仓无 registry
+        metadata client、无元数据 cache 存储、无针对仓库元数据抓取的
+        credential/proxy 会话策略（现有 proxy 管线服务 terminal/db/mail，
+        未覆盖此场景）。
+      - Rust 侧 pom.xml 处理仅是 sdk/detect.rs 的文本级属性扫描（SDK 探测），
+        非 position-aware project model；build.gradle 仅做构建系统存在性
+        判定。completion 所需的坐标区间定位模型不存在。
+      - UI 审计：无任何依赖补全入口。
+    决策
+      defer。命中 defer 条件“无可信 metadata/credential/proxy 策略”；
+      也绝不以 hardcoded popular list 充当候选源。
+    重开条件
+      确立受信仓库清单 + 元数据缓存（含 TTL/失效）+ 抓取走会话级代理与
+      超时/取消的完整策略后重评。
+    禁止声明（持续生效）
+      不得写 dependency completion 可用；不得用内置常用坐标列表冒充
+      repository 候选。
+
+ADR R8-C Full Line local completion —— defer
+    代码事实
+      - src-tauri/src/tab/fim_engine.rs 默认把 FIM 路由到 LlmRouter
+        (TaskKind::TabCompletion)，该路径可为云端 provider；local-llm-fim
+        feature 编译进 fim_engine_real.rs，但其 complete() 无条件返回 None
+        （"real decode not yet wired"）——native 本地解码运行时不存在。
+        Full Line 合同要求 localOnly 且“绝不远端/Terminal FIM 冒充”。
+      - 无签名模型分发/更新管理器；detectFullLineHardware 在 x86 上返回
+        "unknown"（AVX2 运行时探测缺失），fullLineAvailability 因此恒为
+        unavailable。前端 fullLineCompletionModel.ts 位于
+        __fixtures__/experimental，非生产模块。
+      - 编辑器侧无任何 ghost-text consumer；tab_suggest_fim 的唯一前端消费方
+        是 lib/terminal/aiSuggestionSource.ts（终端 AI 建议）——该入口必须
+        保持其现有命名与语义，不得改标 Full Line。
+    决策
+      defer。命中“无可分发模型、license、安全更新或 AVX2/ARM64 runtime”。
+    重开条件
+      发布已知良好的本地 FIM GGUF（含签名校验与更新通道）+ fim_engine_real
+      真实解码接线 + x86 AVX2 探测落地后重评；届时按 §8.19.9 要求补
+      ghost-text StateField、accept word/line、one-undo 与延迟/内存证据。
+    禁止声明（持续生效）
+      不得把云端/终端 FIM 改名或统计为 Full Line；不得在硬件 unknown 时
+      启用模型下载。
+
+ADR R8-D Code Style suite —— implement-now（分阶段）
+    代码事实（可达性成立）
+      - workspaceCodeStyleScheme.ts（scheme/provenance/format-plan 模型）、
+        codeStyleModel.ts（IDEA 四层优先级解析）与 editorConfigResolver.ts
+        已有真实下游生产消费：getEffectiveCodeStyleForFile → EditorGroup/
+        CodeMirrorHost（缩进行为）、saveNormalizationPipeline（EOL/trim/
+        final newline 归一化）、formatActiveFile 走 provider
+        formatting/rangeFormatting 能力。
+      - 缺口即本表列出的最小交付：scheme copy/rename/delete/reset 的生产
+        store/UI、field provenance 展示、formatter stage planner（provider
+        不支持的 stage 显式 unavailable）与 selection/file 首批 apply（经
+        R0 effect 通道）。当前无任何组件消费 CodeStyleScheme（grep 为空），
+        indentationOverrides 只提供 per-file 缩进覆盖。
+    决策
+      implement-now，拆两个提交：
+      R8-D1 scheme 生产 store + 管理 UI（copy/rename/delete/reset/选中持久化）
+        + provenance 显示；
+      R8-D2 formatter stage planner + selection/file reformat 首批（stage 按
+        provider capability 门禁，不支持显示 reason；apply 经 WorkspaceEdit
+        effect/undo 通道）。
+      scope/rearrange/cleanup/exclusion/save actions 维持关闭直到 provider
+        支持（§8.19.9 表格原文）。
+    禁止声明（持续生效）
+      provider/syntax 不支持的 stage 不得静默跳过后宣称 reformatted；
+      不得把 format 后文本启发式重排称为 cleanup/rearrange。
+```
+
+R8 结论：A/B/C defer（保持 typed unavailable、零误导入口、禁止声明挂账），D implement-now 分两提交跟进；“Advanced Profile complete”在任何情况下不可声明。
+
+**R8 as-built（v4.60，2026-08-25，ADR + R8-D1 `5ef8609e` + R8-D2 `62a52adc`）。**
+
+```text
+包 ID / commit / capability ID
+    R8 / a9ad47c9（四项 ADR）、5ef8609e（D1 scheme store/UI/provenance）、
+    62a52adc（D2 reformat planner） /
+    code-style.scheme-store, code-style.reformat-planner,
+    ssr.deferred, dependency-completion.deferred, full-line.deferred
+As-built production call chain
+    D1: workspaceCodeStyleSchemes.ts —— 命名 scheme 为内建 Default 之上的
+      类型化字段 delta；纯 CRUD（copy 生成唯一名并记 basedOn、rename/delete/
+      reset 拒改内建、delete 清除悬挂 per-language 激活）；localStorage 持久化
+      不落盘内建、读时修复（坏条目丢弃/未知键忽略/激活 id 校验）。
+      解析层：codeStyleModel.resolveEffectiveCodeStyle 与
+      workspaceStyleController.resolveForFile 同步插入 "scheme" 层——位于
+      EditorConfig 之下、language-default/sniffed 之上；scheme 的缩进字段
+      抑制探测（显式意图），EOL/trim/final-newline 只在 EditorConfig 未设时
+      补位；provenance 记 source:"scheme"。CodeWorkspaceTab 以扩展名作为
+      languageKey 把激活 scheme 注入两条解析路径。
+      UI: CodeStyleSettingsDialog（workspace.codeStyleSettings action 打开）
+      ——scheme listbox（built-in 标注且只读）、Copy/Rename(行内)/Delete/
+      Reset、shared+当前扩展名的激活下拉、类型化字段编辑器（空=继承）、
+      当前文件 provenance 面板（resolved label/胜出层/激活 scheme 名）。
+    D2: reformatWorkflow.planReformat —— 每次 Format 调用解析为可执行 stage
+      或类型化不可用原因：无打开目标、read-only（library/decompiled/操作锁）、
+      file scope 无 provider、有选区但无 rangeFormatting（附清除选区提示）、
+      该语言无 provider。exclusion-pattern 门保留占位。scope/rearrange/
+      cleanup 关闭不伪装。workspace.format(Ctrl+Alt+L) 改道 planner：可执行
+      委派 formatFileText（range/document 按 capability），其余状态栏显示原因。
+Owner files
+    workspace/workspaceCodeStyleSchemes.ts(+test)、
+    workspace/CodeStyleSettingsDialog.tsx(+test)、workspace/reformatWorkflow.ts
+    (+test)、workspace/codeStyleModel.ts(+test)、
+    workspace/workspaceStyleController.ts、workspace/editorConfigResolver.ts、
+    CodeWorkspaceTab.tsx。
+测试证据（已运行，2026-08-25）
+    - npx vitest run src/components/editor/ → 155 文件 1310 通过。新增：
+      scheme store 6、resolver scheme 层 4、dialog 4、reformat planner 4。
+      pnpm build 绿（tsc -b + vite），三个 commit 各自验证。Rust 无改动。
+诚实边界（本包未闭合项）
+    - CodeStyleSchemeV2.saveActions（reformat-on-save 等）模型存在但无生产
+      consumer；formatOnSave 走的是独立 intelligence 偏好，两者未统一。
+    - exclusion patterns 无用户界面（planner 门占位恒空）；directory/module
+      scope、organize-imports 并入 plan、rearrange/cleanup 全部按契约关闭。
+    - dialog 的 provenance 仅显示 effective 结果与胜出层，不逐字段列出完整
+      EditorConfig chain。
+    - A/B/C defer 状态维持：SSR/dependency/Full Line 保持 typed unavailable，
+      重开条件见 v4.59 ADR；终端 FIM 入口不得改标 Full Line。
+    - 无 native/三端证据、无 IDEA 对照录制；jsdom 级闭合。
+最高允许声明
+    “R8：四项 productionize-or-defer 决策完成（A/B/C defer 带重开条件）；
+    Code Style D1/D2 以纯函数+单测+jsdom 交互测试交付 scheme 管理、分层
+    provenance 解析与诚实 reformat 决策”。
+禁止声明
+    不得写 Advanced Profile complete、SSR/dependency/Full Line 可用、
+    cleanup/rearrange 已实现、scheme save actions 生效、三端已验证。
+残余风险与下一依赖包
+    表序下一包为 R2（QA catalog/workflow 修复，§8.19.4），随后 R9 最终门禁。
+    本包的 dialog/planner testid 可直接进 QA C-catalog。
+```
 
 #### 8.19.10 R9：Native 三端、性能、IME 与可访问发布门禁
 

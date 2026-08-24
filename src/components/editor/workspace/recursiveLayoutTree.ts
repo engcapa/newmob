@@ -533,6 +533,124 @@ export function getAllLeafNodes(root: LayoutNode): LeafGroupNode[] {
   return root.children.flatMap(getAllLeafNodes);
 }
 
+// ---------------------------------------------------------------------------
+// §8.19.6 R5-b split management primitives: equalize / stretch / navigate /
+// unsplit-all. All pure, atomic (unchanged reference on no-op), ratio-legal.
+// ---------------------------------------------------------------------------
+
+/**
+ * Equalize the ratios of the split DIRECTLY containing `leafId` (§8.19.6:
+ * equalize distributes evenly across same-layer children). Returns the same
+ * tree reference when the leaf is missing or already equalized.
+ */
+export function equalizeLeafParentSplit(root: LayoutNode, leafId: string): LayoutNode {
+  if (root.type === "leaf") return root;
+  let changed = false;
+  const walk = (node: LayoutNode): LayoutNode => {
+    if (node.type === "leaf") return node;
+    const children = node.children.map(walk);
+    const childChanged = children.some((child, index) => child !== node.children[index]);
+    const direct = node.children.some((child) => child.type === "leaf" && child.id === leafId);
+    const equalRatios = node.children.map(() => 1 / node.children.length);
+    const ratiosChanged = direct
+      && !node.ratios.every((ratio, index) => ratio === equalRatios[index]);
+    if (!childChanged && !ratiosChanged) return node;
+    changed = true;
+    return {
+      ...node,
+      children: childChanged ? children : node.children,
+      ratios: ratiosChanged ? equalRatios : [...node.ratios],
+    };
+  };
+  const next = walk(root);
+  return changed ? next : root;
+}
+
+/**
+ * Grow one leaf's share inside its parent split by `step`, shrinking siblings
+ * proportionally so ratios stay normalized (§8.19.6: repeatable with an upper
+ * bound). No-op once the leaf reaches `max` or siblings have no space left.
+ */
+export function stretchLeafInTree(
+  root: LayoutNode,
+  leafId: string,
+  options: { step?: number; max?: number } = {},
+): LayoutNode {
+  const rawStep = options.step ?? 0.1;
+  const rawMax = options.max ?? 0.8;
+  const step = Number.isFinite(rawStep) ? Math.min(Math.max(rawStep, 0.01), 0.5) : 0.1;
+  const max = Number.isFinite(rawMax) ? Math.min(Math.max(rawMax, 0.05), 0.99) : 0.8;
+
+  const apply = (node: LayoutNode): LayoutNode => {
+    if (node.type === "leaf") return node;
+    const directIndex = node.children.findIndex((child) => child.type === "leaf" && child.id === leafId);
+    if (directIndex >= 0) {
+      const current = node.ratios[directIndex] ?? 0;
+      const target = Math.min(max, current + step);
+      const grow = target - current;
+      const otherTotal = node.ratios.reduce((sum, ratio, index) => (index === directIndex ? sum : sum + ratio), 0);
+      if (grow <= 1e-9 || otherTotal <= grow + 1e-9) return node;
+      const shrinkFactor = (otherTotal - grow) / otherTotal;
+      const ratios = node.ratios.map((ratio, index) => (index === directIndex ? target : ratio * shrinkFactor));
+      if (ratios.every((ratio, index) => ratio === node.ratios[index])) return node;
+      return { ...node, ratios };
+    }
+    let changed = false;
+    const children = node.children.map((child) => {
+      const next = apply(child);
+      changed ||= next !== child;
+      return next;
+    });
+    return changed ? { ...node, children } : node;
+  };
+  return apply(root);
+}
+
+/**
+ * Preorder next/previous leaf around `currentLeafId`, wrapping at the ends
+ * (§8.19.6 go-to-next/previous-split navigation). Returns null for single-
+ * leaf trees or unknown ids in one-leaf trees.
+ */
+export function navigateLeafOrder(
+  tree: LayoutNode,
+  currentLeafId: string,
+  direction: 1 | -1,
+): LeafGroupNode | null {
+  const leaves = getAllLeafNodes(tree);
+  if (leaves.length <= 1) return null;
+  const index = leaves.findIndex((leaf) => leaf.id === currentLeafId);
+  const base = index < 0 ? 0 : index;
+  return leaves[(base + direction + leaves.length) % leaves.length] ?? null;
+}
+
+/**
+ * Collapse the entire tree into its FIRST preorder leaf, migrating every
+ * leaf's tabs into it with order-preserving dedup (§8.19.6 Unsplit All —
+ * tabs migrate, never drop). The survivor keeps its id; the resulting active
+ * tab comes from the globally active leaf when that tab survives the merge.
+ * Returns null for single-leaf trees (already unsplit).
+ */
+export function unsplitAllLeaves(
+  root: LayoutNode,
+  activeLeafId: string | null,
+): { tree: LeafGroupNode; mergedKeys: readonly string[] } | null {
+  const leaves = getAllLeafNodes(root);
+  const survivor = leaves[0];
+  if (!survivor || leaves.length <= 1) return null;
+
+  const keys: string[] = [];
+  for (const leaf of leaves) {
+    for (const key of leaf.openFileKeys) {
+      if (!keys.includes(key)) keys.push(key);
+    }
+  }
+  const activeLeaf = activeLeafId != null ? leaves.find((leaf) => leaf.id === activeLeafId) : null;
+  let activeKey = activeLeaf?.activeKey ?? survivor.activeKey;
+  if (activeKey != null && !keys.includes(activeKey)) activeKey = null;
+
+  return { tree: { type: "leaf", id: survivor.id, openFileKeys: keys, activeKey }, mergedKeys: keys };
+}
+
 /**
  * Find a specific leaf node by ID.
  */

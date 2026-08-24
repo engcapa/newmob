@@ -19,6 +19,10 @@ import {
   findAdjacentSiblingLeaf,
   commitLayoutMutation,
   panelLayoutToRatios,
+  equalizeLeafParentSplit,
+  stretchLeafInTree,
+  navigateLeafOrder,
+  unsplitAllLeaves,
   type LayoutNode,
 } from "./recursiveLayoutTree";
 
@@ -511,5 +515,131 @@ describe("recursiveLayoutTree", () => {
     };
     const committed = commitLayoutMutation(validTree, validGroups, "l1", badMutation);
     expect(committed.kind).toBe("failed");
+  });
+
+  // §8.19.6 R5-b: equalize / stretch / navigate / unsplit-all primitives.
+  describe("R5-b split management reducers", () => {
+    /** leaf(a) + split[leaf(b), split-vertical[leaf(c), leaf(d)]] — three layers. */
+    function mixedTree(): LayoutNode {
+      return {
+        type: "split",
+        id: "root-split",
+        orientation: "horizontal",
+        ratios: [0.7, 0.3],
+        children: [
+          { type: "leaf", id: "l-a", openFileKeys: ["a.ts"], activeKey: "a.ts" },
+          {
+            type: "split",
+            id: "right-split",
+            orientation: "vertical",
+            ratios: [0.25, 0.75],
+            children: [
+              { type: "leaf", id: "l-b", openFileKeys: [], activeKey: null },
+              {
+                type: "split",
+                id: "inner-split",
+                orientation: "horizontal",
+                ratios: [0.6, 0.4],
+                children: [
+                  { type: "leaf", id: "l-c", openFileKeys: ["c.ts"], activeKey: "c.ts" },
+                  { type: "leaf", id: "l-d", openFileKeys: ["d.ts"], activeKey: null },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+    }
+
+    it("equalizes only the split directly containing the target leaf", () => {
+      const tree = equalizeLeafParentSplit(mixedTree(), "l-c");
+      expect(validateLayoutTree(tree).valid).toBe(true);
+      if (tree.type !== "split") throw new Error("expected root split");
+      const right = tree.children[1];
+      if (right.type !== "split") throw new Error("expected right split");
+      // l-c's parent is inner-split: equalized to [0.5, 0.5]…
+      const inner = right.children[1];
+      expect(inner.type === "split" && inner.ratios).toEqual([0.5, 0.5]);
+      // …while every other level keeps its ratios untouched.
+      expect(tree.ratios).toEqual([0.7, 0.3]);
+      expect(right.ratios).toEqual([0.25, 0.75]);
+    });
+
+    it("returns the same reference when the leaf is missing or already equal", () => {
+      const tree = mixedTree();
+      expect(equalizeLeafParentSplit(tree, "missing-leaf")).toBe(tree);
+      const once = equalizeLeafParentSplit(tree, "l-c");
+      expect(equalizeLeafParentSplit(once, "l-c")).toBe(once);
+    });
+
+    it("stretches repeatable within its cap and keeps ratios normalized", () => {
+      let tree = mixedTree();
+      for (let i = 0; i < 10; i += 1) {
+        tree = stretchLeafInTree(tree, "l-c");
+      }
+      expect(validateLayoutTree(tree).valid).toBe(true);
+      const inner = findLeafNode(tree, "l-c");
+      expect(inner).not.toBeNull();
+      // Walk to the parent split and confirm the share hit the 0.8 cap.
+      function parentRatiosOf(node: LayoutNode, leafId: string): number[] | null {
+        if (node.type === "leaf") return null;
+        for (const child of node.children) {
+          if (child.type === "leaf" && child.id === leafId) return node.ratios;
+        }
+        for (const child of node.children) {
+          const found = parentRatiosOf(child, leafId);
+          if (found) return found;
+        }
+        return null;
+      }
+      const ratios = parentRatiosOf(tree, "l-c")!;
+      const index = (() => {
+        // inner-split's direct child index of l-c
+        if (tree.type !== "split") return -1;
+        const right = tree.children[1];
+        if (right.type !== "split") return -1;
+        const inner = right.children[1];
+        return inner.type === "split" ? inner.children.findIndex((c) => c.type === "leaf" && c.id === "l-c") : -1;
+      })();
+      expect(ratios[index]).toBeCloseTo(0.8, 5);
+      expect(ratios.reduce((sum, value) => sum + value, 0)).toBeCloseTo(1, 5);
+
+      // Stretching a single-leaf tree or unknown leaf is an atomic no-op.
+      const single: LayoutNode = { type: "leaf", id: "only", openFileKeys: [], activeKey: null };
+      expect(stretchLeafInTree(single, "only")).toBe(single);
+      expect(stretchLeafInTree(mixedTree(), "ghost")).toStrictEqual(mixedTree());
+    });
+
+    it("navigates next/previous in preorder with wrap-around", () => {
+      const tree = mixedTree();
+      expect(navigateLeafOrder(tree, "l-a", 1)?.id).toBe("l-b");
+      expect(navigateLeafOrder(tree, "l-b", 1)?.id).toBe("l-c");
+      expect(navigateLeafOrder(tree, "l-d", 1)?.id).toBe("l-a"); // wraps
+      expect(navigateLeafOrder(tree, "l-a", -1)?.id).toBe("l-d"); // wraps back
+      expect(navigateLeafOrder({ type: "leaf", id: "only", openFileKeys: [], activeKey: null }, "only", 1)).toBeNull();
+    });
+
+    it("unsplit-all merges every leaf into the first without dropping tabs", () => {
+      const tree: LayoutNode = {
+        type: "split",
+        id: "root",
+        orientation: "vertical",
+        ratios: [0.5, 0.5],
+        children: [
+          { type: "leaf", id: "l-keep", openFileKeys: ["a.ts", "b.ts"], activeKey: "b.ts" },
+          { type: "leaf", id: "l-other", openFileKeys: ["a.ts", "c.ts"], activeKey: "c.ts" },
+        ],
+      };
+      const merged = unsplitAllLeaves(tree, "l-other");
+      expect(merged?.tree).toEqual({
+        type: "leaf",
+        id: "l-keep", // survivor keeps the first preorder id
+        openFileKeys: ["a.ts", "b.ts", "c.ts"], // deduped, order preserved
+        activeKey: "c.ts", // active tab of the globally active leaf wins
+      });
+      expect(unsplitAllLeaves(
+        { type: "leaf", id: "only", openFileKeys: [], activeKey: null }, "only",
+      )).toBeNull();
+    });
   });
 });

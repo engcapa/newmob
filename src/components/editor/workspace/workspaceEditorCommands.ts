@@ -1,6 +1,5 @@
 import {
   EditorSelection,
-  Facet,
   StateEffect,
   StateField,
   type ChangeSpec,
@@ -8,6 +7,13 @@ import {
   type SelectionRange,
   type StateCommand,
 } from "@codemirror/state";
+import {
+  editorVirtualSpacePolicy,
+  paddingForOverflow,
+  setVirtualOverflow,
+  virtualSpaceOverflowField,
+  type VirtualOverflowMap,
+} from "./workspaceVirtualSpace";
 import {
   copyLineDown,
   deleteLine,
@@ -53,17 +59,10 @@ export interface EditorVirtualSpacePolicy {
   atFileBottom: boolean;
 }
 
-export const editorVirtualSpacePolicy = Facet.define<
-  EditorVirtualSpacePolicy,
-  EditorVirtualSpacePolicy
->({
-  combine(values) {
-    return values[values.length - 1] ?? {
-      afterLineEnd: false,
-      atFileBottom: false,
-    };
-  },
-});
+// §8.19.5: the facet itself lives beside the virtual-space StateField so the
+// field can read it without an import cycle; re-exported here for the
+// appearance/profile consumers.
+export { editorVirtualSpacePolicy } from "./workspaceVirtualSpace";
 
 export function detectClipboardSourceEol(text: string): ClipboardSourceEol {
   if (text.includes("\r\n")) return "crlf";
@@ -175,9 +174,31 @@ export function pasteEditorClipboardPayload(
   if (view.composing) return false;
   const plan = buildMultiCaretPastePlan(view.state, payload);
   if (!plan) return false;
+  // §8.19.5: carets parked in the virtual region get their padding spaces
+  // manufactured in the SAME dispatch (multi-caret padding+text is one
+  // transaction), and the overflow map collapses because the doc changed.
+  let overflow: VirtualOverflowMap | null = null;
+  if (view.state.field(virtualSpaceOverflowField, false)?.size) {
+    overflow = new Map(view.state.field(virtualSpaceOverflowField)!);
+  }
+  let changes: readonly ChangeSpec[] = plan.changes;
+  if (overflow && overflow.size > 0) {
+    const padded = [...plan.changes];
+    view.state.selection.ranges.forEach((range, index) => {
+      const pad = paddingForOverflow(overflow!.get(range.from) ?? overflow!.get(range.head) ?? 0);
+      if (pad) {
+        const entry = padded[index] as { from: number; to: number; insert?: string };
+        padded[index] = { ...entry, insert: `${pad}${entry.insert ?? ""}` };
+      }
+    });
+    changes = padded;
+  }
   view.dispatch({
-    changes: plan.changes,
+    changes,
     selection: plan.selection,
+    ...(overflow && overflow.size > 0
+      ? { effects: setVirtualOverflow.of(new Map()) }
+      : {}),
     userEvent: "input.paste",
     scrollIntoView: true,
   });

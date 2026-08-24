@@ -153,6 +153,9 @@ interface EditorGroupProps {
   onCloseAll: () => void;
   onSplitRight: (key: string) => void;
   onSplitDown: (key: string) => void;
+  /** §8.19.6 move-tab-between-splits; provided only when another leaf exists. */
+  onMoveTabToNextSplit?: (key: string) => void;
+  onMoveTabToPreviousSplit?: (key: string) => void;
   onCopyPath: (key: string, absolute: boolean) => void;
   onRevealInTree: (key: string) => void;
   onRevealInSystem: (key: string) => void;
@@ -279,6 +282,8 @@ export function EditorGroup({
   onCloseAll,
   onSplitRight,
   onSplitDown,
+  onMoveTabToNextSplit,
+  onMoveTabToPreviousSplit,
   onCopyPath,
   onRevealInTree,
   onRevealInSystem,
@@ -417,6 +422,12 @@ export function EditorGroup({
       { label: pinned ? "Unpin Tab" : "Pin Tab", onClick: () => onPin(key, !pinned) },
       { label: "Open in Split Right", onClick: () => onSplitRight(key) },
       { label: "Open in Split Down", onClick: () => onSplitDown(key) },
+      ...(onMoveTabToNextSplit ? [
+        { label: "Move Tab to Next Split", onClick: () => onMoveTabToNextSplit(key) },
+      ] : []),
+      ...(onMoveTabToPreviousSplit ? [
+        { label: "Move Tab to Previous Split", onClick: () => onMoveTabToPreviousSplit(key) },
+      ] : []),
       { separator: true, label: "" },
       { label: "Close", shortcut: "Ctrl+F4", onClick: () => onClose(key) },
       { label: "Close Others", onClick: () => onCloseOthers(key) },

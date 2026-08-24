@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   completeStatementPlan,
+  completeStatementStrategy,
   filterGenerateCodeActions,
   smartCompletionGate,
+  surroundKindsForLanguage,
   surroundWithPlan,
   SURROUND_KINDS,
 } from "./workspaceSemanticEditing";
@@ -83,7 +85,6 @@ describe("§8.18.8 Surround With", () => {
     expect(inserted).toContain("doWork();");
     // Caret sits inside catch parameter area of the wrapper head.
     expect(plan.selection.anchor).toBeGreaterThan(0);
-    expect(plan.evidence.rule).toBe("surround.try-catch");
   });
 
   it("rejects partial-token selections, multi-range and unsupported languages", () => {
@@ -102,16 +103,157 @@ describe("§8.18.8 Surround With", () => {
     expect(pythonRunnable.kind).toBe("unavailable");
     expect(SURROUND_KINDS.map((kind) => kind.id)).toContain("synchronized");
   });
+
+  it("labels plans local-text unless node evidence proves syntax alignment (§8.19.8)", () => {
+    // No syntax facts at all → local-text, never the old lying syntax-tree tag.
+    const plain = surroundWithPlan("if", facts);
+    if (plain.kind !== "editor-transaction") throw new Error("expected a plan");
+    expect(plain.provenance).toEqual({ kind: "local-text", ruleId: "surround.if" });
+    expect(plain.evidenceV2.identity).toBeNull();
+    expect(plain.evidenceV2.completeness).toBe("partial");
+
+    // Aligned node but parse errors in scope → still local-text, error recorded.
+    const errorScope = surroundWithPlan("while", {
+      ...facts,
+      syntax: {
+        alignedNodeType: "ExpressionStatement",
+        treeRevision: 4,
+        selectionNodeRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
+        parseErrorsInScope: true,
+      },
+    });
+    if (errorScope.kind !== "editor-transaction") throw new Error("expected a plan");
+    expect(errorScope.provenance.kind).toBe("local-text");
+    expect(errorScope.evidenceV2.parseErrorsInScope).toBe(true);
+
+    // Exact node alignment with clean parse upgrades to syntax-tree.
+    const aligned = surroundWithPlan("try-catch", {
+      ...facts,
+      syntax: {
+        alignedNodeType: "ExpressionStatement",
+        treeRevision: 7,
+        selectionNodeRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
+        parseErrorsInScope: false,
+      },
+    });
+    if (aligned.kind !== "editor-transaction") throw new Error("expected a plan");
+    expect(aligned.provenance).toEqual({
+      kind: "syntax-tree",
+      languageId: "java",
+      nodeType: "ExpressionStatement",
+      treeRevision: 7,
+    });
+    expect(aligned.evidenceV2.completeness).toBe("complete");
+    expect(aligned.evidenceV2.selectionNodeRange).not.toBeNull();
+  });
+
+  it("offers only adapter kinds per language for the dialog", () => {
+    expect(surroundKindsForLanguage(null)).toEqual([]);
+    expect(surroundKindsForLanguage("python")).toEqual([]);
+    expect(surroundKindsForLanguage("java").map((kind) => kind.id))
+      .toEqual(["if", "while", "try-catch", "synchronized", "runnable"]);
+    expect(surroundKindsForLanguage("typescript").map((kind) => kind.id))
+      .toEqual(["if", "while", "try-catch"]);
+  });
 });
 
-describe("§8.18.8 Generate Code candidates", () => {
-  it("keeps only provider generate/refactor kinds; local templates are separate", () => {
+describe("§8.19.8 Complete Statement strategy", () => {
+  const aligned = (nodeType: string, parseErrorsInScope = false) => ({
+    alignedNodeType: nodeType,
+    treeRevision: 3,
+    selectionNodeRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
+    parseErrorsInScope,
+  });
+
+  it("grants syntax-tree provenance only for explicit Java statement nodes", () => {
+    for (const nodeType of ["ExpressionStatement", "ReturnStatement", "ThrowStatement"]) {
+      const decision = completeStatementStrategy({
+        languageId: "java",
+        readOnly: false,
+        caretCount: 1,
+        lineText: "  doWork()",
+        syntax: aligned(nodeType),
+      });
+      if (decision.kind !== "exact") throw new Error(`${nodeType} should be exact`);
+      expect(decision.insertSemicolonAt).toBe(10); // trailing whitespace trimmed
+      expect(decision.provenance).toMatchObject({
+        kind: "syntax-tree", languageId: "java", nodeType, treeRevision: 3,
+      });
+      expect(decision.evidenceV2.completeness).toBe("complete");
+    }
+  });
+
+  it("keeps block boundaries, headers and unknown nodes on the labelled local path", () => {
+    for (const line of ["if (ready)", "{", "public void run()", "}"]) {
+      const decision = completeStatementStrategy({
+        languageId: "java",
+        readOnly: false,
+        caretCount: 1,
+        lineText: line,
+        syntax: aligned("Block"),
+      });
+      expect(decision.kind === "local" && decision.ruleId === "completeStatement.local").toBe(true);
+    }
+  });
+
+  it("no-ops with a reason on multi-caret, read-only and unterminated strings", () => {
+    const base = { languageId: "java", caretCount: 1, lineText: "log(\"x" };
+    const multi = completeStatementStrategy({ ...base, readOnly: false, caretCount: 2, syntax: null });
+    expect(multi.kind === "unavailable" && multi.reason).toContain("Multi-caret");
+    const readOnly = completeStatementStrategy({ ...base, readOnly: true, caretCount: 1, syntax: null });
+    expect(readOnly.kind).toBe("unavailable");
+    const unterminated = completeStatementStrategy({
+      ...base, readOnly: false, syntax: aligned("ExpressionStatement"),
+    });
+    expect(unterminated.kind === "unavailable" && unterminated.reason).toContain("Unterminated");
+  });
+
+  it("refuses the semantic upgrade when parse errors are in scope", () => {
+    const decision = completeStatementStrategy({
+      languageId: "java",
+      readOnly: false,
+      caretCount: 1,
+      lineText: "doWork()",
+      syntax: aligned("ExpressionStatement", true),
+    });
+    expect(decision.kind === "unavailable" && decision.reason).toContain("Parse errors");
+  });
+
+  it("falls back to the local heuristic without node evidence or off-Java", () => {
+    const noFacts = completeStatementStrategy({
+      languageId: "java", readOnly: false, caretCount: 1, lineText: "doWork()", syntax: null,
+    });
+    expect(noFacts).toEqual({ kind: "local", ruleId: "completeStatement.local" });
+    const typescript = completeStatementStrategy({
+      languageId: "typescript", readOnly: false, caretCount: 1, lineText: "doWork()",
+      syntax: aligned("ExpressionStatement"),
+    });
+    // Java-only first batch: TS never borrows Java's node vocabulary.
+    expect(typescript.kind).toBe("local");
+    const terminated = completeStatementStrategy({
+      languageId: "java", readOnly: false, caretCount: 1, lineText: "return x;",
+      syntax: aligned("ReturnStatement"),
+    });
+    expect(terminated).toEqual({ kind: "local", ruleId: "completeStatement.newline-below" });
+    const blank = completeStatementStrategy({
+      languageId: "java", readOnly: false, caretCount: 1, lineText: "   ", syntax: null,
+    });
+    expect(blank).toEqual({ kind: "local", ruleId: "completeStatement.blank-line" });
+  });
+});
+
+describe("§8.19.8 Generate Code candidates", () => {
+  it("keeps only provider generate/refactor kinds and preserves the raw actions", () => {
     const actions = filterGenerateCodeActions([
-      { title: "Generate Constructor", kind: "source.generate.constructor" },
-      { title: "Extract variable", kind: "refactor.extract.variable" },
-      { title: "Quick fix import", kind: "quickfix.import" },
-      { title: "No kind at all" },
+      { title: "Generate Constructor", kind: "source.generate.constructor", raw: "a" },
+      { title: "Extract variable", kind: "refactor.extract.variable", raw: "b" },
+      { title: "Quick fix import", kind: "quickfix.import", raw: "c" },
+      { title: "No kind at all", kind: null, raw: "d" },
     ]);
-    expect(actions.map((action) => action.title)).toEqual(["Generate Constructor", "Extract variable"]);
+    expect(actions.map((entry) => entry.title)).toEqual(["Generate Constructor", "Extract variable"]);
+    // The original provider actions survive so apply runs exactly what the
+    // server sent — never a locally rebuilt template.
+    expect(actions[0].item.raw).toBe("a");
+    expect(actions[1].item.raw).toBe("b");
   });
 });

@@ -25,7 +25,19 @@ export interface EditorClipboardSession {
    * instead of silently degrading to plain full text.
    */
   systemClipboardUnavailable?: boolean;
+  /**
+   * §8.19.5: producers mark secret-like payloads (vault material, masked
+   * fields); sensitive payloads fill the live slot but NEVER enter history.
+   */
+  sensitive?: boolean;
 }
+
+/** Why a written payload did not enter the history ring (§8.19.5). */
+export type ClipboardHistoryExclusion =
+  | "recorded"
+  | "history-disabled"
+  | "oversized-item"
+  | "sensitive";
 
 /** Why the session/history was cleared (typed for diagnostics). */
 export type ClipboardClearReason = "workspace-close" | "user" | "privacy-policy";
@@ -108,6 +120,9 @@ export class WorkspaceClipboardStore {
   private history: HistoryEntry[] = [];
   private historyEnabled = true;
   private historyTotalBytes = 0;
+  private historyMaxItems = CLIPBOARD_HISTORY_MAX_ITEMS;
+  private historyMaxTotalBytes = CLIPBOARD_HISTORY_MAX_TOTAL_BYTES;
+  private lastHistoryExclusion: ClipboardHistoryExclusion = "recorded";
 
   write(input: {
     sourceViewId: string | null;
@@ -116,6 +131,8 @@ export class WorkspaceClipboardStore {
     rectangular: boolean;
     sourceEol: ClipboardSourceEol;
     systemClipboardUnavailable?: boolean;
+    /** §8.19.5: secret-like payloads fill the slot but never the ring. */
+    sensitive?: boolean;
     /** Oversized/binary payloads skip the C3b ring but still fill the slot. */
     historyEligible?: boolean;
   }): EditorClipboardSession {
@@ -128,9 +145,14 @@ export class WorkspaceClipboardStore {
       sourceEol: input.sourceEol,
       createdAt: Date.now(),
       ...(input.systemClipboardUnavailable ? { systemClipboardUnavailable: true } : {}),
+      ...(input.sensitive ? { sensitive: true } : {}),
     };
     this.session = session;
-    this.recordHistory(session, input.historyEligible !== false);
+    if (input.sensitive) {
+      this.lastHistoryExclusion = "sensitive";
+    } else {
+      this.recordHistory(session, input.historyEligible !== false);
+    }
     return session;
   }
 
@@ -159,6 +181,31 @@ export class WorkspaceClipboardStore {
     return this.historyEnabled;
   }
 
+  /** §8.19.5 Settings: item cap clamped to 1–50, total bytes user-settable. */
+  setHistoryLimits(maxItems: number, maxTotalBytes: number): void {
+    this.historyMaxItems = Math.min(50, Math.max(1, Math.floor(maxItems)));
+    this.historyMaxTotalBytes = Math.max(1024, Math.floor(maxTotalBytes));
+    this.evictOverflow();
+  }
+
+  historyLimits(): { maxItems: number; maxTotalBytes: number } {
+    return { maxItems: this.historyMaxItems, maxTotalBytes: this.historyMaxTotalBytes };
+  }
+
+  /** Outcome of the most recent write's history admission (non-blocking). */
+  historyExclusion(): ClipboardHistoryExclusion {
+    return this.lastHistoryExclusion;
+  }
+
+  /** Remove ONE entry (Delete key in the popup); false when index invalid. */
+  removeHistoryEntry(index: number): boolean {
+    const entry = this.history[index];
+    if (!entry) return false;
+    this.history.splice(index, 1);
+    this.historyTotalBytes -= entry.bytes;
+    return true;
+  }
+
   historyEntries(): readonly EditorClipboardSession[] {
     return this.history.map((entry) => entry.session);
   }
@@ -178,11 +225,18 @@ export class WorkspaceClipboardStore {
   }
 
   private recordHistory(session: EditorClipboardSession, eligible: boolean): void {
-    if (!this.historyEnabled || !eligible) return;
+    if (!this.historyEnabled || !eligible) {
+      this.lastHistoryExclusion = "history-disabled";
+      return;
+    }
     // UTF-16 length is the closest WebView proxy for the byte budget; the
     // conservative estimate keeps quota math from undercounting.
     const bytes = session.plainText.length * 2 + (session.segments?.reduce((sum, segment) => sum + segment.length * 2, 0) ?? 0);
-    if (bytes > CLIPBOARD_HISTORY_MAX_ITEM_BYTES) return;
+    if (bytes > CLIPBOARD_HISTORY_MAX_ITEM_BYTES) {
+      this.lastHistoryExclusion = "oversized-item";
+      return;
+    }
+    this.lastHistoryExclusion = "recorded";
     const existing = this.history.findIndex((entry) => entry.session.plainText === session.plainText);
     if (existing >= 0) {
       const [moved] = this.history.splice(existing, 1);
@@ -190,10 +244,14 @@ export class WorkspaceClipboardStore {
     }
     this.history.unshift({ session, bytes });
     this.historyTotalBytes += bytes;
+    this.evictOverflow();
+  }
+
+  private evictOverflow(): void {
     while (
       this.history.length > 0
-      && (this.history.length > CLIPBOARD_HISTORY_MAX_ITEMS
-        || this.historyTotalBytes > CLIPBOARD_HISTORY_MAX_TOTAL_BYTES)
+      && (this.history.length > this.historyMaxItems
+        || this.historyTotalBytes > this.historyMaxTotalBytes)
     ) {
       const dropped = this.history.pop();
       if (dropped) this.historyTotalBytes -= dropped.bytes;
@@ -212,9 +270,13 @@ export interface WorkspaceClipboardHandle {
   release(): void;
   historyEntries(): readonly EditorClipboardSession[];
   pasteFromHistory(index: number): EditorClipboardSession | null;
+  removeHistoryEntry(index: number): boolean;
   clearHistory(): void;
   setHistoryEnabled(enabled: boolean): void;
   isHistoryEnabled(): boolean;
+  setHistoryLimits(maxItems: number, maxTotalBytes: number): void;
+  historyLimits(): { maxItems: number; maxTotalBytes: number };
+  historyExclusion(): ClipboardHistoryExclusion;
 }
 
 /**
@@ -258,10 +320,14 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
       });
     },
     historyEntries: () => live().historyEntries(),
-    pasteFromHistory: (index) => live().pasteFromHistory(index),
+    pasteFromHistory(index) { return live().pasteFromHistory(index); },
+    removeHistoryEntry: (index) => live().removeHistoryEntry(index),
     clearHistory: () => live().clearHistory(),
     setHistoryEnabled: (enabled) => live().setHistoryEnabled(enabled),
     isHistoryEnabled: () => live().isHistoryEnabled(),
+    setHistoryLimits: (maxItems, maxTotalBytes) => live().setHistoryLimits(maxItems, maxTotalBytes),
+    historyLimits: () => live().historyLimits(),
+    historyExclusion: () => live().historyExclusion(),
   };
 }
 

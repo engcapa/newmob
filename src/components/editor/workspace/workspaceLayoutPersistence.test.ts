@@ -171,4 +171,77 @@ describe("workspaceLayoutPersistence", () => {
     expect(normalized.layoutTreeV2.type).toBe("leaf");
     expect(normalized.editorGroups[normalized.layoutTreeV2.id]).toBeDefined();
   });
+
+  it("materializes a default v3 tab policy when the payload has none", () => {
+    const normalized = normalizeWorkspaceLayoutSnapshot({ version: 2 });
+    expect(normalized.tabPolicy).toEqual({
+      schemaVersion: 3,
+      limitPerLeaf: 12,
+      order: "open-order",
+      openPosition: "end",
+      activateOnClose: "mru",
+      pinnedRow: "same",
+      previewMode: true,
+      reusePreview: true,
+    });
+    expect(normalized.tabPolicyBackup).toBeUndefined();
+  });
+
+  it("round-trips a custom tab policy through localStorage", () => {
+    writeWorkspaceLayoutSnapshot("ws-policy", {
+      ...defaultWorkspaceLayoutSnapshot(),
+      tabPolicy: {
+        schemaVersion: 3,
+        limitPerLeaf: 5,
+        order: "alphabetical",
+        openPosition: "after-active",
+        activateOnClose: "left",
+        pinnedRow: "separate",
+        previewMode: false,
+        reusePreview: false,
+      },
+    });
+    const restored = readWorkspaceLayoutSnapshot("ws-policy");
+    expect(restored?.tabPolicy).toMatchObject({
+      schemaVersion: 3,
+      limitPerLeaf: 5,
+      order: "alphabetical",
+      previewMode: false,
+    });
+    expect(restored?.tabPolicyBackup).toBeUndefined();
+  });
+
+  it("repairs corrupt/v2 policies on read and archives the raw payload as backup", () => {
+    // v2 payload: previewEnabled migrates; limit survives.
+    writeWorkspaceLayoutSnapshot("ws-v2", {
+      ...defaultWorkspaceLayoutSnapshot(),
+      tabPolicy: { schemaVersion: 2, limitPerLeaf: 7, previewEnabled: false } as never,
+    });
+    let restored = readWorkspaceLayoutSnapshot("ws-v2")!;
+    expect(restored.tabPolicy).toMatchObject({ schemaVersion: 3, limitPerLeaf: 7, previewMode: false });
+    expect(restored.tabPolicyBackup).toEqual({ schemaVersion: 2, limitPerLeaf: 7, previewEnabled: false });
+
+    // Corrupt fields repair individually; backup keeps the exact raw payload.
+    writeWorkspaceLayoutSnapshot("ws-corrupt", {
+      ...defaultWorkspaceLayoutSnapshot(),
+      tabPolicy: { schemaVersion: 9, limitPerLeaf: "many", order: "random" } as never,
+    });
+    restored = readWorkspaceLayoutSnapshot("ws-corrupt")!;
+    expect(restored.tabPolicy!.limitPerLeaf).toBe(12);
+    expect(restored.tabPolicy!.order).toBe("open-order");
+    expect(restored.tabPolicyBackup).toEqual({ schemaVersion: 9, limitPerLeaf: "many", order: "random" });
+
+    // Re-normalizing the repaired snapshot carries the archive forward…
+    const renormalized = normalizeWorkspaceLayoutSnapshot(restored);
+    expect(renormalized.tabPolicyBackup).toEqual(restored.tabPolicyBackup);
+    // …until a clean live write (no backup field) replaces it.
+    writeWorkspaceLayoutSnapshot("ws-corrupt", {
+      ...defaultWorkspaceLayoutSnapshot(),
+      // Normalization always materializes the policy; non-null assertion kept
+      // local so a future type regression here still fails loudly.
+      tabPolicy: restored.tabPolicy!,
+    });
+    restored = readWorkspaceLayoutSnapshot("ws-corrupt")!;
+    expect(restored.tabPolicyBackup).toBeUndefined();
+  });
 });

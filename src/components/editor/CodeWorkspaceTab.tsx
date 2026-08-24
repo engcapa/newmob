@@ -51,6 +51,9 @@ import {
   Columns3,
   ShieldCheck,
   Link2,
+  AlignHorizontalJustifyCenter,
+  Maximize2,
+  Square,
 } from "lucide-react";
 import {
   workspaceListDir,
@@ -201,9 +204,18 @@ import {
 import {
   enforceTabPolicy,
   pushClosedTab,
-  DEFAULT_WORKSPACE_TAB_POLICY,
+  buildReopenTreeRoute,
+  resolveReopenLocation,
+  DEFAULT_WORKSPACE_TAB_POLICY_V3,
   type ClosedTabEntry,
+  type WorkspaceTabPolicyV3,
 } from "./workspace/workspaceTabPolicy";
+import {
+  listToolWindowsForCycle,
+  syncBottomDockToolWindows,
+  unregisterAllToolWindows,
+} from "./workspace/toolWindowRegistry";
+import { planReformat } from "./workspace/reformatWorkflow";
 import { attachWorkspaceMouseDispatcher } from "./workspace/workspaceMouseDispatcher";
 import {
   createWorkspaceLocationController,
@@ -215,7 +227,9 @@ import {
 } from "./workspace/navigationHistoryModel";
 import {
   createSingleLeafLayout,
+  findLeafNode,
   getAllLeafNodes,
+  navigateLeafOrder,
   panelLayoutToRatios,
   cloneLayoutTree,
   type LayoutNode,
@@ -232,6 +246,14 @@ import {
   type PersistedEditorGroup,
 } from "./workspace/workspaceLayoutPersistence";
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
+import { CodeStyleSettingsDialog } from "./workspace/CodeStyleSettingsDialog";
+import {
+  activeSchemeForLanguage,
+  readCodeStyleSchemeStore,
+  schemeStyleFields,
+  writeCodeStyleSchemeStore,
+  type CodeStyleSchemeStoreState,
+} from "./workspace/workspaceCodeStyleSchemes";
 import { EditorSelectionAiToolbar } from "./workspace/EditorSelectionAiToolbar";
 import {
   CONTEXT_LINE_RADIUS,
@@ -263,6 +285,7 @@ import { useContextMenu } from "../ContextMenu";
 import { useChatStore } from "../../stores/chatStore";
 import {
   type EditorCommandId,
+  type EditorCommandOptions,
   type EditorCommandPort,
   type EditorCommandPortRegistration,
   type EditorCommandState,
@@ -270,6 +293,16 @@ import {
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./workspace/CodeMirrorHost";
+import { SurroundWithDialog } from "./workspace/SurroundWithDialog";
+import { GenerateCodeDialog } from "./workspace/GenerateCodeDialog";
+import {
+  applyGenerateSelection,
+  type GenerateCandidate,
+} from "./workspace/generateCodeWorkflow";
+import { filterGenerateCodeActions } from "./workspace/workspaceSemanticEditing";
+import { copyReferenceCandidates } from "./workspace/workspaceCopyReference";
+import { ClipboardHistoryPopup } from "./workspace/ClipboardHistoryPopup";
+import { clipboardStoreForWorkspace, type EditorClipboardSession } from "./workspace/workspaceClipboardSession";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
@@ -307,7 +340,7 @@ import {
   writeKeymapSchemes,
   type KeymapSchemeV3,
 } from "./workspace/workspaceKeymapScheme";
-import { TabSwitcher } from "./workspace/TabSwitcher";
+import { TabSwitcher, type TabSwitcherEntry, type TabSwitcherToolWindow } from "./workspace/TabSwitcher";
 import { DapAdapterGuideDialog } from "./workspace/DapAdapterGuideDialog";
 import {
   buildWorkspacePathSnapshotEdit,
@@ -866,6 +899,24 @@ export function CodeWorkspaceTab({
   const [bookmarks, setBookmarks] = useState<WorkspaceBookmark[]>(
     () => readWorkspaceBookmarks(workspaceInstanceId),
   );
+  // §8.19.6 per-workspace tab policy: restored from the layout snapshot
+  // (migrated/repaired on read) and consumed by open-time limit enforcement.
+  // Editing UI is deferred — restored values already govern eviction.
+  const [tabPolicy, setTabPolicy] = useState<WorkspaceTabPolicyV3>(() => ({ ...DEFAULT_WORKSPACE_TAB_POLICY_V3 }));
+  const tabPolicyRef = useRef(tabPolicy);
+  tabPolicyRef.current = tabPolicy;
+  // §8.19.9 R8-D1: code style schemes — production store with persistence;
+  // the active scheme layers into effective-style resolution BELOW EditorConfig.
+  const [codeStyleSchemes, setCodeStyleSchemes] = useState<CodeStyleSchemeStoreState>(
+    () => readCodeStyleSchemeStore(),
+  );
+  const codeStyleSchemesRef = useRef(codeStyleSchemes);
+  codeStyleSchemesRef.current = codeStyleSchemes;
+  const changeCodeStyleSchemes = useCallback((next: CodeStyleSchemeStoreState) => {
+    setCodeStyleSchemes(next);
+    writeCodeStyleSchemeStore(next);
+  }, []);
+  const [codeStyleSettingsOpen, setCodeStyleSettingsOpen] = useState(false);
   const ensureWorkspaceUi = useCodeWorkspaceStore((s) => s.ensureInstance);
   const disposeWorkspaceUi = useCodeWorkspaceStore((s) => s.disposeInstance);
   const patchWorkspaceUi = useCodeWorkspaceStore((s) => s.patchInstance);
@@ -880,6 +931,10 @@ export function CodeWorkspaceTab({
   const setStoreActiveEditorGroup = useCodeWorkspaceStore((s) => s.setActiveEditorGroup);
   const splitLayoutLeaf = useCodeWorkspaceStore((s) => s.splitLayoutLeaf);
   const closeLayoutLeaf = useCodeWorkspaceStore((s) => s.closeLayoutLeaf);
+  const moveLayoutTabStore = useCodeWorkspaceStore((s) => s.moveLayoutTab);
+  const equalizeLayoutRatiosStore = useCodeWorkspaceStore((s) => s.equalizeLayoutRatios);
+  const stretchLayoutLeafStore = useCodeWorkspaceStore((s) => s.stretchLayoutLeaf);
+  const unsplitAllLayoutStore = useCodeWorkspaceStore((s) => s.unsplitAllLayout);
   const setLayoutTreeV2Store = useCodeWorkspaceStore((s) => s.setLayoutTreeV2);
   const closeLayoutTabInLeaf = useCodeWorkspaceStore((s) => s.closeLayoutTabInLeaf);
   const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
@@ -906,6 +961,7 @@ export function CodeWorkspaceTab({
       if (snapshot.layoutRecovered) {
         setStatusMessage("Recovered invalid workspace layout into a single editor leaf");
       }
+      setTabPolicy(snapshot.tabPolicy ?? { ...DEFAULT_WORKSPACE_TAB_POLICY_V3 });
       patchWorkspaceUi(workspaceInstanceId, {
         bottomDockOpen: snapshot.bottomDockOpen,
         bottomDockTab: snapshot.bottomDockTab,
@@ -1059,18 +1115,19 @@ export function CodeWorkspaceTab({
   const activeEditorCommandState = useCallback((): EditorCommandState | null => {
     return activeEditorCommandOwner()?.port.state() ?? null;
   }, [activeEditorCommandOwner]);
-  const executeActiveEditorCommand = useCallback((commandId: EditorCommandId) => {
-    return activeEditorCommandOwner()?.port.execute(commandId) ?? false;
+  const executeActiveEditorCommand = useCallback((commandId: EditorCommandId, options?: EditorCommandOptions) => {
+    return activeEditorCommandOwner()?.port.execute(commandId, options) ?? false;
   }, [activeEditorCommandOwner]);
   const executeEditorCommandFor = useCallback((
     target: EditorCommandTarget | undefined,
     commandId: EditorCommandId,
+    options?: EditorCommandOptions,
   ) => {
     if (target) {
       return editorCommandOwnerFor(target.groupId, target.fileKey)
-        ?.port.execute(commandId) ?? false;
+        ?.port.execute(commandId, options) ?? false;
     }
-    return executeActiveEditorCommand(commandId);
+    return executeActiveEditorCommand(commandId, options);
   }, [editorCommandOwnerFor, executeActiveEditorCommand]);
   const executeEditorCommand = useCallback((commandId: EditorCommandId, context?: WorkspaceCommandContext) => {
     const target = context?.payload as EditorCommandTarget | undefined;
@@ -1221,6 +1278,24 @@ export function CodeWorkspaceTab({
     patchWorkspaceUi(workspaceInstanceId, { structureLoading: loading });
   }, [patchWorkspaceUi, workspaceInstanceId]);
   const [recentLocationsOpen, setRecentLocationsOpen] = useState(false);
+  // §8.19.8 Surround With dialog state (one entry, all kinds).
+  const [surroundWithDialogOpen, setSurroundWithDialogOpen] = useState(false);
+  // §8.19.8 Generate Code workflow state: provider candidates + phase.
+  const [generateCode, setGenerateCode] = useState<{
+    open: boolean;
+    phase: "loading" | "ready" | "empty" | "running" | "error";
+    candidates: GenerateCandidate[];
+    error: string | null;
+  }>({ open: false, phase: "loading", candidates: [], error: null });
+  // §8.19.5 Paste-from-History popup state (session-only ring snapshot).
+  const [clipboardHistoryOpen, setClipboardHistoryOpen] = useState(false);
+  const [clipboardHistoryEntries, setClipboardHistoryEntries] = useState<EditorClipboardSession[]>([]);
+  const generateCodeContextRef = useRef<{
+    file: OpenFileState;
+    range: LspRange;
+    semanticToken: WorkspaceSemanticIndexBuildToken | null;
+    actions: LspCodeAction[];
+  } | null>(null);
   const [recentLocationsChangedOnly, setRecentLocationsChangedOnly] = useState(false);
   const setStructureUnavailable = useCallback((reason: string | null) => {
     patchWorkspaceUi(workspaceInstanceId, { structureUnavailable: reason });
@@ -1739,10 +1814,15 @@ export function CodeWorkspaceTab({
     const asyncResolved = resolvedCodeStylesRef.current[file.key];
     if (asyncResolved) return asyncResolved;
     const explicitOverride = indentationOverridesRef.current[file.key];
+    // §8.19.9 R8-D1: the active scheme for the file's extension-keyed
+    // language participates below EditorConfig.
+    const languageKey = file.languagePath.split(".").pop()?.toLowerCase() ?? "";
+    const activeScheme = activeSchemeForLanguage(codeStyleSchemesRef.current, languageKey || null);
     return resolveEffectiveCodeStyle({
       filePath: file.languagePath,
       text: file.text,
       explicitOverride,
+      activeSchemeFields: schemeStyleFields(activeScheme),
     });
   }, []);
 
@@ -2150,7 +2230,7 @@ export function CodeWorkspaceTab({
               lastUsedAt: 1_000_000 - mruFileKeysRef.current.indexOf(entryKey),
             },
           ]));
-          const eviction = enforceTabPolicy(groupAfter.openOrder, meta, DEFAULT_WORKSPACE_TAB_POLICY);
+          const eviction = enforceTabPolicy(groupAfter.openOrder, meta, tabPolicyRef.current);
           if (eviction.kind === "evicted") {
             for (const evictedKey of eviction.evictedKeys) {
               if (evictedKey !== key) void closeFileRef.current?.(evictedKey, groupId, { discard: true });
@@ -2597,6 +2677,7 @@ export function CodeWorkspaceTab({
         expandedDirKeys,
         editorGroups: persistableGroups,
         layoutTreeV2: workspaceUi.layoutTreeV2,
+        tabPolicy: tabPolicyRef.current,
       }), {
         // §8.17.4 step 3: persistence refusals surface as a recovery
         // diagnostic, not only a console line.
@@ -4549,10 +4630,14 @@ export function CodeWorkspaceTab({
     if (capabilities && useRange && !capabilities.rangeFormatting) return null;
 
     const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
+    const schemeLanguageKey = file.languagePath.split(".").pop()?.toLowerCase() ?? "";
     const codeStyle = await workspaceStyleControllerRef.current.resolveForFile({
       filePath: absPath,
       explicitOverride: indentationOverridesRef.current[file.key],
       text: file.text,
+      activeSchemeFields: schemeStyleFields(
+        activeSchemeForLanguage(codeStyleSchemesRef.current, schemeLanguageKey || null),
+      ),
     });
     resolvedCodeStylesRef.current[file.key] = codeStyle;
 
@@ -4969,6 +5054,10 @@ export function CodeWorkspaceTab({
       if (file) {
         closeLspDocument(file);
         // §8.18.5 reopen stack: session-only, capped, never persisted.
+        // §8.19.6: capture structured relocation evidence so a later reopen
+        // can find the closest surviving editor even after splits close.
+        const closedTree = currentUi.layoutTreeV2;
+        const closedLeaf = findLeafNode(closedTree, groupId);
         setClosedTabsStack((stack) => pushClosedTab(stack, {
           fileIdentity: workspaceFileIdentity(file.ref),
           ref: file.ref,
@@ -4976,6 +5065,11 @@ export function CodeWorkspaceTab({
           subtitle: file.subtitle,
           leafPath: [groupId],
           closedAt: Date.now(),
+          location: {
+            leafId: groupId,
+            treeRoute: buildReopenTreeRoute(closedTree, groupId),
+            siblingFileKeys: (closedLeaf?.openFileKeys ?? []).filter((entryKey) => entryKey !== key),
+          },
         }));
       }
       setOpenFiles((current) => {
@@ -5127,6 +5221,63 @@ export function CodeWorkspaceTab({
   const closeSplit = useCallback(() => {
     closeLayoutLeaf(workspaceInstanceId, activeEditorGroupId);
   }, [activeEditorGroupId, closeLayoutLeaf, workspaceInstanceId]);
+
+  // §8.19.6 R5-b: split management actions — navigation, tab moves between
+  // splits, equalize/stretch proportions and unsplit-all. All layout truth
+  // flows through the recursive-tree store reducers.
+  const goToAdjacentSplit = useCallback((direction: 1 | -1): boolean => {
+    const target = navigateLeafOrder(workspaceUi.layoutTreeV2, activeEditorGroupId, direction);
+    if (!target || target.id === activeEditorGroupId) return false;
+    setStoreActiveEditorGroup(workspaceInstanceId, target.id);
+    setStatusMessage(`${direction === 1 ? "Next" : "Previous"} editor: ${target.id}`);
+    return true;
+  }, [activeEditorGroupId, setStoreActiveEditorGroup, setStatusMessage, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+
+  const moveActiveTabToAdjacentSplit = useCallback((direction: 1 | -1): boolean => {
+    // Read through the store so a stale closure never moves the wrong tab.
+    const liveUi = useCodeWorkspaceStore.getState().byInstanceId[workspaceInstanceId];
+    const sourceId = liveUi?.activeEditorGroupId ?? activeEditorGroupId;
+    const key = sourceId ? (liveUi?.editorGroups[sourceId]?.activeKey ?? null) : null;
+    if (!key) return false;
+    const target = navigateLeafOrder(workspaceUi.layoutTreeV2, sourceId, direction);
+    if (!target || target.id === sourceId) return false;
+    moveLayoutTabStore(workspaceInstanceId, sourceId, target.id, key);
+    setStatusMessage(`Moved ${openFilesRef.current[key]?.title ?? key} to the ${direction === 1 ? "next" : "previous"} split`);
+    return true;
+  }, [activeEditorGroupId, moveLayoutTabStore, openFilesRef, setStatusMessage, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+
+  const moveTabToAdjacentSplitFrom = useCallback((
+    sourceLeafId: EditorGroupId,
+    key: string,
+    direction: 1 | -1,
+  ): boolean => {
+    const target = navigateLeafOrder(workspaceUi.layoutTreeV2, sourceLeafId, direction);
+    if (!target || target.id === sourceLeafId) return false;
+    moveLayoutTabStore(workspaceInstanceId, sourceLeafId, target.id, key);
+    return true;
+  }, [moveLayoutTabStore, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+
+  const equalizeActiveSplitRatios = useCallback((): boolean => {
+    equalizeLayoutRatiosStore(workspaceInstanceId, activeEditorGroupId);
+    setStatusMessage("Split proportions equalized");
+    return true;
+  }, [activeEditorGroupId, equalizeLayoutRatiosStore, setStatusMessage, workspaceInstanceId]);
+
+  const stretchActiveSplit = useCallback((): boolean => {
+    stretchLayoutLeafStore(workspaceInstanceId, activeEditorGroupId);
+    return true;
+  }, [activeEditorGroupId, stretchLayoutLeafStore, workspaceInstanceId]);
+
+  const unsplitAllWindows = useCallback((): boolean => {
+    if (getAllLeafNodes(useCodeWorkspaceStore.getState().byInstanceId[workspaceInstanceId]?.layoutTreeV2
+      ?? workspaceUi.layoutTreeV2).length <= 1) {
+      setStatusMessage("No splits to close");
+      return false;
+    }
+    unsplitAllLayoutStore(workspaceInstanceId);
+    setStatusMessage("Closed all splits — tabs kept in one editor");
+    return true;
+  }, [setStatusMessage, unsplitAllLayoutStore, workspaceInstanceId, workspaceUi.layoutTreeV2]);
 
   const activeFile = activeKey ? openFiles[activeKey] ?? null : null;
   // Large-file mode (M6-B): above the size/line threshold, skip the per-edit
@@ -7452,11 +7603,17 @@ export function CodeWorkspaceTab({
       });
       if (result.status === "executed-command") {
         setStatusMessage(`Executed code action: ${executableAction.title}`);
+        return { ok: true, message: null };
       } else if (result.status === "empty") {
-        setStatusMessage("Code action had no edit or command to apply");
+        const message = "Code action had no edit or command to apply";
+        setStatusMessage(message);
+        return { ok: false, message };
       }
+      return { ok: true, message: null };
     } catch (error) {
-      setStatusMessage(errorMessage(error));
+      const message = errorMessage(error);
+      setStatusMessage(message);
+      return { ok: false, message };
     }
   }, [
     applyLspWorkspaceEdit,
@@ -7466,6 +7623,171 @@ export function CodeWorkspaceTab({
     semanticIndex.invalidate,
     setStatusMessage,
     updateLspStatusForFile,
+  ]);
+
+  // §8.19.8 Generate Code: request provider source/generate CodeActions for
+  // the caret, list exactly what came back, and apply the selection through
+  // the existing runCodeAction pipeline (resolve → WorkspaceEdit/command with
+  // semantic staleness guards). No local member templates exist anywhere.
+  const requestGenerateCandidates = useCallback(async () => {
+    const file = activeFile;
+    if (!file || file.loading || file.library) {
+      setStatusMessage("Generate requires an active workspace file");
+      setGenerateCode((prev) => ({ ...prev, phase: "empty" }));
+      return;
+    }
+    const selection = editorSelectionRef.current;
+    const range: LspRange = {
+      start: selection.start,
+      end: selection.empty ? selection.start : selection.end,
+    };
+    setGenerateCode((prev) => ({ ...prev, open: true, phase: "loading", error: null }));
+    const requested = await requestCodeActions(file, range, [], ["source"]);
+    if (
+      requested.semanticToken
+      && !workspaceSemanticIndexBuildIsCurrent(semanticIndex.current(), requested.semanticToken)
+    ) {
+      setGenerateCode({ open: true, phase: "error", candidates: [], error: "Generation actions became stale because the workspace changed; retry to request them again" });
+      generateCodeContextRef.current = null;
+      return;
+    }
+    const filtered = filterGenerateCodeActions(requested.actions);
+    if (filtered.length === 0) {
+      generateCodeContextRef.current = null;
+      setGenerateCode({ open: true, phase: "empty", candidates: [], error: null });
+      return;
+    }
+    generateCodeContextRef.current = {
+      file,
+      range,
+      semanticToken: requested.semanticToken,
+      actions: filtered.map((entry) => entry.item),
+    };
+    setGenerateCode({
+      open: true,
+      phase: "ready",
+      candidates: filtered.map((entry, index) => ({
+        id: String(index),
+        title: entry.title,
+        kind: entry.kind,
+      })),
+      error: null,
+    });
+  }, [activeFile, requestCodeActions, semanticIndex.current, setStatusMessage]);
+
+  const closeGenerateDialog = useCallback(() => {
+    generateCodeContextRef.current = null;
+    setGenerateCode((prev) => ({ ...prev, open: false }));
+  }, []);
+
+  const applyGenerateCandidates = useCallback(async (ids: readonly string[]) => {
+    const context = generateCodeContextRef.current;
+    if (!context) return;
+    // Only ids that still map onto the captured provider actions.
+    const selection: GenerateCandidate[] = ids.flatMap((id) => {
+      const action = context.actions[Number(id)];
+      return action ? [{ id, title: action.title, kind: action.kind ?? "" }] : [];
+    });
+    if (selection.length === 0) return;
+    setGenerateCode((prev) => ({ ...prev, phase: "running", error: null }));
+    const outcome = await applyGenerateSelection(selection, {
+      actionFor: (candidate) => context.actions[Number(candidate.id)],
+      isStale: () => !!context.semanticToken
+        && !workspaceSemanticIndexBuildIsCurrent(semanticIndex.current(), context.semanticToken!),
+      run: (action) => runCodeAction(action, context.file, context.semanticToken),
+    });
+    if (outcome.failedIndex != null) {
+      // §8.19.8: resolve/apply failure keeps the dialog on Retry/Cancel and
+      // never falls back to inserting a fixed template.
+      setGenerateCode((prev) => ({
+        ...prev,
+        phase: "error",
+        error: outcome.message ?? "Generation failed",
+      }));
+      return;
+    }
+    setStatusMessage(`Generated via ${outcome.applied} language-server action${outcome.applied === 1 ? "" : "s"}`);
+    closeGenerateDialog();
+  }, [closeGenerateDialog, runCodeAction, semanticIndex.current, setStatusMessage]);
+
+  // §8.19.5 Copy Reference: workspace-relative `path:line` from real file
+  // facts, plus a symbol candidate only when the provider names one via its
+  // rename range. Qualified names are never synthesized — without a
+  // provider channel they stay an explicit unavailable reason.
+  const copyReferenceAtCursor = useCallback(async () => {
+    const file = activeFile;
+    if (!file) return;
+    const path = absolutePathForOpenFile(file);
+    const outcome = copyReferenceCandidates({
+      path,
+      isLibrary: !!file.library,
+      roots: rootsRef.current.map((root) => root.path),
+      line: editorSelectionRef.current.start.line,
+      symbolName: null,
+    });
+    if (outcome.kind === "unavailable") {
+      setStatusMessage(`Copy Reference unavailable (${outcome.reason}): ${outcome.detail}`);
+      return;
+    }
+    // Best-effort provider symbol identity; failure degrades to path-only
+    // rather than blocking the copy.
+    let symbolName: string | null = null;
+    if (!file.library) {
+      try {
+        const live = openFilesRef.current[file.key];
+        const descriptor = live ? lspDescriptorForFile(live) : null;
+        if (descriptor) {
+          const position = editorSelectionRef.current.start;
+          const prepared = await lspPrepareRename(descriptor, position);
+          const range = prepared.range ?? null;
+          const lineText = live?.text.split("\n")[position.line] ?? "";
+          symbolName = (range && range.start.line === range.end.line
+            ? lineText.slice(range.start.character, range.end.character).trim()
+            : "")
+            || lineText.slice(position.character).match(/^[A-Za-z0-9_$]+/)?.[0]
+            || null;
+        }
+      } catch {
+        symbolName = null;
+      }
+    }
+    const final = symbolName
+      ? copyReferenceCandidates({
+        path,
+        isLibrary: !!file.library,
+        roots: rootsRef.current.map((root) => root.path),
+        line: editorSelectionRef.current.start.line,
+        symbolName,
+      })
+      : outcome;
+    if (final.kind === "unavailable") {
+      setStatusMessage(`Copy Reference unavailable (${final.reason}): ${final.detail}`);
+      return;
+    }
+    if (final.candidates.length === 1) {
+      await writeText(final.candidates[0].text);
+      setStatusMessage(`Copied reference: ${final.candidates[0].text}`);
+      return;
+    }
+    const rect = editorPaneRef.current?.getBoundingClientRect();
+    openTreeContextMenuAt(
+      (rect?.left ?? 0) + 80,
+      (rect?.top ?? 0) + 80,
+      final.candidates.map((candidate) => ({
+        label: `${candidate.label}: ${candidate.text}`,
+        onClick: () => {
+          void writeText(candidate.text).then(() => {
+            setStatusMessage(`Copied reference: ${candidate.text}`);
+          });
+        },
+      })),
+    );
+  }, [
+    absolutePathForOpenFile,
+    activeFile,
+    lspDescriptorForFile,
+    openTreeContextMenuAt,
+    setStatusMessage,
   ]);
 
   const showCodeActionsMenu = useCallback(async (
@@ -7907,14 +8229,35 @@ export function CodeWorkspaceTab({
       run: (context) => executeEditorCommand("completeStatement", context),
     },
     {
-      id: "editor.surroundWith.tryCatch",
-      title: "Surround with try/catch",
+      // §8.19.8: one Surround With entry opens the kind dialog; try/catch is
+      // no longer a hard-wired command and every kind shares the same
+      // plan builder, single transaction and undo entry.
+      id: "editor.surroundWith",
+      title: "Surround With…",
       category: "Edit",
       keybinding: "Ctrl+Alt+T",
       keybindings: ["Meta+Alt+T"],
-      keywords: ["surround", "wrap", "exception"],
-      when: (context) => context.focus === "editor" && !!context.hasSelection && !context.readOnly,
-      run: (context) => executeEditorCommand("surroundWithTryCatch", context),
+      keywords: ["surround", "wrap", "try", "catch", "if", "while", "runnable"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: () => {
+        setSurroundWithDialogOpen(true);
+        return true;
+      },
+    },
+    {
+      // §8.19.8 Generate Code: the dialog lists exactly what the provider
+      // returned; without a provider this stays honestly empty.
+      id: "editor.generateCode",
+      title: "Generate Code…",
+      category: "Code",
+      keybinding: "Alt+Insert",
+      keybindings: ["Meta+n"],
+      keywords: ["generate", "constructor", "getter", "setter", "toString", "override"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: () => {
+        void requestGenerateCandidates();
+        return true;
+      },
     },
     {
       // §8.18.8 Smart completion stays visible but typed-unavailable until a
@@ -7935,11 +8278,26 @@ export function CodeWorkspaceTab({
       keywords: ["reopen", "closed", "tab", "undo close"],
       run: () => {
         // §8.18.5: pop the newest entry that still resolves to a real file.
+        // §8.19.6: resolve against the LIVE tree — original leaf, then the
+        // nearest surviving ancestor along the recorded route, then the leaf
+        // owning the most former siblings, then the active editor.
         while (closedTabsStack.length > 0) {
           const [entry, ...rest] = closedTabsStack;
+          const resolution = entry?.ref && entry.location
+            ? resolveReopenLocation(workspaceUi.layoutTreeV2, entry.location, activeEditorGroupId)
+            : null;
           setClosedTabsStack(rest);
           if (entry && entry.ref) {
-            void openFile(entry.ref as never);
+            void openFile(entry.ref as never, resolution ? { groupId: resolution.leafId } : undefined);
+            if (resolution?.kind === "relocated") {
+              setStatusMessage(
+                resolution.reason === "route"
+                  ? `Reopened ${entry.title} in the nearest surviving split`
+                  : resolution.reason === "sibling"
+                    ? `Reopened ${entry.title} next to its former tab group`
+                    : `Reopened ${entry.title} in the active editor`,
+              );
+            }
             return true;
           }
         }
@@ -7954,6 +8312,18 @@ export function CodeWorkspaceTab({
       keywords: ["keymap", "shortcut", "scheme", "keybinding"],
       run: () => {
         setKeymapSettingsOpen(true);
+        return true;
+      },
+    },
+    {
+      // §8.19.9 R8-D1: scheme management surface (copy/rename/delete/reset +
+      // provenance); the active scheme feeds effective-style resolution.
+      id: "workspace.codeStyleSettings",
+      title: "Code Style Settings",
+      category: "View",
+      keywords: ["code style", "scheme", "indent", "spaces", "end of line"],
+      run: () => {
+        setCodeStyleSettingsOpen(true);
         return true;
       },
     },
@@ -8120,6 +8490,55 @@ export function CodeWorkspaceTab({
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
       run: (context) => { executeEditorCommand("paste", context); },
+    },
+    {
+      // §8.19.5 Plain Paste: rectangular/segment metadata is dropped; the
+      // plain text replaces the selection like any ordinary paste.
+      id: "workspace.editor.pasteAsPlainText",
+      title: "Paste as Plain Text",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+Alt+V",
+      keybindings: ["Meta+Shift+Alt+V"],
+      keywords: ["clipboard", "plain text", "paste without formatting"],
+      when: (context) => {
+        const state = editorCommandStateFor(context);
+        return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
+      },
+      run: (context) => { executeEditorCommand("pasteAsPlainText", context); },
+    },
+    {
+      // §8.19.5 Copy Reference: workspace-relative path:line, with a symbol
+      // candidate only when the provider actually names one.
+      id: "workspace.editor.copyReference",
+      title: "Copy Reference",
+      category: "Edit",
+      keybinding: "Ctrl+Alt+Shift+C",
+      keybindings: ["Meta+Alt+Shift+C"],
+      keywords: ["copy reference", "path line", "qualified name", "symbol"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile,
+      run: () => { void copyReferenceAtCursor(); },
+    },
+    {
+      // §8.19.5 Paste from History: session-only ring, searchable popup;
+      // Enter dispatches the full segment plan at the caret as one undo.
+      id: "editor.pasteFromHistory",
+      title: "Paste from History…",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+V",
+      keybindings: ["Meta+Shift+V"],
+      keywords: ["clipboard history", "paste history", "recent copies"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile
+        && !context.readOnly,
+      run: () => {
+        const store = clipboardStoreForWorkspace(workspaceInstanceId);
+        if (!store.isHistoryEnabled() || store.historyEntries().length === 0) {
+          setStatusMessage("Clipboard history is empty or disabled");
+          return true;
+        }
+        setClipboardHistoryEntries([...store.historyEntries()]);
+        setClipboardHistoryOpen(true);
+        return true;
+      },
     },
     {
       id: "workspace.editor.moveStatementUp",
@@ -8305,17 +8724,43 @@ export function CodeWorkspaceTab({
       title: "Format Document",
       category: "Code",
       keybinding: "Ctrl+Alt+L",
-      keywords: ["format", "prettier", "indent"],
+      keywords: ["format", "prettier", "indent", "reformat"],
       when: (context) => {
         if (context.focus === "tree" || context.focus === "terminal") return false;
         if (!activeFile || activeFile.loading) return false;
         // Prefer capability gate when status is known; if LSP has not
         // reported yet, still allow the command so the shortcut is live
-        // as soon as the buffer is open (formatActiveFile no-ops without a formatter).
+        // as soon as the buffer is open (the planner reports a typed reason
+        // instead of a silent no-op).
         if (!activeCapabilities) return true;
         return !!(activeCapabilities.formatting || activeCapabilities.rangeFormatting);
       },
-      run: () => void formatActiveFile(),
+      run: () => {
+        // §8.19.9 R8-D2: every invocation resolves through the planner —
+        // executable scopes delegate to the provider stage; everything else
+        // surfaces a typed unavailable reason.
+        const selection = editorSelectionRef.current;
+        const hasSelection = !!selection && !selection.empty;
+        const decision = planReformat({
+          scope: hasSelection ? "selection" : "file",
+          targetPath: activeFile
+            ? (absolutePathForOpenFile(activeFile) ?? activeFile.languagePath)
+            : null,
+          languageId: activeLanguageId,
+          readOnly: !!activeFile?.library || workspaceResourceOperationLocked,
+          hasSelection,
+          capabilities: {
+            formatting: !!activeCapabilities?.formatting,
+            rangeFormatting: !!activeCapabilities?.rangeFormatting,
+          },
+        });
+        if (decision.kind === "unavailable") {
+          setStatusMessage(decision.reason);
+          return false;
+        }
+        void formatActiveFile();
+        return true;
+      },
     },
     {
       id: "workspace.toggleFormatOnSave",
@@ -8857,6 +9302,83 @@ export function CodeWorkspaceTab({
         });
       },
     },
+    // §8.19.6 R5-b split management actions.
+    {
+      id: "workspace.splitRight",
+      title: "Split Editor Right",
+      category: "View",
+      keywords: ["split", "vertical", "editor"],
+      when: () => !!activeKey,
+      run: () => {
+        splitEditor("vertical");
+        return true;
+      },
+    },
+    {
+      id: "workspace.splitDown",
+      title: "Split Editor Down",
+      category: "View",
+      keywords: ["split", "horizontal", "editor"],
+      when: () => !!activeKey,
+      run: () => {
+        splitEditor("horizontal");
+        return true;
+      },
+    },
+    {
+      id: "workspace.goToNextSplit",
+      title: "Go to Next Split",
+      category: "View",
+      keywords: ["next", "splitter", "navigate"],
+      run: () => goToAdjacentSplit(1),
+    },
+    {
+      id: "workspace.goToPreviousSplit",
+      title: "Go to Previous Split",
+      category: "View",
+      keywords: ["previous", "splitter", "navigate"],
+      run: () => goToAdjacentSplit(-1),
+    },
+    {
+      id: "workspace.moveTabToNextSplit",
+      title: "Move Tab to Next Split",
+      category: "View",
+      keywords: ["move", "tab", "next", "split"],
+      when: () => !!activeKey,
+      run: () => moveActiveTabToAdjacentSplit(1),
+    },
+    {
+      id: "workspace.moveTabToPreviousSplit",
+      title: "Move Tab to Previous Split",
+      category: "View",
+      keywords: ["move", "tab", "previous", "split"],
+      when: () => !!activeKey,
+      run: () => moveActiveTabToAdjacentSplit(-1),
+    },
+    {
+      id: "workspace.equalizeSplitProportions",
+      title: "Equalize Split Proportions",
+      category: "View",
+      keywords: ["equalize", "proportions", "ratios", "split"],
+      when: () => !!splitOrientation,
+      run: equalizeActiveSplitRatios,
+    },
+    {
+      id: "workspace.stretchActiveSplit",
+      title: "Stretch Active Split",
+      category: "View",
+      keywords: ["stretch", "widen", "grow", "split"],
+      when: () => !!splitOrientation,
+      run: stretchActiveSplit,
+    },
+    {
+      id: "workspace.unsplitAll",
+      title: "Unsplit All",
+      category: "View",
+      keywords: ["unsplit", "close splits", "single editor"],
+      when: () => !!splitOrientation,
+      run: unsplitAllWindows,
+    },
     {
       id: "workspace.tree.openLooseFile",
       title: "Open Loose File",
@@ -9065,20 +9587,30 @@ export function CodeWorkspaceTab({
     addRoot,
     closeFile,
     closedTabsStack,
+    columnSelectionMode,
     copyTreePath,
     createDir,
     createFile,
     deleteSelected,
     editorCommandStateFor,
+    equalizeActiveSplitRatios,
     executeActiveEditorCommand,
     executeEditorCommand,
     findInDirectory,
     formatActiveFile,
     gitRoots.length,
     gitRootsLoading,
+    goToAdjacentSplit,
     ignoreWorkspacePath,
+    intelligencePreferences.formatOnSave,
+    intelligencePreferences.inlayHintsEnabled,
+    intelligencePreferences.inlineBlameEnabled,
+    activeFileSoftWrap,
+    languagePanelOpen,
+    moveActiveTabToAdjacentSplit,
     navCan.back,
     navCan.forward,
+    navigateDiagnostic,
     navigateHistory,
     onOpenGitManager,
     openCodeActionsAtCursor,
@@ -9092,46 +9624,45 @@ export function CodeWorkspaceTab({
     openRecentFiles,
     openSearchEverywhere,
     openStructurePopup,
+    optimizeImports,
     recentFilesOpen,
     refreshTree,
     reloadFile,
+    requestGenerateCandidates,
     revealEditorTabInTree,
     renameSelected,
     resolveEditorTarget,
     roots.length,
+    runEditorAiActionAtCursor,
     saveFile,
+    scanWorkspaceCoverage,
     seSymbolsAvailable,
     selected,
     selectedRootDirectory,
-    intelligencePreferences.inlayHintsEnabled,
-    intelligencePreferences.inlineBlameEnabled,
-    activeFileSoftWrap,
-    columnSelectionMode,
-    intelligencePreferences.formatOnSave,
+    setBottomDockOpen,
+    setBottomDockTab,
     setFormatOnSave,
+    setClosedTabsStack,
+    setStatusMessage,
+    splitOrientation,
+    stretchActiveSplit,
+    workspaceResourceOperationLocked,
+    t,
+    toggleBookmarkAtCursor,
+    toggleColumnSelectionMode,
     toggleInlayHints,
     toggleInlayHintsForActiveLanguage,
     toggleInlineBlame,
-    toggleSoftWrap,
-    toggleColumnSelectionMode,
-    toggleBookmarkAtCursor,
-    languagePanelOpen,
-    runEditorAiActionAtCursor,
-    t,
-    toggleProjectTree,
     toggleOutlinePane,
+    toggleProjectTree,
+    toggleSoftWrap,
     toggleTodosPane,
-    navigateDiagnostic,
-    optimizeImports,
     undoWorkspaceEdit,
     redoWorkspaceEdit,
+    unsplitAllWindows,
     workspaceEditHistoryState,
+    workspaceUi.layoutTreeV2,
     coverageReport,
-    scanWorkspaceCoverage,
-    setBottomDockOpen,
-    setBottomDockTab,
-    setClosedTabsStack,
-    setStatusMessage,
   ]);
 
   const commandFocusForTarget = useCallback((target: EventTarget | null): WorkspaceFocus => {
@@ -9252,12 +9783,6 @@ export function CodeWorkspaceTab({
   const tabSwitcherIndexRef = useRef(0);
   tabSwitcherOpenRef.current = tabSwitcherOpen;
   tabSwitcherIndexRef.current = tabSwitcherIndex;
-  // §8.18.5: session MRU for tool windows in the Switcher.
-  const dockMruRef = useRef(new Map<BottomDockTabId, number>());
-  useEffect(() => {
-    if (!bottomDockTab) return;
-    dockMruRef.current.set(bottomDockTab, Date.now());
-  }, [bottomDockTab]);
   const mruFileKeysRef = useRef<string[]>([]);
   useEffect(() => {
     if (!activeKey) return;
@@ -9267,8 +9792,26 @@ export function CodeWorkspaceTab({
     ].slice(0, 24);
   }, [activeKey]);
 
-  const tabSwitcherEntries = useMemo(() => {
-    if (!tabSwitcherOpen) return [];
+  // §8.19.6: bottom-dock panels mirror their REAL dock state into the
+  // workspace-scoped tool-window registry; the Switcher consumes registry
+  // snapshots instead of constructing its own list.
+  useEffect(() => {
+    syncBottomDockToolWindows(workspaceInstanceId, { open: bottomDockOpen, activeTab: bottomDockTab });
+  }, [workspaceInstanceId, bottomDockOpen, bottomDockTab]);
+  useEffect(() => () => unregisterAllToolWindows(workspaceInstanceId), [workspaceInstanceId]);
+
+  // §8.17.5 step 4 + §8.19.6: the popup cycles over ONE frozen snapshot
+  // captured at open time — editor MRU entries plus registry cycle snapshots.
+  // Tool windows opened/closed in the background cannot shift the index
+  // space or reorder entries mid-cycle; release commits against the snapshot.
+  const [switcherSnapshot, setSwitcherSnapshot] = useState<{
+    editors: TabSwitcherEntry[];
+    tools: TabSwitcherToolWindow[];
+  } | null>(null);
+  const switcherSnapshotRef = useRef(switcherSnapshot);
+  switcherSnapshotRef.current = switcherSnapshot;
+
+  const buildSwitcherSnapshot = useCallback(() => {
     // §8.18.5 leaf identity: resolve which layout leaf currently owns each
     // file so commit reactivates the ORIGINAL view instead of the active one.
     const ownerByFileKey = new Map<string, string>();
@@ -9277,12 +9820,11 @@ export function CodeWorkspaceTab({
         if (!ownerByFileKey.has(key)) ownerByFileKey.set(key, leaf.id);
       }
     }
-    const groupMeta = editorGroups;
-    return mruFileKeysRef.current
+    const editors: TabSwitcherEntry[] = mruFileKeysRef.current
       .map((key) => openFiles[key])
       .filter((entry): entry is NonNullable<typeof entry> => !!entry)
       .map((entry) => {
-        const owningGroup = Object.values(groupMeta).find(
+        const owningGroup = Object.values(editorGroups).find(
           (group) => group.openOrder.includes(entry.key),
         );
         return {
@@ -9296,63 +9838,66 @@ export function CodeWorkspaceTab({
           preview: owningGroup?.previewKey === entry.key,
         };
       });
-  }, [tabSwitcherOpen, openFiles, activeKey, workspaceUi.layoutTreeV2, editorGroups]);
-
-  // §8.17.5 step 4: the Switcher lists editor MRU entries AND open tool
-  // windows, exactly like IDEA. Tool-window activation is part of the same
-  // cycle/commit index space.
-  const tabSwitcherToolWindows = useMemo(() => {
-    // §8.18.5: entries carry real open state and a session MRU ordering.
-    const mru = dockMruRef.current;
-    const items = ([
-      ["problems", "Problems"],
-      ["search", "Find in Files"],
-      ["terminal", "Terminal"],
-      ["run", "Run"],
-      ["references", "References"],
-      ["call-hierarchy", "Call Hierarchy"],
-      ["type-hierarchy", "Type Hierarchy"],
-    ] as readonly [BottomDockTabId, string][]).map(([id, label]) => ({
-      id,
-      label,
-      open: bottomDockOpen && bottomDockTab === id,
+    const tools: TabSwitcherToolWindow[] = listToolWindowsForCycle(workspaceInstanceId).map((snapshot) => ({
+      id: snapshot.id,
+      label: snapshot.title,
+      open: snapshot.state === "open",
     }));
-    return items.sort((left, right) =>
-      (mru.get(right.id) ?? 0) - (mru.get(left.id) ?? 0));
-  }, [bottomDockOpen, bottomDockTab]);
+    return { editors, tools };
+  }, [activeKey, editorGroups, openFiles, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+  const buildSwitcherSnapshotRef = useRef(buildSwitcherSnapshot);
+  buildSwitcherSnapshotRef.current = buildSwitcherSnapshot;
+
   const switcherTotalCountRef = useRef(0);
-  switcherTotalCountRef.current = tabSwitcherEntries.length + tabSwitcherToolWindows.length;
+  switcherTotalCountRef.current = switcherSnapshot
+    ? switcherSnapshot.editors.length + switcherSnapshot.tools.length
+    : 0;
 
   /**
-   * Leaf-aware switcher close (§8.18.5 Backspace): clean tabs close directly,
-   * dirty tabs go through the same confirm path as the tab strip; tool
-   * windows hide instead of being destroyed.
+   * Leaf-aware switcher close, graded per §8.19.6: pinned tabs refuse with a
+   * reason (protected work is never silently closed), dirty tabs go through
+   * the same confirm path as the tab strip, and tool windows only hide.
    */
   const closeFromTabSwitcher = useCallback(async () => {
-    const index = Math.min(tabSwitcherIndexRef.current, switcherTotalCountRef.current - 1);
-    const editorEntry = tabSwitcherEntries[index];
-    setTabSwitcherOpen(false);
+    const snapshot = switcherSnapshotRef.current;
+    if (!snapshot) return;
+    const index = Math.min(
+      tabSwitcherIndexRef.current,
+      snapshot.editors.length + snapshot.tools.length - 1,
+    );
+    const editorEntry = snapshot.editors[index];
     if (editorEntry) {
+      if (editorEntry.pinned) {
+        setStatusMessage(`${editorEntry.title} is pinned — unpin it before closing`);
+        return;
+      }
+      setTabSwitcherOpen(false);
+      setSwitcherSnapshot(null);
       await closeFile(editorEntry.key, editorEntry.leafId ?? activeEditorGroupId);
       return;
     }
-    const toolWindow = tabSwitcherToolWindows[index - tabSwitcherEntries.length];
+    setTabSwitcherOpen(false);
+    setSwitcherSnapshot(null);
+    const toolWindow = snapshot.tools[index - snapshot.editors.length];
     if (toolWindow) {
+      // Single-tab dock: hiding the dock IS hiding this window; it stays
+      // registered as hidden and reopens through the Switcher.
       setBottomDockOpen(false);
     }
-  }, [activeEditorGroupId, closeFile, tabSwitcherEntries, tabSwitcherToolWindows]);
+  }, [activeEditorGroupId, closeFile, setBottomDockOpen, setStatusMessage]);
 
   const commitTabSwitcher = useCallback((index: number) => {
-    const entries = tabSwitcherEntries;
+    const snapshot = switcherSnapshotRef.current;
     setTabSwitcherOpen(false);
-    const toolWindow = tabSwitcherToolWindows[index - entries.length];
+    setSwitcherSnapshot(null);
+    if (!snapshot) return;
+    const toolWindow = snapshot.tools[index - snapshot.editors.length];
     if (toolWindow) {
-      dockMruRef.current.set(toolWindow.id, Date.now());
       setBottomDockOpen(true);
-      setBottomDockTab(toolWindow.id);
+      setBottomDockTab(toolWindow.id as BottomDockTabId);
       return;
     }
-    const target = entries[index];
+    const target = snapshot.editors[index];
     if (!target) return;
     const targetRef = openFilesRef.current[target.key]?.ref ?? null;
     if (target.key === activeKeyRef.current && target.leafId) {
@@ -9371,7 +9916,7 @@ export function CodeWorkspaceTab({
       setStatusMessage(`${target.title}: its split was closed — reopened in the current editor`);
     }
     if (targetRef) void openFile(targetRef);
-  }, [workspaceUi.layoutTreeV2, openFile, setStoreActiveEditorGroup, setLeafActiveTab, setStatusMessage, tabSwitcherEntries, tabSwitcherToolWindows, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
+  }, [workspaceUi.layoutTreeV2, openFile, setStoreActiveEditorGroup, setLeafActiveTab, setStatusMessage, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
   const commitTabSwitcherRef = useRef(commitTabSwitcher);
   commitTabSwitcherRef.current = commitTabSwitcher;
   const closeFromTabSwitcherRef = useRef(closeFromTabSwitcher);
@@ -9391,13 +9936,12 @@ export function CodeWorkspaceTab({
         event.preventDefault();
         event.stopPropagation();
         if (!tabSwitcherOpenRef.current) {
-          // Openable when there are editor entries OR tool windows to list.
-          if (switcherTotalCountRef.current === 0) return;
-          const editorCount = mruFileKeysRef.current
-            .map((key) => openFilesRef.current[key])
-            .filter((entry): entry is NonNullable<typeof entry> => !!entry)
-            .length;
-          setTabSwitcherIndex(editorCount > 1 ? 1 : 0);
+          // Openable when there are editor entries OR tool windows to list;
+          // the snapshot is frozen here for the whole cycle (§8.19.6).
+          const snapshot = buildSwitcherSnapshotRef.current();
+          if (snapshot.editors.length + snapshot.tools.length === 0) return;
+          setSwitcherSnapshot(snapshot);
+          setTabSwitcherIndex(snapshot.editors.length > 1 ? 1 : 0);
           setTabSwitcherOpen(true);
           return;
         }
@@ -11977,6 +12521,9 @@ export function CodeWorkspaceTab({
     return () => setTabCodeWorkspaceContext(tabId, null);
   }, [setTabCodeWorkspaceContext, tabId]);
 
+  // §8.19.6: move-tab menu entries only make sense with another split target.
+  const leafCountForMenu = getAllLeafNodes(workspaceUi.layoutTreeV2).length;
+
   const renderEditorGroup = (groupId: EditorGroupId) => {
     const group = editorGroups[groupId] ?? createEditorGroup(groupId);
     const groupFile = group.activeKey ? openFiles[group.activeKey] ?? null : null;
@@ -12140,6 +12687,8 @@ export function CodeWorkspaceTab({
         }}
         onSplitRight={(key) => splitEditor("vertical", key, groupId)}
         onSplitDown={(key) => splitEditor("horizontal", key, groupId)}
+        onMoveTabToNextSplit={leafCountForMenu > 1 ? (key) => moveTabToAdjacentSplitFrom(groupId, key, 1) : undefined}
+        onMoveTabToPreviousSplit={leafCountForMenu > 1 ? (key) => moveTabToAdjacentSplitFrom(groupId, key, -1) : undefined}
         onCopyPath={(key, absolute) => void copyEditorTabPath(key, absolute)}
         onRevealInTree={revealEditorTabInTree}
         onRevealInSystem={revealEditorTabInExplorer}
@@ -12436,6 +12985,24 @@ export function CodeWorkspaceTab({
                   return next;
                 });
               }}
+            />
+            <IconButton
+              label="Equalize split proportions"
+              testId="code-workspace-split-equalize"
+              icon={<AlignHorizontalJustifyCenter className="h-3.5 w-3.5" />}
+              onClick={() => executeWorkspaceCommand("workspace.equalizeSplitProportions")}
+            />
+            <IconButton
+              label="Stretch active split"
+              testId="code-workspace-split-stretch"
+              icon={<Maximize2 className="h-3.5 w-3.5" />}
+              onClick={() => executeWorkspaceCommand("workspace.stretchActiveSplit")}
+            />
+            <IconButton
+              label="Unsplit all (keep tabs)"
+              testId="code-workspace-split-unsplit-all"
+              icon={<Square className="h-3.5 w-3.5" />}
+              onClick={() => executeWorkspaceCommand("workspace.unsplitAll")}
             />
             <IconButton
               label="Close editor split"
@@ -12967,12 +13534,15 @@ export function CodeWorkspaceTab({
       />
       <TabSwitcher
         open={tabSwitcherOpen}
-        entries={tabSwitcherEntries}
-        toolWindows={tabSwitcherToolWindows}
+        entries={switcherSnapshot?.editors ?? []}
+        toolWindows={switcherSnapshot?.tools ?? []}
         selectedIndex={tabSwitcherIndex}
         onHover={setTabSwitcherIndex}
         onCommit={commitTabSwitcher}
-        onCancel={() => setTabSwitcherOpen(false)}
+        onCancel={() => {
+          setTabSwitcherOpen(false);
+          setSwitcherSnapshot(null);
+        }}
       />
       <WorkspacePopupsHost
         searchEverywhereOpen={searchEverywhereOpen}
@@ -13214,6 +13784,55 @@ export function CodeWorkspaceTab({
           }}
         />
       )}
+      <ClipboardHistoryPopup
+        open={clipboardHistoryOpen}
+        entries={clipboardHistoryEntries}
+        onPaste={(index) => {
+          executeActiveEditorCommand("pasteFromHistory", { historyIndex: index });
+        }}
+        onDelete={(index) => {
+          clipboardStoreForWorkspace(workspaceInstanceId).removeHistoryEntry(index);
+          setClipboardHistoryEntries([...clipboardStoreForWorkspace(workspaceInstanceId).historyEntries()]);
+        }}
+        onClear={() => {
+          clipboardStoreForWorkspace(workspaceInstanceId).clearHistory();
+          setClipboardHistoryEntries([]);
+        }}
+        onClose={() => setClipboardHistoryOpen(false)}
+      />
+      <GenerateCodeDialog
+        open={generateCode.open}
+        phase={generateCode.phase}
+        candidates={generateCode.candidates}
+        error={generateCode.error}
+        onApply={(ids) => void applyGenerateCandidates(ids)}
+        onRetry={() => void requestGenerateCandidates()}
+        onCancel={closeGenerateDialog}
+      />
+      <SurroundWithDialog
+        open={surroundWithDialogOpen}
+        languageId={activeLanguageId}
+        onClose={() => setSurroundWithDialogOpen(false)}
+        onPick={(kindId) => {
+          const dispatched = executeActiveEditorCommand("surroundWith", {
+            surroundKindId: kindId,
+            onSemanticEditApplied: ({ applied, provenance }) => {
+              if (!applied) {
+                setStatusMessage("Surround requires a whole-line selection in one range");
+                return;
+              }
+              // §8.19.8 honest provenance surfacing: local templates never
+              // masquerade as Semantic in status reporting.
+              setStatusMessage(
+                provenance?.kind === "syntax-tree"
+                  ? `Surround applied (syntax node ${provenance.nodeType})`
+                  : "Surround applied (local template)",
+              );
+            },
+          });
+          if (!dispatched) setStatusMessage("Surround requires an active editor");
+        }}
+      />
       {keymapCheatSheetOpen && (
         <KeymapCheatSheetDialog
           open={true}
@@ -13241,6 +13860,25 @@ export function CodeWorkspaceTab({
           onClose={() => setKeymapSettingsOpen(false)}
         />
       )}
+      <CodeStyleSettingsDialog
+        open={codeStyleSettingsOpen}
+        store={codeStyleSchemes}
+        activeLanguageId={(() => {
+          const ext = activeFile?.languagePath.split(".").pop()?.toLowerCase() ?? "";
+          return ext || null;
+        })()}
+        provenance={activeFile ? {
+          filePath: activeFile.subtitle,
+          effectiveLabel: getEffectiveCodeStyleForFile(activeFile)?.label ?? "—",
+          source: getEffectiveCodeStyleForFile(activeFile)?.source ?? "fallback",
+          schemeName: activeSchemeForLanguage(
+            codeStyleSchemes,
+            activeFile.languagePath.split(".").pop()?.toLowerCase() || null,
+          ).name,
+        } : null}
+        onChange={changeCodeStyleSchemes}
+        onClose={() => setCodeStyleSettingsOpen(false)}
+      />
       {dapGuideOpen && (
         <DapAdapterGuideDialog
           open={true}

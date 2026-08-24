@@ -137,9 +137,19 @@ import {
 } from "./workspaceCodeMirrorKeymap";
 import { EditorActionBridge } from "./workspaceActionHost";
 import {
+  completeStatementStrategy,
   surroundWithPlan,
+  type SemanticEditSource,
   type SurroundKind,
 } from "./workspaceSemanticEditing";
+import { observeSyntaxFacts, treeRevisionField } from "./workspaceSyntaxFacts";
+import {
+  virtualBackspaceCommand,
+  virtualLineEndCommand,
+  virtualSpaceClickHandler,
+  virtualSpaceOverflowField,
+  virtualSpaceTypingHandler,
+} from "./workspaceVirtualSpace";
 import type { WorkspaceActionHost } from "./workspaceActionHost";
 
 export interface EditorRevealTarget {
@@ -298,7 +308,8 @@ const clipboardContextByView = new WeakMap<
   }
 >();
 
-type ClipboardStoreLike = Pick<WorkspaceClipboardHandle, "write" | "read">;
+type ClipboardStoreLike = Pick<WorkspaceClipboardHandle, "write" | "read" | "pasteFromHistory">
+  & Partial<Pick<WorkspaceClipboardHandle, "historyExclusion">>;
 
 function workspaceStoreFor(
   context: { workspaceId: string | null; handle: WorkspaceClipboardHandle | null } | undefined,
@@ -330,6 +341,13 @@ function rememberEditorClipboardPayload(
       sourceEol: payload.sourceEol,
       ...(options.systemClipboardUnavailable ? { systemClipboardUnavailable: true } : {}),
     });
+    // §8.19.5 non-blocking notice when the ring declined the payload.
+    const exclusion = store.historyExclusion?.() ?? "recorded";
+    if (exclusion === "sensitive") {
+      context?.onUnavailable("Sensitive content was kept out of clipboard history");
+    } else if (exclusion === "oversized-item") {
+      context?.onUnavailable("Oversized content was kept out of clipboard history");
+    }
   }
 }
 
@@ -421,6 +439,43 @@ function pasteSystemClipboard(view: EditorView): boolean {
   return true;
 }
 
+/**
+ * §8.19.5 Plain Paste: internal rectangular/segment metadata is deliberately
+ * dropped — the system (or in-workspace fallback) text inserts as ONE plain
+ * string per caret in a single dispatch, so one undo restores everything.
+ */
+function pasteAsPlainText(view: EditorView): boolean {
+  if (view.composing || view.state.readOnly) return false;
+  const docAtRequest = view.state.doc;
+  const context = clipboardContextByView.get(view);
+  void readTextResult()
+    .then((result) => {
+      if (!view.dom.isConnected || view.composing || view.state.doc !== docAtRequest) return;
+      const session = workspaceStoreFor(context)?.read() ?? null;
+      const text = result.ok ? result.text : session?.plainText ?? "";
+      if (!text) {
+        context?.onUnavailable("Nothing to paste");
+        return;
+      }
+      // Ascending per-caret replacement of the same full text; no segments,
+      // no rectangular plan, no cycling.
+      const ranges = [...view.state.selection.ranges].sort((a, b) => a.from - b.from);
+      view.dispatch({
+        changes: ranges.map((range) => ({ from: range.from, to: range.to, insert: text })),
+        userEvent: "input.paste.plain",
+        scrollIntoView: true,
+      });
+      if (!result.ok && session) {
+        context?.onUnavailable(
+          "System clipboard unavailable — pasted the last in-workspace copy as plain text",
+        );
+      }
+      view.focus();
+    })
+    .catch(() => {});
+  return true;
+}
+
 function cutSystemClipboard(view: EditorView): boolean {
   if (view.composing || view.state.readOnly) return false;
   const payload = editorClipboardPayload(view.state);
@@ -472,10 +527,21 @@ export type EditorCommandId =
   | "moveStatementDown"
   | "moveStatementUp"
   | "paste"
+  | "pasteAsPlainText"
+  | "pasteFromHistory"
   | "selectAllOccurrences"
   | "selectNextOccurrence"
-  | "surroundWithTryCatch"
+  | "surroundWith"
   | "unfoldAll";
+
+/** Options for commands that need arguments beyond the id (§8.19.8). */
+export interface EditorCommandOptions {
+  surroundKindId?: SurroundKind["id"];
+  /** §8.19.5: index into the workspace clipboard history ring. */
+  historyIndex?: number;
+  /** Applied once the surround transaction dispatches, with its provenance. */
+  onSemanticEditApplied?: (result: { applied: boolean; provenance: SemanticEditSource | null }) => void;
+}
 
 export interface EditorCommandState {
   composing: boolean;
@@ -486,7 +552,7 @@ export interface EditorCommandState {
 }
 
 export interface EditorCommandPort {
-  execute: (commandId: EditorCommandId) => boolean;
+  execute: (commandId: EditorCommandId, options?: EditorCommandOptions) => boolean;
   state: () => EditorCommandState;
 }
 
@@ -497,10 +563,17 @@ export interface EditorCommandPortRegistration {
 }
 
 /**
- * Apply a Surround With plan to the main selection (§8.18.8). The selection
- * must span whole lines of one range; everything else is a typed no-op.
+ * Apply a Surround With plan to the main selection (§8.18.8/§8.19.8). The
+ * selection must span whole lines of one range; everything else is a typed
+ * no-op. Provenance comes from live syntax facts when the Lezer tree aligns
+ * exactly with the expanded line range and parses cleanly — otherwise the
+ * plan stays honestly local-text.
  */
-function applySurroundWith(view: EditorView, kindId: SurroundKind["id"]): boolean {
+function applySurroundWith(
+  view: EditorView,
+  kindId: SurroundKind["id"],
+  onApplied?: EditorCommandOptions["onSemanticEditApplied"],
+): boolean {
   if (view.state.readOnly || view.composing) return false;
   const ranges = view.state.selection.ranges;
   const main = view.state.selection.main;
@@ -508,6 +581,9 @@ function applySurroundWith(view: EditorView, kindId: SurroundKind["id"]): boolea
   const fromLine = view.state.doc.lineAt(main.from);
   const toLine = view.state.doc.lineAt(main.to);
   const languageId = guessEditorLanguageId(view) ?? "plaintext";
+  // Node evidence is observed against the EXPANDED whole-line bounds, which
+  // are what statement nodes actually align to.
+  const syntax = observeSyntaxFacts(view.state, fromLine.from, toLine.to);
   const plan = surroundWithPlan(kindId, {
     text: view.state.doc.sliceString(fromLine.from, toLine.to),
     from: fromLine.from,
@@ -517,14 +593,20 @@ function applySurroundWith(view: EditorView, kindId: SurroundKind["id"]): boolea
     rangeCount: ranges.length,
     readOnly: view.state.readOnly,
     languageId,
+    syntax,
   });
-  if (plan.kind === "unavailable") return false;
+  if (plan.kind === "unavailable") {
+    onApplied?.({ applied: false, provenance: null });
+    return false;
+  }
   view.dispatch({
     changes: plan.changes,
     selection: { anchor: Math.min(plan.selection.anchor, view.state.doc.length + plan.changes.reduce((sum, change) => sum + ("insert" in change ? (change.insert as string)?.length ?? 0 : 0), 0)) },
     userEvent: "input.surround",
     scrollIntoView: true,
   });
+  // One transaction == one undo entry carrying its provenance evidence.
+  onApplied?.({ applied: true, provenance: plan.provenance });
   return true;
 }
 
@@ -538,19 +620,48 @@ function guessEditorLanguageId(view: EditorView): string | null {
 
 function editorCommandPort(view: EditorView): EditorCommandPort {
   return {
-    execute(commandId) {
+    execute(commandId, options) {
       switch (commandId) {
         case "cloneCaretAbove": return cloneCaretAbove(view);
         case "cloneCaretBelow": return cloneCaretBelow(view);
         case "collapseCarets": return escapeEditorSelections(view);
-        case "completeStatement":
-          // Same command the in-editor Mod-Shift-Enter keymap runs, so the
-          // action-host shortcut (window capture listener) and direct typing
-          // share one behaviour: caret-line edits with balanced brackets, not
-          // a bare `;` dropped at a line-relative offset (which used to land
-          // inside line 1 whenever the caret was below the first line).
+        case "completeStatement": {
+          // §8.19.8: the strategy decides between a syntax-tree-proven `;`,
+          // the clearly-labelled Local/Heuristic fallback, and an explicit
+          // no-op with reason. Same command the in-editor Mod-Shift-Enter
+          // keymap runs, so shortcuts and direct typing share one behaviour.
           if (view.state.readOnly || view.composing) return false;
-          return completeCurrentStatement(view);
+          const main = view.state.selection.main;
+          const line = view.state.doc.lineAt(main.head);
+          const decision = completeStatementStrategy({
+            languageId: guessEditorLanguageId(view) ?? "plaintext",
+            readOnly: view.state.readOnly,
+            caretCount: view.state.selection.ranges.length,
+            lineText: line.text,
+            syntax: observeSyntaxFacts(view.state, line.from, line.to),
+          });
+          if (decision.kind === "unavailable") {
+            options?.onSemanticEditApplied?.({ applied: false, provenance: null });
+            return false;
+          }
+          if (decision.kind === "exact") {
+            const at = Math.min(line.from + decision.insertSemicolonAt, line.to);
+            view.dispatch({
+              changes: { from: at, insert: ";" },
+              selection: { anchor: at + 1 },
+              userEvent: "input.completeStatement.syntax",
+              scrollIntoView: true,
+            });
+            options?.onSemanticEditApplied?.({ applied: true, provenance: decision.provenance });
+            return true;
+          }
+          const done = completeCurrentStatement(view);
+          options?.onSemanticEditApplied?.({
+            applied: done,
+            provenance: { kind: "local-text", ruleId: decision.ruleId },
+          });
+          return done;
+        }
         case "copy": return writeEditorSelectionToClipboard(view);
         case "cut": return cutSystemClipboard(view);
         case "foldAll": return foldAll(view) ?? false;
@@ -558,9 +669,33 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
         case "moveStatementDown": return moveStatementDown(view);
         case "moveStatementUp": return moveStatementUp(view);
         case "paste": return pasteSystemClipboard(view);
+        case "pasteAsPlainText": return pasteAsPlainText(view);
+        case "pasteFromHistory": {
+          // §8.19.5: history paste promotes the entry to the live slot and
+          // dispatches its FULL segment plan at the caret — deliberately
+          // bypassing the system clipboard, which may hold newer content.
+          const index = options?.historyIndex;
+          if (index == null || view.composing || view.state.readOnly) return false;
+          const store = workspaceStoreFor(clipboardContextByView.get(view));
+          const session = index >= 0 && store ? store.pasteFromHistory(index) : null;
+          if (!session) return false;
+          pasteEditorClipboardPayload(view, {
+            plainText: session.plainText,
+            segments: session.segments ?? undefined,
+            sourceEol: session.sourceEol,
+            rectangular: session.rectangular,
+          });
+          view.focus();
+          return true;
+        }
         case "selectAllOccurrences": return selectAllEditorOccurrences(view);
         case "selectNextOccurrence": return selectNextEditorOccurrence(view);
-        case "surroundWithTryCatch": return applySurroundWith(view, "try-catch");
+        case "surroundWith": {
+          // §8.19.8: every surround kind routes through this one entry point.
+          const kindId = options?.surroundKindId;
+          if (!kindId) return false;
+          return applySurroundWith(view, kindId, options?.onSemanticEditApplied);
+        }
         case "unfoldAll": return unfoldAll(view) ?? false;
       }
     },
@@ -1550,6 +1685,19 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         }),
         crosshairCursor(),
         history(),
+        // §8.19.8 treeRevision source for semantic-edit evidence envelopes.
+        treeRevisionField,
+        // §8.19.5 Virtual Space: overflow tracking, typing materialization
+        // and click-past-EOL. The keymap below only claims keys when a
+        // virtual caret is actually involved; everything else falls through.
+        virtualSpaceOverflowField,
+        virtualSpaceTypingHandler,
+        virtualSpaceClickHandler,
+        Prec.high(keymap.of([
+          { key: "End", run: (view) => virtualLineEndCommand(view, false) },
+          { key: "Shift-End", run: (view) => virtualLineEndCommand(view, true) },
+          { key: "Backspace", run: (view) => virtualBackspaceCommand(view) },
+        ])),
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),
