@@ -270,4 +270,143 @@ describe("RichMailEditor", () => {
     });
     expect(onPasteImages).not.toHaveBeenCalled();
   });
+
+  it("keeps toolbar buttons from stealing focus from the editor", () => {
+    render(<RichMailEditor html="<p>Hello</p>" onChange={vi.fn()} />);
+
+    const event = fireEvent.mouseDown(screen.getByTestId("mail-compose-bold"));
+
+    expect(event).toBe(false);
+  });
+
+  it("applies editing shortcuts while the editor holds the selection even without focus", () => {
+    const execCommand = vi.fn();
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    render(<RichMailEditor html="<p>Hello</p>" onChange={vi.fn()} />);
+
+    const editor = screen.getByTestId("mail-compose-editor");
+    // jsdom has no layout engine; pretend the editor is rendered.
+    vi.spyOn(editor, "getClientRects").mockReturnValue([{ width: 100 }] as unknown as DOMRectList);
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    // Focus deliberately left on body — the pre-fix behavior dropped these.
+    fireEvent.keyDown(window, { ctrlKey: true, key: "z" });
+    fireEvent.keyDown(window, { ctrlKey: true, shiftKey: true, key: "z" });
+    fireEvent.keyDown(window, { ctrlKey: true, key: "b" });
+    fireEvent.keyDown(window, { ctrlKey: true, key: "i" });
+    fireEvent.keyDown(window, { ctrlKey: true, key: "u" });
+
+    expect(execCommand).toHaveBeenNthCalledWith(1, "undo", false, undefined);
+    expect(execCommand).toHaveBeenNthCalledWith(2, "redo", false, undefined);
+    expect(execCommand).toHaveBeenNthCalledWith(3, "bold", false, undefined);
+    expect(execCommand).toHaveBeenNthCalledWith(4, "italic", false, undefined);
+    expect(execCommand).toHaveBeenNthCalledWith(5, "underline", false, undefined);
+  });
+
+  it("ignores editing shortcuts while the editor is hidden (inactive keep-alive tab)", () => {
+    const execCommand = vi.fn();
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    render(<RichMailEditor html="<p>Hello</p>" onChange={vi.fn()} />);
+
+    const editor = screen.getByTestId("mail-compose-editor");
+    // Hidden keep-alive tab: no layout boxes. jsdom matches this by default.
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    fireEvent.keyDown(window, { ctrlKey: true, key: "z" });
+    fireEvent.keyDown(window, { ctrlKey: true, key: "b" });
+
+    expect(execCommand).not.toHaveBeenCalled();
+  });
+
+  it("leaves editing shortcuts alone when another editable field has focus", () => {
+    const execCommand = vi.fn();
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    render(
+      <div>
+        <input data-testid="other-field" />
+        <RichMailEditor html="<p>Hello</p>" onChange={vi.fn()} />
+      </div>,
+    );
+
+    const editor = screen.getByTestId("mail-compose-editor");
+    vi.spyOn(editor, "getClientRects").mockReturnValue([{ width: 100 }] as unknown as DOMRectList);
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    screen.getByTestId("other-field").focus();
+    fireEvent.keyDown(window, { ctrlKey: true, key: "z" });
+
+    expect(execCommand).not.toHaveBeenCalled();
+  });
+
+  it("opens the in-app link dialog and applies createLink with the typed URL", async () => {
+    const execCommand = vi.fn();
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    render(<RichMailEditor html="<p>Hello</p>" onChange={vi.fn()} />);
+
+    // The editor must own the caret for createLink to be reachable.
+    screen.getByTestId("mail-compose-editor").focus();
+
+    fireEvent.click(screen.getByTestId("mail-compose-link"));
+    const dialogInput = await screen.findByTestId("text-input-dialog-input");
+    fireEvent.change(dialogInput, { target: { value: "https://example.com" } });
+    fireEvent.click(screen.getByTestId("text-input-dialog-confirm"));
+
+    await waitFor(() => {
+      expect(execCommand).toHaveBeenCalledWith("createLink", false, "https://example.com");
+    });
+  });
+
+  it("opens the table dialog and inserts a table from the size prompt", async () => {
+    const execCommand = vi.fn();
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    render(<RichMailEditor html="<p>Hello</p>" onChange={vi.fn()} />);
+    screen.getByTestId("mail-compose-editor").focus();
+
+    fireEvent.click(screen.getByTestId("mail-compose-insert-menu"));
+    fireEvent.click(await screen.findByTestId("mail-compose-insert-table"));
+    const dialogInput = await screen.findByTestId("text-input-dialog-input");
+    expect(dialogInput).toHaveValue("2x2");
+    fireEvent.change(dialogInput, { target: { value: "3x2" } });
+    fireEvent.click(screen.getByTestId("text-input-dialog-confirm"));
+
+    await waitFor(() => {
+      expect(execCommand).toHaveBeenCalledWith(
+        "insertHTML",
+        false,
+        expect.stringContaining("<table"),
+      );
+    });
+  });
 });

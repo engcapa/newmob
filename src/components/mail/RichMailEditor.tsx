@@ -32,6 +32,7 @@ import { readClipboardImageFiles, readMultiFormat, readText } from "../../lib/cl
 import { useT } from "../../lib/i18n";
 import { isOsFileDrag, preventDefaultForOsFileDrag } from "../../lib/osFileDrop";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
+import { useTextInputDialog } from "../sidebar/ConfirmDialog";
 
 interface RichMailEditorProps {
   html: string;
@@ -71,22 +72,22 @@ const SIZE_OPTIONS = [
 ];
 
 const EMOJI_OPTIONS = [
-  { id: "smile", label: "微笑", value: "🙂" },
-  { id: "frown", label: "皱眉", value: "🙁" },
-  { id: "wink", label: "眨眼", value: "😉" },
-  { id: "tongue", label: "吐舌", value: "😛" },
-  { id: "laugh", label: "大笑", value: "😂" },
-  { id: "blush", label: "窘迫", value: "😳" },
-  { id: "unsure", label: "迟疑", value: "😕" },
-  { id: "surprise", label: "惊讶", value: "😮" },
-  { id: "kiss", label: "亲吻", value: "😘" },
-  { id: "shout", label: "大叫", value: "😱" },
-  { id: "cool", label: "酷", value: "😎" },
-  { id: "money", label: "爱财", value: "🤑" },
-  { id: "sealed", label: "失言", value: "😶" },
-  { id: "innocent", label: "无辜", value: "😇" },
-  { id: "cry", label: "哭泣", value: "😭" },
-  { id: "silent", label: "缄默", value: "🤐" },
+  { id: "smile", value: "🙂" },
+  { id: "frown", value: "🙁" },
+  { id: "wink", value: "😉" },
+  { id: "tongue", value: "😛" },
+  { id: "laugh", value: "😂" },
+  { id: "blush", value: "😳" },
+  { id: "unsure", value: "😕" },
+  { id: "surprise", value: "😮" },
+  { id: "kiss", value: "😘" },
+  { id: "shout", value: "😱" },
+  { id: "cool", value: "😎" },
+  { id: "money", value: "🤑" },
+  { id: "sealed", value: "😶" },
+  { id: "innocent", value: "😇" },
+  { id: "cry", value: "😭" },
+  { id: "silent", value: "🤐" },
 ];
 
 export function RichMailEditor({
@@ -105,6 +106,7 @@ export function RichMailEditor({
   const [color, setColor] = useState("#1f2937");
   const [localDrag, setLocalDrag] = useState(false);
   const editorMenu = useContextMenu();
+  const textInputDialog = useTextInputDialog();
   const t = useT();
 
   useEffect(() => {
@@ -113,6 +115,25 @@ export function RichMailEditor({
     const next = html || "<p><br></p>";
     if (editor.innerHTML !== next) editor.innerHTML = next;
   }, [html]);
+
+  // Keep the cached range in sync with the live selection. Select-all and
+  // mouse drags never fire an input event, so without this the toolbar would
+  // "restore" a stale collapsed caret over the user's real selection and apply
+  // formatting to nothing. Only ranges inside the editor are cached; when the
+  // selection moves elsewhere (e.g. into a prompt dialog's input) the last
+  // editor caret is kept so toolbar actions still land where the user left off.
+  useEffect(() => {
+    const onSelectionChange = () => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const selection = window.getSelection();
+      if (selection?.rangeCount && isRangeInEditor(selection.getRangeAt(0))) {
+        selectionRef.current = selection.getRangeAt(0).cloneRange();
+      }
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, []);
 
   const emitChange = () => {
     const editor = editorRef.current;
@@ -168,6 +189,70 @@ export function RichMailEditor({
     if (rich) onRichFormatUsed?.();
     emitChange();
   };
+
+  // Own the standard editing shortcuts. The webview only applies Ctrl+Z /
+  // Ctrl+B / … to the currently focused editable, and focus drifts out of a
+  // contentEditable easily (popup menu clicks, dialog drags), which made those
+  // keys dead while the context-menu commands kept working. Apply them
+  // whenever the editor owns the caret — focused, or holding the live
+  // selection — and stay out of the way when another editable has focus.
+  const shortcutCommandsRef = useRef<{ disabled: boolean; exec: typeof exec }>({ disabled, exec });
+  useEffect(() => {
+    shortcutCommandsRef.current = { disabled, exec };
+  });
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      const primary = event.ctrlKey || event.metaKey;
+      if (!primary || event.altKey) return;
+      const { current: commands } = shortcutCommandsRef;
+      if (commands.disabled) return;
+      const editor = editorRef.current;
+      if (!editor || editor.getClientRects().length === 0) return;
+
+      const active = document.activeElement as HTMLElement | null;
+      if (
+        active
+        && active !== editor
+        && active.closest?.('input, textarea, select, [contenteditable="true"], [contenteditable=""]')
+      ) {
+        return;
+      }
+
+      const selection = window.getSelection();
+      const selectionInEditor =
+        !!selection?.rangeCount && editor.contains(selection.getRangeAt(0).commonAncestorContainer);
+      if (active !== editor && !selectionInEditor) return;
+
+      const key = event.key.toLowerCase();
+      let command: string | null = null;
+      let rich = false;
+      if (key === "z") {
+        command = event.shiftKey ? "redo" : "undo";
+      } else if (key === "y" && !event.shiftKey) {
+        command = "redo";
+      } else if (key === "b" && !event.shiftKey) {
+        command = "bold";
+        rich = true;
+      } else if (key === "i" && !event.shiftKey) {
+        command = "italic";
+        rich = true;
+      } else if (key === "u" && !event.shiftKey) {
+        command = "underline";
+        rich = true;
+      } else if (key === "a" && !event.shiftKey) {
+        command = "selectAll";
+      }
+      if (!command) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      commands.exec(command, undefined, rich);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const pasteClipboard = async (mode: "normal" | "plain" | "markdown") => {
     if (disabled) return;
@@ -273,14 +358,25 @@ export function RichMailEditor({
     })();
   };
 
-  const handleLink = () => {
-    const href = window.prompt("Link URL");
+  // window.prompt is silently ignored by Tauri's webviews (see ConfirmDialog),
+  // so link / anchor / table insertion route through the in-app text dialog.
+  // While the dialog is open the editor keeps its cached caret via the
+  // selectionchange guard above, so the command lands at the right spot.
+  const handleLink = async () => {
+    const href = await textInputDialog.promptText({
+      title: "Insert link",
+      label: "Link URL",
+      placeholder: "https://example.com",
+    });
     if (!href?.trim()) return;
     exec("createLink", href.trim());
   };
 
-  const handleAnchor = () => {
-    const name = window.prompt("Anchor name");
+  const handleAnchor = async () => {
+    const name = await textInputDialog.promptText({
+      title: "Insert anchor",
+      label: "Anchor name",
+    });
     const cleaned = name?.trim().replace(/\s+/g, "-");
     if (!cleaned) return;
     insertHtml(`<a name="${escapeHtml(cleaned)}"></a>`, true);
@@ -292,8 +388,12 @@ export function RichMailEditor({
     insertHtml(imageHtml, true);
   };
 
-  const handleTable = () => {
-    const raw = window.prompt("Table size (columns x rows)", "2x2");
+  const handleTable = async () => {
+    const raw = await textInputDialog.promptText({
+      title: "Insert table",
+      label: "Table size (columns x rows)",
+      initialValue: "2x2",
+    });
     if (!raw) return;
     const match = /^\s*(\d{1,2})\s*[x*,]\s*(\d{1,2})\s*$/i.exec(raw);
     const cols = Math.max(1, Math.min(12, Number(match?.[1] ?? 2)));
@@ -310,14 +410,14 @@ export function RichMailEditor({
   };
 
   const emojiMenuItems = (): MenuItem[] => EMOJI_OPTIONS.map((emoji) => ({
-    label: `${emoji.value} ${emoji.label}`,
+    label: emoji.value,
     testId: `mail-compose-emoji-${emoji.id}`,
     onClick: () => insertHtml(emoji.value, false),
   }));
 
   const editingMenuItems = (): MenuItem[] => [
     { label: t("contextMenu.undo"), testId: "mail-compose-context-undo", shortcut: shortcut("Z"), onClick: () => exec("undo", undefined, false) },
-    { label: t("contextMenu.redo"), testId: "mail-compose-context-redo", shortcut: shortcut("Y"), onClick: () => exec("redo", undefined, false) },
+    { label: t("contextMenu.redo"), testId: "mail-compose-context-redo", shortcut: redoShortcut(), onClick: () => exec("redo", undefined, false) },
     { label: "", separator: true },
     { label: t("contextMenu.cut"), testId: "mail-compose-context-cut", shortcut: shortcut("X"), onClick: () => exec("cut", undefined, false) },
     { label: t("contextMenu.copy"), testId: "mail-compose-context-copy", shortcut: shortcut("C"), onClick: () => exec("copy", undefined, false) },
@@ -339,35 +439,35 @@ export function RichMailEditor({
 
   const insertMenuItems = (): MenuItem[] => [
     {
-      label: "链接",
+      label: "Link",
       testId: "mail-compose-insert-link",
       icon: <LinkIcon className="w-3.5 h-3.5" />,
-      onClick: handleLink,
+      onClick: () => void handleLink(),
     },
     {
-      label: "锚标",
+      label: "Anchor",
       testId: "mail-compose-insert-anchor",
       icon: <Anchor className="w-3.5 h-3.5" />,
-      onClick: handleAnchor,
+      onClick: () => void handleAnchor(),
     },
     {
-      label: "图像",
+      label: "Image",
       testId: "mail-compose-insert-image",
       icon: <ImageIcon className="w-3.5 h-3.5" />,
       disabled: !onInlineImage,
       onClick: () => void handleInlineImage(),
     },
     {
-      label: "水平线",
+      label: "Horizontal rule",
       testId: "mail-compose-insert-hr",
       icon: <Minus className="w-3.5 h-3.5" />,
       onClick: () => insertHtml("<hr>", true),
     },
     {
-      label: "表格",
+      label: "Table",
       testId: "mail-compose-insert-table",
       icon: <Table2 className="w-3.5 h-3.5" />,
-      onClick: handleTable,
+      onClick: () => void handleTable(),
     },
   ];
 
@@ -444,7 +544,7 @@ export function RichMailEditor({
         <ToolbarButton label="Align left" testId="mail-compose-align-left" disabled={disabled} onClick={() => exec("justifyLeft")}><AlignLeft className="w-3.5 h-3.5" /></ToolbarButton>
         <ToolbarButton label="Align center" testId="mail-compose-align-center" disabled={disabled} onClick={() => exec("justifyCenter")}><AlignCenter className="w-3.5 h-3.5" /></ToolbarButton>
         <ToolbarButton label="Align right" testId="mail-compose-align-right" disabled={disabled} onClick={() => exec("justifyRight")}><AlignRight className="w-3.5 h-3.5" /></ToolbarButton>
-        <ToolbarButton label="Insert link" testId="mail-compose-link" disabled={disabled} onClick={handleLink}><LinkIcon className="w-3.5 h-3.5" /></ToolbarButton>
+        <ToolbarButton label="Insert link" testId="mail-compose-link" disabled={disabled} onClick={() => void handleLink()}><LinkIcon className="w-3.5 h-3.5" /></ToolbarButton>
         <MenuButton label="Insert" testId="mail-compose-insert-menu" disabled={disabled} onClick={(event) => showMenu(event, insertMenuItems())}>
           <ImageIcon className="w-3.5 h-3.5" />
         </MenuButton>
@@ -465,6 +565,7 @@ export function RichMailEditor({
         )}
       </div>
       {editorMenu.render}
+      {textInputDialog.render}
       <div className="relative flex-1 min-h-[240px] flex flex-col">
         <div
           ref={editorRef}
@@ -518,6 +619,10 @@ function ToolbarButton({
       title={label}
       data-testid={testId}
       disabled={disabled}
+      // Keep focus (and the live selection) in the editor when a toolbar
+      // button is clicked — otherwise the caret/selection is lost to the
+      // button and the command applies to nothing.
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
     >
       {children}
@@ -546,6 +651,8 @@ function MenuButton({
       title={label}
       data-testid={testId}
       disabled={disabled}
+      // Same as ToolbarButton: don't steal focus from the editor.
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
     >
       {children}
@@ -609,6 +716,10 @@ function plainTextFragment(value: string): string {
 
 function shortcut(key: string): string {
   return `${navigator.platform.toLowerCase().includes("mac") ? "Cmd" : "Ctrl"}+${key}`;
+}
+
+function redoShortcut(): string {
+  return navigator.platform.toLowerCase().includes("mac") ? "Cmd+Shift+Z" : "Ctrl+Y";
 }
 
 function escapeHtml(value: string): string {
