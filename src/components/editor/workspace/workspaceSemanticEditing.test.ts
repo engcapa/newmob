@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   completeStatementPlan,
+  completeStatementStrategy,
   filterGenerateCodeActions,
   smartCompletionGate,
   surroundKindsForLanguage,
@@ -153,6 +154,91 @@ describe("§8.18.8 Surround With", () => {
       .toEqual(["if", "while", "try-catch", "synchronized", "runnable"]);
     expect(surroundKindsForLanguage("typescript").map((kind) => kind.id))
       .toEqual(["if", "while", "try-catch"]);
+  });
+});
+
+describe("§8.19.8 Complete Statement strategy", () => {
+  const aligned = (nodeType: string, parseErrorsInScope = false) => ({
+    alignedNodeType: nodeType,
+    treeRevision: 3,
+    selectionNodeRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
+    parseErrorsInScope,
+  });
+
+  it("grants syntax-tree provenance only for explicit Java statement nodes", () => {
+    for (const nodeType of ["ExpressionStatement", "ReturnStatement", "ThrowStatement"]) {
+      const decision = completeStatementStrategy({
+        languageId: "java",
+        readOnly: false,
+        caretCount: 1,
+        lineText: "  doWork()",
+        syntax: aligned(nodeType),
+      });
+      if (decision.kind !== "exact") throw new Error(`${nodeType} should be exact`);
+      expect(decision.insertSemicolonAt).toBe(10); // trailing whitespace trimmed
+      expect(decision.provenance).toMatchObject({
+        kind: "syntax-tree", languageId: "java", nodeType, treeRevision: 3,
+      });
+      expect(decision.evidenceV2.completeness).toBe("complete");
+    }
+  });
+
+  it("keeps block boundaries, headers and unknown nodes on the labelled local path", () => {
+    for (const line of ["if (ready)", "{", "public void run()", "}"]) {
+      const decision = completeStatementStrategy({
+        languageId: "java",
+        readOnly: false,
+        caretCount: 1,
+        lineText: line,
+        syntax: aligned("Block"),
+      });
+      expect(decision.kind === "local" && decision.ruleId === "completeStatement.local").toBe(true);
+    }
+  });
+
+  it("no-ops with a reason on multi-caret, read-only and unterminated strings", () => {
+    const base = { languageId: "java", caretCount: 1, lineText: "log(\"x" };
+    const multi = completeStatementStrategy({ ...base, readOnly: false, caretCount: 2, syntax: null });
+    expect(multi.kind === "unavailable" && multi.reason).toContain("Multi-caret");
+    const readOnly = completeStatementStrategy({ ...base, readOnly: true, caretCount: 1, syntax: null });
+    expect(readOnly.kind).toBe("unavailable");
+    const unterminated = completeStatementStrategy({
+      ...base, readOnly: false, syntax: aligned("ExpressionStatement"),
+    });
+    expect(unterminated.kind === "unavailable" && unterminated.reason).toContain("Unterminated");
+  });
+
+  it("refuses the semantic upgrade when parse errors are in scope", () => {
+    const decision = completeStatementStrategy({
+      languageId: "java",
+      readOnly: false,
+      caretCount: 1,
+      lineText: "doWork()",
+      syntax: aligned("ExpressionStatement", true),
+    });
+    expect(decision.kind === "unavailable" && decision.reason).toContain("Parse errors");
+  });
+
+  it("falls back to the local heuristic without node evidence or off-Java", () => {
+    const noFacts = completeStatementStrategy({
+      languageId: "java", readOnly: false, caretCount: 1, lineText: "doWork()", syntax: null,
+    });
+    expect(noFacts).toEqual({ kind: "local", ruleId: "completeStatement.local" });
+    const typescript = completeStatementStrategy({
+      languageId: "typescript", readOnly: false, caretCount: 1, lineText: "doWork()",
+      syntax: aligned("ExpressionStatement"),
+    });
+    // Java-only first batch: TS never borrows Java's node vocabulary.
+    expect(typescript.kind).toBe("local");
+    const terminated = completeStatementStrategy({
+      languageId: "java", readOnly: false, caretCount: 1, lineText: "return x;",
+      syntax: aligned("ReturnStatement"),
+    });
+    expect(terminated).toEqual({ kind: "local", ruleId: "completeStatement.newline-below" });
+    const blank = completeStatementStrategy({
+      languageId: "java", readOnly: false, caretCount: 1, lineText: "   ", syntax: null,
+    });
+    expect(blank).toEqual({ kind: "local", ruleId: "completeStatement.blank-line" });
   });
 });
 

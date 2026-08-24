@@ -137,6 +137,7 @@ import {
 } from "./workspaceCodeMirrorKeymap";
 import { EditorActionBridge } from "./workspaceActionHost";
 import {
+  completeStatementStrategy,
   surroundWithPlan,
   type SemanticEditSource,
   type SurroundKind,
@@ -568,14 +569,43 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
         case "cloneCaretAbove": return cloneCaretAbove(view);
         case "cloneCaretBelow": return cloneCaretBelow(view);
         case "collapseCarets": return escapeEditorSelections(view);
-        case "completeStatement":
-          // Same command the in-editor Mod-Shift-Enter keymap runs, so the
-          // action-host shortcut (window capture listener) and direct typing
-          // share one behaviour: caret-line edits with balanced brackets, not
-          // a bare `;` dropped at a line-relative offset (which used to land
-          // inside line 1 whenever the caret was below the first line).
+        case "completeStatement": {
+          // §8.19.8: the strategy decides between a syntax-tree-proven `;`,
+          // the clearly-labelled Local/Heuristic fallback, and an explicit
+          // no-op with reason. Same command the in-editor Mod-Shift-Enter
+          // keymap runs, so shortcuts and direct typing share one behaviour.
           if (view.state.readOnly || view.composing) return false;
-          return completeCurrentStatement(view);
+          const main = view.state.selection.main;
+          const line = view.state.doc.lineAt(main.head);
+          const decision = completeStatementStrategy({
+            languageId: guessEditorLanguageId(view) ?? "plaintext",
+            readOnly: view.state.readOnly,
+            caretCount: view.state.selection.ranges.length,
+            lineText: line.text,
+            syntax: observeSyntaxFacts(view.state, line.from, line.to),
+          });
+          if (decision.kind === "unavailable") {
+            options?.onSemanticEditApplied?.({ applied: false, provenance: null });
+            return false;
+          }
+          if (decision.kind === "exact") {
+            const at = Math.min(line.from + decision.insertSemicolonAt, line.to);
+            view.dispatch({
+              changes: { from: at, insert: ";" },
+              selection: { anchor: at + 1 },
+              userEvent: "input.completeStatement.syntax",
+              scrollIntoView: true,
+            });
+            options?.onSemanticEditApplied?.({ applied: true, provenance: decision.provenance });
+            return true;
+          }
+          const done = completeCurrentStatement(view);
+          options?.onSemanticEditApplied?.({
+            applied: done,
+            provenance: { kind: "local-text", ruleId: decision.ruleId },
+          });
+          return done;
+        }
         case "copy": return writeEditorSelectionToClipboard(view);
         case "cut": return cutSystemClipboard(view);
         case "foldAll": return foldAll(view) ?? false;

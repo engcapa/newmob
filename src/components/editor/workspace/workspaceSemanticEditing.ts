@@ -322,6 +322,126 @@ function buildSurroundProvenance(
 }
 
 // ---------------------------------------------------------------------------
+// §8.19.8 Complete Statement strategy (per-language)
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of the Complete Statement strategy. `exact` carries syntax-tree
+ * provenance backed by real node facts; `local` delegates to the shipped
+ * local heuristic which UI/telemetry MUST label Local/Heuristic; anything
+ * ambiguous is an explicit `unavailable` with a reason instead of a guess.
+ */
+export type CompleteStatementOutcome =
+  | {
+    kind: "exact";
+    /** Absolute offset of the inserted terminator. */
+    insertSemicolonAt: number;
+    provenance: SemanticEditSource;
+    evidenceV2: SemanticEditEvidenceV2;
+  }
+  | { kind: "local"; ruleId: string }
+  | { kind: "unavailable"; reason: string };
+
+/** Java statement nodes whose terminator is unambiguous (first batch). */
+const JAVA_TERMINATED_NODES = new Set([
+  "ExpressionStatement",
+  "ReturnStatement",
+  "ThrowStatement",
+]);
+
+function lineHasUnterminatedStringOrComment(lineText: string): boolean {
+  const trimmedStart = lineText.trimStart();
+  const code = trimmedStart.replace(/\/\/.*$/, "");
+  if (/\/\*/.test(code) && !code.includes("*/")) return true;
+  let escaped = false;
+  let open: string | null = null;
+  for (const char of code) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (open) {
+      if (char === open) open = null;
+    } else if (char === '"' || char === "'") {
+      open = char;
+    }
+  }
+  return open !== null;
+}
+
+/**
+ * Decide how Complete Statement may run for the caret line (§8.19.8).
+ * Java first batch: explicit expression statements and return/throw get a
+ * syntax-tree-proven `;` only when the live tree aligns exactly and parses
+ * cleanly; every other shape stays on the clearly-labelled local heuristic.
+ */
+export function completeStatementStrategy(input: {
+  languageId: string;
+  readOnly: boolean;
+  caretCount: number;
+  lineText: string;
+  syntax: SemanticSyntaxFacts | null;
+}): CompleteStatementOutcome {
+  if (input.readOnly) return { kind: "unavailable", reason: "Read-only editor" };
+  if (!input.lineText.trim()) return { kind: "local", ruleId: "completeStatement.blank-line" };
+  if (input.caretCount > 1) {
+    return { kind: "unavailable", reason: "Multi-caret statement completion is ambiguous" };
+  }
+
+  if (input.languageId !== "java") {
+    // First batch is Java-only; other languages stay on the labelled
+    // local heuristic rather than borrowing Java's node vocabulary.
+    return { kind: "local", ruleId: "completeStatement.local" };
+  }
+
+  if (lineHasUnterminatedStringOrComment(input.lineText)) {
+    return { kind: "unavailable", reason: "Unterminated string or comment on the caret line" };
+  }
+
+  const syntax = input.syntax;
+  if (!syntax || !syntax.alignedNodeType) {
+    // No node evidence available (parser missing or tree not parsed yet):
+    // the conservative local heuristic remains, labelled Local/Heuristic.
+    return { kind: "local", ruleId: "completeStatement.local" };
+  }
+  if (syntax.parseErrorsInScope) {
+    return { kind: "unavailable", reason: "Parse errors in scope prevent a safe statement completion" };
+  }
+
+  if (!JAVA_TERMINATED_NODES.has(syntax.alignedNodeType)) {
+    // Block boundaries, headers and declarations are NOT upgraded to
+    // semantics — they remain local-template work under an honest label.
+    return { kind: "local", ruleId: "completeStatement.local" };
+  }
+  if (/;\s*$/.test(input.lineText)) {
+    return { kind: "local", ruleId: "completeStatement.newline-below" };
+  }
+
+  const source: SemanticEditSource = {
+    kind: "syntax-tree",
+    languageId: input.languageId,
+    nodeType: syntax.alignedNodeType,
+    treeRevision: syntax.treeRevision,
+  };
+  return {
+    kind: "exact",
+    insertSemicolonAt: input.lineText.replace(/\s+$/, "").length,
+    provenance: source,
+    evidenceV2: {
+      identity: null,
+      source,
+      selectionNodeRange: syntax.selectionNodeRange,
+      parseErrorsInScope: false,
+      completeness: "complete",
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Generate Code via provider CodeActions (constructor/getter/… candidates)
 // ---------------------------------------------------------------------------
 
