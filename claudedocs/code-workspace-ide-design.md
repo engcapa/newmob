@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-25 · 版本：v4.58（R5-b ①② `827fec82`、③④ `64a43314`；v4.57 R5-a `5cae5f7a`；v4.56 R4 `2fcc9f47`；v4.55 R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R7 生产代码合同闭合（无真实 jdtls trace、无 IDEA 对照）；R4 生产代码合同闭合（History 设置界面未接、region 折叠标签未收口）；R5 生产代码合同闭合（jsdom 级；policy 编辑 UI、display-order/activateOnClose 接线、QA C4 全流程与三端 native 开放）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-25 · 版本：v4.59（R8 四项 ADR 先行；v4.58 R5-b ①② `827fec82`、③④ `64a43314`；v4.57 R5-a `5cae5f7a`；v4.56 R4 `2fcc9f47`；v4.55 R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R8 决策完成——SSR/dependency/Full Line defer（typed unavailable + 重开条件），Code Style implement-now（R8-D1/D2 待实施）；R7 生产代码合同闭合（无真实 jdtls trace、无 IDEA 对照）；R4 生产代码合同闭合（History 设置界面未接、region 折叠标签未收口）；R5 生产代码合同闭合（jsdom 级；policy 编辑 UI、display-order/activateOnClose 接线、QA C4 全流程与三端 native 开放）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4105,7 +4105,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 6 | [x] **R5 Tool-window registry/tab policy/split operations** | 模型+接线 → **R5-a 模型（v4.57）之上，R5-b 全部接线：Switcher 冻结 registry 快照、tabPolicy 随 layout snapshot 迁移读写（backup 留档）、equalize/stretch/unsplit-all/navigation/move-tab reducers+actions、Backspace 分级关闭 + ReopenLocationV2 结构化重开（v4.58）；policy 编辑 UI、order projection/activateOnClose 接线、QA C4 全流程与三端 native 未做** | G1 Switcher/tabs/splits 使用真实状态并持久化 ✅（jsdom 级；L2 待 QA C4 实跑） | R1 |
 | 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial → **usages session 生产合同（真实 identity/rerun/pin/角色诚实/库过滤）+ 五 kind 类型化服务通道闭合（v4.54）；Parameter Info 改道、refactorApplyGate 第二消费方、真实 trace 未闭合** | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
 | 8 | [x] **R7 Semantic editing/Surround/Generate** | 谎报 syntax-tree / try-catch 硬编码 / Generate 只有 filter → **provenance 类型化（local-text/syntax-tree/provider，node evidence 强制）、Surround 五 kind 同一 action/dialog/单事务、Generate 全链路真实 provider CodeAction、Complete Statement Java 首批 syntax-backed + 其余 Local/Heuristic 标注（v4.55）；真实 jdtls trace 与 IDEA 对照未运行** | provenance 诚实，Java syntax/provider 子集可用 ✅（trace/对照仍开放） | R1、R3、R6 |
-| 9 | [ ] **R8 Advanced suite productionize-or-defer** | appearance wired，其余模型居多 | SSR/dependency/Full Line/code style 每项有明确产品决策 | R1；按子项依赖 R3/R6 |
+| 9 | [~] **R8 Advanced suite productionize-or-defer** | 四项 ADR 已决（v4.59）：SSR/dependency/Full Line **defer**（typed unavailable、零误导入口、重开条件挂账），Code Style **implement-now**（R8-D1 scheme store/UI + R8-D2 stage planner/首批 reformat 待实施） | SSR/dependency/Full Line/code style 每项有明确产品决策 ✅（D 的实施与 evidence 待交付） | R1；按子项依赖 R3/R6 |
 | 10 | [ ] **R9 Native three-platform/performance/IME/a11y gate** | 未执行 | G0/G1 发布证据；G2/G3 分项 evidence manifest | 各包持续补，最终汇总 |
 
 固定接口顺序为 `R0 -> R1 -> R3 -> R6 -> R7`。R2 的 catalog ownership 修复可立即进行，随后随每包同步更新；R4/R5 在 R1 action IDs 冻结后可独立实施；R8 子项不能以“整包”领取。触碰 `CodeWorkspaceTab.tsx` 时按 save、action/keymap、completion/reference、layout/tabs、execution 五个区域分提交，X 轨道代码除非是当前包的必要回归不得修改。
@@ -5178,6 +5178,108 @@ R8不是“补更多类型”的包。第一提交必须给四个子项各做一
 Appearance不是第五个空模型：现有 `editorAppearanceProfile.ts` 已生产接线，后续只补 font actual-hit、high contrast对比度、200% zoom、state-preserving reconfigure和三端 evidence，归 R9；不要重建另一套 appearance store。
 
 每个 implement-now 子项沿用 §8.18.9 的 typed schema作为设计输入，但必须补 production call chain、settings、failure UI、security/privacy、migration、unit/mounted/native/performance和 IDEA expected。每项独立 DoD/commit/evidence；一个子项完成不能提升其它子项或 G1。若全部 defer，R8仍可“决策完成”，但四项能力保持 L0/L1 unavailable，不得写 Advanced Profile complete。
+
+**R8 ADR（v4.59，2026-08-25）：四项 production reachability 决策。**
+依据均为 2026-08-25 工作树（R5-b `64a43314` 之后）的代码事实；每个 defer 记录重开条件（re-entry），满足前对应能力保持 L0/L1 typed-unavailable。
+
+```text
+ADR R8-A Java SSR —— defer
+    代码事实
+      - companionCapabilities.ts 已定型 StructuralQuery schema 与可用性门禁，
+        但 SSR_SUPPORTED_LANGUAGES 为空集，availability union 把唯一合法后端
+        钉在 backend:"tree-sitter"；package.json / Cargo.toml 均无 tree-sitter
+        依赖。工作树内确有 @lezer/java（highlighting 级增量解析），但它不是
+        模型契约声明的后端：改用 Lezer 属于未记录的后端替换，且 SSR 需要
+        pattern query 解析器 + 变量绑定 matcher + 替换模板引擎 + R0
+        preview/apply 全链路与 false-positive=0 fixture，均不存在。
+      - 无性能预算测量、无 query schema migration 路径——正是本节写明的
+        defer 条件（“无 Java parser/provider、性能预算或 query schema
+        migration”）。
+      - UI 审计：components 下无任何消费 structuralSearch* 的入口，无误导性
+        UI 需要移除。
+    决策
+      defer。能力保持 L0 unavailable：structuralSearchAvailability(id,false)
+      → { available:false, reason:"backend-missing" } 即为对用户契约。
+    重开条件
+      引入 tree-sitter-java（或显式修订 schema 的 backend union 并补 migration）
+      + pattern/query service 设计 + 性能预算（文件级扫描上限）确立后，
+      方可按 §8.19.9 implement-now 最小 owner 重排入待办。
+    禁止声明（持续生效）
+      绝不 regex 换皮冒充 SSR；不得因 schema 存在宣称 SSR 可用。
+
+ADR R8-B Maven/Gradle dependency completion —— defer
+    代码事实
+      - companionCapabilities.ts 有 DependencyCompletionRequest/Candidate 与
+        repositoryUrlPolicy（https 才 trustedRead），但全仓无 registry
+        metadata client、无元数据 cache 存储、无针对仓库元数据抓取的
+        credential/proxy 会话策略（现有 proxy 管线服务 terminal/db/mail，
+        未覆盖此场景）。
+      - Rust 侧 pom.xml 处理仅是 sdk/detect.rs 的文本级属性扫描（SDK 探测），
+        非 position-aware project model；build.gradle 仅做构建系统存在性
+        判定。completion 所需的坐标区间定位模型不存在。
+      - UI 审计：无任何依赖补全入口。
+    决策
+      defer。命中 defer 条件“无可信 metadata/credential/proxy 策略”；
+      也绝不以 hardcoded popular list 充当候选源。
+    重开条件
+      确立受信仓库清单 + 元数据缓存（含 TTL/失效）+ 抓取走会话级代理与
+      超时/取消的完整策略后重评。
+    禁止声明（持续生效）
+      不得写 dependency completion 可用；不得用内置常用坐标列表冒充
+      repository 候选。
+
+ADR R8-C Full Line local completion —— defer
+    代码事实
+      - src-tauri/src/tab/fim_engine.rs 默认把 FIM 路由到 LlmRouter
+        (TaskKind::TabCompletion)，该路径可为云端 provider；local-llm-fim
+        feature 编译进 fim_engine_real.rs，但其 complete() 无条件返回 None
+        （"real decode not yet wired"）——native 本地解码运行时不存在。
+        Full Line 合同要求 localOnly 且“绝不远端/Terminal FIM 冒充”。
+      - 无签名模型分发/更新管理器；detectFullLineHardware 在 x86 上返回
+        "unknown"（AVX2 运行时探测缺失），fullLineAvailability 因此恒为
+        unavailable。前端 fullLineCompletionModel.ts 位于
+        __fixtures__/experimental，非生产模块。
+      - 编辑器侧无任何 ghost-text consumer；tab_suggest_fim 的唯一前端消费方
+        是 lib/terminal/aiSuggestionSource.ts（终端 AI 建议）——该入口必须
+        保持其现有命名与语义，不得改标 Full Line。
+    决策
+      defer。命中“无可分发模型、license、安全更新或 AVX2/ARM64 runtime”。
+    重开条件
+      发布已知良好的本地 FIM GGUF（含签名校验与更新通道）+ fim_engine_real
+      真实解码接线 + x86 AVX2 探测落地后重评；届时按 §8.19.9 要求补
+      ghost-text StateField、accept word/line、one-undo 与延迟/内存证据。
+    禁止声明（持续生效）
+      不得把云端/终端 FIM 改名或统计为 Full Line；不得在硬件 unknown 时
+      启用模型下载。
+
+ADR R8-D Code Style suite —— implement-now（分阶段）
+    代码事实（可达性成立）
+      - workspaceCodeStyleScheme.ts（scheme/provenance/format-plan 模型）、
+        codeStyleModel.ts（IDEA 四层优先级解析）与 editorConfigResolver.ts
+        已有真实下游生产消费：getEffectiveCodeStyleForFile → EditorGroup/
+        CodeMirrorHost（缩进行为）、saveNormalizationPipeline（EOL/trim/
+        final newline 归一化）、formatActiveFile 走 provider
+        formatting/rangeFormatting 能力。
+      - 缺口即本表列出的最小交付：scheme copy/rename/delete/reset 的生产
+        store/UI、field provenance 展示、formatter stage planner（provider
+        不支持的 stage 显式 unavailable）与 selection/file 首批 apply（经
+        R0 effect 通道）。当前无任何组件消费 CodeStyleScheme（grep 为空），
+        indentationOverrides 只提供 per-file 缩进覆盖。
+    决策
+      implement-now，拆两个提交：
+      R8-D1 scheme 生产 store + 管理 UI（copy/rename/delete/reset/选中持久化）
+        + provenance 显示；
+      R8-D2 formatter stage planner + selection/file reformat 首批（stage 按
+        provider capability 门禁，不支持显示 reason；apply 经 WorkspaceEdit
+        effect/undo 通道）。
+      scope/rearrange/cleanup/exclusion/save actions 维持关闭直到 provider
+        支持（§8.19.9 表格原文）。
+    禁止声明（持续生效）
+      provider/syntax 不支持的 stage 不得静默跳过后宣称 reformatted；
+      不得把 format 后文本启发式重排称为 cleanup/rearrange。
+```
+
+R8 结论：A/B/C defer（保持 typed unavailable、零误导入口、禁止声明挂账），D implement-now 分两提交跟进；“Advanced Profile complete”在任何情况下不可声明。
 
 #### 8.19.10 R9：Native 三端、性能、IME 与可访问发布门禁
 
