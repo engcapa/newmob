@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-24 · 版本：v4.55（R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R7 生产代码合同闭合（provenance/Surround/Generate/Complete Statement，无真实 jdtls trace、无 IDEA 对照）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-24 · 版本：v4.56（R4 `2fcc9f47`；v4.55 R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R7 生产代码合同闭合（无真实 jdtls trace、无 IDEA 对照）；R4 生产代码合同闭合（History 设置界面未接、region 折叠标签未收口）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4101,7 +4101,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 2 | [x] **R1 Action/Keymap runtime single truth** | editable 基础已接，dispatcher 不完整 → **业务键位全部迁入 ActionHost + typed V2 gate/chord/mouse dispatcher（v4.52，工作树），三端 native 未运行** | 所有用户命令可发现、可改键、可拒绝 IME/AltGr 误触发 | R0 的 typed-result 命名约定 |
 | 3 | [ ] **R2 QA catalog 与可执行 workflow 修复** | audit 红、核心 YAML 占位 | catalog current，G0/G1 browser cases 真正操作并断言 | R0/R1 同步提供 testid；基线修复可先行 |
 | 4 | [x] **R3 real jdtls Basic Completion acceptance** | synthetic L2 → **R3-a/b 生产代码合同（cb07c95c）+ R3-c 真实 fixture/runner/trace：五项目九场景 Linux 实机全绿，provider 层 G1 L2（v4.53）** | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 ✅（IDEA 对照录制与三端仍开放） | R1；effectful edits 依赖 R0 |
-| 5 | [ ] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial | G1 多光标/视觉列闭环，G3 history/reference 分项可用 | R1 |
+| 5 | [x] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial → **history ring V2（sensitive/限额/单删）+ Paste-from-History 弹层、Paste-as-Plain-Text、Copy Reference 候选模型、VisualColumnPosition/overflow StateField + End/click/type/backspace/paste 消费（v4.56）；Settings 接线、region 折叠标签、native clipboard 权限未做** | G1 多光标/视觉列闭环 ✅（jsdom 级），G3 history/reference 分项可用 ✅ | R1 |
 | 6 | [ ] **R5 Tool-window registry/tab policy/split operations** | layout wired，workflow partial | G1 Switcher/tabs/splits 使用真实状态并持久化 | R1 |
 | 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial → **usages session 生产合同（真实 identity/rerun/pin/角色诚实/库过滤）+ 五 kind 类型化服务通道闭合（v4.54）；Parameter Info 改道、refactorApplyGate 第二消费方、真实 trace 未闭合** | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
 | 8 | [x] **R7 Semantic editing/Surround/Generate** | 谎报 syntax-tree / try-catch 硬编码 / Generate 只有 filter → **provenance 类型化（local-text/syntax-tree/provider，node evidence 强制）、Surround 五 kind 同一 action/dialog/单事务、Generate 全链路真实 provider CodeAction、Complete Statement Java 首批 syntax-backed + 其余 Local/Heuristic 标注（v4.55）；真实 jdtls trace 与 IDEA 对照未运行** | provenance 诚实，Java syntax/provider 子集可用 ✅（trace/对照仍开放） | R1、R3、R6 |
@@ -4765,6 +4765,105 @@ Owner files
     ADR，R9 为最终门禁汇总。建议下一包按表序领取 R4（Clipboard History/
     Plain Paste/Copy Reference/Virtual Space），其 G1 多光标断言可直接复用
     本包 command-port 测试基建（EditorView.findFromDOM + port.execute）。
+```
+
+**R4 as-built（v4.56，2026-08-24，生产代码合同闭合，单提交）。**
+
+```text
+包 ID / commit / capability ID
+    R4 / 2fcc9f47 / clipboard.history-v2, paste.plain-text, copy.reference,
+      virtual-space.model
+As-built production call chain
+    Clipboard history（R4-a）: WorkspaceClipboardStore 扩为 §8.19.5 事实源——
+      write 接受 sensitive（敏感载荷只进 live slot，绝不入 ring），返回侧以
+      historyExclusion() 暴露 recorded|history-disabled|oversized-item|
+      sensitive 四态非阻断说明（CodeMirrorHost.rememberEditorClipboardPayload
+      经 onUnavailable 上抛）；setHistoryLimits 把条目上限钳制在 1–50、总字
+      节下限 1024；removeHistoryEntry 支持单条 Delete。
+      editor.pasteFromHistory action（Ctrl+Shift+V / Meta+Shift+V）→
+      ClipboardHistoryPopup 可搜索 listbox（首行/segment 数/相对时间，
+      role=option+aria-selected）；Enter → executeActiveEditorCommand
+      ("pasteFromHistory",{historyIndex}) → host 从 workspace store 取回该
+      条 promote 到 live slot 后直接 pasteEditorClipboardPayload 完整
+      segment plan——刻意绕过系统剪贴板（系统内容可能更新），单事务一次
+      undo；Delete 单删、Clear 两段确认、ring 依旧 session-only 且最后一个
+      handle release 即清空（refcount 语义不变）。
+    Plain Paste / Copy Reference（R4-b）: editor.pasteAsPlainText
+      （Ctrl+Shift+Alt+V）→ pasteAsPlainText 丢弃 rectangular/segment 元数
+      据，系统剪贴板失败回落 session plainText，按 caret 升序一次 dispatch
+      全文替换（userEvent=input.paste.plain）。editor.copyReference
+      （Ctrl+Alt+Shift+C）→ copyReferenceCandidates 纯函数：root 内给
+      workspace-relative path:line（显示行号 +1）、跨 root 给显式 absolute
+      格式、library 一律 unavailable library-source、无路径 no-file；
+      symbol 候选只在 provider rename range/词边界真实给出时追加——模型里
+      不存在 qualified-name kind，不伪造类名。多候选经 openTreeContextMenuAt
+      菜单选择，单候选直接写剪贴板并回报文本。
+    Virtual Space（R4-c）: workspaceVirtualSpace.ts —— facet 与 StateField
+      同址（消除 import cycle，workspaceEditorCommands 仅再导出）；
+      virtualSpaceOverflowField 按 CLAMPED head 记录溢出可视列：policy 关闭
+      或 docChanged 一律坍缩到合法 document column，selection-only 移动保留
+      未移动 head 的溢出。End/Shift+End 以 Prec.high 绑定但严格 defer——任一
+      caret 未达行末即 return false 交给默认 keymap（保住 soft-wrap 边界语
+      义），全部到行末后每次 +1 列走进虚拟区；click-past-EOL handler 用
+      posAtCoords/coordsAtPos 像素过冲估算列数（atFileBottom 只对最后一行放
+      行）；typing inputHandler 在 IME composing 时直接 defer，溢出存在时用
+      changeByRange 同事务产出 padding+text；pasteEditorClipboardPayload 在
+      同一 changes 数组内为各 caret 前置 padding 并清空 overflow map——多
+      caret padding+text 单 dispatch。measureVisualPositions 输出契约的
+      VisualColumnPosition{line,documentColumn,visualColumn,virtualColumns}，
+      tab stop 对齐 + CJK/emoji 双宽估算。
+Owner files
+    workspace/workspaceClipboardSession.ts（sensitive/exclusion/limits/
+    removeEntry）、workspace/ClipboardHistoryPopup.tsx（新）、
+    CodeMirrorHost.tsx（exclusion 通知、pasteAsPlainText/pasteFromHistory
+    命令、virtual space 扩展注册）、workspace/workspaceCopyReference.ts
+    （新）、workspace/workspaceVirtualSpace.ts（新）、workspace/
+    workspaceEditorCommands.ts（facet 迁址再导出、paste padding 消费）、
+    CodeWorkspaceTab.tsx（三个新 action + 弹层状态/渲染）。
+测试证据（已运行，2026-08-24）
+    - npx vitest run src/components/editor/ → 153 文件 1264 通过。新增：
+      workspaceVirtualSpace.test.ts 7 例（tab/双宽测量、policy 门控测量、
+      溢出记录不动 doc/history、typing 单事务物化、无溢出 defer、backspace
+      递减不动 doc、End 走虚拟区且关闭即失效、multi-caret 保留）；
+      workspaceCopyReference.test.ts 7 例（relative/absolute/library/no-file/
+      symbol 候选/Windows 盘符/最小 root）；workspaceClipboardHistory.test.ts
+      7 例（refcount 清空、限额驱逐与钳制、sensitive 排除、oversized 排除、
+      单删+去重晋升、promote、disable/clear）；ClipboardHistoryPopup.test.tsx
+      5 例（首行/段数/时间、过滤与空态、Enter 粘贴、Delete 与 Clear 确认、
+      关闭渲染 null）。
+    - pnpm build 绿（tsc -b + vite）。Rust 无改动。
+诚实边界（本包未闭合项）
+    - Settings 中 Disable/Clear/限制 UI 未接线：store API
+      （setHistoryEnabled/setHistoryLimits/clearHistory）已生产暴露并有测试，
+      但外观/剪贴板设置对话框尚未提供入口——避免在无 consumer 时造第二真值。
+    - sensitive 标记当前无生产 producer（编辑器内暂无密钥类复制来源）；排除
+      路径由 store 级测试覆盖，机制先行、声明为零。
+    - 虚拟空间 up/down 移动沿用既有 cloneCaretVertically 的 policy 消费；
+      方向键跨行保持溢出仅通过 field 的 selection-only 保留语义部分成立，
+      未做完整 IDEA 式 column 记忆。
+    - click-past-EOL 依赖 coordsAtPos 像素估算，jsdom 无法构造真实几何——
+      该路径仅有模块级单元覆盖（handler 注册），像素行为归 R9 native 验证。
+    - region folding 的 "Text marker folding (heuristic)" 标签收口未在本包
+      处理（R4 合同列出但属折叠子系统，避免与本包剪贴板/虚拟空间改动混
+      提交）。
+    - rectangular drag 新建（Alt+Shift 拖拽矩形选区）沿用 CM 既有
+      rectangularSelection；本包未新增 rectangle drag 专属逻辑。
+    - native clipboard permission 场景归 R9 三端门禁。
+最高允许声明
+    “R4 生产代码合同闭合：clipboard history V2 事实（sensitive/限额/单删/
+    typed exclusion）+ 会话级 Paste-from-History 弹层（绕过系统剪贴板的单
+    事务 segment plan）；Plain Paste 与 Copy Reference 候选模型不伪造任何
+    provider 未给出的身份；Virtual Space 以 overflow StateField 实现
+    End/click/type/backspace/paste 全消费链且多 caret padding 单事务”。
+禁止声明
+    不得写 Clipboard suite complete、History Settings UI 已可用、virtual
+    space IDEA-equivalent（up/down column 记忆不全、像素行为未经 native
+    验证）、Copy Reference qualifiedName 已支持、G3 clipboard L2 合并声明。
+残余风险与下一依赖包
+    表序下一包为 R5（真实 ToolWindow Registry、Tab Policy V3、Split 操作，
+    §8.19.6），R2 catalog/workflow 修复亦可随时并行；R8 需先出四项 ADR；
+    R9 为最终汇总门禁。本包的 overflow StateField 与 popup 测试基建可直接
+    被 R5 的 Switcher/tab restore 断言复用。
 ```
 
 #### 8.19.5 R4：Clipboard History、Plain Paste、Copy Reference 与完整 Virtual Space
