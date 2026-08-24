@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-24 · 版本：v4.53（R3-a/R3-b resolve gate + Basic invocation evidence 实施记录；R0 已于 `52da0ebf` 提交、R1 已于 `401d85e1` 提交）· 状态：**实施中；R3 生产代码合同已闭合（工作树未提交），真实 jdtls fixture/provider trace 未运行（R3-c 待做）；三端 native 前所有 keymap 能力保持 platform-unverified；G0 证据门禁红、G1 未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19.1/§8.19.2/§8.19.4 的 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-24 · 版本：v4.53（R3 全包实施记录：a/b 生产代码合同已于 `cb07c95c` 提交，c 真实 fixture/runner/trace 工作树；R0 已于 `52da0ebf` 提交、R1 已于 `401d85e1` 提交）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机，五项目九场景全绿）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19.1/§8.19.2/§8.19.4 的 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4100,7 +4100,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 1 | [x] **R0 Save/recovery/WorkspaceEdit effect closure** | 生产缺陷已确认，G0 红 → **代码合同已闭合（v4.51，工作树），native/browser 证据未运行** | 所有写路径共享 effect result/recovery ledger，partial apply 可恢复 | 无 |
 | 2 | [x] **R1 Action/Keymap runtime single truth** | editable 基础已接，dispatcher 不完整 → **业务键位全部迁入 ActionHost + typed V2 gate/chord/mouse dispatcher（v4.52，工作树），三端 native 未运行** | 所有用户命令可发现、可改键、可拒绝 IME/AltGr 误触发 | R0 的 typed-result 命名约定 |
 | 3 | [ ] **R2 QA catalog 与可执行 workflow 修复** | audit 红、核心 YAML 占位 | catalog current，G0/G1 browser cases 真正操作并断言 | R0/R1 同步提供 testid；基线修复可先行 |
-| 4 | [ ] **R3 real jdtls Basic Completion acceptance** | synthetic L2，真实 Java 未验证 → **resolve gate/显式 Basic 入口/invocation evidence 生产合同已闭合（v4.53，工作树）；真实 fixture+provider trace 未运行（R3-c）** | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 | R1；effectful edits 依赖 R0 |
+| 4 | [x] **R3 real jdtls Basic Completion acceptance** | synthetic L2 → **R3-a/b 生产代码合同（cb07c95c）+ R3-c 真实 fixture/runner/trace：五项目九场景 Linux 实机全绿，provider 层 G1 L2（v4.53）** | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 ✅（IDEA 对照录制与三端仍开放） | R1；effectful edits 依赖 R0 |
 | 5 | [ ] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial | G1 多光标/视觉列闭环，G3 history/reference 分项可用 | R1 |
 | 6 | [ ] **R5 Tool-window registry/tab policy/split operations** | layout wired，workflow partial | G1 Switcher/tabs/splits 使用真实状态并持久化 | R1 |
 | 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
@@ -4522,6 +4522,65 @@ Schema/migration
     - gate 横幅锚定在出现时刻的 caret 坐标，不随后续滚动移动（动作自身有
       stale 守卫，不会误插）。
 ```
+
+**R3-c as-built（v4.53，2026-08-24）。** 真实 jdtls fixture、native runner 与 trace：
+
+```text
+包 ID / commit / capability ID
+    R3-c / 工作树（基线 HEAD cb07c95c）/ java.basic-completion（provider 层证据）
+交付物
+    - projects/: maven-single、maven-multi-module(parent+core/app)、gradle-single、
+      gradle-multi-module(:core+:app)、maven-broken-classpath。补全目标写在
+      completionTargets() 不可达块中每行一个裸前缀 token；依赖固定为本地仓库可解
+      析版本（junit 4.13.2 test scope、commons-lang3 3.12.0），Gradle 工程零外部
+      依赖仅核心插件。
+    - runner/lsp-client.mjs + runner/run-jdtls-fixture.mjs：按生产等价启动配方
+      （lsp.rs 的 JVM 产品 flags/config_linux/-data）拉起真实 jdtls；initialize 的
+      completion client capabilities 与生产逐字段一致（含 resolveSupport.
+      additionalTextEdits）；逐场景轮询→completionItem/resolve（原样回传 raw）→
+      命中断言→可选 acceptance 模拟（pre-image 绝对偏移换算后倒序应用，
+      CodeMirror change-set 语义；undo() 反演必须精确恢复原文 sha256）→
+      maven-single 追加 SIGKILL 重启复测。
+    - traces/*.trace.json：五个脱敏 trace 入档——工具链版本（Zulu 21.0.4 /
+      jdtls 1.61.0.202607102111 / Gradle 9.5.1 wrapper 缓存 / Maven CLI 3.9.9）、
+      构建模型指纹（pom/gradle sha256）、逐场景 attempts/ms/itemCount/isIncomplete/
+      matchedDetail、resolve additional edits 原文、acceptance 三哈希、restart
+      时延与结果；home/tmp/project 路径统一脱敏，无源码正文。
+    - jdtlsFixtureExpectations.ts 重写为真实矩阵 14 条期望（含 ideaExpected 注记，
+      标明 curated 非机器录制）；jdtlsTraceContract.test.ts（22 例）在 Vitest 中
+      断言入档 trace 与期望逐条一致。
+真实运行结果（2026-08-24，Linux 实机）
+    - 全矩阵 node runner → **5/5 fixtures green**（含 broken-classpath 负例：
+      MissingUtil 候选未出现且 java.lang 正常补全；SIGKILL 重启后同一用例恢复）。
+    - npx vitest run src/components/editor/ → 144 文件 1198 通过（含新增
+      jdtlsTraceContract 22 例）；pnpm build 绿。
+真实发现（已如实记录）
+    - 原始 jdtls 会把 com.sun.tools.javac.util.StringUtils（JDK 编译器内部类）
+      作为 StringUtils 同名孪生一并返回并可能被 resolve 选中 —— IDEA 会把工程
+      依赖排在 JDK 内部符号之前；runner 用 detailContains 固定期望孪生，
+      matchedDetail 入档。
+    - InsertReplaceEdit 形态（{insert,replace,newText}）在实际响应中出现；
+      acceptance 模拟取 replace 区间（IDEA 接受语义）。
+诚实边界
+    - 本包证据是 **provider 层**：证明请求形状/capabilities/import-on-resolve/
+      restart 在真实服务器成立。Tauri IPC/webview、键盘/IME、三端行为仍归 R9；
+      编辑器内 Ctrl+Z 单击撤销由 mounted/browser 层另行记账，acceptance.undo()
+      是哈希往返反演，不等价于 UI undo。
+    - IDEA expected 为人工整理（curated），G2/L3 的 idea-compare 升级仍需显式
+      对照录制。
+最高允许声明
+    “Java Basic Completion 主路径 G1 L2 provider-backed（provider layer,
+    Linux 实机, jdtls 1.61/JDK 21）：五项目九场景全绿并有脱敏 trace 与 Vitest
+    契约门禁”。不得写 classpath-complete、Smart、all-Java-completion、
+    cross-platform verified 或 G2/L3。
+残余风险
+    - trace 为一次性生成物：代码或工具链变化后需重跑 runner 刷新（契约测试会
+      以指纹/期望失败提示）；Windows/macOS 未运行。
+    - Gradle 版本取 wrapper 缓存最高发行版（当前 9.5.1）而非硬编码 pin；如需
+      严格 pin 可设 TAOMNI_FIXTURE_GRADLE。
+```
+
+下一依赖包：R6（Reference Information + Usages/refactor session，依赖 R0/R3 已就绪）。
 
 #### 8.19.5 R4：Clipboard History、Plain Paste、Copy Reference 与完整 Virtual Space
 

@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "maven-broken-classpath",
+  "generatedAt": "2026-08-24T07:17:55.215Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21
+      }
+    },
+    "jdtls": {
+      "home": "~/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    },
+    "gradle": {
+      "version": "9.5.1",
+      "home": "~/.gradle/wrapper/dists/gradle-9.5.1-bin/bvvv0hnjcinfezlom7fy9dbyi/gradle-9.5.1"
+    },
+    "mavenCliDetected": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)"
+  },
+  "buildModelFingerprint": "9c8afbc3b5b074cc9c73fc809ea9ce91a0f4c227b8f7b6661d82ae7160901653",
+  "scenarios": [
+    {
+      "caseId": "missing-dependency-candidate-absent",
+      "file": "src/main/java/com/example/broken/Broken.java",
+      "position": {
+        "line": 7,
+        "character": 22
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 3273,
+          "itemCount": 0,
+          "isIncomplete": false,
+          "satisfied": true,
+          "matchedDetail": null,
+          "evaluationReason": null
+        }
+      ],
+      "resolve": null,
+      "acceptance": null,
+      "notes": "broken classpath must not fabricate the dependency type"
+    },
+    {
+      "caseId": "jdk-still-completes-on-broken-classpath",
+      "file": "src/main/java/com/example/broken/Broken.java",
+      "position": {
+        "line": 10,
+        "character": 16
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 554,
+          "itemCount": 50,
+          "isIncomplete": true,
+          "satisfied": true,
+          "matchedDetail": "java.lang.String",
+          "evaluationReason": null
+        }
+      ],
+      "resolve": null,
+      "acceptance": null,
+      "notes": "java.lang completion survives the unresolvable dependency"
+    }
+  ],
+  "failures": [],
+  "diagnosticsSummary": {
+    "count": 4,
+    "mentionsMissingLib": true,
+    "sampleMessages": [
+      "The container 'Maven Dependencies' references non existing library '~/.m2/repository/org/example/missing/missing-lib/99.99/missing-lib-99.99.jar'",
+      "The project cannot be built until build path errors are resolved",
+      "Missing artifact org.example.missing:missing-lib:jar:99.99"
+    ]
+  }
+}

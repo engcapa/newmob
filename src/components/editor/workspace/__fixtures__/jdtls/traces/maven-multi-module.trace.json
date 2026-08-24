@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "maven-multi-module",
+  "generatedAt": "2026-08-24T07:17:08.679Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21
+      }
+    },
+    "jdtls": {
+      "home": "~/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    },
+    "gradle": {
+      "version": "9.5.1",
+      "home": "~/.gradle/wrapper/dists/gradle-9.5.1-bin/bvvv0hnjcinfezlom7fy9dbyi/gradle-9.5.1"
+    },
+    "mavenCliDetected": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)"
+  },
+  "buildModelFingerprint": "14364c510c0fe227b2371a634eaeeb330cd45b7615efcbc442c5f81811f6d7a7",
+  "scenarios": [
+    {
+      "caseId": "cross-module-type",
+      "file": "app/src/main/java/com/example/app/Main.java",
+      "position": {
+        "line": 14,
+        "character": 17
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 3076,
+          "itemCount": 1,
+          "isIncomplete": false,
+          "satisfied": true,
+          "matchedDetail": "com.example.core.CoreUtil",
+          "evaluationReason": null
+        }
+      ],
+      "resolve": {
+        "ms": 581,
+        "additionalEditCount": 1,
+        "additionalEditTexts": [
+          "\n\nimport com.example.core.CoreUtil;\n\n"
+        ]
+      },
+      "acceptance": {
+        "originalSha256": "d5e6d15e975fee63fbb1d749bd841e52b0249412f3147f8cbdb71c45be8988cf",
+        "appliedSha256": "636a9abe1f93fa0616c070336e6534a55cf2af38d4e1becbd938f84a15db76e0",
+        "revertedSha256": "d5e6d15e975fee63fbb1d749bd841e52b0249412f3147f8cbdb71c45be8988cf",
+        "revertRestoresOriginalHash": true
+      },
+      "notes": null
+    },
+    {
+      "caseId": "ambiguous-same-name-types",
+      "file": "app/src/main/java/com/example/app/Main.java",
+      "position": {
+        "line": 17,
+        "character": 16
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 194,
+          "itemCount": 7,
+          "isIncomplete": false,
+          "satisfied": true,
+          "matchedDetail": null,
+          "evaluationReason": null
+        }
+      ],
+      "resolve": null,
+      "acceptance": null,
+      "notes": "IDEA shows both twins with their FQNs; user picks one, resolve imports exactly that one"
+    }
+  ],
+  "failures": []
+}

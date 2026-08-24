@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example.broken</groupId>
+  <artifactId>maven-broken-classpath</artifactId>
+  <version>1.0.0</version>
+
+  <properties>
+    <maven.compiler.source>21</maven.compiler.source>
+    <maven.compiler.target>21</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <!-- INTENTIONALLY BROKEN: no such artifact exists anywhere. The fixture
+       asserts that a broken classpath degrades dependency completion without
+       killing java.lang completion or the server session. -->
+  <dependencies>
+    <dependency>
+      <groupId>org.example.missing</groupId>
+      <artifactId>missing-lib</artifactId>
+      <version>99.99</version>
+    </dependency>
+  </dependencies>
+</project>

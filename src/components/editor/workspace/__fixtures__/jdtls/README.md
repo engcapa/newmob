@@ -1,48 +1,70 @@
-# jdtls 真实 provider fixture 合同(§8.18.3 / §8.18.7)
+# jdtls 真实 provider fixture 合同(§8.19.4 R3-c)
 
-本目录是 C2/C6 的**版本固定 Java fixture 合同**。它定义了在真实 jdtls
-运行时中必须复现并留证的最小矩阵;任何 capability 在没有对应 trace 证据前,
-只能声明 `wired`/`platform-unverified`,不得写 `verified/L3`。
+本目录是 Basic Completion 的**版本固定 Java fixture 合同**:真实 jdtls
+进程按生产等价的启动配方与 client capabilities 运行,逐场景留下脱敏
+trace。任何 capability 在没有对应 trace 证据前,只能声明
+`platform-unverified`/synthetic,不得写 `verified/L3`。
 
-## 运行环境要求
+## 工具链(固定版本,trace 内记录)
 
-- JDK 21(jdtls 最低要求),`JAVA_HOME` 指向该 JDK。
-- jdtls distribution + java-debug / java-test 扩展 jar(Taomni
-  `src-tauri/src/java_bundles.rs` 解析)。
-- Maven(`mvn -q -v`)与 Gradle(`gradle -v`)任一可用 wrapper。
-- 运行 Taomni 打包应用(Linux/Windows/macOS 三端各一次)。
+- JDK 21:Zulu 21.0.4(`TAOMNI_FIXTURE_JAVA` 覆盖,默认 `/data/dev/jdk-21/bin/java`)。
+- jdtls 1.61.0.202607102111(`JDTLS_HOME` 覆盖,默认 `~/.local/share/jdtls`)。
+- Maven 3.9.x(jdtls 内嵌 m2e 解析 pom;`mvnCliDetected` 仅记录探测结果)。
+- Gradle:`~/.gradle/wrapper/dists` 缓存中的最高发行版(9.5.1;
+  `TAOMNI_FIXTURE_GRADLE` 覆盖),经 `java.import.gradle.home` 注入。
 
-## Fixture 项目
+## Fixture 项目(`projects/`)
 
-| 目录(待建) | 内容 | 覆盖 |
+| 项目 | 构建工具 | 覆盖场景 |
 |---|---|---|
-| `maven-multi-module/` | parent + `app`(main source set)+ `lib`;`app` 依赖 `lib` | 跨模块 navigation/rename、classpath 完整性 |
-| `gradle-single/` | 单模块,含 test source set 与 JUnit 依赖 | test/main 分区、Gradle classpath |
-| `ambiguous-types/` | 两个同名类 `com.a.Foo` / `com.b.Foo`,均被引用 | auto-import 歧义由用户选择 |
-| `snippet-method/` | 含 method snippet 触发点(`${1|void,int|}` choice + placeholder) | choice/tabstop 会话、一次 undo |
-| `static-import/` | 需 resolve additional edit 的 static import 候选 | 有界 resolve、"Insert without additional edits" 回退 |
-| `dependency-source/` | 引用已下载源码的第三方库类型 | library read-only、decompiled/source 区分 |
+| `maven-single/` | maven | JDK type、static member(`Arrays.`)、overload 家族(`appen`)、依赖类型 + resolve import(commons-lang3)、test source set(junit) |
+| `maven-multi-module/` | maven | 跨模块类型(CoreUtil)+ resolve import、同名类型歧义(两个 `Result`) |
+| `gradle-single/` | gradle | Gradle 导入 sanity(JDK type) |
+| `gradle-multi-module/` | gradle | 跨模块类型(GCore)+ resolve import |
+| `maven-broken-classpath/` | maven | 坏 classpath:缺失依赖候选绝不出现、java.lang 仍可补全 |
 
-## 必须留证的 trace(脱敏后入档)
+补全目标写在 `completionTargets()` 的不可达块里,每行一个裸前缀
+token;runner 按"整行等于 token"(成员触发则行尾)定位 caret,与编译
+代码中的同名标识符无歧义。
 
-1. initialize capability 位图(completionProvider resolveProvider 等)。
-2. Basic completion:typing(80ms debounce)/ trigger(`.`)/ explicit
-   (Ctrl+Space,重复调用 ordinal=2 → "provider scope unchanged")三路请求/
-   响应摘要(label 数量、isIncomplete、截断标志)。
-3. resolve:additional edits(auto-import)原文、resolve timeout 行为。
-4. acceptance:一次 dispatch(主文本+import+selection)、单次 Ctrl+Z 全恢复。
-5. provider restart / stale:generation 变化后迟到结果被丢弃。
-6. 非 Java 负例:.ts/.py 在无 provider 时 unavailable,绝不插入 Java import。
+## Runner(`runner/`)
 
-## 记录格式
+```
+node runner/run-jdtls-fixture.mjs [--fixture <id>]...
+```
 
-每个用例一行 JSON,字段:`caseId / jdtlsVersion / jvmVersion / buildTool /
-requestKind / requestSummary / responseSummary / assertions[] / result /
-timestamp / platform`。日志不得包含源码正文、用户名、绝对 home 路径或凭据。
+- 启动配方镜像 `src-tauri/src/lsp.rs`(产品 JVM flags、共享 config 区、
+  `-data` workspace);initialize 的 completion client capabilities 与
+  生产相同,含 `resolveSupport.properties = [documentation, detail,
+  additionalTextEdits]`。
+- 每个场景轮询 completion 直到期望满足或超时(首次项目导入可达数分钟);
+  命中候选项后发 `completionItem/resolve`(原样回传 item.raw,与生产一致),
+  记录 additionalTextEdits。
+- `verifyRevert` 场景把 primary+additional edits 应用到内存文档并做哈希
+  往返:应用后哈希 → 反向移除全部插入 → 必须精确恢复原始哈希。这验证
+  additional edits 是纯插入且范围良定义(R0 ledger 的 hash 记账前提),
+  **不等于**编辑器内 Ctrl+Z —— 后者由 mounted/browser/native 层另行记账。
+- restart 场景 SIGKILL 首个 server 后重建会话并复测同一用例。
+- trace 写入 `traces/<fixture>.trace.json`:工具链版本、构建模型指纹
+  (pom/gradle 文件内容 sha256)、逐场景请求次数/耗时/itemCount/
+  isIncomplete、resolve additional edits 原文、acceptance 三哈希、
+  restart 时延;home/tmp/project 绝对路径统一替换为 `~`/`${project}`/
+  `${fixtures}`,不含源码正文。
+
+## 诚实边界
+
+- runner 直连 jdtls stdio,采集的是 **provider 层证据**:证明请求形状、
+  capabilities、import-on-resolve、restart 行为在真实服务器上成立。
+  Tauri IPC/webview 链路、键盘/IME、三端行为仍归 R9 native 门禁。
+- IDEA expected 目前为**人工整理**(候选类别/scope/import/undo 结果),
+  不是 IntelliJ 机器录制;"单 fixture 与 IDEA 对照达到完整矩阵"的 G2/L3
+  升级仍需该对照被明确建立。
 
 ## 当前状态(诚实登记)
 
-- [x] 合同与期望结构定义(本文件 + `jdtlsFixtureExpectations.ts`)。
-- [x] synthetic acceptance 基线(Vitest mounted host,1040+ 测试)。
-- [ ] **真实 jdtls trace**:需要实机 JDK/jdtls/Maven/Gradle 环境,本轮开发
-  环境不可用 —— 所有 Java provider capability 保持 `platform-unverified`。
+- [x] 合同与期望结构定义(`jdtlsFixtureExpectations.ts`)。
+- [x] synthetic acceptance 基线(Vitest mounted host)。
+- [x] 真实 jdtls trace(R3-c,2026-08-24,Linux 实机):五个项目全部
+  绿,见 `traces/*.trace.json`;Vitest 断言 trace 与期望一致
+  (`jdtlsTraceContract.test.ts`)。
+- [ ] Windows/macOS 平台重复运行(R9);IDEA 2026.2 对照录制。

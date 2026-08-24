@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "maven-single",
+  "generatedAt": "2026-08-24T07:16:47.272Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21
+      }
+    },
+    "jdtls": {
+      "home": "~/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    },
+    "gradle": {
+      "version": "9.5.1",
+      "home": "~/.gradle/wrapper/dists/gradle-9.5.1-bin/bvvv0hnjcinfezlom7fy9dbyi/gradle-9.5.1"
+    },
+    "mavenCliDetected": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)"
+  },
+  "buildModelFingerprint": "1f5457909013590296f1710d954eba6b51b61e0ab610a319e711614c1cd3465e",
+  "scenarios": [
+    {
+      "caseId": "jdk-type",
+      "file": "src/main/java/com/example/single/App.java",
+      "position": {
+        "line": 20,
+        "character": 16
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 4246,
+          "itemCount": 50,
+          "isIncomplete": true,
+          "satisfied": true,
+          "matchedDetail": "java.lang.String",
+          "evaluationReason": null
+        }
+      ],
+      "resolve": null,
+      "acceptance": null,
+      "notes": null
+    },
+    {
+      "caseId": "static-member",
+      "file": "src/main/java/com/example/single/App.java",
+      "position": {
+        "line": 23,
+        "character": 19
+      },
+      "trigger": ".",
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 607,
+          "itemCount": 58,
+          "isIncomplete": true,
+          "satisfied": true,
+          "matchedDetail": "Arrays.asList(T... a) : List<T>",
+          "evaluationReason": null
+        }
+      ],
+      "resolve": null,
+      "acceptance": null,
+      "notes": null
+    },
+    {
+      "caseId": "generic-overload",
+      "file": "src/main/java/com/example/single/App.java",
+      "position": {
+        "line": 26,
+        "character": 37
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 55,
+          "itemCount": 14,
+          "isIncomplete": false,
+          "satisfied": true,
+          "matchedDetail": null,
+          "evaluationReason": null
+        }
+      ],
+      "resolve": null,
+      "acceptance": null,
+      "notes": null,
+      "overloads": [
+        {
+          "label": "append(double d) : StringBuilder",
+          "detail": "StringBuilder.append(double d) : StringBuilder"
+        },
+        {
+          "label": "append(float f) : StringBuilder",
+          "detail": "StringBuilder.append(float f) : StringBuilder"
+        },
+        {
+          "label": "append(long lng) : StringBuilder",
+          "detail": "StringBuilder.append(long lng) : StringBuilder"
+        },
+        {
+          "label": "append(int i) : StringBuilder",
+          "detail": "StringBuilder.append(int i) : StringBuilder"
+        },
+        {
+          "label": "append(char c) : StringBuilder",
+          "detail": "StringBuilder.append(char c) : StringBuilder"
+        },
+        {
+          "label": "append(boolean b) : StringBuilder",
+          "detail": "StringBuilder.append(boolean b) : StringBuilder"
+        },
+        {
+          "label": "append(char[] str) : StringBuilder",
+          "detail": "StringBuilder.append(char[] str) : StringBuilder"
+        },
+        {
+          "label": "append(CharSequence s) : StringBuilder",
+          "detail": "StringBuilder.append(CharSequence s) : StringBuilder"
+        },
+        {
+          "label": "append(StringBuffer sb) : StringBuilder",
+          "detail": "StringBuilder.append(StringBuffer sb) : StringBuilder"
+        },
+        {
+          "label": "append(String str) : StringBuilder",
+          "detail": "StringBuilder.append(String str) : StringBuilder"
+        },
+        {
+          "label": "append(Object obj) : StringBuilder",
+          "detail": "StringBuilder.append(Object obj) : StringBuilder"
+        },
+        {
+          "label": "append(char[] str, int offset, int len) : StringBuilder",
+          "detail": "StringBuilder.append(char[] str, int offset, int len) : StringBuilder"
+        },
+        {
+          "label": "append(CharSequence s, int start, int end) : StringBuilder",
+          "detail": "StringBuilder.append(CharSequence s, int start, int end) : StringBuilder"
+        },
+        {
+          "label": "appendCodePoint(int codePoint) : StringBuilder",
+          "detail": "StringBuilder.appendCodePoint(int codePoint) : StringBuilder"
+        }
+      ]
+    },
+    {
+      "caseId": "dependency-source-import",
+      "file": "src/main/java/com/example/single/App.java",
+      "position": {
+        "line": 29,
+        "character": 21
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 150,
+          "itemCount": 2,
+          "isIncomplete": false,
+          "satisfied": true,
+          "matchedDetail": "org.apache.commons.lang3.StringUtils",
+          "evaluationReason": null
+        }
+      ],
+      "resolve": {
+        "ms": 248,
+        "additionalEditCount": 1,
+        "additionalEditTexts": [
+          "\n\nimport org.apache.commons.lang3.StringUtils;"
+        ]
+      },
+      "acceptance": {
+        "originalSha256": "15e9164d815a71b8bb6d8164682bc405029df3831d1e028bddaed59bc0a88062",
+        "appliedSha256": "1dfc8524af7256de46334b3e1698cbfb2ac402e00d3f2abe9822a022a43517a9",
+        "revertedSha256": "15e9164d815a71b8bb6d8164682bc405029df3831d1e028bddaed59bc0a88062",
+        "revertRestoresOriginalHash": true
+      },
+      "notes": null
+    },
+    {
+      "caseId": "test-source-set",
+      "file": "src/test/java/com/example/single/AppTest.java",
+      "position": {
+        "line": 15,
+        "character": 17
+      },
+      "trigger": null,
+      "scopeRequested": "default",
+      "requests": [
+        {
+          "attempts": 1,
+          "msTotal": 221,
+          "itemCount": 50,
+          "isIncomplete": true,
+          "satisfied": true,
+          "matchedDetail": null,
+          "evaluationReason": null
+        }
+      ],
+      "resolve": null,
+      "acceptance": null,
+      "notes": "candidate must come from junit test scope (proves test source set import)"
+    }
+  ],
+  "failures": [],
+  "restart": {
+    "performed": true,
+    "msToReadyAfterRestart": 7187,
+    "completionOkAfterRestart": true,
+    "reason": null
+  }
+}
