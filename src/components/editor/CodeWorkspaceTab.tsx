@@ -215,6 +215,7 @@ import {
   syncBottomDockToolWindows,
   unregisterAllToolWindows,
 } from "./workspace/toolWindowRegistry";
+import { planReformat } from "./workspace/reformatWorkflow";
 import { attachWorkspaceMouseDispatcher } from "./workspace/workspaceMouseDispatcher";
 import {
   createWorkspaceLocationController,
@@ -8723,17 +8724,43 @@ export function CodeWorkspaceTab({
       title: "Format Document",
       category: "Code",
       keybinding: "Ctrl+Alt+L",
-      keywords: ["format", "prettier", "indent"],
+      keywords: ["format", "prettier", "indent", "reformat"],
       when: (context) => {
         if (context.focus === "tree" || context.focus === "terminal") return false;
         if (!activeFile || activeFile.loading) return false;
         // Prefer capability gate when status is known; if LSP has not
         // reported yet, still allow the command so the shortcut is live
-        // as soon as the buffer is open (formatActiveFile no-ops without a formatter).
+        // as soon as the buffer is open (the planner reports a typed reason
+        // instead of a silent no-op).
         if (!activeCapabilities) return true;
         return !!(activeCapabilities.formatting || activeCapabilities.rangeFormatting);
       },
-      run: () => void formatActiveFile(),
+      run: () => {
+        // §8.19.9 R8-D2: every invocation resolves through the planner —
+        // executable scopes delegate to the provider stage; everything else
+        // surfaces a typed unavailable reason.
+        const selection = editorSelectionRef.current;
+        const hasSelection = !!selection && !selection.empty;
+        const decision = planReformat({
+          scope: hasSelection ? "selection" : "file",
+          targetPath: activeFile
+            ? (absolutePathForOpenFile(activeFile) ?? activeFile.languagePath)
+            : null,
+          languageId: activeLanguageId,
+          readOnly: !!activeFile?.library || workspaceResourceOperationLocked,
+          hasSelection,
+          capabilities: {
+            formatting: !!activeCapabilities?.formatting,
+            rangeFormatting: !!activeCapabilities?.rangeFormatting,
+          },
+        });
+        if (decision.kind === "unavailable") {
+          setStatusMessage(decision.reason);
+          return false;
+        }
+        void formatActiveFile();
+        return true;
+      },
     },
     {
       id: "workspace.toggleFormatOnSave",
@@ -9619,6 +9646,7 @@ export function CodeWorkspaceTab({
     setStatusMessage,
     splitOrientation,
     stretchActiveSplit,
+    workspaceResourceOperationLocked,
     t,
     toggleBookmarkAtCursor,
     toggleColumnSelectionMode,
