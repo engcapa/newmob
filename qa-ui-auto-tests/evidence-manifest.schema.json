@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://taomni.local/qa-ui-auto/evidence-manifest.schema.json",
+  "title": "EditorEvidenceManifestV1",
+  "description": "W7/R9 native gate evidence entry (§8.19.10 / §8.20.8). One file per capability × platform under qa-ui-auto-report/evidence/<app-hash>/<platform>/; sanitized entries may be committed, raw artifacts never.",
+  "type": "object",
+  "required": ["capabilityId", "app", "environment", "evidenceLayers", "result", "maximumClaim"],
+  "additionalProperties": false,
+  "properties": {
+    "capabilityId": { "type": "string", "minLength": 1 },
+    "app": {
+      "type": "object",
+      "required": ["commit", "bundleHash"],
+      "additionalProperties": false,
+      "properties": {
+        "commit": { "type": "string", "minLength": 1 },
+        "bundleHash": { "type": "string", "minLength": 1 },
+        "version": { "type": "string" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["os", "arch", "webview", "keyboard", "ime", "scale"],
+      "additionalProperties": false,
+      "properties": {
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "webview": { "type": "string" },
+        "keyboard": { "type": "string", "description": "keyboard layout, e.g. us / de / cn,us" },
+        "ime": { "type": "string" },
+        "scale": { "type": "number", "description": "display scale, 1 = 100%, 2 = 200%" },
+        "filesystem": { "type": "string" }
+      }
+    },
+    "provider": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["id", "version", "fixture"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string" },
+            "version": { "type": "string" },
+            "fixture": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "evidenceLayers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["unit", "mounted", "browser", "native", "provider", "idea-compare"] }
+    },
+    "result": { "enum": ["passed", "failed", "blocked", "platform-unverified", "provider-unverified", "manual-native"] },
+    "command": { "type": "string", "description": "exact command(s) executed" },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "sha256", "redacted"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string" },
+          "sha256": { "type": "string" },
+          "redacted": { "type": "boolean" },
+          "path": { "type": "string" }
+        }
+      }
+    },
+    "knownGaps": { "type": "array", "items": { "type": "string" } },
+    "maximumClaim": { "type": "string", "description": "highest L0-L3 claim this single entry supports; never inferred across platforms" },
+    "notes": { "type": "string" },
+    "collectedAt": { "type": "string" }
+  }
+}

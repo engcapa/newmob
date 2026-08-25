@@ -306,6 +306,14 @@ controls:
     selector: '[data-testid="welcome-recent-no-matches"]'
     kind: display
     optional: true
+  - id: recent-workspace-row
+    selector: '[data-testid="welcome-recent-workspace-row"]'
+    kind: interactive
+    optional: true       # rendered only when recent workspaces exist (native gate C0 enters here)
+  - id: history-tab-workspaces
+    selector: '[data-testid="welcome-history-tab-workspaces"]'
+    kind: interactive
+    optional: true       # template testid welcome-history-tab-${tab.id}; sessions|workspaces|directories
   - id: tips-section
     selector: 'text="Tips"'
     kind: display

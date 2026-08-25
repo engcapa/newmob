@@ -73,3 +73,4 @@ from . import mouse        # noqa: E402,F401
 from . import keyboard     # noqa: E402,F401
 from . import assertions   # noqa: E402,F401
 from . import app_specific # noqa: E402,F401
+from . import persistence  # noqa: E402,F401

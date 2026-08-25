@@ -1,33 +1,46 @@
 id: TC-IDE-C0-01
 title: "Save transaction, dirty marker, stale snapshot recovery ledger"
 description: |
-  §8.19.10 gate case C0. Capability ids: workspace.save-transaction /
+  §8.19.10 gate case C0 (native slice). Capability ids: workspace.save-transaction /
   workspace.recovery-ledger / workspace.disk-hash.
-  Required mode: NATIVE (disk hash re-read and close-during-write recovery
-  need the Rust filesystem backend; browser stubs cannot prove them).
-  Fixture id: none beyond a user-chosen scratch folder. Highest claim on
-  green: L1 native single-platform. This run records environment-blocked
-  until the tauri-driver harness provisions a fixture root (R9 owns the
-  native manifest); it must never be marked passed from a browser run.
+  Required mode: NATIVE — the G0 disk-effect proof re-reads the saved bytes from
+  the real host filesystem (assert_file_contains), which browser-VFS stubs can
+  never prove. The workspace enters via the app's own recent-workspaces
+  persistence (seed_storage) because the native folder picker is not WebDriver-
+  drivable; this exercises the same restore path an end user gets after
+  reopening a workspace.
+  Fixture ids: reset_db, workspace_root (temp dir seeded with README.md).
+  Highest claim on green: L1 native single-platform disk-effect evidence.
+  A browser run of this case must stay environment-blocked (workspace_root
+  skips there); it must never be marked passed from a stub.
 covers: [F25.1]
 tags: [code-workspace, ide-c0, save, recovery, native-gate, p1]
 modes: [native]
-fixtures: [reset_db]
+fixtures: [reset_db, workspace_root]
 timeout_sec: 300
 steps:
   - open: "${cfg.app.base_url}"
+  # Fresh isolated app-data => empty vault => first-run master-password gate.
+  # Sets a QA master password; no-ops when the vault is already unlocked.
+  - vault_first_run: "qa-native-gate-password"
   - wait_for: '[data-testid="welcome-panel"]'
-  - click: '[data-testid="side-tab-tools"]'
-  - wait_for: '[data-testid="sidebar-tools-panel"]'
-  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - screenshot: tc-ide-c0-welcome.png
+
+  # Enter the workspace through persisted recents (no native folder picker).
+  # The path-qualified row guards against any other recents in the profile.
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-c0","name":"qa-c0","roots":[{"id":"r1","name":"qa-c0","path":"${fixture.workspace_root}","kind":"folder"}],"looseFiles":[],"lastOpenedAt":1756100000000,"isGitRepo":false}]'
+  - reload_window: null
+  # Welcome defaults to the sessions history tab; switch to workspaces.
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.workspace_root}"]'
   - wait_for: '[data-testid="code-workspace-tab"]'
-  # Add the browser-VFS preview folder (/preview prefilled in the prompt).
-  - click: '[data-testid="code-workspace-tree-add-folder"]'
-  - wait_for: '[data-testid="text-input-dialog"]'
-  - click: '[data-testid="text-input-dialog-confirm"]'
-  - wait_for: '[data-testid="code-workspace-tree-file"]'
-  # Open README.txt into the active leaf.
-  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"][data-path="README.md"]'
+  - screenshot: tc-ide-c0-tree.png
+
+  # Open README.md into the active leaf.
+  - click: '[data-testid="code-workspace-tree-file"][data-path="README.md"]'
   - wait_for: '[data-testid="code-workspace-editor-pane"]'
   - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
 
@@ -37,12 +50,15 @@ steps:
   - assert_visible: '[data-testid="code-workspace-file-status"]'
   - screenshot: tc-ide-c0-dirty.png
   - press: Control+s
-  - assert_text:
-      selector: '[data-testid="code-workspace-file-status"]'
-      contains: saved
-      timeout_sec: 15
-  # The v4 disk-effect ledger must classify this write as verified.
-  - eval_readonly:
-      expression: "JSON.stringify(localStorage).includes('save-effects') || JSON.stringify(localStorage).includes('verified')"
-      expect_truthy: true
+  # NOTE: file-status renders size + mtime (EditorGroup.tsx) — there is no
+  # "saved" transient text; the earlier `contains: saved` expectation was
+  # never validated in any mode. The authoritative save verification is the
+  # host-side disk re-read below (G0 disk-effect proof).
+  - assert_visible: '[data-testid="code-workspace-file-status"]'
   - screenshot: tc-ide-c0-saved.png
+
+  # G0 disk effect: the write pipeline must have reached the real file.
+  - assert_file_contains:
+      path: "${fixture.workspace_root}/README.md"
+      contains: "c0 disk verification marker"
+      timeout_sec: 15
