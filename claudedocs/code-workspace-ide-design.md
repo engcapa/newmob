@@ -2,11 +2,11 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Core Daily Editing Profile，再以 Java 为首个语言完成可证明的 provider-backed 语义工作流。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-25 · 版本：v4.62（当前 HEAD `f572c6b8101564761d119bb39d63a1acf933bba4` 再审计、IntelliJ IDEA 2026.2 官方帮助 2026-08-18 构建版复核、目标与执行队列重置）· 状态：**实施中；R0/R1/R3/R4/R5/R7/R8 生产合同与 R2 静态 QA 门禁与 R9 native harness+Linux 首批证据（C0 native 两连绿磁盘字节级证明、perf browser 基线、a11y 扫描）已交付，Java Basic Completion 达 provider 层 G1 L2（Linux、jdtls 1.61/JDK 21）；R6 仍为部分闭合；G0 的代码合同已闭合但 native 故障注入与三端证据未绿；G1 仍受两个已复现 shell 缺陷、Reference/Parameter 单一通道、Java inspection/navigation/refactor 证据和 R9 三端门禁阻断；G2/G3 继续逐 capability 记账**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
+> 日期：2026-08-25 · 版本：v4.63（W0 shell stability + shortcut ownership as-built；上一版 v4.62 为 HEAD `f572c6b8` 再审计与执行队列重置）· 状态：**实施中；R0/R1/R3/R4/R5/R7/R8 生产合同与 R2 静态 QA 门禁、R9 native harness+Linux 首批证据（C0 native 两连绿磁盘字节级证明、perf browser 基线、a11y 扫描）与 W0 shell stability/shortcut ownership（C1/C4 实跑双绿）已交付，Java Basic Completion 达 provider 层 G1 L2（Linux、jdtls 1.61/JDK 21）；R6 仍为部分闭合；G0 的代码合同已闭合但 native 故障注入与三端证据未绿；G1 仍受两个已复现 shell 缺陷、Reference/Parameter 单一通道、Java inspection/navigation/refactor 证据和 R9 三端门禁阻断；G2/G3 继续逐 capability 记账**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
 >
 > 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链。当前阻断不再是 v4.50 记录的旧缺陷，而是：`TC-IDE-C1-01` 可复现的 workspace tree 渲染崩溃、`Ctrl+Shift+T` 在最后一个编辑器标签关闭后被 shell 抢占、Parameter Info 仍绕过统一 reference controller、`refactorApplyGate` 尚未覆盖 Rename/provider refactor、Java usages/diagnostics/refactor 缺真实 trace，以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 是 provider 结果的新鲜度台账而不是索引，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine。
 >
-> 上一版本：v4.61（2026-08-25，R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
+> 上一版本：v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
 >
 > 早期版本：v4.44（2026-08-22，`85be924f` as-built 复核、IDEA 2026.2 Editor 能力第四批对照、G0/G1 目标重排与 §8.16 合同）· v4.42（2026-08-21，`d641ad12` + `9203d3e4` + `20027dfe` as-built 复核）· v4.41（2026-08-20，`c5ce1fd6` + `5ce13c9a` as-built 复核）· v4.40（2026-08-19，`a4584916` + `b4e7325f` as-built 复核与 Gate R0 回归登记）· v4.39（2026-08-19，`dab8a778` production-path code review）· v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -5577,7 +5577,7 @@ Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
 
 | 顺序 | 状态 | 包 | 目标 | 依赖 |
 |---:|---|---|---|---|
-| 1 | [ ] | **W0 Shell stability + shortcut ownership** | 修复 C1 渲染崩溃与 `Ctrl+Shift+T` owner 冲突，恢复 G1 可执行基线 | R1 |
+| 1 | [x] | **W0 Shell stability + shortcut ownership（v4.63 as-built）** | 修复 C1 渲染崩溃与 `Ctrl+Shift+T` owner 冲突，恢复 G1 可执行基线 | R1 |
 | 2 | [ ] | **W1 Reference Information V3** | Parameter/QuickDoc 单一请求通道；按 IDEA 2026.2 修正 Type/External/Expression Static Data 边界 | W0、R3/R6 |
 | 3 | [ ] | **W2 Java Project Analysis truth** | provider-owned project/import snapshot、ready/degraded 状态和可复用 jdtls evidence runner | W0、R3 |
 | 4 | [ ] | **W3 Inspection + Intention provider contract** | 把 diagnostic presentation 与 provider analysis/action 执行彻底分账 | W2、R0/R1 |
@@ -5674,6 +5674,88 @@ type ShellShortcutRoute =
 - `qa_ui_auto.audit --gate` 绿，C1/C4 实跑通过；不得只修 stub 而 native decoder仍接受 malformed payload。
 
 完成 W0 只允许声明“shell/browser 主路径稳定、shortcut owner deterministic”；不提升 native/三端等级。
+
+**W0 as-built（v4.63，2026-08-25）。** 按 §8.19.11 模板：
+
+```text
+包 ID / commit / capability ID
+    W0 / 本包提交（feat/code-workspace-idea-parity） /
+    workspace.tree-ipc-boundary, shell.shortcut-routing,
+    workspace.reopen-closed-tab (shell claim)
+As-built production call chain
+    ①tree 边界：workspaceListDir/workspaceCompactChain/
+      workspaceListFilesRecursive（src/lib/editor/workspace.ts）→ 结构校验
+      decodeWorkspaceEntries/decodeWorkspaceCompactChain →
+      WorkspaceTreeLoadResult<T>（ready{entries,truncated}/cancelled/
+      unavailable/failed）；invoke 拒绝也转 failed，不再向上抛。
+      useWorkspaceTreeData 三个 loader 只消费 union：ready 才写入 entries
+      （副本），failed/unavailable 保留旧缓存 + error row + onError，
+      cancelled 静默；generation 检查之外新增 findRoot(rootId) 存活检查
+      （root 删除/workspace 切换后迟到响应不得复活缓存）。compact chain 的
+      行走终点从 entries[0] 的 parent 推导（union 不携带 path），终点列表
+      写行走键、请求目录保持自身 entries。
+      stub（tauri-core.ts）补齐 workspace_compact_chain（单链下行镜像
+      workspace.rs）与 workspace_list_files_recursive（仅文件、跳 .git、
+      depth/file cap、大小写不敏感排序——镜像 collect_workspace_files），
+      browser 与 native 同 shape。
+    ②shortcut 路由：shellShortcutRouter.ts（纯模块，ShellShortcutClaim/
+      ShellShortcutRoute 合同逐字实现；scope rank modal > active-workspace >
+      active-tab > shell，同 scope 按 priority 降序）。CodeWorkspaceTab 在
+      visible && reopenStack 非空时经既有 onCommandsChange 通道发布
+      shellShortcutClaims（WorkspaceCommandRegistration 新可选字段）；
+      MainLayout window-capture handler 先问 router：dispatch →
+      executeAction(workspace.reopenClosedTab)；blocked → 仅 preventDefault；
+      unclaimed → 原 new-terminal。注册经 ref 读取，监听器身份稳定。
+      AltGr/dead-key/composition 沿用 R1 gate，未新增 window 业务 keydown。
+修改 owner 文件（无关文件数 0）
+    src/lib/editor/workspace.ts、useWorkspaceTreeData.ts、
+    shellShortcutRouter.ts（新）、workspaceCommands.ts、CodeWorkspaceTab.tsx、
+    MainLayout.tsx、src/stubs/tauri-core.ts + 对应测试
+    （workspace.test.ts 新、useWorkspaceTreeData.test.tsx 重写、
+    shellShortcutRouter.test.ts 新、CodeWorkspaceTab.test.tsx mock 委托层）。
+旧缺陷复现 -> 结果
+    ①C1：palette 输入触发 useWorkspaceTreeData
+      "Cannot read properties of undefined (reading 'length')" →
+      根因 workspaceListFilesRecursive 在 stub 缺命令时返回 undefined 直写
+      FlatFilesState。现在：decoder 判别联合 + stub 同 shape；browser 实跑
+      C1 完整 keymap 流程（palette→Actions→Keymap Settings→Copy scheme→
+      录制 Alt+Shift+R→Enter commit→conflict→close）7.5-10s 绿，无
+      RootErrorBoundary。
+    ②C4：最后 editor tab 关闭后 Ctrl+Shift+T 被 MainLayout 抢走 →
+      router claim 生效：browser 实跑 C4 关最后 tab→一次 chord 重开文件→
+      切 welcome 同 chord 落 shell 创建并激活 Local terminal tab，12.9s 绿。
+接口/schema/migration 与 compatibility
+    WorkspaceTreeLoadResult 为新增导出类型；workspaceListDir 等 3 函数
+    返回类型变化（唯一消费方 hook + CodeWorkspaceTab 3 处已同提交迁移）；
+    WorkspaceCommandRegistration.shellShortcutClaims 可选字段（旧注册方
+    不受影响）。测试 mock 经工厂委托把裸 fixture 转 union，fixture 写法
+    不变。stub 新增 2 命令与 native 同 shape。
+cancel/stale/error/disk/provider/undo effect
+    stale：generation + root 存活双重丢弃；error：failed union 保留旧缓存
+    + Retry 入口（error row）；cancel：cancelled 分支静默；disk/provider/
+    undo：不涉及（W0 范围外）。
+Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
+    unit：2941/2941 vitest 绿（含 decoder 8 例、hook 边界 8 例、router
+    13 例）；tsc -b 绿。QA browser：C1+C4 同 run 双绿（10.0s/4.3s）、
+    audit --gate 绿（0 lint/0 orphan/baseline 无回归）。Rust/native/
+    provider/IDEA compare：未跑（W0 明示不提升 native/三端等级；native
+    侧同代码路径由 R9 harness 覆盖，后续 W7 矩阵复验）。
+未运行项及原因
+    Rust 测试（本包零 Rust 改动）、native 实跑（DoD 限 browser 主路径；
+    W7 矩阵统一复验）、pnpm build（tsc -b --force 已等价执行编译检查）。
+最高可声明 L0-L3 + evidence layers
+    shell/browser 主路径稳定（unit + browser 双层）；shortcut owner
+    deterministic（unit + browser）。不提升 native/三端等级。
+禁止声明仍有哪些
+    不得声明 native/三端 shortcut 行为已验证；不得从 C1/C4 绿推导 G1
+    release-ready（仍受 W1-W7 约束）。
+残余风险与下一依赖包
+    keymap 面板 Copy/Rename 用 window.prompt（浏览器可自动化，native
+    webview 待 W7 验证）；palette 记忆上次页签属产品行为，case 已显式
+    选 Actions。下一包：W1（依赖 W0 ✅ + R3/R6）。
+```
+
+
 
 #### 8.20.2 W1：Reference Information V3 与 Parameter 单一通道（G1/P0）
 

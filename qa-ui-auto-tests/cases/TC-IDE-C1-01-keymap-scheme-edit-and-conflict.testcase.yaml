@@ -25,6 +25,10 @@ steps:
   - wait_for: '[data-testid="text-input-dialog"]'
   - click: '[data-testid="text-input-dialog-confirm"]'
   - wait_for: '[data-testid="code-workspace-tree-file"]'
+  # Open a file first: editor.replace is requiresEditor and is filtered from
+  # the keymap rows while no editor is open.
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
 
   # Normalize focus into the workspace surface, then dispatch
   # workspace.keymapSettings from the action palette.
@@ -34,18 +38,28 @@ steps:
   - wait_for:
       selector: '[data-testid="code-workspace-search-everywhere"]'
       timeout_sec: 30
+  # The palette remembers its last tab (Files/Classes/...); select Actions
+  # explicitly so the command entry is searchable. Clicking the tab moves
+  # focus off the input, so refocus the quick-pick input before typing.
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
   - type: Keymap Settings
   - click: '[data-testid="code-workspace-search-everywhere"] >> text=Keymap Settings'
   - wait_for: '[data-testid="workspace-keymap-settings-dialog"]'
   - assert_visible: '[data-testid="keymap-scheme-select"]'
+  # The built-in scheme is readOnly; copy it first so rows become mutable
+  # (keymap-add-*/keymap-replace-* only render for a mutable scheme).
+  - click: '[data-testid="workspace-keymap-settings-dialog"] >> text=Copy'
   - fill:
       selector: '[data-testid="keymap-action-filter"]'
       value: Replace in File
   - wait_for: '[data-testid="keymap-row-editor.replace"]'
   - screenshot: tc-ide-c1-dialog.png
-  # Record a new primary chord with the two-stroke recorder.
+  # Record a new primary chord with the two-stroke recorder; Enter commits
+  # the capture (Esc cancels, Backspace pops a stroke).
   - click: '[data-testid="keymap-add-editor.replace"]'
   - press: Alt+Shift+r
+  - press: Enter
   - assert_visible: '[data-testid="keymap-replace-editor.replace-0"]'
   - screenshot: tc-ide-c1-recorded.png
   - click: '[data-testid="keymap-settings-close"]'

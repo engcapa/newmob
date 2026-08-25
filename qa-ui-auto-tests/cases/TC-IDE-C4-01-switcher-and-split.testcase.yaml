@@ -59,14 +59,27 @@ steps:
   - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', equal: 1}
 
   # Close the focused editor tab (Ctrl+F4): the tab strip empties.
-  # NOTE: Ctrl+Shift+T reopen is NOT exercised here — after the last editor
-  # tab closes, the welcome surface owns Ctrl+Shift+T ("Start local
-  # terminal"), so the chord starts a shell instead of reopening (recorded
-  # as a product finding). Reopen semantics are pinned by CodeWorkspaceTab.test.tsx
-  # and belong to the native keyboard run.
   - click: '[data-testid="code-workspace-tab"]'
   - wait: 0.3
   - press: Control+F4
   - assert_visible: '[data-testid="code-workspace-tree"]'
   - assert_count: {selector: '[data-testid="code-workspace-editor-tab-strip"]', max: 0}
   - screenshot: tc-ide-c4-after-close.png
+
+  # W0 §8.20.1: with the reopen stack non-empty, the active workspace CLAIMS
+  # Ctrl+Shift+T from the shell router — the chord reopens the closed file
+  # instead of reaching MainLayout's new-local-terminal owner.
+  - press: Control+Shift+T
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
+  - screenshot: tc-ide-c4-reopened.png
+
+  # Switch to the welcome tab: no active workspace claim remains (the reopen
+  # stack was popped above), so the SAME chord falls through to the shell
+  # owner — a local terminal tab is created AND activated. Browser preview
+  # has no PTY (stub rejects the connection) but the tab contract still holds.
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait: 0.3
+  - press: Control+Shift+T
+  - wait_for: '[data-testid="tab-item"][data-tab-type="terminal"][data-active="true"]'
+  - screenshot: tc-ide-c4-welcome-chord.png

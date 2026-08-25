@@ -7,6 +7,7 @@ import type {
   WorkspaceFocus,
 } from "./workspaceActionRegistry";
 import type { ActionSnapshotItem } from "./workspaceActionHost";
+import type { ShellShortcutClaim } from "./shellShortcutRouter";
 
 export type WorkspaceCommandFocus = WorkspaceFocus;
 
@@ -46,6 +47,13 @@ export interface WorkspaceCommandRegistration {
   executeAction: (commandId: string, payload?: unknown, signal?: AbortSignal) => Promise<ActionResult>;
   /** Deprecated synchronous adapter for legacy callers; result is intentionally not the truth. */
   execute: (commandId: string, payload?: unknown) => boolean;
+  /**
+   * W0 §8.20.1: chords this instance claims from the shell router while it is
+   * the active workspace (e.g. Ctrl+Shift+T → workspace.reopenClosedTab when
+   * the reopen stack is non-empty). Absent/empty = the instance makes no
+   * shell claim and the chord falls through to the shell owner.
+   */
+  shellShortcutClaims?: readonly ShellShortcutClaim[];
 }
 
 export interface KeyboardEventLike {

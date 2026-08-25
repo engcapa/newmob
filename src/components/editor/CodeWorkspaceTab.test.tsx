@@ -171,7 +171,33 @@ const gitMocks = vi.hoisted(() => ({
   )),
 }));
 
-vi.mock("../../lib/editor/workspace", () => workspaceMocks);
+vi.mock("../../lib/editor/workspace", () => {
+  // W0 §8.20.1: the production tree IPC returns the WorkspaceTreeLoadResult
+  // union. Test fixtures keep writing raw arrays/chain objects; these
+  // delegates convert them (and rejections) exactly like the real decoder.
+  const wrapResult = (value: unknown): unknown => {
+    if (value && typeof value === "object" && "state" in (value as Record<string, unknown>)) return value;
+    if (Array.isArray(value)) return { state: "ready", entries: value, truncated: false };
+    if (value && typeof value === "object" && "path" in (value as Record<string, unknown>)
+      && "entries" in (value as Record<string, unknown>)) {
+      return { state: "ready", entries: (value as { entries: unknown[] }).entries, truncated: false };
+    }
+    return { state: "failed", message: "malformed fixture payload" };
+  };
+  const wrap = async (fn: () => unknown): Promise<unknown> => {
+    try {
+      return wrapResult(await fn());
+    } catch (error) {
+      return { state: "failed", message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  return {
+    ...workspaceMocks,
+    workspaceListDir: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceListDir(...args)),
+    workspaceCompactChain: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceCompactChain(...args)),
+    workspaceListFilesRecursive: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceListFilesRecursive(...args)),
+  };
+});
 
 vi.mock("../../lib/editor/lsp", () => lspMocks);
 

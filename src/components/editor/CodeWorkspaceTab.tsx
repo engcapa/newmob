@@ -451,6 +451,7 @@ import {
   type WorkspaceCommandContext,
   type WorkspaceCommandRegistration,
 } from "./workspace/workspaceCommands";
+import type { ShellShortcutClaim } from "./workspace/shellShortcutRouter";
 import type { WorkspaceFocus } from "./workspace/workspaceActionRegistry";
 import type { WorkspaceSearchMatch } from "../../lib/editor/workspaceSearch";
 import type {
@@ -2875,16 +2876,18 @@ export function CodeWorkspaceTab({
       // File segment → siblings in parent; directory/root → children of that path.
       const listPath = segment.kind === "file" ? parentPath(segment.path) : segment.path;
       void loadDir(rootId, listPath);
-      const entries = await workspaceListDir(root.path, listPath);
-      return toChildren(entries, (entry) => entry.path);
+      const result = await workspaceListDir(root.path, listPath);
+      if (result.state !== "ready") return [];
+      return toChildren([...result.entries], (entry) => entry.path);
     }
 
     // Loose file: list an absolute directory via workspace_list_dir(dir, "").
     const absolute = normalizeFsPath(segment.path);
     const dirToList = segment.kind === "file" ? parentPath(absolute) : absolute;
     if (!dirToList) return [];
-    const entries = await workspaceListDir(dirToList, "");
-    return toChildren(entries, (entry) =>
+    const result = await workspaceListDir(dirToList, "");
+    if (result.state !== "ready") return [];
+    return toChildren([...result.entries], (entry) =>
       normalizeFsPath(`${dirToList.replace(/[/\\]+$/, "")}/${entry.name}`)
     );
   }, [loadDir]);
@@ -3465,8 +3468,9 @@ export function CodeWorkspaceTab({
       if (relative === null) continue;
       if (!relative) return null;
       try {
-        const entries = await workspaceListDir(root.path, parentPath(relative));
-        const entry = entries.find((candidate) => candidate.path === relative);
+        const listing = await workspaceListDir(root.path, parentPath(relative));
+        if (listing.state !== "ready") return null;
+        const entry = listing.entries.find((candidate) => candidate.path === relative);
         if (!entry) return { path: normalizedPath, exists: false, text: null };
         // Restoring a directory, symlink, or special node as a regular file
         // would be data loss. Those transactions remain deliberately ineligible.
@@ -10003,10 +10007,36 @@ export function CodeWorkspaceTab({
 
   const commandRegistration = actionsController.commandRegistration;
 
+  // W0 §8.20.1: while this instance is the active workspace tab and its
+  // reopen stack is non-empty, claim Ctrl+Shift+T from the shell router so
+  // the chord reopens the closed tab instead of creating a local terminal.
+  // Empty stack (or inactive tab) = no claim = shell owns the chord.
+  const shellShortcutClaims = useMemo((): readonly ShellShortcutClaim[] => (
+    visible && closedTabsStack.length > 0
+      ? [{
+          ownerId: workspaceInstanceId,
+          actionId: "workspace.reopenClosedTab",
+          scope: "active-workspace",
+          priority: 40,
+          enabled: true,
+          canExecute: true,
+          disabledReason: null,
+        }]
+      : []
+  ), [visible, closedTabsStack.length, workspaceInstanceId]);
+  const commandRegistrationWithClaims = useMemo(
+    () => (
+      shellShortcutClaims.length > 0
+        ? { ...commandRegistration, shellShortcutClaims }
+        : commandRegistration
+    ),
+    [commandRegistration, shellShortcutClaims],
+  );
+
   useEffect(() => {
     if (!onCommandsChange) return;
-    onCommandsChange(tabId, commandRegistration);
-  }, [commandRegistration, onCommandsChange, tabId]);
+    onCommandsChange(tabId, commandRegistrationWithClaims);
+  }, [commandRegistrationWithClaims, onCommandsChange, tabId]);
 
   useEffect(() => {
     if (!onCommandsChange) return;

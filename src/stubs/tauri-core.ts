@@ -1768,6 +1768,83 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         isHidden: entry.isHidden,
       })) as T;
     }
+    case "workspace_compact_chain": {
+      // Mirror the native walk: descend while a directory holds exactly one
+      // child directory, up to maxDepth; report the final path's entries.
+      const repoRoot = (args?.repoRoot as string) || VFS_ROOT;
+      const path = (args?.path as string) || "";
+      const maxDepth = (args?.maxDepth as number | null) ?? 16;
+      let current = joinWorkspacePath(repoRoot, path);
+      let currentRel = path;
+      for (let depth = 0; depth < maxDepth; depth++) {
+        const entries = await vfsList(current);
+        const mapped = entries.map((entry) => ({
+          name: entry.name,
+          path: relativeWorkspacePath(repoRoot, entry.path),
+          fileType: entry.fileType === "dir" ? "dir" : entry.fileType === "file" ? "file" : "other",
+          size: entry.size,
+          mtime: entry.mtime,
+          isHidden: entry.isHidden,
+        }));
+        if (mapped.length !== 1 || mapped[0].fileType !== "dir") {
+          return { path: currentRel, entries: mapped } as T;
+        }
+        current = joinWorkspacePath(current, mapped[0].name);
+        currentRel = mapped[0].path;
+      }
+      const finalEntries = await vfsList(current);
+      return {
+        path: currentRel,
+        entries: finalEntries.map((entry) => ({
+          name: entry.name,
+          path: relativeWorkspacePath(repoRoot, entry.path),
+          fileType: entry.fileType === "dir" ? "dir" : entry.fileType === "file" ? "file" : "other",
+          size: entry.size,
+          mtime: entry.mtime,
+          isHidden: entry.isHidden,
+        })),
+      } as T;
+    }
+    case "workspace_list_files_recursive": {
+      // Mirror collect_workspace_files: files only (dirs recursed, not
+      // emitted), .git skipped, depth/file capped, sorted case-insensitively.
+      const repoRoot = (args?.repoRoot as string) || VFS_ROOT;
+      const maxDepth = (args?.maxDepth as number | null) ?? 16;
+      const maxFiles = (args?.maxFiles as number | null) ?? 2000;
+      const out: Array<{
+        name: string;
+        path: string;
+        fileType: "dir" | "file" | "other";
+        size: number;
+        mtime: number;
+        isHidden: boolean;
+      }> = [];
+      const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+        if (depth > maxDepth || out.length >= maxFiles) return;
+        const entries = await vfsList(dir);
+        for (const entry of entries) {
+          if (entry.name === ".git" || entry.path.startsWith(".git/")) continue;
+          const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+          if (entry.fileType === "file") {
+            out.push({
+              name: entry.name,
+              path: childRel,
+              fileType: "file",
+              size: entry.size,
+              mtime: entry.mtime,
+              isHidden: entry.isHidden,
+            });
+            if (out.length >= maxFiles) return;
+          } else if (entry.fileType === "dir" && depth < maxDepth) {
+            await walk(joinWorkspacePath(dir, entry.name), childRel, depth + 1);
+            if (out.length >= maxFiles) return;
+          }
+        }
+      };
+      await walk(joinWorkspacePath(repoRoot, (args?.path as string) || ""), "", 0);
+      out.sort((a, b) => a.path.toLowerCase().localeCompare(b.path.toLowerCase()));
+      return out as T;
+    }
     case "workspace_read_file": {
       const repoRoot = (args?.repoRoot as string) || VFS_ROOT;
       const path = args?.path as string;
