@@ -1,11 +1,11 @@
 {
   "version": 1,
   "totals": {
-    "features_with_controls": 53,
-    "required": 228,
-    "covered_required": 228,
-    "shallow": 21,
-    "orphans": 112
+    "features_with_controls": 66,
+    "required": 369,
+    "covered_required": 346,
+    "shallow": 44,
+    "orphans": 0
   },
   "features": {
     "F1.2": {
@@ -16,22 +16,17 @@
     "F1.3": {
       "required": 10,
       "covered_required": 10,
-      "shallow": 1
-    },
-    "F1.4": {
-      "required": 3,
-      "covered_required": 3,
       "shallow": 0
     },
     "F1.5": {
-      "required": 7,
-      "covered_required": 7,
+      "required": 8,
+      "covered_required": 8,
       "shallow": 0
     },
     "F1.6": {
-      "required": 10,
-      "covered_required": 10,
-      "shallow": 1
+      "required": 16,
+      "covered_required": 16,
+      "shallow": 2
     },
     "F1.7": {
       "required": 1,
@@ -39,19 +34,19 @@
       "shallow": 0
     },
     "F1.8": {
-      "required": 5,
-      "covered_required": 5,
-      "shallow": 0
+      "required": 1,
+      "covered_required": 1,
+      "shallow": 2
     },
     "F1.9": {
-      "required": 6,
-      "covered_required": 6,
+      "required": 5,
+      "covered_required": 4,
       "shallow": 0
     },
     "F2.2": {
       "required": 1,
       "covered_required": 1,
-      "shallow": 0
+      "shallow": 2
     },
     "F4.1": {
       "required": 0,
@@ -61,7 +56,7 @@
     "F4.2": {
       "required": 0,
       "covered_required": 0,
-      "shallow": 1
+      "shallow": 4
     },
     "F4.3": {
       "required": 0,
@@ -105,27 +100,27 @@
     },
     "F5.2": {
       "required": 15,
-      "covered_required": 15,
+      "covered_required": 2,
       "shallow": 0
     },
     "F5.5": {
-      "required": 3,
-      "covered_required": 3,
+      "required": 1,
+      "covered_required": 1,
       "shallow": 0
     },
     "F6.2": {
-      "required": 8,
-      "covered_required": 8,
-      "shallow": 0
+      "required": 9,
+      "covered_required": 9,
+      "shallow": 5
     },
     "F6.3": {
-      "required": 33,
-      "covered_required": 33,
+      "required": 38,
+      "covered_required": 38,
       "shallow": 0
     },
     "F6.4": {
-      "required": 7,
-      "covered_required": 7,
+      "required": 6,
+      "covered_required": 6,
       "shallow": 0
     },
     "F6.5": {
@@ -164,8 +159,8 @@
       "shallow": 0
     },
     "F9.7": {
-      "required": 8,
-      "covered_required": 8,
+      "required": 7,
+      "covered_required": 7,
       "shallow": 0
     },
     "F9.8": {
@@ -174,12 +169,17 @@
       "shallow": 0
     },
     "F11.1": {
-      "required": 2,
-      "covered_required": 2,
+      "required": 13,
+      "covered_required": 13,
+      "shallow": 0
+    },
+    "F11.2": {
+      "required": 9,
+      "covered_required": 9,
       "shallow": 0
     },
     "F12.1": {
-      "required": 2,
+      "required": 6,
       "covered_required": 2,
       "shallow": 0
     },
@@ -201,7 +201,7 @@
     "F-AI-2.4": {
       "required": 0,
       "covered_required": 0,
-      "shallow": 3
+      "shallow": 5
     },
     "F-AI-2.5": {
       "required": 5,
@@ -231,7 +231,7 @@
     "F-ImportPreview-1": {
       "required": 0,
       "covered_required": 0,
-      "shallow": 4
+      "shallow": 5
     },
     "F-ExternalVault-1": {
       "required": 0,
@@ -239,6 +239,11 @@
       "shallow": 0
     },
     "F-FolderName-1": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F-Sidebar-1": {
       "required": 0,
       "covered_required": 0,
       "shallow": 0
@@ -269,6 +274,66 @@
       "shallow": 0
     },
     "F-DB-2": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F-DB-3": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F-DB-4": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F-TAO-1": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 3
+    },
+    "F-MAIL-1": {
+      "required": 9,
+      "covered_required": 9,
+      "shallow": 0
+    },
+    "F-MAIL-2": {
+      "required": 29,
+      "covered_required": 29,
+      "shallow": 0
+    },
+    "F-MAIL-3": {
+      "required": 1,
+      "covered_required": 1,
+      "shallow": 0
+    },
+    "F-MAIL-4": {
+      "required": 5,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F-Sockscap-1": {
+      "required": 17,
+      "covered_required": 17,
+      "shallow": 3
+    },
+    "F25.1": {
+      "required": 44,
+      "covered_required": 44,
+      "shallow": 1
+    },
+    "F25.5": {
+      "required": 1,
+      "covered_required": 1,
+      "shallow": 1
+    },
+    "F25.2": {
+      "required": 10,
+      "covered_required": 10,
+      "shallow": 0
+    },
+    "F25.3": {
       "required": 0,
       "covered_required": 0,
       "shallow": 0

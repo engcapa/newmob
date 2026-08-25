@@ -1,19 +1,34 @@
 id: TC-IDE-C6-01
-title: "usages grouping pin rerun under jdtls"
+title: "Usages panel pin/rerun contract without provider"
 description: |
-  §8.18.10 gate case. Show Usages popup to Find tool window handoff, filter/preview/pin/rerun, provider restart marks result stale.
-  Requires the Tauri native harness (and for provider cases the versioned
-  jdtls fixture from __fixtures__/jdtls). Not executable in browser mode;
-  recorded here so the catalog tracks the gate and the manifest can reference
-  run results per platform.
-covers: [F25.8]
-tags: [code-workspace, ide-c6, native-gate, p1]
-modes: [native]
+  §8.19.10 gate case C6 part 1 (contract portion). Capability ids:
+  references.pin-rerun / usages.session. Show->Find Usages grouping,
+  staleness and rename flows need the jdtls fixture (provider mode). The
+  browser run verifies the References panel surfaces its empty/no-provider
+  contract and exposes pin/rerun controls only for a real query session.
+  Highest claim on green: L1 unavailable-contract only.
+covers: [F25.5]
+tags: [code-workspace, ide-c6, usages, unavailable-contract, p1]
+modes: [browser]
 fixtures: [reset_db]
-timeout_sec: 300
+timeout_sec: 120
 steps:
   - open: "${cfg.app.base_url}"
-  - wait_for: "[data-testid=\"tab-bar\"]"
-  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - wait_for: "[data-testid=\"code-workspace-tab\"]"
-  - screenshot: tc-ide-c6-01-placeholder.png
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  # Add the browser-VFS preview folder (/preview prefilled in the prompt).
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  # Open README.txt into the active leaf.
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
+
+  - click: '[data-testid="code-workspace-bottom-tab-analysis"]'
+  - wait_for: '[data-testid="code-workspace-analysis-panel"]'
+  - screenshot: tc-ide-c6-usages-no-provider.png

@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from . import reset_db, ssh_required, sftp_required
+from . import reset_db, ssh_required, sftp_required, jdtls_required
 
 
 class FixtureContext(Protocol):
@@ -35,6 +35,7 @@ REGISTRY: dict[str, Fixture] = {
     "reset_db":     Fixture("reset_db",     reset_db.setup,     reset_db.teardown),
     "ssh_required": Fixture("ssh_required", ssh_required.setup),
     "sftp_required": Fixture("sftp_required", sftp_required.setup),
+    "jdtls_required": Fixture("jdtls_required", jdtls_required.setup),
 }
 
 

@@ -26,18 +26,18 @@ steps:
   - hover: '[data-testid="context-menu"] >> text="Import sessions from third-party programs"'
   - wait: 1
   # Spot-check a representative cross-section of supported tools.
-  - assert_visible: 'text="Import MobaXterm sessions"'
-  - assert_visible: 'text="Import WSL sessions"'
-  - assert_visible: 'text="Import PuTTY sessions"'
-  - assert_visible: 'text="Import Xshell sessions"'
-  - assert_visible: 'text="Import Tabby sessions"'
-  - assert_visible: 'text="Import iTerm2 profiles"'
-  - assert_visible: 'text="Import Termius sessions"'
-  - assert_visible: 'text="Import WindTerm sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import MobaXterm sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import WSL sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import PuTTY sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import Xshell sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import Tabby sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import iTerm2 profiles"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import Termius sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import WindTerm sessions"'
   - press: Escape
-  # MenuBar route — Sessions → Import sessions submenu lists the MenuBar-level
+  # Unified app menu route — Import sessions submenu lists the top-level
   # import formats plus the CSV template download.
-  - click: '[data-testid="menu-sessions"]'
+  - click: '[data-testid="app-main-menu"]'
   - wait_for: '[data-testid="context-menu"]'
   - hover: '[data-testid="context-menu"] >> text="Import sessions"'
   - wait: 1

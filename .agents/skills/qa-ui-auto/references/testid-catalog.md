@@ -94,6 +94,7 @@
 
 - `[data-testid="capture-toolbar"]` — display — F4.13.toolbar-root
 - `[data-testid="capture-menu"]` — interactive — F4.13.capture-menu
+- `[data-testid="capture-menu-dropdown"]` — display [optional] — F4.13.capture-menu-dropdown
 - `[data-testid="capture-save-visible"]` — interactive [optional] — F4.13.save-visible
 - `[data-testid="capture-copy-clipboard"]` — interactive [optional] — F4.13.copy-clipboard
 - `[data-testid="capture-save-full"]` — interactive [optional] — F4.13.save-full
@@ -143,10 +144,32 @@
 - `[data-testid="editor-context-goto-definition"]` — interactive [optional] — F25.3.context-goto-definition
 - `[data-testid="editor-context-format"]` — interactive [optional] — F25.3.context-format
 
+## code-workspace/editor-shell (F25.5)
+
+- `[data-testid="code-workspace-tree-add-folder"]` — interactive [optional] — F25.5.tree-add-folder
+- `[data-testid="code-workspace-tree-file"]` — interactive [optional] — F25.5.tree-file-row
+- `[data-testid="code-workspace-editor-pane"]` — display — F25.5.editor-pane
+- `[data-testid="code-workspace-editor-tab-strip"]` — display [optional] — F25.5.editor-tab-strip
+- `[data-testid="code-workspace-editor"] .cm-content` — interactive [optional] — F25.5.editor-content
+- `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
+- `[data-testid="code-workspace-search-everywhere"]` — display [optional] — F25.5.search-everywhere
+- `[data-testid="code-workspace-bottom-tab-terminal"]` — interactive [optional] — F25.5.bottom-dock-terminal-tab
+- `[data-testid="code-workspace-split-down"]` — interactive [optional] — F25.5.split-down
+- `[data-testid="code-workspace-split-close"]` — interactive [optional] — F25.5.split-close
+- `[data-testid="keymap-scheme-select"]` — interactive [optional] — F25.5.keymap-scheme-select
+- `[data-testid="keymap-action-filter"]` — interactive [optional] — F25.5.keymap-action-filter
+- `[data-testid="keymap-row-editor.replace"]` — display [optional] — F25.5.keymap-row-editor-replace
+- `[data-testid="keymap-add-editor.replace"]` — interactive [optional] — F25.5.keymap-add-editor-replace
+- `[data-testid="keymap-replace-editor.replace-0"]` — display [optional] — F25.5.keymap-replace-slot
+- `[data-testid="keymap-settings-close"]` — interactive [optional] — F25.5.keymap-settings-close
+
 ## code-workspace/execution (F25.1)
 
 - `[data-testid="sidebar-tool-code-workspace"]` — interactive — F25.1.sidebar-entry
 - `[data-testid="code-workspace-tab"]` — display — F25.1.workspace
+- `[data-testid="code-workspace-tree"]` — display [optional] — F25.1.tree-container
+- `[data-testid="code-workspace-split-equalize"]` — interactive [optional] — F25.1.split-equalize
+- `[data-testid="code-workspace-split-unsplit-all"]` — interactive [optional] — F25.1.split-unsplit-all
 - `[data-testid="code-workspace-build-project"]` — interactive [optional] — F25.1.build-current-project
 - `[data-testid="code-workspace-run-target"]` — interactive [optional] — F25.1.run-current-target
 - `[data-testid="code-workspace-active-run-configuration"]` — interactive [optional] — F25.1.active-run-configuration
@@ -312,6 +335,11 @@
 - `[data-testid="workspace-debug-skip-static-init"]` — interactive [optional] — F25.1.skip-static-init
 - `[data-testid="workspace-debug-skip-constructors"]` — interactive [optional] — F25.1.skip-constructors
 - `[data-testid="code-workspace-split-sync-scroll"]` — interactive [optional] — F25.1.split-sync-scroll
+- `[data-testid="code-workspace-split-right"]` — interactive [optional] — F25.1.split-right
+- `[data-testid="workspace-keymap-settings-dialog"]` — display [optional] — F25.1.keymap-settings-dialog
+- `[data-testid="references-show-more"]` — interactive [optional] — F25.1.references-panel-show-more
+- `[data-testid="references-pin-toggle"]` — interactive [optional] — F25.1.references-pin-toggle
+- `[data-testid="references-rerun"]` — interactive [optional] — F25.1.references-rerun
 
 ## code-workspace/semantic-analysis (F25.2)
 
@@ -519,15 +547,13 @@
 
 ## main/menubar (F1.8)
 
-- `[data-testid="menu-bar"]` — display — F1.8.menu-bar
-- `[data-testid="menu-terminal"]` — interactive — F1.8.menu-terminal
-- `[data-testid="menu-sessions"]` — interactive — F1.8.menu-sessions
-- `[data-testid="menu-view"]` — interactive — F1.8.menu-view
+- `[data-testid="app-main-menu"]` — interactive — F1.8.app-main-menu
+- `[data-testid="context-menu-item-view"]` — interactive [optional] — F1.8.context-menu-item-view
 - `[data-testid="context-menu-item-toggle-ribbon"]` — interactive [optional] — F1.8.menu-toggle-ribbon
 - `[data-testid="context-menu-item-toggle-quick-connect"]` — interactive [optional] — F1.8.menu-toggle-quick-connect
-- `[data-testid="menu-help"]` — interactive — F1.8.menu-help
-- `[data-testid="menu-import-sessions"]` — interactive [optional] — F1.8.menu-import-sessions
-- `[data-testid="menu-export-sessions"]` — interactive [optional] — F1.8.menu-export-sessions
+- `[data-testid="context-menu-item-new-local-terminal"]` — interactive [optional] — F1.8.new-local-terminal-command
+- `[data-testid="context-menu-item-reload-sessions"]` — interactive [optional] — F1.8.reload-sessions-command
+- `[data-testid="context-menu-item-xserver"]` — interactive [optional] — F1.8.xserver-command
 
 ## main/ribbon (F1.9)
 
@@ -571,6 +597,9 @@
 
 - `[data-testid="app-theme-select"]` — interactive — F5.5.theme-select
 - `[data-testid^="app-theme-"]` — interactive [optional] — F5.5.theme-options
+  ↳ `[data-testid="app-theme-dark"]` — alias
+  ↳ `[data-testid="app-theme-light"]` — alias
+  ↳ `[data-testid="app-theme-system"]` — alias
 - `button[aria-label="Cycle application theme"]` — interactive [optional] — F5.5.theme-icon-button
 
 ## main/welcome (F1.6)
@@ -606,21 +635,14 @@
 
 - `[data-testid="app-titlebar"]` — display — F1.3.titlebar
 - `[data-testid="titlebar-tray"]` — display — F1.3.tray
+- `[data-testid="control-bar"]` — display — F1.3.control-bar
 - `[data-testid="theme-cycle"]` — interactive — F1.3.theme-cycle
-- `[data-testid="compact-toggle"]` — interactive — F1.3.compact-toggle
 - `[data-testid="tab-split-view"]` — interactive — F1.3.split-view
 - `[data-testid="tab-multiexec-toggle"]` — interactive — F1.3.multiexec-toggle
 - `[data-testid="window-controls"]` — display — F1.3.window-controls
 - `[data-testid="window-min"]` — display — F1.3.window-min
 - `[data-testid="window-max"]` — display — F1.3.window-max
 - `[data-testid="window-close"]` — display — F1.3.window-close
-
-## main/window (F1.4)
-
-- `[data-testid="compact-titlebar"]` — display — F1.4.titlebar
-- `[data-testid="compact-main-menu"]` — interactive — F1.4.main-menu
-- `[data-testid="compact-sidebar-drawer-toggle"]` — interactive — F1.4.sidebar-drawer-toggle
-  ↳ `[aria-label="Show sessions drawer"]` — alias
 
 ## network/sockscap (F-Sockscap-1)
 
@@ -946,6 +968,7 @@
 ## sftp (F7.2)
 
 - `[data-testid="sftp-browser"]` — display — F7.2.panel-root
+- `[role="dialog"][aria-modal="true"]:has-text("Open remote file?")` — display [optional] — F7.2.download-prompt-dialog
 - `[data-testid="sftp-local-pane"]` — display — F7.2.local-pane
 - `[data-testid="sftp-remote-pane"]` — display — F7.2.remote-pane
 - `[data-testid="sftp-local-list"]` — display — F7.2.local-list
@@ -1042,6 +1065,8 @@
 - `[data-testid="attached-sftp-toggle"]` — interactive [optional] — F2.2.attached-sftp-toggle
 - `[data-testid="tab-chat-toggle"]` — interactive [optional] — F2.2.tab-chat-toggle
 - `[data-testid="context-menu"]` — display [optional] — F2.2.context-menu
+- `[data-testid="terminal-context-font-select"]` — interactive [optional] — F2.2.terminal-context-font-select
+- `[data-testid="terminal-context-font-size"]` — interactive [optional] — F2.2.terminal-context-font-size
 
 ## terminal/multiexec (F4.11)
 
@@ -1178,6 +1203,9 @@
 ## ui/dialog (F-Confirm-1)
 
 - `[data-testid="confirm-dialog"]` — display [optional] — F-Confirm-1.confirm-dialog
+- `[data-testid="text-input-dialog"]` — display [optional] — F-Confirm-1.text-input-dialog
+- `[data-testid="text-input-dialog-input"]` — interactive [optional] — F-Confirm-1.text-input-dialog-input
+- `[data-testid="text-input-dialog-confirm"]` — interactive [optional] — F-Confirm-1.text-input-dialog-confirm
 - `[data-testid="confirm-dialog-message"]` — display [optional] — F-Confirm-1.confirm-dialog-message
 - `[data-testid="confirm-dialog-cancel"]` — interactive [optional] — F-Confirm-1.confirm-dialog-cancel
 - `[data-testid="confirm-dialog-confirm"]` — interactive [optional] — F-Confirm-1.confirm-dialog-confirm

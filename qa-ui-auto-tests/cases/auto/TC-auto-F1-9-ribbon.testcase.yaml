@@ -17,9 +17,10 @@ fixtures: [reset_db]
 timeout_sec: 60
 steps:
   - open: ${cfg.app.base_url}
-  - wait_for: '[data-testid="menu-bar"]'
+  - wait_for: '[data-testid="app-main-menu"]'
   - assert_not_visible: '[data-testid="ribbon"]'
-  - click: '[data-testid="menu-view"]'
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu-item-view"]'
   - click: '[data-testid="context-menu-item-toggle-ribbon"]'
   - wait_for: '[data-testid="ribbon"]'
   - assert_visible: '[data-testid="ribbon"]'

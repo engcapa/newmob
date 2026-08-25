@@ -14,10 +14,10 @@ steps:
   - wait: 1
   - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  - hover: "text=Theme"
+  - hover: "[data-testid=\"context-menu\"] >> text=Theme"
   - wait: 1
-  - assert_count: { selector: '[data-testid^="terminal-context-theme-option-"]', min: 3 }
-  - click: '[data-testid="terminal-context-theme-option-termius-dark"]'
+  - assert_count: { selector: '[data-testid="context-menu"] [data-testid^="terminal-context-theme-option-"]', min: 3 }
+  - click: '[data-testid="context-menu"] >> [data-testid="terminal-context-theme-option-termius-dark"]'
   - wait: 1
   - assert_text: {selector: "[data-testid=\"terminal-pane\"]", contains: qa-theme-marker}
   - click: "[data-testid=\"terminal-pane\"]"

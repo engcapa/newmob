@@ -26,9 +26,9 @@ steps:
   - wait: 1
   - right_click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-folder-target\"]"
   - wait_for: "[data-testid=\"context-menu\"]"
-  - hover: 'text="Move to folder"'
-  - wait_for: "text=\"qa-ui-auto-group\""
-  - click: "text=\"qa-ui-auto-group\""
+  - hover: '[data-testid="context-menu"] >> text="Move to folder"'
+  - wait_for: "[data-testid=\"context-menu\"] >> text=\"qa-ui-auto-group\""
+  - click: "[data-testid=\"context-menu\"] >> text=\"qa-ui-auto-group\""
   - wait: 1
-  - assert_visible: "text=\"qa-ui-auto-group\""
+  - assert_visible: "[data-testid=\"session-tree\"] >> text=\"qa-ui-auto-group\""
   - screenshot: 036-session-tree-folders.png

@@ -16,15 +16,15 @@ steps:
   - wait_for: "[data-testid=\"bookmark-settings\"]"
   - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-menu}
   - click: "[data-testid=\"session-save\"]"
-  - wait_for: "text=\"qa-ui-auto-menu\""
+  - wait_for: "[data-testid=\"session-tree\"] >> text=\"qa-ui-auto-menu\""
   - fill: {selector: "[data-testid=\"session-search\"]", value: qa-ui-auto-menu}
   - assert_visible: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-menu\"]"
   - click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-menu\"]"
   - click: "[data-testid=\"session-duplicate\"]"
-  - wait_for: "text=\"qa-ui-auto-menu (copy)\""
+  - wait_for: "[data-testid=\"session-tree\"] >> text=\"qa-ui-auto-menu (copy)\""
   - right_click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-menu\"]"
   - wait_for: "[data-testid=\"context-menu\"]"
-  - assert_visible: "text=\"Connect\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Connect\""
   - assert_visible: "[data-testid=\"context-menu-item-copy-connection-command\"]"
   - hover: "[data-testid=\"context-menu-item-copy-connection-command\"]"
   - assert_visible: "[data-testid=\"context-menu-item-copy-command-posix\"]"
@@ -34,10 +34,10 @@ steps:
   - assert_visible: "[data-testid=\"context-menu-item-copy-command-posix-jump\"]"
   - assert_visible: "[data-testid=\"context-menu-item-copy-command-posix-forwards\"]"
   - assert_visible: "[data-testid=\"context-menu-item-copy-command-posix-full\"]"
-  - assert_visible: "text=\"Edit...\""
-  - assert_visible: "text=\"Duplicate\""
-  - assert_visible: "text=\"Move to folder\""
-  - assert_visible: "text=\"Delete\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Edit...\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Duplicate\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Move to folder\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Delete\""
   - press: Escape
   # session-edit toolbar button opens the editor for the selected session
   - click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-menu (copy)\"]"

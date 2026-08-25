@@ -26,5 +26,5 @@ steps:
   - assert_visible: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-recent\"]"
   - fill: {selector: "[data-testid=\"session-search\"]", value: qa-ui-auto-no-such-session}
   - wait: 1
-  - assert_visible: "text=\"No matching sessions.\""
+  - assert_visible: "[data-testid=\"session-tree\"] >> text=\"No matching sessions.\""
   - screenshot: 037-sidebar-search.png

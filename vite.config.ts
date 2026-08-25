@@ -62,5 +62,11 @@ export default defineConfig({
     host: "0.0.0.0",
     allowedHosts: true,
     hmr: true,
+    // qa-ui-auto runner writes failure HTML/screenshots into qa-ui-auto-report/
+    // during runs; without this ignore every artifact triggers a full reload
+    // and tears down the page mid-case.
+    watch: {
+      ignored: ["**/qa-ui-auto-report/**", "**/qa-ui-auto-tests/cases/**"],
+    },
   },
 });

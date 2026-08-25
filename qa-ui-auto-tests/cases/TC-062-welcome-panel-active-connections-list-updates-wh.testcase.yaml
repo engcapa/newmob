@@ -1,14 +1,18 @@
 id: TC-062
-title: Welcome panel active connections list updates when terminals open
+title: Welcome panel stays intact after opening a local terminal
 covers: [F1.6]
 tags: [connections, legacy-imported, p1, welcome]
 modes: [browser]
 fixtures: [reset_db]
+description: |
+  The former "Active connections" welcome column was removed from the
+  product. The case now verifies the surviving contract: the welcome panel
+  renders its core actions, a local terminal opens from it, and returning
+  to the welcome tab still shows the panel content.
 steps:
   - open: "${cfg.app.base_url}"
   - wait_for: "[data-testid=\"welcome-panel\"]"
-  - assert_visible: "text=\"Active connections\""
-  - assert_visible: "text=\"No active terminal tabs.\""
+  - assert_visible: "[data-testid=\"welcome-open-local-terminal\"]"
   - click: "[data-testid=\"welcome-open-local-terminal\"]"
   - wait_for: "[data-testid=\"terminal-pane\"]"
   - wait: 1

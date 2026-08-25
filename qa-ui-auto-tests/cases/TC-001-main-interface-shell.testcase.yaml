@@ -6,10 +6,9 @@ description: |
   menu bar, sidebar sidetab strip, session tree, tab bar, status bar,
   welcome panel, and the optional ribbon / quick-connect toolbars once enabled
   from View. Asserts the remaining welcome actions (Start local terminal,
-  New session), the Tips section, and the right-hand activity column
-  (Active connections / Last events with the empty placeholder). Status bar
-  segments are spot-checked. Compact-mode interaction is covered separately
-  in TC-auto-F1.4.
+  New session) and the Tips section. Status bar segments are spot-checked.
+  (The former right-hand activity column and compact mode were removed from
+  the product.)
 covers: [F1.2, F1.6, F1.7]
 tags: [smoke, p0, main]
 modes: [browser]
@@ -17,9 +16,12 @@ fixtures: [reset_db]
 timeout_sec: 60
 steps:
   - open: ${cfg.app.base_url}
-  - wait_for: '[data-testid="menu-bar"]'
+  - wait_for:
+      selector: '[data-testid="control-bar"]'
+      timeout_sec: 55
   - assert_not_visible: '[data-testid="ribbon"]'
-  - click: '[data-testid="menu-view"]'
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu-item-view"]'
   - click: '[data-testid="context-menu-item-toggle-ribbon"]'
   - wait_for: '[data-testid="ribbon"]'
   - assert_visible: '[data-testid="ribbon"]'
@@ -27,7 +29,8 @@ steps:
   - assert_visible: '[data-testid="ribbon-sftp"]'
   - assert_visible: '[data-testid="ribbon-settings"]'
   - assert_not_visible: '[data-testid="quick-connect"]'
-  - click: '[data-testid="menu-view"]'
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu-item-view"]'
   - click: '[data-testid="context-menu-item-toggle-quick-connect"]'
   - wait_for: '[data-testid="quick-connect"]'
   - assert_visible: '[data-testid="quick-connect"]'
@@ -44,7 +47,6 @@ steps:
   - assert_visible: '[data-testid="app-titlebar"]'
   - assert_visible: '[data-testid="titlebar-tray"]'
   - assert_visible: '[data-testid="theme-cycle"]'
-  - assert_visible: '[data-testid="compact-toggle"]'
   - assert_visible: '[data-testid="welcome-panel"]'
   - assert_text:
       selector: '[data-testid="welcome-panel"]'
@@ -60,12 +62,8 @@ steps:
   - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'New session'}
   - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'Tips'}
   - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'Quick connect'}
-  # Right-hand activity column is part of the welcome panel and can be resized/collapsed.
-  - assert_visible: 'text=Active connections'
-  - assert_visible: 'text=No active terminal tabs.'
-  - assert_visible: 'text=Last events'
-  - assert_visible: '[data-testid="welcome-activity-pane-resize-handle"]'
-  - assert_visible: '[data-testid="welcome-activity-pane-collapse"]'
+  # The right-hand welcome activity column (Active connections / Last events)
+  # was removed from the product; the status bar carries connection state now.
   # Status-bar segments (Image 2 reference).
   - assert_text: {selector: '[data-testid="status-bar"]', contains: 'sessions'}
   - assert_text: {selector: '[data-testid="status-bar"]', contains: 'Network'}

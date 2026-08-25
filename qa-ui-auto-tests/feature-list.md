@@ -64,12 +64,13 @@ controls:
   - id: tray
     selector: '[data-testid="titlebar-tray"]'
     kind: display
+  - id: control-bar
+    selector: '[data-testid="control-bar"]'
+    kind: display
   - id: theme-cycle
     selector: '[data-testid="theme-cycle"]'
     kind: interactive
-  - id: compact-toggle
-    selector: '[data-testid="compact-toggle"]'
-    kind: interactive
+  # compact-toggle removed from the product together with compact mode (F1.4).
   - id: split-view             # toggles terminal split view (lives in title bar tray)
     selector: '[data-testid="tab-split-view"]'
     kind: interactive
@@ -99,34 +100,18 @@ controls:
 - `WindowResizeHandles` 在无 decorations 模式下提供 8 向窗口缩放（North/South/East/West/四个角）
 - 主菜单 / Sessions / View / Tunneling / Settings / Help / Exit 入口接入
 
-### 1.4 紧凑 UI 模式（Compact mode）✅
+### 1.4 紧凑 UI 模式（Compact mode）❌ 已移除
 
 <!-- feature
 id: F1.4
-status: done
+status: todo
 area: main/window
-components: [CompactTitleBar]
-files:
-  - src/components/tabbar/CompactTitleBar.tsx
-  - src/index.css
-controls:
-  - id: titlebar
-    selector: '[data-testid="compact-titlebar"]'
-    kind: display
-  - id: main-menu
-    selector: '[data-testid="compact-main-menu"]'
-    kind: interactive
-  - id: sidebar-drawer-toggle
-    selector: '[data-testid="compact-sidebar-drawer-toggle"]'
-    kind: interactive
-    aliases:
-      - '[aria-label="Show sessions drawer"]'
+components: []
+files: []
+controls: []
 -->
 
-- 默认布局 vs 紧凑布局可一键切换，状态持久化到 `localStorage` (`taomni.compactMode`)
-- 紧凑模式下使用 `CompactTitleBar`：主菜单按钮 + 标签栏 + 托盘控件统一在一行
-- 标题栏内置主菜单：新建本地/远程会话、新建 SFTP、关闭活动标签、Sessions、View、Tunneling、Settings、Help、Exit
-- 快捷键 Ctrl+Shift+M 切换紧凑模式
+> 2026-08-25（R2 目录对账）：紧凑 UI 模式已从产品移除 —— `CompactTitleBar.tsx`、`compact-titlebar` / `compact-main-menu` / `compact-sidebar-drawer` testid、`taomni.compactMode` 持久化与 Ctrl+Shift+M 均不存在于当前源码。原 F1.4 用例已改写为覆盖存续的标题栏/统一菜单表面（见 TC-101、TC-auto-F1-4）。本条目保留为占位，待产品确认后删除。
 
 ### 1.5 标签页系统 ✅
 
@@ -359,48 +344,48 @@ controls:
 - 展示应用图标、`Version` 字段（来自 `__APP_VERSION__` 注入的 `package.json` 版本号）
 - Esc / 点击遮罩 / Close 按钮均可关闭
 
-### 1.8 主菜单栏 `MenuBar` ✅
+### 1.8 应用主菜单（统一菜单）✅
 
 <!-- feature
 id: F1.8
 status: done
 area: main/menubar
-components: [MenuBar]
+components: [ControlBar, ContextMenu]
 files:
-  - src/components/menubar/MenuBar.tsx
+  - src/components/tabbar/ControlBar.tsx
+  - src/components/ContextMenu.tsx
 controls:
-  - id: menu-bar
-    selector: '[data-testid="menu-bar"]'
-    kind: display
-  - id: menu-terminal
-    selector: '[data-testid="menu-terminal"]'
+  - id: app-main-menu
+    selector: '[data-testid="app-main-menu"]'
+    kind: interactive     # opens the unified app menu (ControlBar)
+  - id: context-menu-item-view          # slug-generated from label "View"
+    selector: '[data-testid="context-menu-item-view"]'
     kind: interactive
-  - id: menu-sessions
-    selector: '[data-testid="menu-sessions"]'
-    kind: interactive
-  - id: menu-view
-    selector: '[data-testid="menu-view"]'
-    kind: interactive
+    optional: true        # only after opening the unified app menu
   - id: menu-toggle-ribbon
     selector: '[data-testid="context-menu-item-toggle-ribbon"]'
     kind: interactive
-    optional: true       # only after opening View or the menu-bar right-click menu
+    optional: true       # only after opening the unified app menu → View submenu
   - id: menu-toggle-quick-connect
     selector: '[data-testid="context-menu-item-toggle-quick-connect"]'
     kind: interactive
-    optional: true       # only after opening View or the menu-bar right-click menu
-  - id: menu-help
-    selector: '[data-testid="menu-help"]'
+    optional: true       # only after opening the unified app menu → View submenu
+  - id: new-local-terminal-command
+    selector: '[data-testid="context-menu-item-new-local-terminal"]'
     kind: interactive
-  - id: menu-import-sessions      # submenu trigger inside Sessions menu
-    selector: '[data-testid="menu-import-sessions"]'
+    optional: true       # top-level entry of the unified app menu
+  - id: reload-sessions-command
+    selector: '[data-testid="context-menu-item-reload-sessions"]'
     kind: interactive
-    optional: true       # only after opening the Sessions menu
-  - id: menu-export-sessions      # submenu trigger inside Sessions menu
-    selector: '[data-testid="menu-export-sessions"]'
+    optional: true       # inside the unified app menu → Sessions submenu
+  - id: xserver-command
+    selector: '[data-testid="context-menu-item-xserver"]'
     kind: interactive
-    optional: true
+    optional: true       # top-level toggle in the unified app menu
 -->
+
+- 原 per-menu `MenuBar`（menu-bar/menu-terminal/menu-view…）已从产品移除；统一入口是标题栏的 `app-main-menu` 按钮，经共享 ContextMenu 渲染一级/二级菜单。
+- 菜单项 testid 两种来源：显式 `testId`（如 context-menu-item-new-local-terminal）或按 label 生成的 slug（`context-menu-item-<slug>`）。用例对无显式 testid 的条目使用 `[data-testid="context-menu"] >> text="…"` 派生选择器。
 
 - 顶级菜单：Terminal / Sessions / View / X server / Tools / Settings / Macros / Help
 - 下拉项调用 ribbon 命令或在新标签内打开会话
@@ -498,6 +483,14 @@ controls:
     selector: '[data-testid="context-menu"]'
     kind: display
     optional: true          # only after right_click
+  - id: terminal-context-font-select     # inside Appearance custom panel
+    selector: '[data-testid="terminal-context-font-select"]'
+    kind: interactive
+    optional: true
+  - id: terminal-context-font-size
+    selector: '[data-testid="terminal-context-font-size"]'
+    kind: interactive
+    optional: true
 -->
 
 - xterm.js + FitAddon + WebglAddon（失败回退 canvas）+ SearchAddon + WebLinksAddon
@@ -935,6 +928,10 @@ controls:
   - id: capture-menu
     selector: '[data-testid="capture-menu"]'
     kind: interactive
+  - id: capture-menu-dropdown
+    selector: '[data-testid="capture-menu-dropdown"]'
+    kind: display
+    optional: true       # only renders while the capture menu is open
   - id: save-visible
     selector: '[data-testid="capture-save-visible"]'
     kind: interactive
@@ -1092,6 +1089,10 @@ controls:
     selector: '[data-testid^="app-theme-"]'
     kind: interactive
     optional: true       # light/dark/system rows only render while the dropdown is open
+    aliases:             # rows render via `testId={`app-theme-${item.mode}`}`; cases use exact ids
+      - '[data-testid="app-theme-dark"]'
+      - '[data-testid="app-theme-light"]'
+      - '[data-testid="app-theme-system"]'
   - id: theme-icon-button
     selector: 'button[aria-label="Cycle application theme"]'
     kind: interactive
@@ -1610,6 +1611,10 @@ controls:
   - id: panel-root
     selector: '[data-testid="sftp-browser"]'
     kind: display
+  - id: download-prompt-dialog      # fixed overlay, no testid — addressed via role+title text
+    selector: '[role="dialog"][aria-modal="true"]:has-text("Open remote file?")'
+    kind: display
+    optional: true       # only after double-clicking a remote file
   - id: local-pane
     selector: '[data-testid="sftp-local-pane"]'
     kind: display
@@ -3162,6 +3167,18 @@ controls:
   - id: confirm-dialog
     selector: '[data-testid="confirm-dialog"]'
     kind: display
+    optional: true
+  - id: text-input-dialog          # same ConfirmDialog component, text-input variant
+    selector: '[data-testid="text-input-dialog"]'
+    kind: display
+    optional: true
+  - id: text-input-dialog-input
+    selector: '[data-testid="text-input-dialog-input"]'
+    kind: interactive
+    optional: true
+  - id: text-input-dialog-confirm
+    selector: '[data-testid="text-input-dialog-confirm"]'
+    kind: interactive
     optional: true
   - id: confirm-dialog-message
     selector: '[data-testid="confirm-dialog-message"]'
@@ -4778,6 +4795,18 @@ controls:
   - id: workspace
     selector: '[data-testid="code-workspace-tab"]'
     kind: display
+  - id: tree-container
+    selector: '[data-testid="code-workspace-tree"]'
+    kind: display
+    optional: true       # mounted with the workspace tree pane
+  - id: split-equalize
+    selector: '[data-testid="code-workspace-split-equalize"]'
+    kind: interactive
+    optional: true       # header group renders once a split orientation exists
+  - id: split-unsplit-all
+    selector: '[data-testid="code-workspace-split-unsplit-all"]'
+    kind: interactive
+    optional: true
   - id: build-current-project
     selector: '[data-testid="code-workspace-build-project"]'
     kind: interactive
@@ -5400,10 +5429,6 @@ controls:
     selector: '[data-testid="code-workspace-split-right"]'
     kind: interactive
     optional: true       # rendered on the editor toolbar; enabled with an open buffer
-  - id: editor-appearance-settings-command
-    selector: '[data-testid="workspace-editor-appearance-settings-dialog"]'
-    kind: display
-    optional: true       # opens from the appearance settings command
   - id: keymap-settings-dialog
     selector: '[data-testid="workspace-keymap-settings-dialog"]'
     kind: display
@@ -5426,6 +5451,89 @@ controls:
 - Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
 - 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
 - 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。标准 source/function/data/exception breakpoints 已覆盖 adapter scope、条件、Mute/Remove All、configurationDone 前同步和绑定状态；exception filters 同时兼容 `filters` 与 capability-gated `filterOptions`，支持 `exceptionOptions` 的 adapter 还可管理持久化异常树路径、排除段及 caught/uncaught break mode。Maven Surefire/Failsafe 与 Gradle JUnit XML 已形成结构化结果、失败详情/定位/重跑闭环；IDEA 专有断点属性、coverage 和完整 adapter 矩阵仍未完成。
+
+### 25.5 编辑器工作台壳层（tree / split / switcher / keymap surface）🟡
+
+<!-- feature
+id: F25.5
+status: partial
+area: code-workspace/editor-shell
+components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, KeymapSettingsDialog]
+files:
+  - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/EditorGroup.tsx
+  - src/components/editor/workspace/FileTreePane.tsx
+  - src/components/editor/workspace/TabSwitcher.tsx
+  - src/components/editor/workspace/KeymapSettingsDialog.tsx
+controls:
+  - id: tree-add-folder
+    selector: '[data-testid="code-workspace-tree-add-folder"]'
+    kind: interactive
+    optional: true       # opens the folder prompt (browser VFS / native dialog)
+  - id: tree-file-row                  # rows render via a shared component; exact id varies per file
+    selector: '[data-testid="code-workspace-tree-file"]'
+    kind: interactive
+    optional: true
+  - id: editor-pane
+    selector: '[data-testid="code-workspace-editor-pane"]'
+    kind: display
+  - id: editor-tab-strip
+    selector: '[data-testid="code-workspace-editor-tab-strip"]'
+    kind: display
+    optional: true       # only with an open buffer
+  - id: editor-content                 # CodeMirror contenteditable inside the editor surface
+    selector: '[data-testid="code-workspace-editor"] .cm-content'
+    kind: interactive
+    optional: true
+  - id: file-status
+    selector: '[data-testid="code-workspace-file-status"]'
+    kind: display
+    optional: true       # dirty/saved indicator on the active tab strip
+  - id: search-everywhere
+    selector: '[data-testid="code-workspace-search-everywhere"]'
+    kind: display
+    optional: true       # Ctrl+Shift+N palette popup
+  - id: bottom-dock-terminal-tab       # dock tab ids are shared with F25.1/F25.2 panels; this owns the terminal tab id
+    selector: '[data-testid="code-workspace-bottom-tab-terminal"]'
+    kind: interactive
+    optional: true
+  - id: split-down
+    selector: '[data-testid="code-workspace-split-down"]'
+    kind: interactive
+    optional: true       # enabled with an open buffer
+  - id: split-close
+    selector: '[data-testid="code-workspace-split-close"]'
+    kind: interactive
+    optional: true
+  # tab-switcher popup container is owned by F25.3 (tab-switcher).
+  - id: keymap-scheme-select
+    selector: '[data-testid="keymap-scheme-select"]'
+    kind: interactive
+    optional: true       # inside the keymap settings dialog
+  - id: keymap-action-filter
+    selector: '[data-testid="keymap-action-filter"]'
+    kind: interactive
+    optional: true
+  - id: keymap-row-editor-replace      # row testids are `keymap-row-<action-id>`
+    selector: '[data-testid="keymap-row-editor.replace"]'
+    kind: display
+    optional: true       # visible after filtering to the action
+  - id: keymap-add-editor-replace
+    selector: '[data-testid="keymap-add-editor.replace"]'
+    kind: interactive
+    optional: true
+  - id: keymap-replace-slot            # recorded chord slot `keymap-replace-<action-id>-<index>`
+    selector: '[data-testid="keymap-replace-editor.replace-0"]'
+    kind: display
+    optional: true       # only after recording a chord
+  - id: keymap-settings-close
+    selector: '[data-testid="keymap-settings-close"]'
+    kind: interactive
+    optional: true       # inside the keymap settings dialog
+-->
+
+- 编辑器工作台的壳层控件：文件树（add-folder/open-file 行）、编辑器 pane/tab-strip/.cm-content、底部 dock 的 terminal tab、split down/close、Ctrl+Tab Switcher 弹层与 Keymap 设置面。
+- §8.19.10 C0–C7 gate 用例（TC-IDE-C*）以本 feature 为 covers owner；provider/native 部分的最高 claim 见各 case description。
 
 ### 25.2 Provider 语义快照与重构一致性 🟡
 

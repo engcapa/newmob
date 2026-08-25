@@ -12,7 +12,8 @@ fixtures: [reset_db, ssh_required, sftp_required]
 timeout_sec: 90
 steps:
   - open: ${cfg.app.base_url}
-  - click: '[data-testid="menu-view"]'
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu-item-view"]'
   - click: '[data-testid="context-menu-item-toggle-quick-connect"]'
   - wait_for: '[data-testid="quick-connect"]'
   - quick_connect: { url: 'ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}' }

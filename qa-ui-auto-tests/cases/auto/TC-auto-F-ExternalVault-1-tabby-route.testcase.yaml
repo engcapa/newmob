@@ -19,11 +19,11 @@ steps:
   - wait_for: '[data-testid="context-menu"]'
   - hover: '[data-testid="context-menu"] >> text="Import sessions from third-party programs"'
   - wait: 1
-  - assert_visible: 'text="Import Tabby sessions"'
-  - hover: 'text="Import Tabby sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Import Tabby sessions"'
+  - hover: '[data-testid="context-menu"] >> text="Import Tabby sessions"'
   - wait: 1
   # Submenu has two leaves — config.yaml file + scanned local config.
-  - assert_visible: 'text="From config.yaml"'
-  - assert_visible: 'text="From local Tabby config"'
+  - assert_visible: '[data-testid="context-menu"] >> text="From config.yaml"'
+  - assert_visible: '[data-testid="context-menu"] >> text="From local Tabby config"'
   - press: Escape
   - screenshot: external-vault-route.png

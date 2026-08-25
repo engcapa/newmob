@@ -17,15 +17,15 @@ steps:
   - fill: {selector: "input[aria-label=\"New forward local address\"]", value: "127.0.0.1:18080"}
   - fill: {selector: "input[aria-label=\"New forward remote address\"]", value: "svc.internal:80"}
   - fill: {selector: "input[aria-label=\"New forward description\"]", value: qa-fwd-1}
-  - click: "text=\"Add\""
-  - wait_for: "input[aria-label=\"Forward local address\"]"
-  - assert_visible: "input[aria-label=\"Forward remote address\"]"
+  - click: "[data-testid=\"session-editor\"] >> text=\"Add\""
+  - wait_for: "[data-testid=\"session-editor\"] input[aria-label=\"Forward local address\"]"
+  - assert_visible: "[data-testid=\"session-editor\"] input[aria-label=\"Forward remote address\"]"
   - fill: {selector: "input[aria-label=\"New forward local address\"]", value: not-an-address}
   - fill: {selector: "input[aria-label=\"New forward remote address\"]", value: "still:nope"}
   - fill: {selector: "input[aria-label=\"New forward description\"]", value: qa-fwd-broken}
-  - click: "text=\"Add\""
+  - click: "[data-testid=\"session-editor\"] >> text=\"Add\""
   - wait: 1
-  - assert_count: {selector: 'input[aria-label="Forward local address"]', min: 2}
+  - assert_count: {selector: '[data-testid="session-editor"] input[aria-label="Forward local address"]', min: 2}
   - click: "[data-testid=\"session-section-bookmark\"]"
   - wait_for: "[data-testid=\"bookmark-settings\"]"
   - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-forwards}

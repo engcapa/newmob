@@ -27,5 +27,5 @@ steps:
       from: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-dnd-target"]'
       to: '[data-testid="session-tree"] >> text="qa-ui-auto-dnd-group"'
   - wait: 1
-  - assert_visible: "text=\"qa-ui-auto-dnd-group\""
+  - assert_visible: "[data-testid=\"session-tree\"] >> text=\"qa-ui-auto-dnd-group\""
   - screenshot: 053-session-tree-drag-drop.png

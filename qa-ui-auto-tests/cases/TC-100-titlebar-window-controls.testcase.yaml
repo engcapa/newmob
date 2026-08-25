@@ -21,7 +21,6 @@ steps:
   - assert_visible: '[data-testid="window-close"]'
   - assert_visible: '[data-testid="titlebar-tray"]'
   - assert_visible: '[data-testid="theme-cycle"]'
-  - assert_visible: '[data-testid="compact-toggle"]'
   - click: '[data-testid="theme-cycle"]'
   - wait: 0.5
   - assert_localstorage: { key: "taomni.appTheme.v1", exists: true }

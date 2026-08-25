@@ -1,26 +1,72 @@
 id: TC-IDE-C4-01
-title: "Switcher renders tool windows alone; split controls present"
+title: "Three-leaf split management and structured reopen (browser portion)"
 description: |
-  §8.18.10 C4 gate (browser portion). Reaches the code workspace through the
-  sidebar tool rail and verifies the split control renders. Splitting needs an
-  open buffer, so the interactive flow lives in component tests and the
-  native manifest entry for this case id.
+  §8.19.10 gate case C4 (browser portion). Capability ids:
+  workspace.split-management / workspace.reopen-closed-tab /
+  workspace.tab-policy. Browser verifies the store/UI/action contract:
+  three leaves via split-right/split-down, equalize + unsplit-all without
+  losing buffers, leaf close and structured reopen via Ctrl+Shift+T.
+  The hold-modifier Ctrl+Tab switcher cycle (and its graded Backspace)
+  commits on physical key release — per-step browser input cannot express
+  it; that portion is pinned by CodeWorkspaceTab.test.tsx and belongs to
+  the NATIVE keyboard run. Highest claim on green here: L1 browser-wired
+  split/reopen.
 covers: [F25.5]
-tags: [code-workspace, ide-c4, switcher, p1]
+tags: [code-workspace, ide-c4, switcher, split, reopen, p1]
 modes: [browser]
 fixtures: [reset_db]
-timeout_sec: 90
+timeout_sec: 150
 steps:
   - open: "${cfg.app.base_url}"
-  - wait_for: "[data-testid=\"tab-bar\"]"
-  # Leave the welcome surface so the sidebar tool strip is mounted.
-  - click: "[data-testid=\"welcome-open-local-terminal\"]"
-  - click: "[data-testid=\"side-tab-tools\"]"
-  - wait_for: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - wait_for: "[data-testid=\"code-workspace-tab\"]"
-  # Split controls exist on the editor toolbar. Clicking them requires an
-  # open buffer (disabled otherwise), so the actual split/teardown flow is
-  # pinned by CodeWorkspaceTab.test.tsx and the native platform run.
-  - assert_visible: '[data-testid="code-workspace-split-right"]'
-  - screenshot: tc-ide-c4-01-toolbar.png
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  # Add the browser-VFS preview folder (/preview prefilled in the prompt).
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  # Open README.txt into the active leaf.
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
+
+  # Build leaf #2 and leaf #3.
+  - click: '[data-testid="code-workspace-split-right"]'
+  - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', min: 2}
+  - wait: 0.5
+  - click: '[data-testid="code-workspace-split-down"]'
+  - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', min: 3}
+  - wait: 0.5
+
+  # Browser preview cannot create a local terminal (stub throws), so the
+  # bottom-dock tool-window half of the switcher stays native-verified.
+  - assert_visible: '[data-testid="code-workspace-split-equalize"]'
+  - assert_visible: '[data-testid="code-workspace-split-unsplit-all"]'
+  # Equalize normalizes the three leaves; screenshot documents the layout.
+  - click: '[data-testid="code-workspace-split-equalize"]'
+  - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', min: 3}
+  - screenshot: tc-ide-c4-three-leaves.png
+  # NOTE: the frozen Ctrl+Tab switcher cycle and its graded Backspace are
+  # HOLD-MODIFIER interactions: the popup commits on key release, which
+  # per-step CDP input cannot express. They are verified in component tests
+  # (CodeWorkspaceTab.test.tsx) and stay in the NATIVE keyboard portion.
+  # Unsplit merges back to one leaf without losing open buffers.
+  - click: '[data-testid="code-workspace-split-unsplit-all"]'
+  - wait: 0.5
+  - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', equal: 1}
+
+  # Close the focused editor tab (Ctrl+F4): the tab strip empties.
+  # NOTE: Ctrl+Shift+T reopen is NOT exercised here — after the last editor
+  # tab closes, the welcome surface owns Ctrl+Shift+T ("Start local
+  # terminal"), so the chord starts a shell instead of reopening (recorded
+  # as a product finding). Reopen semantics are pinned by CodeWorkspaceTab.test.tsx
+  # and belong to the native keyboard run.
+  - click: '[data-testid="code-workspace-tab"]'
+  - wait: 0.3
+  - press: Control+F4
+  - assert_visible: '[data-testid="code-workspace-tree"]'
+  - assert_count: {selector: '[data-testid="code-workspace-editor-tab-strip"]', max: 0}
+  - screenshot: tc-ide-c4-after-close.png

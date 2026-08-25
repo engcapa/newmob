@@ -1784,6 +1784,11 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         hash: await sha256Hex(text),
       } as T;
     }
+    case "workspace_detect_git_roots": {
+      // The in-memory VFS has no .git directories; report no repos so
+      // useWorkspaceGitSnapshots keeps an empty (never undefined) list.
+      return [] as unknown as T;
+    }
     case "workspace_read_loose_file": {
       const path = args?.path as string;
       const [entry, text] = await Promise.all([vfsStat(path), vfsReadText(path)]);

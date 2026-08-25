@@ -17,12 +17,12 @@ steps:
   - click: '[data-testid="ribbon-settings"]'
   - wait_for: 'text=Web Search'
   - assert_visible: 'text="Web Search"'
-  - assert_visible: 'text="SearXNG"'
-  - assert_visible: 'text="Tavily"'
-  - assert_visible: 'text="Serper"'
-  - assert_visible: 'text="Brave Search"'
-  - assert_visible: 'text="Exa"'
-  - assert_visible: 'text="Google CSE"'
+  - assert_visible: '[data-testid="settings-panel"] >> text=SearXNG'
+  - assert_visible: '[data-testid="settings-panel"] >> text=Tavily'
+  - assert_visible: '[data-testid="settings-panel"] >> text=Serper'
+  - assert_visible: '[data-testid="settings-panel"] >> text=Brave Search'
+  - assert_visible: '[data-testid="settings-panel"] >> text=Exa'
+  - assert_visible: '[data-testid="settings-panel"] >> text=Google CSE'
   # Confirmation modes (when enabled). English defaults from i18n
   # locale "en"; zh-CN substitutes 每次确认 / 本 thread 静默 / etc.
   - assert_visible: 'text="Confirm every time (default)"'

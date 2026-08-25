@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-25 · 版本：v4.60（R8-D1 `5ef8609e`、D2 `62a52adc`；v4.59 R8 四项 ADR；v4.58 R5-b ①② `827fec82`、③④ `64a43314`；v4.57 R5-a `5cae5f7a`；v4.56 R4 `2fcc9f47`；v4.55 R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R8 决策完成且 Code Style 交付——SSR/dependency/Full Line defer（typed unavailable + 重开条件），R8-D1 scheme store/UI+provenance 与 D2 reformat planner 以单测/集成闭合（jsdom 级，三端未跑）；R7 生产代码合同闭合（无真实 jdtls trace、无 IDEA 对照）；R4 生产代码合同闭合（History 设置界面未接、region 折叠标签未收口）；R5 生产代码合同闭合（jsdom 级；policy 编辑 UI、display-order/activateOnClose 接线、QA C4 全流程与三端 native 开放）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-25 · 版本：v4.61（R2 QA catalog/workflow 修复 as-built；此前 v4.60（R8-D1 `5ef8609e`、D2 `62a52adc`；v4.59 R8 四项 ADR；v4.58 R5-b ①② `827fec82`、③④ `64a43314`；v4.57 R5-a `5cae5f7a`；v4.56 R4 `2fcc9f47`；v4.55 R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R8 决策完成且 Code Style 交付——SSR/dependency/Full Line defer（typed unavailable + 重开条件），R8-D1 scheme store/UI+provenance 与 D2 reformat planner 以单测/集成闭合（jsdom 级，三端未跑）；R7 生产代码合同闭合（无真实 jdtls trace、无 IDEA 对照）；R4 生产代码合同闭合（History 设置界面未接、region 折叠标签未收口）；R5 生产代码合同闭合（jsdom 级；policy 编辑 UI、display-order/activateOnClose 接线、QA C4 全流程与三端 native 开放）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4099,7 +4099,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 |---|---|---|---|---|
 | 1 | [x] **R0 Save/recovery/WorkspaceEdit effect closure** | 生产缺陷已确认，G0 红 → **代码合同已闭合（v4.51，工作树），native/browser 证据未运行** | 所有写路径共享 effect result/recovery ledger，partial apply 可恢复 | 无 |
 | 2 | [x] **R1 Action/Keymap runtime single truth** | editable 基础已接，dispatcher 不完整 → **业务键位全部迁入 ActionHost + typed V2 gate/chord/mouse dispatcher（v4.52，工作树），三端 native 未运行** | 所有用户命令可发现、可改键、可拒绝 IME/AltGr 误触发 | R0 的 typed-result 命名约定 |
-| 3 | [ ] **R2 QA catalog 与可执行 workflow 修复** | audit 红、核心 YAML 占位 | catalog current，G0/G1 browser cases 真正操作并断言 | R0/R1 同步提供 testid；基线修复可先行 |
+| 3 | [x] **R2 QA catalog 与可执行 workflow 修复（v4.61 as-built）** | ~~audit 红、核心 YAML 占位~~ 已修复：lint 0 / catalog current / orphan 0 / gate green；C1、C3–C7 重写为真实交互+断言并实际执行 | 5/6 browser cases 绿（见 §8.19.3 as-built）；C0/C2/C6-02 属 native/provider，环境受阻如实记账 | R9 承接 native 键盘/IME 与 provider manifest |
 | 4 | [x] **R3 real jdtls Basic Completion acceptance** | synthetic L2 → **R3-a/b 生产代码合同（cb07c95c）+ R3-c 真实 fixture/runner/trace：五项目九场景 Linux 实机全绿，provider 层 G1 L2（v4.53）** | Maven/Gradle completion/reinvoke/resolve/import/undo 可追溯 ✅（IDEA 对照录制与三端仍开放） | R1；effectful edits 依赖 R0 |
 | 5 | [x] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial → **history ring V2（sensitive/限额/单删）+ Paste-from-History 弹层、Paste-as-Plain-Text、Copy Reference 候选模型、VisualColumnPosition/overflow StateField + End/click/type/backspace/paste 消费（v4.56）；Settings 接线、region 折叠标签、native clipboard 权限未做** | G1 多光标/视觉列闭环 ✅（jsdom 级），G3 history/reference 分项可用 ✅ | R1 |
 | 6 | [x] **R5 Tool-window registry/tab policy/split operations** | 模型+接线 → **R5-a 模型（v4.57）之上，R5-b 全部接线：Switcher 冻结 registry 快照、tabPolicy 随 layout snapshot 迁移读写（backup 留档）、equalize/stretch/unsplit-all/navigation/move-tab reducers+actions、Backspace 分级关闭 + ReopenLocationV2 结构化重开（v4.58）；policy 编辑 UI、order projection/activateOnClose 接线、QA C4 全流程与三端 native 未做** | G1 Switcher/tabs/splits 使用真实状态并持久化 ✅（jsdom 级；L2 待 QA C4 实跑） | R1 |
@@ -4389,6 +4389,54 @@ Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
 **模式边界。** browser 只验证 store/UI/action；native 验证 filesystem、system clipboard、physical keyboard/IME/window；provider fixture验证真实 jdtls process/request；三者不得互相替代。fixture准备失败必须报告 `environment-blocked`，不能回退 stub后仍标 passed。case metadata记录 capability id、required mode、fixture id和最高 claim。
 
 **DoD。** audit 为 0 lint error、catalog current、0 broken case；orphan 为 0或每项有 owner-approved allowlist/reason/expiry；所有 G0/G1 required YAML实际执行并保存 report。R2只解除 browser/catalog门禁，不单独升级 G0/G1；native/provider仍由 R3/R9解除。
+
+**R2 as-built（v4.61，2026-08-25）。** 按 §8.19.11 模板回报。
+
+```text
+包 ID / commit / capability ID
+    R2 / 本提交（基线 HEAD 867dd74a）/ qa.catalog-integrity, qa.browser-workflow-evidence
+静态门禁（audit --gate 实测）
+    修复前基线复现：1 lint error（F25.1/F25.3 重复声明 workspace-editor-appearance-settings-dialog）、
+    catalog STALE、137 orphan selectors；文档记录的 4 个 broken case（TC-007/010/TC-auto-F25-1/TC-auto-F7-5）。
+    修复后：lint 0 errors（140 cases / 80 features / 1048 controls）；catalog up to date；
+    orphans 0；coverage-baseline 重定基 346/369 required covered，gate exit 0。
+主要修复
+    ① F25.1/F25.3 所有权去重：appearance dialog 唯一归属 F25.3；
+    ② catalog 先重生成再清 orphan：137 个 orphan 全部以三类手段闭合——为真实控件补声明/
+      alias（app-main-menu→F1.8 新统一菜单块；text-input-dialog 三件套→F-Confirm-1；
+      app-theme-dark/light/system 以 aliases 归 F5.5 theme-options；terminal-context-font-*→F2.2；
+      capture-menu-dropdown；download-prompt-dialog（无 testid 的 role+has-text 选择器）→F7.2）；
+      用例改写为从已声明控件派生（[data-testid="context-menu"] >> text=… 统一菜单/右键菜单族，
+      tunnel-manager/tunnel-editor/session-editor/sftp-*-pane/welcome-panel/settings-panel/
+      multiexec-bar/capture-menu-dropdown 等容器派生）；死控件对应步骤按现状重写或删除；
+    ③ 死 testid 清理：menu-bar/menu-terminal/menu-sessions/menu-view/menu-help、compact-* 全家、
+      welcome-open-chat-tao、welcome-activity-pane-* 在产品中已不存在——F1.8 改写为统一主菜单
+      （ControlBar app-main-menu），F1.4 标记"已移除"占位并删除 TC-auto-F1-4，TC-101/TC-001/
+      TC-035/TC-041/TC-055/TC-100/TC-auto-F1-8/F1-9/F6-4 改写到现存 UI；
+    ④ C0–C7 九个 YAML 全部由占位重写为真实 interaction+state 断言，metadata 记录
+      capability id/required mode/fixture id/最高 claim；新增 jdtls_required fixture
+      （JDK 探测，缺失即 FixtureSkip=environment-blocked，绝不回退 stub 标 passed）与 schema 枚举。
+browser 执行（Vite dev，runner 实跑，report 存 qa-ui-auto-report/run-*）
+    ✅ TC-IDE-C3-01 / C4-01 / C5-01 / C6-01 / C7-01 共 5 例通过；
+    ❌ TC-IDE-C1-01 保持失败：Search Everywhere 输入触发 useWorkspaceTreeData
+    "Cannot read properties of undefined (reading 'length')" 渲染崩溃（console 已存档）——
+    按 §8.19.3 约定保留 failing case，修复归编辑器 shell owner 包；
+    ❌ TC-IDE-C0-01/C2-01/C6-02 属 native/provider mode：本环境无 tauri-driver 与 jdtls fixture，
+    记 environment-blocked，不得标 passed。
+产品缺陷（非 selector 漂移）修复
+    src/stubs/tauri-core.ts 对未知命令 resolve(undefined) 使 useWorkspaceGitSnapshots 在浏览器
+    预览把 undefined 写入 gitRoots，添加首个 workspace root 即整页 React 崩溃——stub 补实现
+    workspace_detect_git_roots 返回 []；vite.config.ts 增加 server.watch.ignored 忽略
+    qa-ui-auto-report/**，消除 runner 落盘 artifact 引发的整页 reload 风暴。
+新发现待办（不属 R2 DoD）
+    Ctrl+Shift+T 双义：最后编辑器标签关闭后欢迎面接管该 chord 启动本地终端而非 reopen
+    （C4 console 存档）；TC-IDE-C1 崩溃栈同上；两者归后续编辑器 shell 包。
+禁止声明
+    本包不升级 G0/G1；不宣称 native/provider workflow evidence；C0/C2/C6-02 未执行；
+    "全部 G0/G1 browser cases 绿"仅指上列 5 例，不含 native 键盘/IME/a11y；R9 前维持
+    §2.29 红线结论。
+```
+
 
 #### 8.19.4 R3：真实 jdtls Basic Completion 与 acceptance
 

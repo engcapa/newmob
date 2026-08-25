@@ -1,24 +1,55 @@
 id: TC-IDE-C1-01
-title: "Keymap settings surface: open via Search Everywhere, fork scheme, record shortcut, reset"
+title: "Keymap scheme surface: action binding recorded, conflict, close"
 description: |
-  §8.18.10 C1 gate (browser portion). Opens the Keymap Settings dialog through
-  Search Everywhere so the action itself proves disabled-action visibility and
-  snapshot-driven search, creates a user scheme copy, verifies the recording
-  affordance exists for an action row, resets the scheme delta, and closes.
-  Native keyboard matrix (AltGr/IME/chord on real OS layouts) stays in the
-  three-platform evidence manifest, not this case.
-covers: [F25.4]
+  §8.19.10 gate case C1 (browser portion). Capability ids:
+  editor.keymap-editable / keymap.scheme-surface.
+  Required mode: browser (settings surface is pure UI/store); physical
+  layout and OS shortcut interception stay native. Highest claim on green:
+  L1 browser-wired. Dispatches workspace.keymapSettings through Search
+  Everywhere, records a fresh primary chord on editor.replace via the
+  two-stroke recorder, verifies the replace slot renders, then closes.
+covers: [F25.5]
 tags: [code-workspace, ide-c1, keymap, p1]
 modes: [browser]
 fixtures: [reset_db]
-timeout_sec: 90
+timeout_sec: 120
 steps:
   - open: "${cfg.app.base_url}"
-  - wait_for: "[data-testid=\"tab-bar\"]"
-  # Leave the welcome surface so the sidebar tool strip is mounted.
-  - click: "[data-testid=\"welcome-open-local-terminal\"]"
-  - click: "[data-testid=\"side-tab-tools\"]"
-  - wait_for: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - wait_for: "[data-testid=\"code-workspace-tab\"]"
-  - screenshot: tc-ide-c1-01-before.png
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  # Add the browser-VFS preview folder (/preview prefilled in the prompt).
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+
+  # Normalize focus into the workspace surface, then dispatch
+  # workspace.keymapSettings from the action palette.
+  - click: '[data-testid="code-workspace-tab"]'
+  - wait: 0.3
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - type: Keymap Settings
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Keymap Settings'
+  - wait_for: '[data-testid="workspace-keymap-settings-dialog"]'
+  - assert_visible: '[data-testid="keymap-scheme-select"]'
+  - fill:
+      selector: '[data-testid="keymap-action-filter"]'
+      value: Replace in File
+  - wait_for: '[data-testid="keymap-row-editor.replace"]'
+  - screenshot: tc-ide-c1-dialog.png
+  # Record a new primary chord with the two-stroke recorder.
+  - click: '[data-testid="keymap-add-editor.replace"]'
+  - press: Alt+Shift+r
+  - assert_visible: '[data-testid="keymap-replace-editor.replace-0"]'
+  - screenshot: tc-ide-c1-recorded.png
+  - click: '[data-testid="keymap-settings-close"]'
+  - wait_for:
+      selector: '[data-testid="workspace-keymap-settings-dialog"]'
+      state: detached
+      timeout_sec: 5

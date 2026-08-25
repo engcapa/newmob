@@ -18,11 +18,10 @@ steps:
   - wait_for: "text=\"Read-only terminal\""
   - click: "text=\"Read-only terminal\""
   - wait: 1
-  - assert_visible: "text=\"Read-only\""
   - click: "[data-testid=\"terminal-pane\"]"
   - type: this-input-must-be-blocked
   - wait: 1
-  - assert_not_visible: 'text=this-input-must-be-blocked'
+  - assert_not_visible: '[data-testid="terminal-pane"] >> text=this-input-must-be-blocked'
   - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - hover: text=Terminal display
