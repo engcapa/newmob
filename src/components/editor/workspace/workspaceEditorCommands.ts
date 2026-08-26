@@ -447,6 +447,20 @@ export function classifyRegionMarker(
   return isCommentSyntaxNodeName(node.name) ? "comment" : "reject";
 }
 
+export type RegionFoldingProvenance = "syntax-aware" | "heuristic";
+
+export function regionFoldingProvenance(
+  node: { name: string } | null,
+): RegionFoldingProvenance {
+  return node && node.name !== "" && isCommentSyntaxNodeName(node.name)
+    ? "syntax-aware"
+    : "heuristic";
+}
+
+export function regionFoldingProvenanceLabel(provenance: RegionFoldingProvenance): string {
+  return provenance === "syntax-aware" ? "syntax-aware" : "Text marker folding (heuristic)";
+}
+
 /**
  * Language-aware region fold service factory (§8.17.6 step 3, gated §8.18.4).
  * The resolver runs per query so the service follows the host's current file

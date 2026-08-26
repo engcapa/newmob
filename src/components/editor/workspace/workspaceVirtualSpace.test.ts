@@ -3,10 +3,13 @@ import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import {
   charVisualWidth,
+  desiredVisualColumnField,
+  documentColumnForVisualColumn,
   measureVisualPositions,
   setVirtualHead,
   virtualBackspaceCommand,
   virtualLineEndCommand,
+  virtualMoveDown,
   virtualOverflowAt,
   virtualSpaceClickHandler,
   virtualSpaceOverflowField,
@@ -159,5 +162,50 @@ describe("§8.19.5 virtual caret lifecycle", () => {
     setVirtualHead(view, 2, 4, false);
     expect(virtualOverflowAt(view.state, 2)).toBe(4);
     expect(view.state.selection.ranges).toHaveLength(2);
+  });
+
+  it("maps visual columns back to document character indices with tabs and wide characters", () => {
+    // "ab\tc": cols 0, 1 -> 'a','b'; tab width is 4 so col 2..3 is tab, col 4 is 'c'
+    expect(documentColumnForVisualColumn("ab\tc", 0, 4)).toBe(0);
+    expect(documentColumnForVisualColumn("ab\tc", 1, 4)).toBe(1);
+    expect(documentColumnForVisualColumn("ab\tc", 4, 4)).toBe(3); // index of 'c'
+    // CJK character "你" takes 2 columns
+    expect(documentColumnForVisualColumn("你好", 0, 4)).toBe(0);
+    expect(documentColumnForVisualColumn("你好", 2, 4)).toBe("你".length);
+  });
+
+  it("moves vertically while preserving desired visual column across short and long lines", () => {
+    // Line 0: "hello world" (length 11)
+    // Line 1: "hi" (length 2)
+    // Line 2: "goodbye world" (length 13)
+    const doc = "hello world\nhi\ngoodbye world";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        extensions: [
+          EditorState.allowMultipleSelections.of(true),
+          virtualSpaceOverflowField,
+          desiredVisualColumnField,
+          POLICY,
+        ],
+      }),
+    });
+
+    // Start at end of line 0 (offset 11)
+    view.dispatch({ selection: { anchor: 11 } });
+    expect(view.state.selection.main.head).toBe(11);
+
+    // Move down to Line 1 ("hi"): since line 1 has length 2 < 11, caret clamps to line end (offset 14),
+    // and virtual overflow is 11 - 2 = 9.
+    expect(virtualMoveDown(view)).toBe(true);
+    expect(view.state.selection.main.head).toBe(14); // "hello world\nhi" -> 11 + 1 + 2 = 14
+    expect(virtualOverflowAt(view.state, 14)).toBe(9);
+
+    // Move down to Line 2 ("goodbye world"): desired column 11 is remembered!
+    // Since Line 2 has length 13 > 11, caret lands on column 11 of line 2, overflow collapses to 0.
+    expect(virtualMoveDown(view)).toBe(true);
+    const line2 = view.state.doc.line(3);
+    expect(view.state.selection.main.head).toBe(line2.from + 11);
+    expect(virtualOverflowAt(view.state, line2.from + 11)).toBe(0);
   });
 });

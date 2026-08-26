@@ -24,6 +24,8 @@ import {
   plainTextClipboardPayload,
   createRegionFoldService,
   regionFoldAvailableForPath,
+  regionFoldingProvenance,
+  regionFoldingProvenanceLabel,
   reverseLines,
   selectNextEditorOccurrence,
   selectionHistoryField,
@@ -613,5 +615,24 @@ describe("N9.3/N14.4 region grammar strategy", () => {
     const line = view.state.doc.line(1);
     expect(foldable(view.state, line.from, line.to)).toBeNull();
     view.destroy();
+  });
+
+  it("marks region folding as syntax-aware with parser and heuristic without parser", () => {
+    // Comment node present -> syntax-aware
+    const commentNode = { name: "LineComment" };
+    expect(regionFoldingProvenance(commentNode)).toBe("syntax-aware");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(commentNode))).toBe("syntax-aware");
+
+    // No parser / null / empty node -> Text marker folding (heuristic)
+    expect(regionFoldingProvenance(null)).toBe("heuristic");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(null))).toBe(
+      "Text marker folding (heuristic)",
+    );
+
+    const emptyNode = { name: "" };
+    expect(regionFoldingProvenance(emptyNode)).toBe("heuristic");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(emptyNode))).toBe(
+      "Text marker folding (heuristic)",
+    );
   });
 });

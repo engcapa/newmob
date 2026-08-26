@@ -132,6 +132,32 @@ export function visualColumnFor(lineText: string, documentColumn: number, tabWid
 }
 
 /**
+ * Document column within lineText that corresponds to the given target visual column.
+ * Respects tab stops, CJK, and emoji double-width characters.
+ */
+export function documentColumnForVisualColumn(
+  lineText: string,
+  targetVisualColumn: number,
+  tabWidth: number,
+): number {
+  if (targetVisualColumn <= 0) return 0;
+  let visual = 0;
+  let index = 0;
+  while (index < lineText.length) {
+    const codePoint = lineText.codePointAt(index);
+    if (codePoint == null) break;
+    const char = String.fromCodePoint(codePoint);
+    const width = charVisualWidth(char, visual, tabWidth);
+    if (visual + width > targetVisualColumn) {
+      break;
+    }
+    visual += width;
+    index += char.length;
+  }
+  return index;
+}
+
+/**
  * Measure §8.19.5 VisualColumnPosition facts for every selection head.
  * Pure observation — never mutates state or history.
  */
@@ -312,3 +338,112 @@ export const virtualSpaceClickHandler = EditorView.domEventHandlers({
     return true;
   },
 });
+
+/** Per-caret desired visual column tracked across vertical navigation. */
+export const setDesiredVisualColumns = StateEffect.define<readonly number[]>();
+
+export const desiredVisualColumnField = StateField.define<readonly number[]>({
+  create: () => [],
+  update(value, tr) {
+    const effect = tr.effects.find((candidate) => candidate.is(setDesiredVisualColumns));
+    if (effect) return effect.value;
+    if (tr.selection) {
+      const tabWidth = 4;
+      return tr.state.selection.ranges.map((range) => {
+        const line = tr.state.doc.lineAt(range.head);
+        const docCol = range.head - line.from;
+        const overflow = virtualOverflowAt(tr.state, range.head);
+        return visualColumnFor(line.text, docCol, tabWidth) + overflow;
+      });
+    }
+    return value;
+  },
+});
+
+/**
+ * Vertical movement (Up / Down / PageUp / PageDown) with per-caret desired visual column.
+ * Unified across single and multi-caret, respecting tab/CJK/emoji visual widths and virtual space policy.
+ */
+export function virtualVerticalMoveCommand(
+  view: EditorView,
+  direction: "up" | "down" | "pageUp" | "pageDown",
+  extend: boolean,
+): boolean {
+  const policy = view.state.facet(editorVirtualSpacePolicy);
+  const state = view.state;
+  const tabWidth = 4;
+  const desired = state.field(desiredVisualColumnField, false) ?? [];
+  const lineDelta = direction === "up" ? -1 : direction === "down" ? 1 : direction === "pageUp" ? -15 : 15;
+
+  let changed = false;
+  const nextRanges: ReturnType<typeof EditorSelection.cursor>[] = [];
+  const nextOverflow = new Map<number, number>();
+  const nextDesired: number[] = [];
+
+  state.selection.ranges.forEach((range, idx) => {
+    const currentLine = state.doc.lineAt(range.head);
+    const targetLineNumber = Math.min(state.doc.lines, Math.max(1, currentLine.number + lineDelta));
+    if (targetLineNumber === currentLine.number && (direction === "up" || direction === "down")) {
+      nextRanges.push(range);
+      nextDesired.push(desired[idx] ?? (
+        visualColumnFor(currentLine.text, range.head - currentLine.from, tabWidth)
+        + virtualOverflowAt(state, range.head)
+      ));
+      return;
+    }
+
+    changed = true;
+    const targetLine = state.doc.line(targetLineNumber);
+    const desiredCol = desired[idx] ?? (
+      visualColumnFor(currentLine.text, range.head - currentLine.from, tabWidth)
+      + virtualOverflowAt(state, range.head)
+    );
+    nextDesired.push(desiredCol);
+
+    const lineVisualWidth = visualColumnFor(targetLine.text, targetLine.length, tabWidth);
+    const isLastLine = targetLine.number === state.doc.lines;
+    const allowed = isLastLine ? policy.atFileBottom : policy.afterLineEnd;
+
+    let targetHead: number;
+    if (desiredCol > lineVisualWidth) {
+      targetHead = targetLine.to;
+      if (allowed) {
+        const overflow = Math.min(desiredCol - lineVisualWidth, MAX_OVERFLOW_COLUMNS);
+        nextOverflow.set(targetHead, overflow);
+      }
+    } else {
+      const docCol = documentColumnForVisualColumn(targetLine.text, desiredCol, tabWidth);
+      targetHead = targetLine.from + docCol;
+    }
+
+    if (extend) {
+      nextRanges.push(
+        range.anchor <= targetHead
+          ? EditorSelection.range(range.anchor, targetHead)
+          : EditorSelection.range(targetHead, range.anchor)
+      );
+    } else {
+      nextRanges.push(EditorSelection.cursor(targetHead));
+    }
+  });
+
+  if (!changed) return false;
+
+  view.dispatch({
+    selection: EditorSelection.create(nextRanges, state.selection.mainIndex),
+    effects: [
+      setVirtualOverflow.of(nextOverflow),
+      setDesiredVisualColumns.of(nextDesired),
+    ],
+    scrollIntoView: true,
+  });
+  return true;
+}
+
+export const virtualMoveUp = (view: EditorView) => virtualVerticalMoveCommand(view, "up", false);
+export const virtualMoveDown = (view: EditorView) => virtualVerticalMoveCommand(view, "down", false);
+export const virtualSelectUp = (view: EditorView) => virtualVerticalMoveCommand(view, "up", true);
+export const virtualSelectDown = (view: EditorView) => virtualVerticalMoveCommand(view, "down", true);
+export const virtualPageUp = (view: EditorView) => virtualVerticalMoveCommand(view, "pageUp", false);
+export const virtualPageDown = (view: EditorView) => virtualVerticalMoveCommand(view, "pageDown", false);
+
