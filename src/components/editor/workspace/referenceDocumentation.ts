@@ -90,3 +90,31 @@ export function referenceHrefFromEventTarget(target: EventTarget | null): string
   if (!(target instanceof Element)) return null;
   return target.closest<HTMLAnchorElement>("a[href]")?.getAttribute("href") ?? null;
 }
+
+/**
+ * §8.20.2 W1: External Documentation enables itself only from a URL the
+ * provider actually returned inside documentation content. This extracts
+ * candidate links from a provider markdown/html body — it never synthesizes
+ * a URL from a symbol name. Order is preserved; duplicates collapse.
+ */
+export function extractProviderDocLinks(body: string | null | undefined): string[] {
+  if (!body) return [];
+  const found: string[] = [];
+  const push = (candidate: string) => {
+    const trimmed = candidate.trim().replace(/[)\].,;]+$/, "");
+    if (!trimmed) return;
+    if (!found.includes(trimmed)) found.push(trimmed);
+  };
+  // Markdown/html link targets: [label](url), <a href="url">, <img src="url">.
+  const linkPattern = /\[[^\]]*\]\(([^)\s]+)\)|(?:href|src)=["']([^"']+)["']/gi;
+  for (const match of body.matchAll(linkPattern)) {
+    const target = match[1] ?? match[2];
+    if (target && /^https?:\/\//i.test(target)) push(target);
+  }
+  // Bare https URLs in plain-text documentation.
+  const barePattern = /https:\/\/[^\s<>"')\]]+/gi;
+  for (const match of body.matchAll(barePattern)) {
+    if (match[0]) push(match[0]);
+  }
+  return found;
+}

@@ -136,7 +136,6 @@ import {
   type LspLocation,
   type LspPosition,
   type LspRange,
-  type LspSignatureHelpResult,
   type LspWorkspaceEdit,
   type LspWorkspaceApplyEditRequest,
   type LspWorkspaceEditOperation,
@@ -394,9 +393,21 @@ import {
 import { useDeferredOpenFileTodos } from "./workspace/useDeferredOpenFileTodos";
 import { type QuickDocContent } from "./workspace/referenceDocumentation";
 import {
+  extractProviderDocLinks,
+  openExternalDocumentation,
+  validateExternalDocUrl,
+} from "./workspace/referenceDocumentation";
+import {
+  LEGACY_CONTEXT_INFO_REASON,
   ReferenceInfoController,
   type ReferenceHistorySnapshot,
 } from "./workspace/referenceInfoController";
+import {
+  ParameterInfoSession,
+  type ParameterDisplayState,
+  type ParameterInvalidateReason,
+  type ReferenceSessionContext,
+} from "./workspace/referenceInfoSession";
 import { type LocationPeekState } from "./workspace/LocationPeek";
 import {
   type GoToSymbolQueryResult,
@@ -847,6 +858,13 @@ export function CodeWorkspaceTab({
     () => new ReferenceInfoController(workspaceInstanceId),
     [workspaceInstanceId],
   );
+  // §8.20.2 W1: the ONLY Parameter Info request sequence lives in this
+  // session; the editor host is a pure display adapter.
+  const parameterInfoSession = useMemo(
+    () => new ParameterInfoSession(referenceInfoController),
+    [referenceInfoController],
+  );
+  const [parameterPopup, setParameterPopup] = useState<ParameterDisplayState>({ phase: "hidden" });
   // §8.18.6: monotonic seq so each reference request supersedes the previous
   // one on the native cancellation registry.
   const referenceCancelSeqRef = useRef(0);
@@ -858,6 +876,13 @@ export function CodeWorkspaceTab({
     setReferenceHistory(referenceInfoController.historySnapshot());
     return () => referenceInfoController.dispose();
   }, [referenceInfoController]);
+  useEffect(() => {
+    const unsubscribe = parameterInfoSession.subscribe(setParameterPopup);
+    return () => {
+      unsubscribe();
+      parameterInfoSession.dispose();
+    };
+  }, [parameterInfoSession]);
   const {
     messageRequest: lspMessageRequest,
     progresses: lspProgresses,
@@ -1601,6 +1626,11 @@ export function CodeWorkspaceTab({
     setIntelligencePreferencesState(readWorkspaceIntelligencePreferences(workspaceInstanceId));
   }, [workspaceInstanceId]);
   const [parameterInfoRequestNonce, setParameterInfoRequestNonce] = useState(0);
+  // 迁移时保留用户现值: persisted auto-popup/delay values flow straight into
+  // the session; defaults never overwrite them.
+  useEffect(() => {
+    parameterInfoSession.setPreferences(intelligencePreferences.parameterInfo);
+  }, [intelligencePreferences.parameterInfo, parameterInfoSession]);
   const [intelligenceSettingsOpen, setIntelligenceSettingsOpen] = useState(false);
   const [breadcrumbSymbolsByGroup, setBreadcrumbSymbolsByGroup] = useState<Record<EditorGroupId, LspDocumentSymbol[]>>({
     primary: [],
@@ -1689,7 +1719,6 @@ export function CodeWorkspaceTab({
   const peekDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToTypeDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToImplementationRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
-  const getLspSignatureHelpRef = useRef<(file: OpenFileState, position: LspPosition, triggerCharacter?: string | null) => Promise<LspSignatureHelpResult | null>>(async () => null);
   const renameSymbolRef = useRef<() => Promise<void>>(async () => {});
   const safeDeleteSymbolRef = useRef<() => Promise<void>>(async () => {});
   // Hover enriches the AI prompt with type information. The LSP hover callback
@@ -6645,8 +6674,12 @@ export function CodeWorkspaceTab({
     const from = start >= 0 ? start : position.character;
     const to = position.character + (endMatch?.[0].length ?? 0);
     const word = line.slice(from, to) || file.title;
-    const outcome = await referenceInfoController.request({
-      kind: "documentation",
+    // Display-only facts captured while the provider runs; the V3 payload
+    // itself stays exactly {markdown, source}.
+    let providerLabel = "Language Server";
+    let providerUri: string | null = null;
+    const outcome = await referenceInfoController.requestTyped({
+      kind: "quick-documentation",
       workspaceId: workspaceInstanceId,
       fileKey: file.key,
       uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath,
@@ -6678,42 +6711,55 @@ export function CodeWorkspaceTab({
         }
         updateLspStatusForFile(file, result.status);
         if (!result.contents) return null;
+        providerLabel = result.status.displayName ?? "Language Server";
+        providerUri = result.status.uri ?? null;
         return {
-          title: word,
-          body: result.contents,
-          source: result.status.displayName ?? "Language Server",
-          uri: result.status.uri,
-          sourceLocation: result.range && result.status.uri
-            ? {
-                uri: result.status.uri,
-                path: result.status.path,
-                range: result.range,
-              }
-            : null,
-          revision: requestRevision,
-          generation: requestGeneration,
+          state: "payload" as const,
+          payload: {
+            kind: "quick-documentation" as const,
+            markdown: result.contents,
+            source: result.range && result.status.uri
+              ? {
+                  uri: result.status.uri,
+                  path: result.status.path ?? null,
+                  range: result.range,
+                }
+              : null,
+          },
         };
       } finally {
         signal.removeEventListener("abort", onAbort);
       }
     });
-    if (outcome.kind === "available") {
-      setQuickDocContent(outcome.content);
-      setReferenceHistory(referenceInfoController.pushHistory(outcome.content));
-      if (pinnedDoc && !pinnedDocLocked) setPinnedDoc(outcome.content);
-      if (intelligencePreferences.quickDoc.defaultTarget === "tool-window") {
-        setPinnedDoc(outcome.content);
-        setPinnedDocLocked(false);
-        setRightPaneTab("documentation");
-        setRightPaneOpen(true);
-        setQuickDocOpen(false);
-      } else {
-        setQuickDocOpen(true);
-      }
-    } else if (outcome.kind === "unavailable") {
-      setStatusMessage("No documentation available");
-    } else if (outcome.kind === "failed") {
-      setStatusMessage(outcome.message);
+    if (outcome.state !== "ready") {
+      if (outcome.state === "unavailable") setStatusMessage("No documentation available");
+      else if (outcome.state === "failed") setStatusMessage(outcome.message);
+      return;
+    }
+    const payload = outcome.payload;
+    if (payload.kind !== "quick-documentation") return;
+    // History only records ready QuickDoc results; failed/unavailable never
+    // enter it (§8.20.2).
+    const content: QuickDocContent = {
+      title: word,
+      body: payload.markdown,
+      source: providerLabel,
+      uri: providerUri,
+      sourceLocation: payload.source,
+      revision: requestRevision,
+      generation: requestGeneration,
+    };
+    setQuickDocContent(content);
+    setReferenceHistory(referenceInfoController.pushHistory(content));
+    if (pinnedDoc && !pinnedDocLocked) setPinnedDoc(content);
+    if (intelligencePreferences.quickDoc.defaultTarget === "tool-window") {
+      setPinnedDoc(content);
+      setPinnedDocLocked(false);
+      setRightPaneTab("documentation");
+      setRightPaneOpen(true);
+      setQuickDocOpen(false);
+    } else {
+      setQuickDocOpen(true);
     }
   }, [
     activeFile,
@@ -6725,11 +6771,151 @@ export function CodeWorkspaceTab({
     referenceInfoController,
     setPinnedDoc,
     setPinnedDocLocked,
+    setQuickDocContent,
     setQuickDocOpen,
     setRightPaneOpen,
     setRightPaneTab,
     setStatusMessage,
     updateLspStatusForFile,
+    workspaceInstanceId,
+  ]);
+
+  /**
+   * §8.20.2 W1 Type Info: ready ONLY when a provider hands back typed
+   * content (`source:"provider"`). No standard LSP channel exists today and
+   * hover markdown must never be converted into a type, so the honest
+   * production result is an explicit per-kind unavailable state.
+   */
+  const runTypeInfo = useCallback(async () => {
+    const file = activeFile;
+    if (!file || file.loading) return;
+    const descriptor = lspDescriptorForFile(file);
+    const serverLabel = lspFilesRef.current[file.key]?.status?.displayName ?? "this language server";
+    if (!descriptor) {
+      setStatusMessage(`Type Info is not provided by ${serverLabel}`);
+      return;
+    }
+    const position = editorSelectionRef.current.start;
+    const outcome = await referenceInfoController.requestTyped({
+      kind: "type-info",
+      workspaceId: workspaceInstanceId,
+      fileKey: file.key,
+      uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath,
+      languageId: descriptor.languageId ?? "plaintext",
+      position,
+      documentRevision: file.documentRevision,
+      providerGeneration: lspSessionGeneration(),
+    }, async () => ({ state: "unavailable" as const, reason: "provider-no-type-info-channel" }));
+    if (outcome.state === "ready" && outcome.payload.kind === "type-info") {
+      setStatusMessage(`Type: ${outcome.payload.display}`);
+    } else if (outcome.state === "unavailable") {
+      setStatusMessage(outcome.reason === "legacy-context-info-not-expression-static-data"
+        ? "Legacy context info is not Expression Static Data"
+        : `Type Info is not provided by ${serverLabel}`);
+    } else if (outcome.state === "failed") {
+      setStatusMessage(outcome.message);
+    }
+  }, [
+    activeFile,
+    lspDescriptorForFile,
+    lspSessionGeneration,
+    referenceInfoController,
+    setStatusMessage,
+    workspaceInstanceId,
+  ]);
+
+  /**
+   * §8.20.2 W1 Expression Static Data: discoverable action; when jdtls/the
+   * current provider exposes no static-data channel the result is an explicit
+   * provider-unavailable — never local text guessing. Legacy V2 context-info
+   * records migrate through migrateLegacyContextInfoRecord inside the
+   * controller and surface under the same unavailable umbrella.
+   */
+  const runExpressionStaticData = useCallback(async () => {
+    const file = activeFile;
+    if (!file || file.loading) return;
+    const descriptor = lspDescriptorForFile(file);
+    const serverLabel = lspFilesRef.current[file.key]?.status?.displayName ?? "this language server";
+    if (!descriptor) {
+      setStatusMessage(`Expression Static Data is not provided by ${serverLabel}`);
+      return;
+    }
+    const position = editorSelectionRef.current.start;
+    const outcome = await referenceInfoController.requestTyped({
+      kind: "expression-static-data",
+      workspaceId: workspaceInstanceId,
+      fileKey: file.key,
+      uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath,
+      languageId: descriptor.languageId ?? "plaintext",
+      position,
+      documentRevision: file.documentRevision,
+      providerGeneration: lspSessionGeneration(),
+    }, async () => ({ state: "unavailable" as const, reason: "provider-no-static-data-channel" }));
+    if (outcome.state === "ready" && outcome.payload.kind === "expression-static-data") {
+      const summary = outcome.payload.facts.map((fact) => `${fact.label}: ${fact.value}`).join(" · ");
+      setStatusMessage(summary);
+    } else if (outcome.state === "unavailable") {
+      setStatusMessage(outcome.reason === LEGACY_CONTEXT_INFO_REASON
+        ? "Legacy context info records do not carry Expression Static Data"
+        : `Expression Static Data is not provided by ${serverLabel}`);
+    } else if (outcome.state === "failed") {
+      setStatusMessage(outcome.message);
+    }
+  }, [
+    activeFile,
+    lspDescriptorForFile,
+    lspSessionGeneration,
+    referenceInfoController,
+    setStatusMessage,
+    workspaceInstanceId,
+  ]);
+
+  /**
+   * §8.20.2 W1 External Documentation: enabled only from a real provider URL
+   * found in the last READY quick-documentation payload (extracted, never
+   * synthesized from the symbol name); https-only policy stays at the service
+   * boundary inside the controller.
+   */
+  const externalDocTargetFromProvider = useCallback((): { url: string; title: string } | null => {
+    const last = referenceInfoController.lastReady("quick-documentation");
+    if (!last || last.payload.kind !== "quick-documentation") return null;
+    const url = extractProviderDocLinks(last.payload.markdown)
+      .find((candidate) => validateExternalDocUrl(candidate).kind === "allowed");
+    if (!url) return null;
+    return { url, title: quickDocContent?.title ?? last.identity.fileKey };
+  }, [quickDocContent?.title, referenceInfoController]);
+
+  const runExternalDocumentation = useCallback(async () => {
+    const target = externalDocTargetFromProvider();
+    const outcome = await referenceInfoController.requestTyped({
+      kind: "external-documentation",
+      workspaceId: workspaceInstanceId,
+      fileKey: activeFile?.key ?? "",
+      uri: "",
+      languageId: "",
+      position: editorSelectionRef.current.start,
+      documentRevision: activeFile?.documentRevision ?? 0,
+      providerGeneration: lspSessionGeneration(),
+    }, async () => {
+      if (!target) return { state: "unavailable" as const, reason: "no-provider-url" };
+      return {
+        state: "payload" as const,
+        payload: { kind: "external-documentation" as const, url: target.url, title: target.title },
+      };
+    });
+    if (outcome.state === "ready" && outcome.payload.kind === "external-documentation") {
+      const decision = await openExternalDocumentation(outcome.payload.url);
+      if (decision.kind !== "allowed") setStatusMessage("The documentation link could not be opened");
+      return;
+    }
+    if (outcome.state === "failed") setStatusMessage(outcome.message);
+  }, [
+    activeFile?.documentRevision,
+    activeFile?.key,
+    externalDocTargetFromProvider,
+    lspSessionGeneration,
+    referenceInfoController,
+    setStatusMessage,
     workspaceInstanceId,
   ]);
 
@@ -8784,6 +8970,42 @@ export function CodeWorkspaceTab({
       run: () => void openQuickDocumentation(),
     },
     {
+      // §8.20.2 W1: IDEA 2026.2 Type Info (Ctrl+Shift+P). Honest unavailable
+      // contract until a provider exposes a typed channel.
+      id: "workspace.typeInfo",
+      title: "Type Info",
+      category: "Code",
+      keybinding: "Ctrl+Shift+P",
+      keybindings: ["Mod-Shift-P"],
+      keywords: ["expression type", "reference information"],
+      when: (context) => context.focus !== "tree" && context.focus !== "terminal" && !!activeFile && !activeFile.loading,
+      run: () => void runTypeInfo(),
+    },
+    {
+      // §8.20.2 W1: enabled ONLY from a real provider URL in the last ready
+      // quick documentation — never synthesized from the symbol name.
+      id: "workspace.externalDocumentation",
+      title: "External Documentation",
+      category: "Code",
+      keywords: ["javadoc online", "browser docs", "url"],
+      when: (context) => context.focus !== "tree"
+        && context.focus !== "terminal"
+        && !!activeFile
+        && !activeFile.loading
+        && externalDocTargetFromProvider() !== null,
+      run: () => void runExternalDocumentation(),
+    },
+    {
+      // §8.20.2 W1: discoverable Expression Static Data entry; reports an
+      // explicit provider-unavailable instead of local text guessing.
+      id: "workspace.expressionStaticData",
+      title: "Expression Static Data",
+      category: "Code",
+      keywords: ["static data", "branch", "nullness", "constant", "reference information"],
+      when: (context) => context.focus !== "tree" && context.focus !== "terminal" && !!activeFile && !activeFile.loading,
+      run: () => void runExpressionStaticData(),
+    },
+    {
       id: "workspace.codeActions",
       title: "Show Code Actions / Quick Fix",
       category: "Code",
@@ -10205,34 +10427,130 @@ export function CodeWorkspaceTab({
     [isCompletionTokenCurrent, lspDescriptorForFile],
   );
 
-  const getLspSignatureHelp = useCallback(
+  // §8.20.2 W1 Parameter single channel: the provider adapter behind the
+  // session. The controller owns identity/cancel; this closure only talks to
+  // the language server through the §8.18.6 cancel bridge.
+  const parameterInfoProvider = useCallback(
     async (
-      file: OpenFileState,
-      position: LspPosition,
-      triggerCharacter?: string | null,
-    ): Promise<LspSignatureHelpResult | null> => {
+      request: { fileKey: string; uri: string; position: LspPosition; documentRevision: number; providerGeneration: number },
+      triggerCharacter: string | null,
+      { signal }: { signal: AbortSignal },
+    ) => {
+      const file = openFilesRef.current[request.fileKey];
+      if (!file) return null;
       if (!shouldLiveSyncLsp(file.languagePath, lspFilesRef.current[file.key])) return null;
       const live = await ensureLspDocumentSynced(file.key);
       if (!live) return null;
       if (!isLspFeatureReady(lspFilesRef.current[live.key])) return null;
       const descriptor = lspDescriptorForFile(live);
       if (!descriptor) return null;
+      referenceCancelSeqRef.current += 1;
+      const cancelKey = `${workspaceInstanceId}|${file.key}`;
+      const requestSeq = referenceCancelSeqRef.current;
+      const onAbort = () => {
+        void lspCancelReferenceRequest(cancelKey).catch(() => 0);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
       try {
-        const result = await lspSignatureHelp(descriptor, position, triggerCharacter ?? null);
-        if (!openFilesRef.current[live.key] || openFilesRef.current[live.key]?.text !== live.text) {
+        const result = await lspSignatureHelp(
+          descriptor,
+          request.position,
+          triggerCharacter ?? null,
+          { cancelKey, requestSeq },
+        );
+        if (signal.aborted) return null;
+        const current = openFilesRef.current[live.key];
+        if (
+          !current
+          || current.documentRevision !== request.documentRevision
+          || lspSessionGeneration() !== request.providerGeneration
+        ) {
           return null;
         }
         updateLspStatusForFile(live, result.status);
-        return result;
+        if (!result.signatures.length || !result.status.active) return null;
+        return {
+          state: "payload" as const,
+          payload: {
+            kind: "parameter-info" as const,
+            signatures: result.signatures,
+            activeSignature: result.activeSignature,
+            activeParameter: result.activeParameter,
+          },
+        };
       } catch {
+        // Request-level failures close the popup quietly; the next explicit
+        // action or trigger re-queries.
         return null;
+      } finally {
+        signal.removeEventListener("abort", onAbort);
       }
     },
-    [ensureLspDocumentSynced, lspDescriptorForFile, updateLspStatusForFile],
+    [
+      ensureLspDocumentSynced,
+      lspDescriptorForFile,
+      lspSessionGeneration,
+      updateLspStatusForFile,
+      workspaceInstanceId,
+    ],
   );
 
+  /** Live file identity snapshot feeding the session's stale/closure checks.
+   * Reads through openFilesRef: a typed edit bumps the revision synchronously
+   * there, while the rendered OpenFileState can lag one flush behind. */
+  const sessionContextForFile = useCallback((file: OpenFileState): ReferenceSessionContext | null => {
+    const latest = openFilesRef.current[file.key] ?? file;
+    if (latest.loading) return null;
+    const descriptor = lspDescriptorForFile(latest);
+    return {
+      fileKey: latest.key,
+      uri: descriptor?.documentUri
+        ?? lspFilesRef.current[latest.key]?.status?.uri
+        ?? descriptor?.filePath
+        ?? latest.languagePath,
+      languageId: descriptor?.languageId ?? "plaintext",
+      documentRevision: latest.documentRevision,
+      providerGeneration: lspSessionGeneration(),
+    };
+  }, [lspDescriptorForFile, lspSessionGeneration]);
+
+  // File switches (and workspace remounts) close the old tooltip; per-edit
+  // closure comes from the host's doc-changed/caret invalidation events.
+  const activeParameterFileKey = activeFile?.key ?? null;
+  useEffect(() => {
+    if (!activeParameterFileKey) {
+      parameterInfoSession.setContext(null);
+      return;
+    }
+    const latest = openFilesRef.current[activeParameterFileKey];
+    if (!latest) return;
+    const context = sessionContextForFile(latest);
+    if (context) parameterInfoSession.setContext(context);
+  }, [activeParameterFileKey, parameterInfoSession, sessionContextForFile]);
+
+  const handleParameterTrigger = useCallback((file: OpenFileState, event: {
+    position: LspPosition;
+    anchorOffset: number;
+    triggerCharacter: string | null;
+    origin: "explicit" | "typing";
+  }) => {
+    const context = sessionContextForFile(file);
+    if (!context) return;
+    // The edit that carried the trigger also bumped the identity; publishing
+    // it here closes any pre-edit tooltip before the fresh query starts.
+    parameterInfoSession.setContext(context);
+    parameterInfoSession.request(event, (request, ticket) =>
+      parameterInfoProvider(request, event.triggerCharacter, ticket));
+  }, [parameterInfoProvider, parameterInfoSession, sessionContextForFile]);
+
+  const handleParameterInvalidate = useCallback((reason: ParameterInvalidateReason) => {
+    parameterInfoSession.invalidate(reason);
+  }, [parameterInfoSession]);
+
+  const handleParameterEscape = useCallback(() => parameterInfoSession.escape(), [parameterInfoSession]);
+
   const getLspHover = useCallback(
-    async (file: OpenFileState, position: LspPosition) => {
+    async (file: OpenFileState, position: LspPosition): Promise<QuickDocContent | null> => {
       // While the debugger is stopped in this file, the hover belongs to the
       // debugger (IDEA shows the value, not the javadoc). Read through the ref:
       // the debug hook is declared later in this component.
@@ -10256,8 +10574,10 @@ export function CodeWorkspaceTab({
       const endMatch = right.match(/^[A-Za-z0-9_$]*/);
       const from = start >= 0 ? start : position.character;
       const to = position.character + (endMatch?.[0].length ?? 0);
-      const outcome = await referenceInfoController.request({
-        kind: "documentation",
+      let providerLabel = "Language Server";
+      let providerUri: string | null = null;
+      const outcome = await referenceInfoController.requestTyped({
+        kind: "quick-documentation",
         workspaceId: workspaceInstanceId,
         fileKey: file.key,
         uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath,
@@ -10282,33 +10602,46 @@ export function CodeWorkspaceTab({
         }
         updateLspStatusForFile(file, result.status);
         if (!result.contents) return null;
+        providerLabel = result.status.displayName ?? "Language Server";
+        providerUri = result.status.uri ?? null;
         return {
-          title: line.slice(from, to) || file.title,
-          body: result.contents,
-          source: result.status.displayName ?? "Language Server",
-          uri: result.status.uri,
-          sourceLocation: result.range && result.status.uri
-            ? {
-                uri: result.status.uri,
-                path: result.status.path,
-                range: result.range,
-              }
-            : null,
-          revision: requestRevision,
-          generation: requestGeneration,
+          state: "payload" as const,
+          payload: {
+            kind: "quick-documentation" as const,
+            markdown: result.contents,
+            source: result.range && result.status.uri
+              ? {
+                  uri: result.status.uri,
+                  path: result.status.path ?? null,
+                  range: result.range,
+                }
+              : null,
+          },
         };
       });
-      if (outcome.kind === "available") return outcome.content;
-      if (outcome.kind === "failed") {
-        setLspFiles((current) => ({
-          ...current,
-          [file.key]: {
-            ...(current[file.key] ?? emptyLspFileState()),
-            error: outcome.message,
-          },
-        }));
+      if (outcome.state !== "ready" || outcome.payload.kind !== "quick-documentation") {
+        if (outcome.state === "failed") {
+          setLspFiles((current) => ({
+            ...current,
+            [file.key]: {
+              ...(current[file.key] ?? emptyLspFileState()),
+              error: outcome.state === "failed" ? outcome.message : "",
+            },
+          }));
+        }
+        return null;
       }
-      return null;
+      // Hover refreshes the cursor-linked popup but never writes history —
+      // only ready explicit QuickDoc does (§8.20.2).
+      return {
+        title: line.slice(from, to) || file.title,
+        body: outcome.payload.markdown,
+        source: providerLabel,
+        uri: providerUri,
+        sourceLocation: outcome.payload.source,
+        revision: requestRevision,
+        generation: requestGeneration,
+      };
     },
     [
       absolutePathForOpenFile,
@@ -10424,7 +10757,6 @@ export function CodeWorkspaceTab({
   peekDefinitionRef.current = peekDefinition;
   goToTypeDefinitionRef.current = goToTypeDefinition;
   goToImplementationRef.current = goToImplementation;
-  getLspSignatureHelpRef.current = getLspSignatureHelp;
 
   const renameSymbolAtCursor = useCallback(async () => {
     const file = activeFile;
@@ -12608,9 +12940,15 @@ export function CodeWorkspaceTab({
         }
         hoverDocumentationDelayMs={intelligencePreferences.quickDoc.hoverDelayMs}
         parameterInfoRequestNonce={groupId === activeEditorGroupId ? parameterInfoRequestNonce : 0}
-        parameterInfoAutoPopup={intelligencePreferences.parameterInfo.autoPopup}
-        parameterInfoDelayMs={intelligencePreferences.parameterInfo.delayMs}
         parameterInfoShowFullSignatures={intelligencePreferences.parameterInfo.showFullSignatures}
+        onParameterTrigger={handleParameterTrigger}
+        onParameterInvalidate={handleParameterInvalidate}
+        onParameterEscape={handleParameterEscape}
+        // Only the active leaf renders the session-published tooltip; an
+        // inactive split must never show another document's anchor.
+        parameterPopup={groupId === activeEditorGroupId && parameterPopup.phase === "shown"
+          ? parameterPopup.view
+          : null}
         openOrder={group.openOrder}
         openFiles={openFiles}
         activeKey={group.activeKey}
@@ -12740,7 +13078,6 @@ export function CodeWorkspaceTab({
         onCompletionIdentity={completionIdentityForFile}
         onCompletionDiagnostic={reportCompletionDiagnostic}
         onCompleteResolve={resolveLspCompletion}
-        onSignatureHelp={getLspSignatureHelp}
         onSelectionChange={(selection) => {
           if (groupId === activeEditorGroupId) {
             editorSelectionRef.current = selection;

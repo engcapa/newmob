@@ -120,6 +120,18 @@ function clientCapabilities() {
         },
         completionItemKind: { valueSet: Array.from({ length: 25 }, (_, i) => i + 1) },
       },
+      // §8.20.2 W1: mirrors the production signatureHelp block verbatim —
+      // without it jdtls (correctly) answers textDocument/signatureHelp
+      // with no signatures.
+      signatureHelp: {
+        dynamicRegistration: true,
+        contextSupport: true,
+        signatureInformation: {
+          documentationFormat: ["markdown", "plaintext"],
+          parameterInformation: { labelOffsetSupport: true },
+          activeParameterSupport: true,
+        },
+      },
       publishDiagnostics: { relatedInformation: true, versionSupport: true },
     },
     workspace: {
@@ -130,6 +142,10 @@ function clientCapabilities() {
   };
 }
 
+/** Mirrors the production `java.*` initialization settings (lsp.rs
+ * JavaLanguageSettings defaults). Notably `signatureHelp.enabled: true` —
+ * jdt.ls gates textDocument/signatureHelp behind this flag (default off),
+ * so omitting it silently yields empty signatures. */
 function initializationSettings(gradleHome) {
   return {
     settings: {
@@ -140,9 +156,25 @@ function initializationSettings(gradleHome) {
           maven: { enabled: true },
           gradle: {
             enabled: true,
+            wrapper: { enabled: true },
+            offline: { enabled: false },
             ...(gradleHome ? { home: gradleHome } : {}),
           },
         },
+        sources: {
+          organizeImports: { starThreshold: 99, staticStarThreshold: 99 },
+        },
+        saveActions: { organizeImports: false },
+        codeGeneration: {
+          hashCodeEquals: { useJava7Objects: true },
+          useBlocks: true,
+          generateComments: false,
+          toString: { template: "${object.className} [${member.name()}=${member.value}, ${otherMembers}]" },
+        },
+        referencesCodeLens: { enabled: false },
+        implementationsCodeLens: { enabled: false },
+        signatureHelp: { enabled: true },
+        inlayHints: { parameterNames: { enabled: "all" } },
       },
     },
   };
@@ -155,11 +187,21 @@ function initializationSettings(gradleHome) {
 const APP_MAIN = "src/main/java/com/example/single/App.java";
 const APP_TEST = "src/test/java/com/example/single/AppTest.java";
 
+// §8.20.2 W1 anchors inside signatureTargets() (see projects/maven-single).
+const SIG_OVERLOAD_LINE = 'sb.append("alpha");';
+const SIG_THREE_ARG_LINE = 'sb.append("ab", 0, 1);';
+const SIG_NESTED_LINE = 'String nested = String.valueOf(Integer.parseInt("42"));';
+const SIG_GENERIC_LINE = "java.util.Collections.singletonList(\"x\");";
+const SIG_PROJECT_SYMBOL_LINE = "new App().signatureTargets();";
+const SIG_LIBRARY_SYMBOL_LINE = 'org.apache.commons.lang3.StringUtils.isBlank("x");';
+
 /**
  * Every case locates one bare token in one file, requests completion at the
  * token end, applies expectations, optionally resolves the matched item, and
  * optionally verifies that reverting the merged acceptance restores the
- * original document hash exactly.
+ * original document hash exactly. Cases with `kind` run the §8.20.2 W1
+ * reference-information scenarios instead (signatureHelp / hover /
+ * supersede-cancel against real jdtls).
  */
 const FIXTURES = {
   "maven-single": {
@@ -188,6 +230,90 @@ const FIXTURES = {
         token: "Asser",
         expect: { anyLabelIn: ["Assert", "assertTrue", "assertFalse"] },
         notes: "candidate must come from junit test scope (proves test source set import)",
+      },
+
+      // ---- §8.20.2 W1: Parameter Info over a real overloaded family. ----
+      {
+        kind: "signature",
+        id: "sig-overload-family",
+        file: APP_MAIN,
+        lineText: SIG_OVERLOAD_LINE,
+        prefix: "sb.append(",
+        expectSignature: { minSignatures: 2, labelContains: "append" },
+        notes: "StringBuilder.append overload family; caret right after the open paren → activeParameter 0",
+      },
+      {
+        kind: "signature",
+        id: "sig-active-parameter-advance",
+        file: APP_MAIN,
+        lineText: SIG_THREE_ARG_LINE,
+        prefix: "sb.append(\"ab\",",
+        expectSignature: { minSignatures: 1, activeParameterEquals: 1 },
+        notes: "caret between args of the 3-arg CharSequence,int,int overload → activeParameter advances to 1",
+      },
+      {
+        kind: "signature",
+        id: "sig-nested-inner",
+        file: APP_MAIN,
+        lineText: SIG_NESTED_LINE,
+        prefix: "Integer.parseInt(",
+        expectSignature: { minSignatures: 1, labelContains: "parseInt" },
+        notes: "inner call of a nested expression owns the tooltip at its own paren",
+      },
+      {
+        kind: "signature",
+        id: "sig-nested-outer",
+        file: APP_MAIN,
+        lineText: SIG_NESTED_LINE,
+        prefix: "String.valueOf(",
+        expectSignature: { minSignatures: 1, labelContains: "valueOf" },
+        notes: "outer call resolves when the caret sits at the outer argument list",
+      },
+      {
+        kind: "signature",
+        id: "sig-generic",
+        file: APP_MAIN,
+        lineText: SIG_GENERIC_LINE,
+        prefix: "java.util.Collections.singletonList(",
+        expectSignature: { minSignatures: 1, labelContains: "singletonList" },
+        notes: "generic method signature; labels recorded for IDEA compare",
+      },
+      {
+        kind: "supersede-cancel",
+        id: "sig-supersede-cancel",
+        file: APP_MAIN,
+        lineText: SIG_OVERLOAD_LINE,
+        prefix: "sb.append(",
+        notes: "$/cancelRequest on the in-flight request mirrors the production cancel bridge; second request must satisfy",
+      },
+
+      // ---- §8.20.2 W1: Quick Documentation at project/JDK/library symbols.
+      {
+        kind: "hover",
+        id: "hover-project-symbol",
+        file: APP_MAIN,
+        lineText: SIG_PROJECT_SYMBOL_LINE,
+        token: "signatureTargets",
+        expectHover: { contentsPresent: true },
+        notes: "project symbol carries javadoc; provider must surface it through hover",
+      },
+      {
+        kind: "hover",
+        id: "hover-jdk-symbol",
+        file: APP_MAIN,
+        lineText: SIG_NESTED_LINE,
+        token: "valueOf",
+        expectHover: { contentsPresent: true },
+        notes: "JDK class documentation attached to String.valueOf",
+      },
+      {
+        kind: "hover",
+        id: "hover-library-symbol",
+        file: APP_MAIN,
+        lineText: SIG_LIBRARY_SYMBOL_LINE,
+        token: "isBlank",
+        expectHover: { contentsPresent: true },
+        notes: "commons-lang3 dependency symbol — synthesized from .class metadata when sources are absent",
       },
     ],
     restartAfterCases: { file: APP_MAIN, token: "Stri", expect: { labelEquals: "String" } },
@@ -399,6 +525,7 @@ async function startSession(jdtls, fixtureId, options = {}) {
   const dataDir = join(tmpdir(), `taomni-r3-${fixtureId}-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dataDir, { recursive: true });
   const diagnosticsLog = [];
+  const registeredMethods = [];
   const client = new LspClient(options.javaPath, launchArgs(jdtls, dataDir), {
     onDiagnostics: (params) => {
       for (const diagnostic of params?.diagnostics ?? []) {
@@ -412,9 +539,17 @@ async function startSession(jdtls, fixtureId, options = {}) {
         });
       }
     },
+    // §8.20.2 W1: jdtls registers several capabilities dynamically instead of
+    // declaring them statically in initialize — record the registrations so
+    // providerChannels can distinguish "absent" from "registered later".
+    onRegisterCapability: (params) => {
+      for (const registration of params?.registrations ?? []) {
+        if (registration?.method) registeredMethods.push(registration.method);
+      }
+    },
   }).start();
   const startedAt = Date.now();
-  await client.request("initialize", {
+  const initializeResult = await client.request("initialize", {
     processId: null,
     rootUri: `file://${projectDir}`,
     workspaceFolders: [{ uri: `file://${projectDir}`, name: fixtureId }],
@@ -422,7 +557,15 @@ async function startSession(jdtls, fixtureId, options = {}) {
     capabilities: clientCapabilities(),
   }, 180_000);
   client.notify("initialized", {});
-  return { client, diagnosticsLog, msToInitialize: Date.now() - startedAt, projectDir, dataDir };
+  return {
+    client,
+    diagnosticsLog,
+    registeredMethods,
+    serverCapabilities: initializeResult?.capabilities ?? {},
+    msToInitialize: Date.now() - startedAt,
+    projectDir,
+    dataDir,
+  };
 }
 
 function openFile(client, projectDir, relPath) {
@@ -477,6 +620,107 @@ async function waitForCase(client, uri, position, trigger, expectFn, budgetMs) {
 /** jdtls decorates labels ("String - java.lang", "asList(int…)"); strip it. */
 function baseLabel(item) {
   return String(item.label ?? "").split(" - ")[0].split("(")[0].trim();
+}
+
+// ---------------------------------------------------------------------------
+// W1 reference-information scenarios (§8.20.2)
+// ---------------------------------------------------------------------------
+
+/** Locate a line by its trimmed content; returns the 0-based line + indent. */
+function locateLineByContent(text, needle) {
+  const lines = text.split("\n");
+  const target = needle.trim();
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() !== target) continue;
+    return { line: i, indent: lines[i].length - lines[i].trimStart().length };
+  }
+  throw new Error(`line ${JSON.stringify(needle)} not found in fixture source`);
+}
+
+/** Caret right after `prefix` inside the located line (unique substring). */
+function locateAfterPrefix(text, lineContent, prefix) {
+  const { line } = locateLineByContent(text, lineContent);
+  const raw = text.split("\n")[line];
+  const index = raw.indexOf(prefix);
+  if (index < 0) throw new Error(`prefix ${JSON.stringify(prefix)} not found on line ${JSON.stringify(lineContent)}`);
+  return { line, character: index + prefix.length };
+}
+
+/** Caret at the middle of `token` inside the located line (hover target). */
+function locateTokenInLine(text, lineContent, token) {
+  const { line } = locateLineByContent(text, lineContent);
+  const raw = text.split("\n")[line];
+  const index = raw.indexOf(token);
+  if (index < 0) throw new Error(`token ${JSON.stringify(token)} not found on line ${JSON.stringify(lineContent)}`);
+  return { line, character: index + Math.floor(token.length / 2) };
+}
+
+async function requestSignatureHelp(client, uri, position) {
+  const startedAt = Date.now();
+  const result = await client.request("textDocument/signatureHelp", {
+    textDocument: { uri },
+    position,
+    context: { triggerKind: 1, isRetrigger: false },
+  });
+  return { result, ms: Date.now() - startedAt };
+}
+
+/**
+ * Poll signatureHelp until the expectation predicate passes (the importer
+ * may still be warming up after a fresh session).
+ */
+async function waitForSignature(client, uri, position, expectFn, budgetMs) {
+  const attempts = [];
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    const { result, ms } = await requestSignatureHelp(client, uri, position);
+    attempts.push({ ms, signaturesCount: result?.signatures?.length ?? 0 });
+    const evaluation = expectFn(result ?? {});
+    if (evaluation.ok) {
+      return { attempts, final: result ?? {}, satisfied: true, evaluation };
+    }
+    if (Date.now() > deadline) {
+      return { attempts, final: result ?? {}, satisfied: false, evaluation };
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 3_000));
+  }
+}
+
+function evaluateSignatureExpect(expect, result) {
+  const signatures = result?.signatures ?? [];
+  if (expect.minSignatures !== undefined && signatures.length < expect.minSignatures) {
+    return { ok: false, reason: `expected ≥${expect.minSignatures} signatures, got ${signatures.length}` };
+  }
+  if (
+    expect.labelContains !== undefined
+    && !signatures.some((signature) => String(signature.label ?? "").includes(expect.labelContains))
+  ) {
+    return {
+      ok: false,
+      reason: `no signature label containing ${expect.labelContains}; saw ${signatures.map((s) => s.label).slice(0, 6).join(" | ")}`,
+    };
+  }
+  if (expect.activeParameterEquals !== undefined && result.activeParameter !== expect.activeParameterEquals) {
+    return {
+      ok: false,
+      reason: `expected activeParameter=${expect.activeParameterEquals}, got ${result.activeParameter} (${signatures.map((s) => s.label).slice(0, 4).join(" | ")})`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Normalize hover contents into plain text + a coarse kind tag. */
+function hoverText(contents) {
+  if (!contents) return { text: "", kind: null };
+  if (typeof contents === "string") return { text: contents, kind: "plaintext" };
+  if (Array.isArray(contents)) return { text: contents.map((c) => hoverText(c).text).join("\n"), kind: "markup-array" };
+  if (contents.kind && typeof contents.value === "string") return { text: contents.value, kind: contents.kind };
+  if (typeof contents.value === "string") return { text: contents.value, kind: "marked-string" };
+  return { text: "", kind: "unknown" };
+}
+
+function httpsLinksIn(text) {
+  return [...new Set(String(text).match(/https:\/\/[^\s<>"')\]]+/g) ?? [])];
 }
 
 function evaluateExpect(expect, items) {
@@ -571,6 +815,20 @@ async function runFixture(fixtureId, toolchain, jdtls, gradleHome) {
   const openedUris = new Map();
 
   try {
+    // §8.20.2 W1: record which reference channels the provider actually
+    // declares. Type Info / Expression Static Data have no standard LSP
+    // method; an honest absence probe here is the evidence for their L0/L1
+    // unavailable contract (unsupported trace is valid evidence).
+    const caps = session.serverCapabilities ?? {};
+    const capabilityJson = JSON.stringify(caps).toLowerCase();
+    trace.providerChannels = {
+      signatureHelpProvider: !!caps?.textDocument?.signatureHelpProvider,
+      hoverProvider: !!caps?.textDocument?.hoverProvider,
+      declaredTypeInfoChannel: /typeinfo/.test(capabilityJson),
+      declaredStaticDataChannel: /staticdata|expressionstaticdata/.test(capabilityJson),
+      topLevelCapabilityKeys: Object.keys(caps).sort(),
+    };
+
     for (const fileSpec of spec.filesToOpen) {
       const text = openFile(session.client, session.projectDir, fileSpec.path);
       openedUris.set(fileSpec.path, { uri: `file://${join(session.projectDir, fileSpec.path)}`, text });
@@ -579,6 +837,135 @@ async function runFixture(fixtureId, toolchain, jdtls, gradleHome) {
     // Give the importer a moment to publish progress; cases poll anyway.
     for (const testCase of spec.cases) {
       const entry = openedUris.get(testCase.file);
+
+      // ---- §8.20.2 W1 reference-information scenarios. ------------------
+      if (testCase.kind === "signature" || testCase.kind === "supersede-cancel") {
+        const position = locateAfterPrefix(entry.text, testCase.lineText, testCase.prefix);
+        const scenario = {
+          caseId: testCase.id,
+          file: testCase.file,
+          kind: testCase.kind,
+          position,
+          scopeRequested: "default",
+          signatureHelp: null,
+          supersede: null,
+          notes: testCase.notes ?? null,
+        };
+        if (testCase.kind === "signature") {
+          const wait = await waitForSignature(
+            session.client,
+            entry.uri,
+            position,
+            (result) => evaluateSignatureExpect(testCase.expectSignature, result),
+            240_000,
+          );
+          scenario.signatureHelp = {
+            attempts: wait.attempts.length,
+            msTotal: Math.round(wait.attempts.reduce((sum, attempt) => sum + attempt.ms, 0)),
+            signaturesCount: wait.final?.signatures?.length ?? 0,
+            labels: (wait.final?.signatures ?? []).map((signature) => String(signature.label ?? "")),
+            activeSignature: wait.final?.activeSignature ?? null,
+            activeParameter: wait.final?.activeParameter ?? null,
+            satisfied: wait.satisfied,
+            evaluationReason: wait.evaluation.ok ? null : wait.evaluation.reason,
+          };
+          if (!wait.satisfied) trace.failures.push(`${testCase.id}: ${wait.evaluation.reason}`);
+        } else {
+          // supersede-cancel: fire, cancel on the wire, then re-request.
+          const params = {
+            textDocument: { uri: entry.uri },
+            position,
+            context: { triggerKind: 1, isRetrigger: false },
+          };
+          const firstStartedAt = Date.now();
+          const first = session.client.requestTracked("textDocument/signatureHelp", params);
+          session.client.cancelRequest(first.id);
+          let firstCancelled = false;
+          let firstOutcome = null;
+          try {
+            const raw = await first.promise;
+            firstOutcome = "resolved-empty";
+            firstCancelled = !raw || !Array.isArray(raw.signatures) || raw.signatures.length === 0;
+          } catch (error) {
+            firstOutcome = `rejected:${error.code ?? "?"}`;
+            firstCancelled = true;
+          }
+          const second = await waitForSignature(
+            session.client,
+            entry.uri,
+            position,
+            (result) => evaluateSignatureExpect({ minSignatures: 1 }, result),
+            240_000,
+          );
+          scenario.supersede = {
+            firstOutcome,
+            firstCancelled,
+            msFirst: Date.now() - firstStartedAt,
+            secondSatisfied: second.satisfied,
+            msSecond: Math.round(second.attempts.reduce((sum, attempt) => sum + attempt.ms, 0)),
+          };
+          if (!firstCancelled) trace.failures.push(`${testCase.id}: cancelled request returned usable signatures`);
+          if (!second.satisfied) trace.failures.push(`${testCase.id}: post-cancel request did not satisfy`);
+        }
+        trace.scenarios.push(scenario);
+        continue;
+      }
+
+      if (testCase.kind === "hover") {
+        const position = locateTokenInLine(entry.text, testCase.lineText, testCase.token);
+        let hover = null;
+        for (let attempt = 0; attempt < 40 && !(hover?.contentsPresent); attempt++) {
+          const startedAt = Date.now();
+          const result = await session.client.request("textDocument/hover", {
+            textDocument: { uri: entry.uri },
+            position,
+          });
+          const { text, kind } = hoverText(result?.contents);
+          if (!hover) {
+            hover = {
+              msFirst: Date.now() - startedAt,
+              attempts: 0,
+              contentsPresent: false,
+              contentsKind: null,
+              externalLinks: [],
+              excerpt: null,
+              satisfied: false,
+              evaluationReason: null,
+            };
+          }
+          hover.attempts += 1;
+          if (text.trim()) {
+            hover.contentsKind = kind;
+            hover.externalLinks = httpsLinksIn(text).slice(0, 5);
+            // Bounded sanitized excerpt — evidence without embedding docs.
+            hover.excerpt = text.replace(/\s+/g, " ").slice(0, 160);
+            const present = text.trim().length > 0;
+            hover.contentsPresent = present;
+            hover.satisfied = present || !testCase.expectHover?.contentsPresent;
+            break;
+          }
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 3_000));
+        }
+        if (hover && !hover.contentsPresent) {
+          hover.evaluationReason = "provider returned empty contents";
+        }
+        const scenario = {
+          caseId: testCase.id,
+          file: testCase.file,
+          kind: "hover",
+          position,
+          scopeRequested: "default",
+          hover,
+          notes: testCase.notes ?? null,
+        };
+        if (testCase.expectHover?.contentsPresent && !hover?.contentsPresent) {
+          trace.failures.push(`${testCase.id}: ${hover?.evaluationReason ?? "no contents recorded"}`);
+        }
+        trace.scenarios.push(scenario);
+        continue;
+      }
+
+      // ---- Existing completion flow. ------------------------------------
       const scenario = {
         caseId: testCase.id,
         file: testCase.file,
@@ -684,11 +1071,30 @@ async function runFixture(fixtureId, toolchain, jdtls, gradleHome) {
           (items) => evaluateExpect(reopenSpec.expect, items),
           240_000,
         );
+        // §8.20.2 W1: Parameter Info must also recover after the provider is
+        // SIGKILLed and the session rebuilt — same evidence bar as completion.
+        let signatureOkAfterRestart = false;
+        let signatureReason = "not run";
+        if (fixtureId === "maven-single") {
+          const sigText = openFile(second.client, second.projectDir, APP_MAIN);
+          const sigWait = await waitForSignature(
+            second.client,
+            `file://${join(second.projectDir, APP_MAIN)}`,
+            locateAfterPrefix(sigText, SIG_OVERLOAD_LINE, "sb.append("),
+            (result) => evaluateSignatureExpect({ minSignatures: 1 }, result),
+            240_000,
+          );
+          signatureOkAfterRestart = sigWait.satisfied;
+          signatureReason = sigWait.evaluation.reason ?? null;
+          if (!sigWait.satisfied) trace.failures.push(`restart-signature: ${sigWait.evaluation.reason}`);
+        }
         trace.restart = {
           performed: true,
           msToReadyAfterRestart: Date.now() - restartStarted,
           completionOkAfterRestart: wait.satisfied,
+          signatureHelpOkAfterRestart: fixtureId === "maven-single" ? signatureOkAfterRestart : null,
           reason: wait.evaluation.reason ?? null,
+          signatureReason,
         };
         if (!wait.satisfied) trace.failures.push(`restart: ${wait.evaluation.reason}`);
       } finally {
@@ -708,6 +1114,20 @@ async function runFixture(fixtureId, toolchain, jdtls, gradleHome) {
     await session.client.shutdown().catch(() => {});
     rmSync(session.dataDir, { recursive: true, force: true });
   }
+
+  // §8.20.2 W1: distinguish "statically declared", "dynamically registered"
+  // and "proven by a satisfied scenario" — jdtls registers signatureHelp/hover
+  // at runtime, so a bare static-capability read would misreport them absent.
+  const staticCaps = session.serverCapabilities ?? {};
+  const anySignatureOk = trace.scenarios.some((scenario) => scenario.signatureHelp?.satisfied);
+  const anyHoverOk = trace.scenarios.some((scenario) => scenario.hover?.contentsPresent);
+  trace.providerChannels.signatureHelpProviderDeclaredStatically = !!staticCaps?.textDocument?.signatureHelpProvider;
+  trace.providerChannels.hoverProviderDeclaredStatically = !!staticCaps?.textDocument?.hoverProvider;
+  trace.providerChannels.signatureHelpProvenByScenarios = anySignatureOk;
+  trace.providerChannels.hoverProvenByScenarios = anyHoverOk;
+  trace.providerChannels.dynamicRegistrations = [...new Set(session.registeredMethods)].sort();
+  delete trace.providerChannels.signatureHelpProvider;
+  delete trace.providerChannels.hoverProvider;
 
   const sanitize = makeSanitizer(session.projectDir);
   const sanitizedTrace = sanitize(trace);

@@ -73,8 +73,9 @@ import type {
   LspSemanticToken,
   LspPosition,
   LspRange,
-  LspSignatureHelpResult,
+  LspSignatureInfo,
 } from "../../../lib/editor/lsp";
+import type { ParameterPopupView } from "./referenceInfoSession";
 import { languageForPath } from "../../git/diffLanguage";
 import { acquireClipboardStore, clipboardStoreForWorkspace, type WorkspaceClipboardHandle } from "./workspaceClipboardSession";
 import { createWorkspaceSearchPanel, WORKSPACE_SEARCH_STYLE } from "./editorSearchPanel";
@@ -224,10 +225,23 @@ interface CodeMirrorHostProps {
   /** Live completion request identity (§8.16.2); null = typed unavailable. */
   getCompletionIdentity: () => CompletionRequestIdentity | null;
   onCompletionDiagnostic: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
-  onSignatureHelp?: (
-    position: LspPosition,
-    triggerCharacter: string | null,
-  ) => Promise<LspSignatureHelpResult | null>;
+  /**
+   * §8.20.2 W1 single channel: the host only EMITS parameter trigger events
+   * (typed signature-trigger char or an explicit nonce); the workspace-side
+   * ParameterInfoSession owns requests, delays and cancellation.
+   */
+  onParameterTrigger?: (event: {
+    position: LspPosition;
+    anchorOffset: number;
+    triggerCharacter: string | null;
+    origin: "explicit" | "typing";
+  }) => void;
+  /** Host-reported viewport churn; the session decides dismissal. */
+  onParameterInvalidate?: (reason: "doc-changed" | "caret-moved" | "closing-char") => void;
+  /** Esc slot in the editor escape stack — true iff this kind consumed it. */
+  onParameterEscape?: () => boolean;
+  /** Controlled Parameter Info display state published by the session. */
+  parameterPopup?: ParameterPopupView | null;
   onSelectionChange?: (selection: EditorSelectionRange) => void;
   onViewportChange?: (range: LspRange) => void;
   onExpandSelection?: (selection: EditorSelectionRange) => Promise<LspRange[] | null>;
@@ -252,10 +266,6 @@ interface CodeMirrorHostProps {
   hoverDocumentationDelayMs?: number;
   /** Monotonic explicit request from the workspace ActionHost. */
   parameterInfoRequestNonce?: number;
-  /** Whether typing a provider signature trigger opens Parameter Info. */
-  parameterInfoAutoPopup?: boolean;
-  /** Delay for typed signature triggers; explicit requests bypass it. */
-  parameterInfoDelayMs?: number;
   /** Render all provider overloads instead of only the active signature. */
   parameterInfoShowFullSignatures?: boolean;
   /** Effective code style driving indentUnit, tabSize, and insertSpaces. */
@@ -996,8 +1006,16 @@ function createHoverDocDom({
   return container;
 }
 
+/**
+ * Pure renderer for the Parameter Info tooltip (§8.20.2 W1: display only —
+ * it never issues requests and holds no request sequence).
+ */
 function signatureTooltipDom(
-  result: LspSignatureHelpResult,
+  result: {
+    signatures: readonly LspSignatureInfo[];
+    activeSignature: number;
+    activeParameter: number;
+  },
   showFullSignatures: boolean,
 ): HTMLElement {
   const dom = document.createElement("div");
@@ -1196,9 +1214,8 @@ function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirror
   if (prev.showHoverDocumentation !== next.showHoverDocumentation) return false;
   if (prev.hoverDocumentationDelayMs !== next.hoverDocumentationDelayMs) return false;
   if (prev.parameterInfoRequestNonce !== next.parameterInfoRequestNonce) return false;
-  if (prev.parameterInfoAutoPopup !== next.parameterInfoAutoPopup) return false;
-  if (prev.parameterInfoDelayMs !== next.parameterInfoDelayMs) return false;
   if (prev.parameterInfoShowFullSignatures !== next.parameterInfoShowFullSignatures) return false;
+  if (prev.parameterPopup !== next.parameterPopup) return false;
   if (prev.coverageEnabled !== next.coverageEnabled) return false;
   if (prev.fileCoverage !== next.fileCoverage) return false;
   if (prev.reveal !== next.reveal) return false;
@@ -1247,7 +1264,10 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onCompleteResolve,
   getCompletionIdentity,
   onCompletionDiagnostic,
-  onSignatureHelp,
+  onParameterTrigger,
+  onParameterInvalidate,
+  onParameterEscape,
+  parameterPopup = null,
   onSelectionChange,
   onViewportChange,
   onExpandSelection,
@@ -1262,8 +1282,6 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   showHoverDocumentation = true,
   hoverDocumentationDelayMs = 300,
   parameterInfoRequestNonce = 0,
-  parameterInfoAutoPopup = true,
-  parameterInfoDelayMs = 0,
   parameterInfoShowFullSignatures = false,
   softWrap = false,
   appearance,
@@ -1305,9 +1323,6 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const readOnlyCompartment = useRef(new Compartment());
   const wrappingCompartment = useRef(new Compartment());
   const appearanceCompartment = useRef(new Compartment());
-  const signatureShownRef = useRef(false);
-  const signatureRequestSequenceRef = useRef(0);
-  const signatureDelayTimerRef = useRef<number | null>(null);
   const lastParameterInfoNonceRef = useRef(parameterInfoRequestNonce);
   const requestParameterInfoRef = useRef<(() => boolean) | null>(null);
   const activeHoverResizeSessionRef = useRef<WindowResizeSession | null>(null);
@@ -1359,7 +1374,9 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const onCompleteResolveRef = useRef(onCompleteResolve);
   const getCompletionIdentityRef = useRef(getCompletionIdentity);
   const onCompletionDiagnosticRef = useRef(onCompletionDiagnostic);
-  const onSignatureHelpRef = useRef(onSignatureHelp);
+  const onParameterTriggerRef = useRef(onParameterTrigger);
+  const onParameterInvalidateRef = useRef(onParameterInvalidate);
+  const onParameterEscapeRef = useRef(onParameterEscape);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onViewportChangeRef = useRef(onViewportChange);
   const onExpandSelectionRef = useRef(onExpandSelection);
@@ -1369,8 +1386,6 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const completionTriggersRef = useRef(completionTriggers ?? []);
   const signatureTriggersRef = useRef(signatureTriggers ?? []);
   const columnSelectionModeRef = useRef(columnSelectionMode);
-  const parameterInfoAutoPopupRef = useRef(parameterInfoAutoPopup);
-  const parameterInfoDelayMsRef = useRef(parameterInfoDelayMs);
   const parameterInfoShowFullSignaturesRef = useRef(parameterInfoShowFullSignatures);
   const pathRef = useRef(path);
   // §8.19.4: set around the editor.basicCompletion close+reopen toggle so the
@@ -1398,7 +1413,9 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onCompleteResolveRef.current = onCompleteResolve;
   getCompletionIdentityRef.current = getCompletionIdentity;
   onCompletionDiagnosticRef.current = onCompletionDiagnostic;
-  onSignatureHelpRef.current = onSignatureHelp;
+  onParameterTriggerRef.current = onParameterTrigger;
+  onParameterInvalidateRef.current = onParameterInvalidate;
+  onParameterEscapeRef.current = onParameterEscape;
   onSelectionChangeRef.current = onSelectionChange;
   onViewportChangeRef.current = onViewportChange;
   onExpandSelectionRef.current = onExpandSelection;
@@ -1454,8 +1471,6 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   completionTriggersRef.current = completionTriggers ?? [];
   signatureTriggersRef.current = signatureTriggers ?? [];
   columnSelectionModeRef.current = columnSelectionMode;
-  parameterInfoAutoPopupRef.current = parameterInfoAutoPopup;
-  parameterInfoDelayMsRef.current = parameterInfoDelayMs;
   parameterInfoShowFullSignaturesRef.current = parameterInfoShowFullSignatures;
   pathRef.current = path;
 
@@ -1542,95 +1557,29 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       onSaveRef.current();
       return true;
     };
-    const clearSignatureDelay = () => {
-      if (signatureDelayTimerRef.current === null) return;
-      window.clearTimeout(signatureDelayTimerRef.current);
-      signatureDelayTimerRef.current = null;
-    };
-    const hideSignature = () => {
-      clearSignatureDelay();
-      signatureRequestSequenceRef.current += 1;
-      if (!signatureShownRef.current) return false;
-      signatureShownRef.current = false;
-      window.queueMicrotask(() => {
-        viewRef.current?.dispatch({
-          effects: signatureCompartment.current.reconfigure([]),
-        });
-      });
-      return true;
-    };
-    const requestSignatureHelp = (
+    // §8.20.2 W1 single channel: the host only REPORTS trigger events. All
+    // request sequencing, delays, supersede and cancellation live in the
+    // workspace-side ParameterInfoSession; rendering follows the controlled
+    // `parameterPopup` prop via the effect below.
+    const emitParameterTrigger = (
       view: EditorView,
-      trigger: string | null,
-      options: { explicit?: boolean } = {},
+      triggerCharacter: string | null,
+      origin: "explicit" | "typing",
     ) => {
-      const handler = onSignatureHelpRef.current;
+      const handler = onParameterTriggerRef.current;
       if (!handler) return false;
-      if (!options.explicit && !parameterInfoAutoPopupRef.current) return false;
-      clearSignatureDelay();
-      signatureRequestSequenceRef.current += 1;
-      const sequence = signatureRequestSequenceRef.current;
-      const docAtRequest = view.state.doc;
-      const headAtRequest = view.state.selection.main.head;
-      const run = () => {
-        signatureDelayTimerRef.current = null;
-        const currentBefore = viewRef.current;
-        if (
-          !currentBefore
-          || currentBefore !== view
-          || currentBefore.state.doc !== docAtRequest
-          || currentBefore.state.selection.main.head !== headAtRequest
-        ) {
-          return;
-        }
-        const position = lspPositionFromOffset(docAtRequest, headAtRequest);
-        void handler(position, trigger)
-          .then((result) => {
-            const current = viewRef.current;
-            if (
-              !current
-              || current !== view
-              || sequence !== signatureRequestSequenceRef.current
-              || current.state.doc !== docAtRequest
-              || current.state.selection.main.head !== headAtRequest
-            ) {
-              return;
-            }
-            if (!result || !result.status.active || result.signatures.length === 0) {
-              hideSignature();
-              return;
-            }
-            signatureShownRef.current = true;
-            current.dispatch({
-              effects: signatureCompartment.current.reconfigure(
-                showTooltip.of({
-                  pos: headAtRequest,
-                  above: true,
-                  create: () => ({
-                    dom: signatureTooltipDom(
-                      result,
-                      parameterInfoShowFullSignaturesRef.current,
-                    ),
-                  }),
-                }),
-              ),
-            });
-          })
-          .catch(() => {
-            if (sequence === signatureRequestSequenceRef.current) hideSignature();
-          });
-      };
-      const delayMs = options.explicit ? 0 : Math.max(0, parameterInfoDelayMsRef.current);
-      if (delayMs > 0) {
-        signatureDelayTimerRef.current = window.setTimeout(run, delayMs);
-      } else {
-        run();
-      }
+      const head = view.state.selection.main.head;
+      handler({
+        position: lspPositionFromOffset(view.state.doc, head),
+        anchorOffset: head,
+        triggerCharacter,
+        origin,
+      });
       return true;
     };
     requestParameterInfoRef.current = () => {
       const current = viewRef.current;
-      return current ? requestSignatureHelp(current, null, { explicit: true }) : false;
+      return current ? emitParameterTrigger(current, null, "explicit") : false;
     };
     const openReplacePanel = (view: EditorView) => {
       openSearchPanel(view);
@@ -1850,19 +1799,24 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           ...(buildEditorPrimitiveKeybindings(!!workspaceActionHost) as KeyBinding[]),
           ...(workspaceActionHost
             ? [
+                // Esc stays an editor-local primitive stack: completion's own
+                // high-precedence binding closes the popup FIRST, then snippet
+                // cancel → selection collapse → §8.20.2 parameter kind. The
+                // last slot consults the session via ref and returns false
+                // when nothing of this kind is open, so Esc never claims a
+                // keystroke it did not consume.
                 { key: "Escape", run: (view: EditorView) => cancelLspSnippetSession(view) },
                 { key: "Escape", run: escapeEditorSelections },
-                { key: "Escape", run: () => hideSignature() },
+                { key: "Escape", run: () => onParameterEscapeRef.current?.() ?? false },
               ]
             : [
                 // Transitional unhosted fallback: standalone embedders/tests
                 // without an action host keep the pre-R1 inline bindings.
                 // Must never grow new entries (see LEGACY_UNHOSTED_SPREAD).
+                // Parameter Info is NOT available here — §8.20.2 requires the
+                // single controller-owned channel, which needs a session.
                 { key: "Mod-s", run: saveHandler },
                 { key: "Mod-r", run: openReplacePanel },
-                { key: "Mod-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
-                { key: "Ctrl-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
-                { key: "Mod-Shift-Space", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
                 { key: "Mod-w", run: expandSemanticSelection },
               ]),
         ]),
@@ -1948,8 +1902,6 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            clearSignatureDelay();
-            signatureRequestSequenceRef.current += 1;
             if (!applyingExternalDocRef.current) {
               // onChange currently carries a full string, so one conversion is
               // unavoidable. Remember it to avoid a second full conversion in
@@ -1972,16 +1924,17 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
               && lastChar
               && signatureTriggersRef.current.includes(lastChar)
             ) {
-              requestSignatureHelp(update.view, lastChar);
-            } else if (
-              signatureShownRef.current &&
-              (lastChar === ")" || inserted.includes("\n"))
-            ) {
-              hideSignature();
+              emitParameterTrigger(update.view, lastChar, "typing");
+            } else if (lastChar === ")" || inserted.includes("\n")) {
+              onParameterInvalidateRef.current?.("closing-char");
+            } else {
+              // §8.20.2: a document change closes the OLD tooltip; the next
+              // trigger character opens a fresh request through the session.
+              onParameterInvalidateRef.current?.("doc-changed");
             }
-          } else if (update.selectionSet && signatureShownRef.current) {
+          } else if (update.selectionSet) {
             // A cursor move without an edit (mouse click, jump) dismisses it.
-            hideSignature();
+            onParameterInvalidateRef.current?.("caret-moved");
           }
           if (update.selectionSet || update.docChanged) {
             // Cursor state fans out into workspace UI and LSP effects. During
@@ -2035,7 +1988,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         escapeStack: () =>
           cancelLspSnippetSession(view)
           || escapeEditorSelections(view)
-          || hideSignature(),
+          || (onParameterEscapeRef.current?.() ?? false),
         runEditorCommand: (command) => command(view),
       }));
       // §8.19.2 EditorActionBridge: register this mounted view so keyboard
@@ -2047,9 +2000,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       bridgeRegistration?.dispose();
       unregisterEditorActions?.();
       clearPendingSelectionEmit();
-      clearSignatureDelay();
       requestParameterInfoRef.current = null;
-      signatureRequestSequenceRef.current += 1;
       cancelActiveHoverResize(activeHoverResizeSessionRef);
       clipboardContextByView.delete(view);
       view.destroy();
@@ -2145,6 +2096,33 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     lastParameterInfoNonceRef.current = parameterInfoRequestNonce;
     requestParameterInfoRef.current?.();
   }, [parameterInfoRequestNonce]);
+
+  // §8.20.2 W1: the Parameter Info tooltip is pure display — it renders the
+  // session-published view and nothing else. No request sequence lives here.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (!parameterPopup || parameterPopup.signatures.length === 0) {
+      window.queueMicrotask(() => {
+        const current = viewRef.current;
+        if (!current || current !== view) return;
+        current.dispatch({ effects: signatureCompartment.current.reconfigure([]) });
+      });
+      return;
+    }
+    const pos = Math.min(Math.max(0, parameterPopup.anchorOffset), view.state.doc.length);
+    view.dispatch({
+      effects: signatureCompartment.current.reconfigure(
+        showTooltip.of({
+          pos,
+          above: true,
+          create: () => ({
+            dom: signatureTooltipDom(parameterPopup, parameterInfoShowFullSignaturesRef.current),
+          }),
+        }),
+      ),
+    });
+  }, [parameterPopup]);
 
   useLayoutEffect(() => {
     const view = viewRef.current;

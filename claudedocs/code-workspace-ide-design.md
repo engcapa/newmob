@@ -2,11 +2,11 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Core Daily Editing Profile，再以 Java 为首个语言完成可证明的 provider-backed 语义工作流。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-25 · 版本：v4.63（W0 shell stability + shortcut ownership as-built；上一版 v4.62 为 HEAD `f572c6b8` 再审计与执行队列重置）· 状态：**实施中；R0/R1/R3/R4/R5/R7/R8 生产合同与 R2 静态 QA 门禁、R9 native harness+Linux 首批证据（C0 native 两连绿磁盘字节级证明、perf browser 基线、a11y 扫描）与 W0 shell stability/shortcut ownership（C1/C4 实跑双绿）已交付，Java Basic Completion 达 provider 层 G1 L2（Linux、jdtls 1.61/JDK 21）；R6 仍为部分闭合；G0 的代码合同已闭合但 native 故障注入与三端证据未绿；G1 仍受两个已复现 shell 缺陷、Reference/Parameter 单一通道、Java inspection/navigation/refactor 证据和 R9 三端门禁阻断；G2/G3 继续逐 capability 记账**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
+> 日期：2026-08-26 · 版本：v4.64（W1 Reference Information V3 as-built；上一版 v4.63 为 W0 shell stability + shortcut ownership）· 状态：**实施中；R0-R9 生产合同/静态门禁/native harness 与 W0（C1/C4 实跑双绿）、W1（五 kind 单通道 + Parameter 单一 request 通道 + Type/External/Static Data 诚实入口 + jdtls signatureHelp/hover/supersede-cancel/provider-channels trace）已交付，Java Basic Completion 与 QuickDoc/Parameter 主路径达 provider 层 G1 L2（Linux、jdtls 1.61/JDK 21）；G0 的代码合同已闭合但 native 故障注入与三端证据未绿；G1 仍受 Project Analysis 状态（W2）、diagnostics/intention 最小闭环（W3）、常用导航/usages（W4）与 R9 三端门禁阻断；G2/G3 继续逐 capability 记账**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
 >
-> 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链。当前阻断不再是 v4.50 记录的旧缺陷，而是：`TC-IDE-C1-01` 可复现的 workspace tree 渲染崩溃、`Ctrl+Shift+T` 在最后一个编辑器标签关闭后被 shell 抢占、Parameter Info 仍绕过统一 reference controller、`refactorApplyGate` 尚未覆盖 Rename/provider refactor、Java usages/diagnostics/refactor 缺真实 trace，以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 是 provider 结果的新鲜度台账而不是索引，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine。
+> 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链；W0 后 shell 主路径稳定且 shortcut owner deterministic，W1 后 Parameter Info 不再有私有 request 序列——五个 reference kind 共用 controller 单通道（request-id 唯一来源）、Type Info/External Documentation/Expression Static Data 有诚实入口。当前阻断是：Project Analysis 状态不解释 semantic 动作可用性（W2）、diagnostic presentation 与 provider inspection/intention 未分账（W3）、usages 角色分类与 refactor evidence gate 未闭环（W4/W5），以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 是 provider 结果的新鲜度台账而不是索引，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine，Type Info/Expression Static Data 的 typed-unavailable 不是能力可用。
 >
-> 上一版本：v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
+> 上一版本：v4.63（2026-08-25，W0 shell stability + shortcut ownership as-built）· v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
 >
 > 早期版本：v4.44（2026-08-22，`85be924f` as-built 复核、IDEA 2026.2 Editor 能力第四批对照、G0/G1 目标重排与 §8.16 合同）· v4.42（2026-08-21，`d641ad12` + `9203d3e4` + `20027dfe` as-built 复核）· v4.41（2026-08-20，`c5ce1fd6` + `5ce13c9a` as-built 复核）· v4.40（2026-08-19，`a4584916` + `b4e7325f` as-built 复核与 Gate R0 回归登记）· v4.39（2026-08-19，`dab8a778` production-path code review）· v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -31,19 +31,19 @@
 | 零生产 consumer 的模型/实验 fixture（不计任何能力） | Maven/Gradle 依赖补全、Full Line session 与 advanced companion 中尚无 production owner 的 SSR/advanced capability | `workspace/__fixtures__/experimental/*`、`companionCapabilities.ts`；它们有类型/纯函数/测试并不代表有用户入口、provider/runtime 或生产能力。Code Style、Surround/Generate 已迁出本行并按各自 as-built 边界记账 |
 | 局部生产 evidence helper（不计本地 inspection 能力） | `inspectionEvidence.ts` 负责 provider metadata 与文本分类，并由 `AnalysisPanel.tsx` 消费 | 有 production consumer，但文本关键字只能标为 presentation hint；不得据此宣称 inspection/nullability/data-flow capability，当前边界与改造合同见 §2.30/§8.20.4 |
 
-**当前明确缺失或被高估的 Editor 能力（v4.62 权威覆盖见 §2.30）：**
+**当前明确缺失或被高估的 Editor 能力（v4.64 权威覆盖见 §2.30）：**
 
-1. 两个生产可达的 shell 缺陷仍阻断 G1：`TC-IDE-C1-01` 在 Search Everywhere/Keymap 流程触发 `useWorkspaceTreeData` 的 `undefined.length` 渲染崩溃；最后一个编辑器标签关闭后 `Ctrl+Shift+T` 被 `MainLayout` 解释为 New Local Terminal，而不是 Code Workspace Reopen Closed Tab。
+1. W0 已修复两个 shell 阻断：tree IPC 判别联合 + stub 同 shape 消除 `TC-IDE-C1-01` 渲染崩溃；ShellShortcutClaim/Route router 使最后标签关闭后的 `Ctrl+Shift+T` 正确归属 Code Workspace Reopen Closed Tab。C1/C4 browser 实跑绿；不得继续引用这两个旧缺陷。
 2. R0 已修复 v4.50 所列 intended hash、discarded writeback、closed-file committer 与 per-operation resume 缺口；当前 G0 红色来自 native 故障注入和三端证据尚未执行，而不是仍存在那些旧代码缺陷。不得继续复制 v4.50 的旧结论。
-3. R6 尚未闭合：Parameter Info 仍由 `CodeMirrorHost` 的 signatureHelp 私有状态机处理，未走 `ReferenceInfoController.requestTyped`；Type Info、External Documentation 与 IDEA 2026.2 的 Expression Static Data 没有完整生产入口/provider contract；旧 `context-info` 类型不能冒充 Expression Static Data。
-4. `workspaceSemanticIndex.ts` 只记录 provider query 的 revision/generation/coverage，不扫描文件、不保存 symbol/reference graph，也不等价于 IDEA 2026.2 的 Project Analysis。Java module/source-set/dependency/classpath import snapshot、degraded/ready 状态与 smart feature 可用性仍需 provider-owned 事实源。
+3. W1 已闭合 Reference 单通道：Parameter Info 不再走 host 私有序列，五 kind 共用 `ReferenceInfoController.requestTyped`（request-id 唯一来源），旧 `context-info` 迁移为显式 unavailable，Type Info/External Documentation/Expression Static Data 有诚实入口且 jdtls trace 覆盖 signatureHelp/hover/supersede-cancel/provider-channel-absence。仍缺：Type Info/Static Data 的真实 provider 通道（当前 typed-unavailable）、External Doc 在 provider 未返回链接时不可用、IDEA 实机对录与三端重复。
+4. `workspaceSemanticIndex.ts` 只记录 provider query 的 revision/generation/coverage，不扫描文件、不保存 symbol/reference graph，也不等价于 IDEA 2026.2 的 Project Analysis。Java module/source-set/dependency/classpath import snapshot、degraded/ready 状态与 smart feature 可用性仍需 provider-owned 事实源（W2）。
 5. Java Basic Completion 已有真实 Linux jdtls 证据，但第二次调用只会诚实记录 provider scope unchanged；completion exclude/prioritize 设置、Smart/Type-Matching expected-type evidence 与 Full Line runtime 均未实现。Full Line 按 R8 ADR 继续 defer。
-6. 当前 `inspectionProfile.ts` 只隐藏或改色 provider diagnostics，suppression/baseline 也只是客户端呈现过滤；没有 IDEA-like inspection catalog/profile/scope executor、provider suppression edit、全项目检查、data-flow/nullability 或 Expression Static Data 语义。Alt+Enter CodeAction 入口存在不等于 intention/inspection 对齐。
-7. Find Usages 已有 identity/rerun/pin/library filter，但 Reads/Writes/Declarations 因 provider 无角色证据而禁用，缺 scope dialog、轻量 Show Usages、recent usages 与真实 jdtls trace。声明/类型/实现/层级/Search Everywhere 虽有 LSP 入口，也未形成 Java 对照矩阵；当前 Search Everywhere browser 流程还受第 1 项崩溃影响。
-8. Rename、Safe Delete 与 provider refactor actions 有入口、preview 和 WorkspaceEdit undo，但 `refactorApplyGate` 未成为 Rename/CodeAction 的共同门；Safe Delete 的完整性依赖有限 LSP references 推断，尚无 provider completeness/conflict 事实。Extract/Inline/Change Signature/Move 只能按 provider action 是否返回逐项记账。
-9. R4/R5/R8 仍有体验收口：Clipboard History 限额/禁用设置未接、virtual space 跨行 visual-column 记忆和 native 像素路径未证实、region folding fallback 标签未收口、Tab Policy 无编辑 UI且 display-order/activateOnClose 未消费、Code Style saveActions/exclusion/directory/module/rearrange/cleanup 未生产化。
-10. IDEA 高级能力继续缺失或明确延期：SSR、Maven/Gradle dependency completion、Full Line、Code Vision、scratch files、language injection、semantic postfix/template functions、完整 detach。已有 schema/fixture/unavailable 提示不得计为实现。
-11. Linux/macOS/Windows 的 IME、非美式键盘、系统快捷键、clipboard denied、字体/高 DPI、路径/watcher、编码/锁定文件和打包应用证据仍缺。R2 静态 gate 已绿，但最近 browser 执行只有 5/6 可运行核心 case 通过，C1 失败；C0/C2/C6-02 因 native/provider 环境受阻，R9 前不得升 release-ready。
+6. 当前 `inspectionProfile.ts` 只隐藏或改色 provider diagnostics，suppression/baseline 也只是客户端呈现过滤；没有 IDEA-like inspection catalog/profile/scope executor、provider suppression edit、全项目检查、data-flow/nullability 或 Expression Static Data 语义。Alt+Enter CodeAction 入口存在不等于 intention/inspection 对齐（W3）。
+7. Find Usages 已有 identity/rerun/pin/library filter，但 Reads/Writes/Declarations 因 provider 无角色证据而禁用，缺 scope dialog、轻量 Show Usages、recent usages 与真实 jdtls trace。声明/类型/实现/层级/Search Everywhere 虽有 LSP 入口，也未形成 Java 对照矩阵（W4）。
+8. Rename、Safe Delete 与 provider refactor actions 有入口、preview 和 WorkspaceEdit undo，但 `refactorApplyGate` 未成为 Rename/CodeAction 的共同门；Safe Delete 的完整性依赖有限 LSP references 推断，尚无 provider completeness/conflict 事实。Extract/Inline/Change Signature/Move 只能按 provider action 是否返回逐项记账（W5）。
+9. R4/R5/R8 仍有体验收口：Clipboard History 限额/禁用设置未接、virtual space 跨行 visual-column 记忆和 native 像素路径未证实、region folding fallback 标签未收口、Tab Policy 无编辑 UI且 display-order/activateOnClose 未消费、Code Style saveActions/exclusion/directory/module/rearrange/cleanup 未生产化（W6）。
+10. IDEA 高级能力继续缺失或明确延期：SSR、Maven/Gradle dependency completion、Full Line、Code Vision、scratch files、language injection、semantic postfix/template functions、完整 detach。已有 schema/fixture/unavailable 提示不得计为实现（W8）。
+11. Linux/macOS/Windows 的 IME、非美式键盘、系统快捷键、clipboard denied、字体/高 DPI、路径/watcher、编码/锁定文件和打包应用证据仍缺。R2 静态 gate 已绿，browser C1/C4/C5 实跑绿；C0/C2/C6-02 因 native/provider 环境受阻，R9 前不得升 release-ready（W7）。
 
 ---
 
@@ -872,16 +872,16 @@ R2 必须先修 catalog ownership 和 broken cases，再把 `TC-IDE-C0/C1/C2/C3/
 | 能力 | 当前 HEAD 可证明事实 | 未闭合 / 被高估边界 | 最高声明与 §8.20 包 |
 |---|---|---|---|
 | **Save/recovery/WorkspaceEdit** | R0 的 native intent/old hash、disk-effect ledger v4、discarded-writeback recovery、closed-file committer、per-operation effect/resume 已进入生产；单测覆盖 typed result 与恢复分支 | 本轮未跑 locked/permission/atomic-replace/watcher/encoding 的 packaged native fault matrix | **代码合同 L2，platform-unverified；G0 仍红**；W7 |
-| **ActionHost/Keymap** | R1 已把业务键位迁入 workspace-scoped host，支持 two-stroke、mouse dispatcher、IME/dead-key/AltGr gate、可编辑 scheme/conflict | browser C1 在打开/使用相关工作流时触发 tree hook 崩溃；shell 与 workspace 对 `Ctrl+Shift+T` 的 owner 冲突仍存在 | **核心合同 L2，G1 阻断**；W0 |
+| **ActionHost/Keymap** | R1 已把业务键位迁入 workspace-scoped host，支持 two-stroke、mouse dispatcher、IME/dead-key/AltGr gate、可编辑 scheme/conflict；W0 补齐 ShellShortcutClaim/Route root router 与 tree IPC 判别联合 | native 态四上下文（editor-open/editor-empty/terminal-focused/dialog-open）回归未跑（W7） | **核心合同 L2(browser 实跑绿)**；W7 复验 |
 | **Basic Completion** | R3 有 resolve failure choice、invocation scope 事实、one-dispatch/one-undo；五个 Maven/Gradle fixture、九场景在 Linux jdtls 1.61/JDK 21 留有脱敏 trace | 无 IDEA 实机对录、Windows/macOS 未跑；第二次调用的 provider scope 可为 unchanged；exclude/prioritize/Smart 不可用 | **Java Basic G1 L2 provider-backed（Linux）**；W2/W7 |
-| **Reference Information** | QuickDoc popup/tool window/pin/history/URL policy可达；signatureHelp 参数弹层可用；`ReferenceInfoController.requestTyped` 已有五 kind 类型与 cancel/stale 测试 | Parameter 仍不走 controller；Type/External 缺完整入口；`context-info` 与 IDEA 当前 Expression Static Data 语义不相同；无真实 provider trace | **QuickDoc L2(jsdom)，Parameter L1/L2 partial，其余 L0/L1**；W1 |
+| **Reference Information** | QuickDoc popup/tool window/pin/history/URL policy可达；W1 后五 kind 共用 `requestTyped` 单通道（request-id 唯一来源、per-kind supersede、context-info 显式迁移）；Parameter 由 `ParameterInfoSession` 驱动（设置延迟/显式零延迟/Esc 按 kind/caret-doc-provider 关闭），host 纯显示；`lsp_signature_help` 接入 `$/cancelRequest` bridge；Type/External/Static Data 有生产入口与 typed unavailable；jdtls trace 覆盖 overload/nested/generic signatureHelp、project/JDK/library hover、supersede-cancel、channel absence、restart 恢复 | Type Info/Expression Static Data 当前无 LSP provider 通道（保持 L0/L1 unavailable-contract）；External Doc 仅在 last ready QuickDoc 含真实 https 链接时可用；IDEA 实机对录与 Windows/macOS 未跑 | **QuickDoc L2(jsdom+provider Linux)，Parameter L2(单通道合同)+provider trace(Linux)，External L1，Type/Static L0-L1**；W1 ✅ |
 | **Project Analysis / Java context** | SDK/JDK 探测、jdtls session、progress 与 `WorkspaceSemanticIndexSnapshot` freshness/coverage 事实存在 | snapshot 不扫描/索引 symbol；没有统一 module/source/test/generated/excluded/dependency import snapshot，ready 不代表 IDEA smart mode 等价 | **provider lifecycle L1**；W2 |
 | **Diagnostics / Intention** | provider diagnostics、Problems/Analysis、CodeAction/resolve/apply、presentation profile/suppression/baseline UI存在 | profile 只影响展示；无 provider inspection catalog/scope/settings/suppression edit；无全项目 inspection/data-flow/nullability 证明；真实 jdtls quick-fix trace缺失 | **diagnostics L2，inspection/intention suite L1**；W3 |
-| **Search / Navigation / Hierarchy** | Search Everywhere 有 All/Class/File/Symbol/Action/Text；definition/type/implementation、call/type hierarchy、Recent/Last Edit/Back/Forward 与结构视图均有生产入口 | C1 shell 崩溃；symbol fan-out 完整性依赖 provider；siblings/method navigation 等 IDEA 子项未闭合；Java fixture/IDEA compare不足 | **mixed L1/L2**；W0/W4 |
+| **Search / Navigation / Hierarchy** | Search Everywhere 有 All/Class/File/Symbol/Action/Text；definition/type/implementation、call/type hierarchy、Recent/Last Edit/Back/Forward 与结构视图均有生产入口；W0 后 C1 shell 崩溃已修（palette 流程实跑绿） | symbol fan-out 完整性依赖 provider；siblings/method navigation 等 IDEA 子项未闭合；Java fixture/IDEA compare不足 | **mixed L1/L2**；W4 |
 | **Usages** | identity/project fingerprint、rerun、pin replace guard、分页与 library owner filter 已生产化 | Reads/Writes/Declarations禁用；无 scope dialog、轻量 Show Usages、recent query；无真实 jdtls role/coverage/cancel/restart trace | **L1**；W4 |
 | **Refactor** | Rename/Safe Delete/provider refactor kinds、preview/exclude、WorkspaceEdit history/undo有入口；Generate 也复用真实 CodeAction apply链 | `refactorApplyGate` 未覆盖 Rename/一般 CodeAction；Safe Delete completeness由客户端推断；Extract/Inline/Change Signature/Move无逐项真实 trace/conflict/post-image | **逐 action L1**；W5 |
 | **Format / Code Style / Imports** | scheme CRUD/持久化、EditorConfig/scheme provenance、selection/file planner 与 provider format、format-on-save、organize imports存在 | scheme saveActions未消费；exclusion UI/directory/module/rearrange/cleanup关闭；provenance未逐字段展示完整 chain | **selection/file L2(jsdom)，suite L1**；W6 |
-| **Tabs / Splits / Tool windows** | 13 项真实 dock registry、frozen Switcher、policy V3持久化、tab limit、equalize/stretch/unsplit/navigation/move、graded close/ReopenLocationV2；C4 browser 通过 | policy无设置 UI，display order/activateOnClose未消费，detach defer；最后 tab 关闭后的 chord owner错误 | **核心 workflow L2(browser)，平台未验证**；W0/W6/W7 |
+| **Tabs / Splits / Tool windows** | 13 项真实 dock registry、frozen Switcher、policy V3持久化、tab limit、equalize/stretch/unsplit/navigation/move、graded close/ReopenLocationV2；W0 后最后 tab 关闭的 `Ctrl+Shift+T` 归属 router 决定（C4 实跑绿） | policy无设置 UI，display order/activateOnClose未消费，detach defer | **核心 workflow L2(browser)，平台未验证**；W6/W7 |
 | **Clipboard / Multi-caret / Virtual Space** | history popup、sensitive/limit model、plain paste、copy reference、multi-segment one-undo、End/click/type/backspace/paste virtual overflow；C3 browser 通过 | History settings未接；vertical column memory不完整；pixel geometry、clipboard denied、IME/native未验证；region fallback仍 heuristic | **核心 workflow L2(browser/jsdom)**；W6/W7 |
 | **Semantic edit / Templates** | Java五种 Surround 同入口/事务且 provenance诚实；Generate只显示 provider action；Java部分 Complete Statement syntax-backed，其余 local heuristic | 无真实 jdtls Surround/Generate trace；placeholder Tab/choice/import shortening、typed postfix applicability、Smart evidence缺失 | **local subset L1/L2，provider semantic未验证**；W2/W8 |
 | **Advanced** | R8 已明确 A/B/C defer，Code Style D1/D2交付；SSR/dependency/Full Line都有 typed unavailable与重开条件 | 无 parser/query、trusted metadata client、signed local model/ghost text；Code Vision/scratch/injection/detach无生产 owner | **defer / L0-L1 unavailable**；W8 |
@@ -891,7 +891,7 @@ R2 必须先修 catalog ownership 和 broken cases，再把 `TC-IDE-C0/C1/C2/C3/
 | 目标 | 当前状态 | 已完成 | 解除条件 |
 |---|---|---|---|
 | **G0 Editor Integrity** | **红（代码合同闭合，发布证据未闭合）** | R0/R1 typed effect、恢复、单一 action/keymap runtime | W7 的 Linux/Windows/macOS 故障矩阵；无未解释磁盘 effect、IME/action ownership 或恢复失败 |
-| **G1 Core Daily Editing** | **未达** | Basic Completion Linux L2；常用编辑/QuickDoc/format/clipboard/tabs/splits 多数达 jsdom/browser L2 | W0 shell稳定；W1 Parameter/Reference 单通道；W2 项目分析状态；W3 diagnostics/intention 最小闭环；W4 常用导航/usages；W7 三端/a11y |
+| **G1 Core Daily Editing** | **未达** | Basic Completion Linux L2；W0 shell 主路径稳定 + shortcut owner deterministic（C1/C4 实跑绿）；W1 Parameter/QuickDoc 单通道 + 五 kind 诚实入口（C5 实跑绿）；常用编辑/QuickDoc/format/clipboard/tabs/splits 多数达 jsdom/browser L2 | W2 项目分析状态；W3 diagnostics/intention 最小闭环；W4 常用导航/usages；W7 三端/a11y |
 | **G2 Java Semantic Workflow** | **未达；仅 Basic Completion 单项到 provider L2** | 真实 jdtls completion fixture 与通用 semantic identity/effect底座 | W2-W5 逐 capability真实 trace + IDEA expected/observed；每项独立升 L2/L3，不设整包布尔完成 |
 | **G3 Advanced Editing** | **分项可用/多数延期** | clipboard history、Code Style首批、local Surround/Complete Statement子集 | W6收口已生产子项；W8只在重开条件满足后实施 SSR/dependency/Full Line/Code Vision/scratch/injection/detach |
 
@@ -5578,7 +5578,7 @@ Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
 | 顺序 | 状态 | 包 | 目标 | 依赖 |
 |---:|---|---|---|---|
 | 1 | [x] | **W0 Shell stability + shortcut ownership（v4.63 as-built）** | 修复 C1 渲染崩溃与 `Ctrl+Shift+T` owner 冲突，恢复 G1 可执行基线 | R1 |
-| 2 | [ ] | **W1 Reference Information V3** | Parameter/QuickDoc 单一请求通道；按 IDEA 2026.2 修正 Type/External/Expression Static Data 边界 | W0、R3/R6 |
+| 2 | [x] | **W1 Reference Information V3（v4.64 as-built）** | Parameter/QuickDoc 单一请求通道；按 IDEA 2026.2 修正 Type/External/Expression Static Data 边界 | W0、R3/R6 |
 | 3 | [ ] | **W2 Java Project Analysis truth** | provider-owned project/import snapshot、ready/degraded 状态和可复用 jdtls evidence runner | W0、R3 |
 | 4 | [ ] | **W3 Inspection + Intention provider contract** | 把 diagnostic presentation 与 provider analysis/action 执行彻底分账 | W2、R0/R1 |
 | 5 | [ ] | **W4 Navigation + Usages + Hierarchy** | scope/coverage/roles/history/preview 与 Java 真实 trace | W2、W1 |
@@ -5786,6 +5786,132 @@ QuickDoc 保留 popup -> 第二次 action/Pin -> Documentation pane 的工作流
 **真实证据。** 扩展 jdtls runner覆盖 overloaded method active parameter、nested call、generic signature、doc at project symbol/JDK/library source、supersede cancel、provider restart。Type/External/Static Data 只运行 provider支持项；unsupported trace也是有效证据，但等级保持 L0/L1。
 
 **DoD。** 删除 Parameter 私有 request sequence或降为纯 display adapter；全仓只有 controller生成 reference request id。unit/mounted覆盖五 kind、延迟、Esc/focus restore、history/pin、URL policy、stale/cancel；QA C5 执行 explicit Parameter + QuickDoc + unavailable kind。G1 只在 Parameter/QuickDoc provider主路径 L2 后解除此项；不得宣称 Reference Suite complete。
+
+**W1 as-built（v4.64，2026-08-26）。** 按 §8.19.11 模板：
+
+```text
+包 ID / commit / capability ID
+    W1 / 本包提交（feat/code-workspace-idea-parity） /
+    editor.reference-info-v3（五 kind 单通道 + context-info 迁移）,
+    editor.parameter-info-single-channel,
+    editor.quick-doc（V3 迁移，工作流不变）
+As-built production call chain
+    ①controller V3：referenceInfoController.ts 重写为
+      ReferenceKindV3（parameter-info/quick-documentation/
+      external-documentation/type-info/expression-static-data）+
+      ReferencePayloadV3 逐 kind 载荷（type-info/static-data 的
+      source:"provider" 进入类型，文本派生载荷无法构造）+
+      ReferenceResultV3。requestTyped 是唯一入口：
+      provider 回传 {state:"payload"|"unavailable"}|null；
+      controller 负责 per-kind supersede/AbortController/identity
+      复核、external URL https-only 边界校验、逐 kind 非空校验
+      （empty-signatures/empty-documentation/empty-type/empty-facts）、
+      lastReady(kind) 事实源记录。requestId 仅由 controller 以
+      `<workspace>:<kind>:<seq>` 生成——全仓唯一。
+      迁移：isLegacyContextInfoKind("context"|"context-info") →
+      migrateLegacyContextInfoRecord() =
+      {state:"unavailable",kind:"expression-static-data",
+       reason:"legacy-context-info-not-expression-static-data"}，
+      不自动映射到真实 kind。
+    ②Parameter 单通道：新建 referenceInfoSession.ts
+      （ParameterInfoSession）：持有 fileKey/uri/languageId/
+      documentRevision/providerGeneration 身份快照与 autoPopup/
+      delayMs 设置；typing 触发按设置门控+延迟，显式动作零延迟；
+      fire 前复核身份（stale schedule 不出网）；ready→shown，
+      unavailable/cancelled/stale→hidden；setContext 变化（文件切换/
+      文档 revision/provider generation）关闭旧 tooltip 并 cancel；
+      invalidate(doc-changed|caret-moved|closing-char) 由 host 上报；
+      escape() 仅在本 kind 有 pending/shown 时消费 Esc。
+      CodeMirrorHost 删除私有 signature 状态机
+      （signatureShownRef/signatureRequestSequenceRef/
+      signatureDelayTimerRef/requestSignatureHelp 全部移除），改为
+      onParameterTrigger/onParameterInvalidate/onParameterEscape 三个
+      事件出口 + parameterPopup 受控渲染（signatureCompartment 只画
+      session 发布的视图；仅 active leaf 收到 popup，非活跃 split 不
+      渲染他人锚点）。Esc 内联栈顺序保持 completion（高优先级）→
+      snippet → selection collapse → parameter-escape（ref 询问
+      session，无 UI 时返回 false 不抢键）。
+      CodeWorkspaceTab：parameterInfoProvider 经 lspSignatureHelp 新
+      cancel bridge（cancelKey+requestSeq → Rust
+      begin_reference_request/$ /cancelRequest）；quick-documentation
+      显式与 hover 双入口迁移到 requestTyped（envelope 字段 title/
+      source/uri 在调用侧闭包捕获，payload 保持 {markdown,source} 纯净）；
+      history 仍只写 ready QuickDoc。
+    ③新入口：workspace.typeInfo（Ctrl+Shift+P，IDEA 2026.2 对齐）、
+      workspace.externalDocumentation（when 依据
+      extractProviderDocLinks(lastReady quick-doc) 中存在可通过
+      https-only 校验的真实 provider URL enable；run 从该事实构造
+      payload，禁止 symbol 拼接）、workspace.expressionStaticData
+      （可发现 action；adapter 如实返回
+      provider-no-static-data-channel /
+      provider-no-type-info-channel）。lsp.ts/lsp.rs：
+      lsp_signature_help 增加 cancel_key/request_seq，cancelled 时
+      返回空签名+新鲜 status（镜像 lsp_hover）；browser stub 同 shape。
+修改 owner 文件（无关文件数 0）
+    referenceInfoController.ts(+test 重写)、referenceInfoSession.ts(新
+    +test)、referenceDocumentation.ts(extractProviderDocLinks,+test)、
+    CodeMirrorHost.tsx(+test 更新)、EditorGroup.tsx(+test props)、
+    CodeWorkspaceTab.tsx、lib/editor/lsp.ts、src-tauri/src/lsp.rs、
+    src/stubs/tauri-core.ts、jdtls fixture 三件（App.java signatureTargets、
+    run-jdtls-fixture.mjs、lsp-client.mjs tracked-request/cancel）、
+    jdtlsFixtureExpectations.ts+jdtlsTraceContract.test.ts（新增
+    signature-help/hover-doc/supersede-cancelled-first/channel-absent/
+    restart-signature-ok 断言）、qa TC-IDE-C5-01 重写、feature-list.md
+    （F25.5/F1.7 控件登记）、referenceInfoServiceV2.test.ts 删除由
+    referenceInfoServiceV3.test.ts 替代。
+旧缺陷复现 -> 结果
+    ①Parameter Info 由 host 私有序列直呼 lsp_signature_help（无
+      cancel bridge、无 identity、无 supersede 合同）→ 单通道后：
+      unit 覆盖延迟/显式零延迟/supersede/Esc 作用域/stale 关闭；
+      browser C5 explicit Ctrl+P 无 provider 时不出弹层不崩溃（9.5s 绿）。
+    ②context-info 类型冒充静态数据风险 → 迁移为显式 unavailable，
+      contract test 固定 reason 字符串。
+    ③Type/External/Static Data 无生产入口 → 三个可发现 action +
+      typed unavailable；External Doc 仅在真实 provider URL 存在时
+      enable。
+接口/schema/migration 与 compatibility
+    ReferencePayload/ReferenceResultV2/referenceKindFromInfoKind 移除
+    （唯一生产消费方 CodeWorkspaceTab 同提交迁移）；QuickDocContent
+    envelope 与 QuickDocPopup/DocumentationPane 显示链不变；
+    WorkspaceIntelligencePreferences 存储不变（delay/auto-popup 用户现值
+    自动保留）。Rust lsp_signature_help 新参可空，旧调用兼容。
+cancel/stale/error/disk/provider/undo effect
+    cancel：controller AbortSignal → cancel bridge $/cancelRequest
+    （provider 层取消，非仅 UI）；supersede-cancel 有真实 jdtls trace。
+    stale：identity(documentRevision/providerGeneration) 复核 + session
+    快照比对双保险。error：failed 带 message，不写 history。
+    disk/undo：不涉及（W1 无编辑效果）。
+Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
+    unit：vitest 全量 336 files/2968 tests 绿（含 controller V3、session、
+    cancellation、URL 提取、host 受控渲染；jdtlsTraceContract 34 例含
+    新 W1 断言）；tsc -b/pnpm build 绿；cargo check 绿 +
+    cargo test --lib lsp:: 97 绿。QA browser：TC-IDE-C5-01 重写后
+    9.5s 绿（explicit Parameter 不出弹层、QuickDoc unavailable、palette
+    触发 Expression Static Data 显示 typed unavailable status）；
+    C1/C4 回归 7.5s/11.2s 绿；audit --gate 绿（0 orphan，baseline 无回归）。
+    provider：maven-single trace 重新生成全绿（14 场景：5 completion +
+    5 signatureHelp + supersede-cancel(-32800) + 3 hover + providerChannels
+    + restart 双恢复 6727ms）；trace contract 对新断言绿。
+    native/IDEA compare：未跑。
+未运行项及原因
+    Windows/macOS（无环境，W7 矩阵统一）；IDEA 2026.2 实机对录
+    （仍需录制，sig-* ideaExpected 为人工整理）。
+最高可声明 L0-L3 + evidence layers
+    QuickDoc L2(jsdom)+L2(provider, Linux jdtls trace)；Parameter Info
+    L2(单通道合同, jsdom)+provider trace(Linux)；External Documentation
+    L1(unavailable-contract+URL policy, jsdom)；Type Info /
+    Expression Static Data L0-L1(typed unavailable, provider channel
+    absence 有 trace 佐证)。三端/platform-unverified 全部保留。
+禁止声明仍有哪些
+    不得宣称 "Reference Suite complete"；不得把 Type Info/
+    Static Data 的 unavailable-contract 说成 capability 可用；不得从
+    hover markdown 推断类型或静态事实；IDEA-equivalent 未建立。
+残余风险与下一依赖包
+    provider-restart 时已显示 tooltip 的即时关闭依赖下一次交互
+    （响应侧已由 generation identity 保证不复活）；下一包 W2
+    （Project Analysis truth，提供 CapabilityEvidenceV3.projectFingerprint
+    后 reference 结果可升级为完整 envelope）。
+```
 
 #### 8.20.3 W2：Java Project Analysis truth 与 provider evidence foundation（G1/G2/P1）
 
@@ -6009,7 +6135,7 @@ ADR必须包含：依赖/license/security、生产call chain、failure/unavailab
 
 #### 8.20.10 合并顺序、owner 冲突与 agent 回报
 
-1. W0先合并并重跑C1/C4；在此之前不要用失败的shell workflow验证其它包。
+1. W0/W1 已合并并实跑 C1/C4/C5 绿；后续包直接以当前 HEAD 为 shell 稳定基线，不再复验 W0 缺陷本身。
 2. W1可与W2并行，但都触及 `CodeWorkspaceTab.tsx` 时先约定区域：W1只改reference/signature adapter，W2只改project/LSP lifecycle。W3-W5统一消费W2 fingerprint/evidence。
 3. W3/W4只请求/展示结果；任何edit仍进R0。W5是唯一可以改变refactor apply gate的包。
 4. W6按A-E独立提交，行为owner与settings/catalog同提交；不得把五个子包压成一个review单元。
@@ -6048,7 +6174,7 @@ Unit / mounted / Rust / QA audit / browser / native / provider / IDEA compare
 | 分屏共享 buffer 复杂度 | 双 view 已可用，递归 layout 后同步/焦点/关闭更易竞态 | 保持单 buffer ownership；先定义递归 layout state 与迁移，再逐步开放 nested split |
 | Inlay hints 抖动 | 编辑时 hint 频繁重排 | 视口 range + 滚动/编辑防抖；默认关，用户主动开启 |
 | 底部终端生命周期 | 工作区关闭时 PTY 泄漏 | 随 tab 卸载显式销毁；复用现有 TerminalPanel 清理路径 |
-| Shell / Workspace shortcut owner 冲突 | R1 已收敛 workspace 内部 ActionHost，但 `MainLayout` 仍会在最后一个 editor tab 关闭后抢占 `Ctrl+Shift+T`，window capture 与 workspace context 的优先级可再次分叉 | W0 定义 shell action broker、route/focus/context owner 和 `preventDefault` 规则；同一快捷键在 editor-open、editor-empty、terminal-focused、dialog-open 四态做 mounted/browser/native 回归 |
+| Shell / Workspace shortcut owner 冲突 | R1 已收敛 workspace 内部 ActionHost；W0 的 ShellShortcutClaim/Route root router 已交付（modal > active-workspace > active-tab > shell），C4 实跑验证最后 tab 关闭后 chord 归属 workspace.reopenClosedTab | 回归防线：同一快捷键在 editor-open、editor-empty、terminal-focused、dialog-open 四态做 mounted/browser/native 回归（native 态归 W7 矩阵）；W1 在 editor 内新增 Escape 槽位时保持 completion 先行的顺序合同 |
 | Action context 分叉（历史已修，仍需防回归） | `a4584916` 曾让 `getState`/`execute` 分别构造 context，`c5ce1fd6` 与 R1 已恢复单一 `buildContext` 和 executable snapshot | 保留同一命令由 keymap、menu、palette、mouse 进入时结果一致的合同测试；W0 修改 shell broker不得重建第二套 `when`/focus/payload 解释器 |
 | ActionHost 生命周期回归（历史已修） | `5ce13c9a` 曾以删除 `host.dispose()` 绕过 StrictMode 双挂载；R1 已恢复 workspace-scoped 创建、释放和隔离合同 | 保留双 workspace、StrictMode、真实 unmount/disposed 后行为测试；W0 shell broker只持弱/可撤销注册，不延长 workspace host 生命周期 |
 | Save/recovery 合同的 native 事实未验证 | R0 已补齐 intended hash、foreign/unknown、discarded writeback、closed-file committer与逐 operation resume；风险已从“代码路径缺失”转为三端文件系统/编码/锁/崩溃证据不足 | 按 §8.20.8 跑 locked/permission/atomic-replace/watcher/encoding/partial-resume manifest；任何未知 disk effect 保持 G0 红，不以单测替代 packaged native 结果 |

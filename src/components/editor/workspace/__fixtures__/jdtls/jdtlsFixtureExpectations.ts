@@ -23,7 +23,17 @@ export type TraceAssertion =
   /** Merged acceptance reverts to the original document sha256 exactly. */
   | { type: "revert-restores-hash" }
   /** Provider restart recovered: same case green on a fresh session. */
-  | { type: "restart-ok" };
+  | { type: "restart-ok" }
+  /** §8.20.2 W1: signatureHelp returned a usable overload family. */
+  | { type: "signature-help"; minSignatures?: number; labelContains?: string; activeParameterEquals?: number }
+  /** §8.20.2 W1: hover delivered non-empty provider documentation. */
+  | { type: "hover-doc" }
+  /** §8.20.2 W1: $/cancelRequest aborted the in-flight request before use. */
+  | { type: "supersede-cancelled-first" }
+  /** §8.20.2 W1: the provider declares NO channel for this reference kind. */
+  | { type: "channel-absent"; channel: "typeInfoChannel" | "staticDataChannel" }
+  /** §8.20.2 W1: signatureHelp recovers on a fresh session after SIGKILL. */
+  | { type: "restart-signature-ok" };
 
 export interface JdtlsTraceExpectation {
   caseId: string;
@@ -130,5 +140,81 @@ export const JDTLS_FIXTURE_EXPECTATIONS: readonly JdtlsTraceExpectation[] = [
     fixture: "maven-single",
     assert: { type: "restart-ok" },
     ideaExpected: "After a provider crash IDEA restarts jdtls and completion recovers on the same project.",
+  },
+
+  // ---- §8.20.2 W1: Reference Information over real jdtls. ----------------
+  {
+    caseId: "sig-overload-family",
+    fixture: "maven-single",
+    assert: { type: "signature-help", minSignatures: 2, labelContains: "append" },
+    ideaExpected: "Parameter Info lists the StringBuilder.append overload family with the active one highlighted and the parameter under the caret bolded.",
+  },
+  {
+    caseId: "sig-active-parameter-advance",
+    fixture: "maven-single",
+    assert: { type: "signature-help", minSignatures: 1, activeParameterEquals: 1 },
+    ideaExpected: "Moving the caret past an argument comma highlights the next parameter of the matching overload (activeParameter advances).",
+  },
+  {
+    caseId: "sig-nested-inner",
+    fixture: "maven-single",
+    assert: { type: "signature-help", minSignatures: 1, labelContains: "parseInt" },
+    ideaExpected: "Inside a nested call the INNER invocation owns Parameter Info at its own argument list.",
+  },
+  {
+    caseId: "sig-nested-outer",
+    fixture: "maven-single",
+    assert: { type: "signature-help", minSignatures: 1, labelContains: "valueOf" },
+    ideaExpected: "With the caret in the outer argument list, Parameter Info resolves the outer call (String.valueOf).",
+  },
+  {
+    caseId: "sig-generic",
+    fixture: "maven-single",
+    assert: { type: "signature-help", minSignatures: 1, labelContains: "singletonList" },
+    ideaExpected: "Generic methods show their instantiated signature; IDEA renders <T>singletonList(T) per the inferred type arguments.",
+  },
+  {
+    caseId: "sig-supersede-cancel",
+    fixture: "maven-single",
+    assert: { type: "supersede-cancelled-first" },
+    ideaExpected: "Caret moves cancel the outstanding Parameter Info query; no stale tooltip ever renders from it.",
+  },
+  {
+    caseId: "hover-project-symbol",
+    fixture: "maven-single",
+    assert: { type: "hover-doc" },
+    ideaExpected: "Quick Documentation on a project symbol shows its javadoc rendered, with links into the project source.",
+  },
+  {
+    caseId: "hover-jdk-symbol",
+    fixture: "maven-single",
+    assert: { type: "hover-doc" },
+    ideaExpected: "Quick Documentation on String.valueOf shows the JDK javadoc without any download step.",
+  },
+  {
+    caseId: "hover-library-symbol",
+    fixture: "maven-single",
+    assert: { type: "hover-doc" },
+    ideaExpected: "Library symbols document from attached sources; without sources IDEA decompiles or shows the signature-level info instead of nothing.",
+  },
+  {
+    caseId: "channel-type-info-absent",
+    fixture: "maven-single",
+    scenarioKey: "__providerChannels",
+    assert: { type: "channel-absent", channel: "typeInfoChannel" },
+    ideaExpected: "IDEA's Type Info (Ctrl+Shift+P) is PSI-backed; plain LSP servers expose no equivalent channel — an honest unavailable contract is required.",
+  },
+  {
+    caseId: "channel-static-data-absent",
+    fixture: "maven-single",
+    scenarioKey: "__providerChannels",
+    assert: { type: "channel-absent", channel: "staticDataChannel" },
+    ideaExpected: "IDEA's Java Expression Static Data comes from JetBrains analysis; LSP providers expose nothing similar — discoverable action + explicit unavailable only.",
+  },
+  {
+    caseId: "restart-signature-ok",
+    fixture: "maven-single",
+    assert: { type: "restart-signature-ok" },
+    ideaExpected: "After a provider restart, Parameter Info recovers together with completion on the same project.",
   },
 ];

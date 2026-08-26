@@ -560,16 +560,29 @@ export function lspCompletionResolve(
   });
 }
 
+export interface LspReferenceRequestOptions {
+  /** Per-file cancellation key shared with the native cancel registry. */
+  cancelKey?: string;
+  /**
+   * Monotonic request sequence; a higher seq for the same cancelKey aborts
+   * this request via `$/cancelRequest` (§8.18.6/§8.20.2).
+   */
+  requestSeq?: number;
+}
+
 export function lspSignatureHelp(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
   triggerCharacter?: string | null,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspSignatureHelpResult> {
   return invoke<LspSignatureHelpResult>("lsp_signature_help", {
     ...documentArgs(descriptor),
     line: position.line,
     character: position.character,
     triggerCharacter: triggerCharacter ?? null,
+    cancelKey: options?.cancelKey ?? null,
+    requestSeq: options?.requestSeq ?? null,
   });
 }
 

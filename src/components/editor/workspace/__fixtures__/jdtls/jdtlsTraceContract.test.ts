@@ -39,9 +39,36 @@ const FIXTURE_IDS = [...new Set(JDTLS_FIXTURE_EXPECTATIONS.map((entry) => entry.
 
 interface TraceScenario {
   caseId: string;
+  kind?: string;
   requests?: Array<{ satisfied: boolean; itemCount: number; evaluationReason: string | null }>;
   resolve?: { additionalEditCount: number; additionalEditTexts: readonly string[] } | null;
   acceptance?: { revertRestoresOriginalHash: boolean } | null;
+  signatureHelp?: {
+    satisfied: boolean;
+    signaturesCount: number;
+    labels: readonly string[];
+    activeParameter: number | null;
+    evaluationReason: string | null;
+  } | null;
+  supersede?: {
+    firstOutcome: string;
+    firstCancelled: boolean;
+    secondSatisfied: boolean;
+  } | null;
+  hover?: {
+    contentsPresent: boolean;
+    contentsKind: string | null;
+    externalLinks: readonly string[];
+    excerpt: string | null;
+    evaluationReason: string | null;
+  } | null;
+}
+
+interface ProviderChannels {
+  signatureHelpProvider: boolean;
+  hoverProvider: boolean;
+  declaredTypeInfoChannel: boolean;
+  declaredStaticDataChannel: boolean;
 }
 
 interface FixtureTrace {
@@ -51,7 +78,12 @@ interface FixtureTrace {
   toolchain: Record<string, unknown>;
   buildModelFingerprint: string;
   scenarios: TraceScenario[];
-  restart?: { performed: boolean; completionOkAfterRestart: boolean };
+  providerChannels?: ProviderChannels;
+  restart?: {
+    performed: boolean;
+    completionOkAfterRestart: boolean;
+    signatureHelpOkAfterRestart?: boolean | null;
+  };
   failures: readonly string[];
 }
 
@@ -123,6 +155,48 @@ describe("§8.19.4 real jdtls trace contract", () => {
         case "restart-ok": {
           expect(trace.restart?.performed).toBe(true);
           expect(trace.restart?.completionOkAfterRestart).toBe(true);
+          break;
+        }
+        case "signature-help": {
+          const assertion = entry.assert;
+          expect(scenario?.signatureHelp, `no signatureHelp record for ${entry.caseId}`).not.toBeNull();
+          expect(scenario!.signatureHelp!.satisfied, scenario!.signatureHelp!.evaluationReason ?? undefined).toBe(true);
+          expect(scenario!.signatureHelp!.signaturesCount).toBeGreaterThanOrEqual(assertion.minSignatures ?? 1);
+          if (assertion.labelContains !== undefined) {
+            expect(
+              scenario!.signatureHelp!.labels.some((label) => label.includes(assertion.labelContains!)),
+              JSON.stringify(scenario!.signatureHelp!.labels),
+            ).toBe(true);
+          }
+          if (assertion.activeParameterEquals !== undefined) {
+            expect(scenario!.signatureHelp!.activeParameter).toBe(assertion.activeParameterEquals);
+          }
+          break;
+        }
+        case "hover-doc": {
+          expect(scenario?.hover, `no hover record for ${entry.caseId}`).not.toBeNull();
+          expect(scenario!.hover!.contentsPresent, scenario!.hover!.evaluationReason ?? undefined).toBe(true);
+          break;
+        }
+        case "supersede-cancelled-first": {
+          expect(scenario?.supersede, `no supersede record for ${entry.caseId}`).not.toBeNull();
+          expect(scenario!.supersede!.firstCancelled).toBe(true);
+          // The replacement request must satisfy — cancel is not a outage.
+          expect(scenario!.supersede!.secondSatisfied).toBe(true);
+          break;
+        }
+        case "channel-absent": {
+          const channels = trace.providerChannels;
+          expect(channels, `no providerChannels record in ${entry.fixture} trace`).toBeDefined();
+          const declared = entry.assert.channel === "typeInfoChannel"
+            ? channels!.declaredTypeInfoChannel
+            : channels!.declaredStaticDataChannel;
+          expect(declared, `${entry.fixture} unexpectedly declares a channel; the unavailable contract must be re-evaluated`).toBe(false);
+          break;
+        }
+        case "restart-signature-ok": {
+          expect(trace.restart?.performed).toBe(true);
+          expect(trace.restart?.signatureHelpOkAfterRestart, "signatureHelp did not recover after restart").toBe(true);
           break;
         }
       }

@@ -33,8 +33,8 @@ import type {
 import type {
   LspCompletionItem,
   LspCompletionResult,
-  LspSignatureHelpResult,
 } from "../../../lib/editor/lsp";
+import type { ParameterPopupView } from "./referenceInfoSession";
 import {
   CodeMirrorHost,
   type EditorCommandPortRegistration,
@@ -139,8 +139,6 @@ interface EditorGroupProps {
   showHoverDocumentation?: boolean;
   hoverDocumentationDelayMs?: number;
   parameterInfoRequestNonce?: number;
-  parameterInfoAutoPopup?: boolean;
-  parameterInfoDelayMs?: number;
   parameterInfoShowFullSignatures?: boolean;
   onActivate: (key: string) => void;
   onActivateGroup: () => void;
@@ -194,11 +192,19 @@ interface EditorGroupProps {
     kind: CompletionAcceptanceDiagnostic,
     detail?: string,
   ) => void;
-  onSignatureHelp: (
+  /** §8.20.2 W1 single channel: file-scoped trigger event into the session. */
+  onParameterTrigger?: (
     file: OpenFileViewModel,
-    position: LspPosition,
-    trigger: string | null,
-  ) => Promise<LspSignatureHelpResult | null>;
+    event: {
+      position: LspPosition;
+      anchorOffset: number;
+      triggerCharacter: string | null;
+      origin: "explicit" | "typing";
+    },
+  ) => void;
+  onParameterInvalidate?: (reason: "doc-changed" | "caret-moved" | "closing-char") => void;
+  onParameterEscape?: () => boolean;
+  parameterPopup?: ParameterPopupView | null;
   onSelectionChange: (selection: EditorSelectionRange) => void;
   onViewportChange: (range: LspRange) => void;
   onExpandSelection: (file: OpenFileViewModel, selection: EditorSelectionRange) => Promise<LspRange[] | null>;
@@ -268,8 +274,6 @@ export function EditorGroup({
   showHoverDocumentation = true,
   hoverDocumentationDelayMs = 300,
   parameterInfoRequestNonce = 0,
-  parameterInfoAutoPopup = true,
-  parameterInfoDelayMs = 0,
   parameterInfoShowFullSignatures = false,
   onActivate,
   onActivateGroup,
@@ -303,7 +307,10 @@ export function EditorGroup({
   onCompleteResolve,
   onCompletionIdentity,
   onCompletionDiagnostic,
-  onSignatureHelp,
+  onParameterTrigger,
+  onParameterInvalidate,
+  onParameterEscape,
+  parameterPopup = null,
   onSelectionChange,
   onViewportChange,
   onExpandSelection,
@@ -699,7 +706,10 @@ export function EditorGroup({
                         onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
                         getCompletionIdentity={() => onCompletionIdentity(activeFile)}
                         onCompletionDiagnostic={onCompletionDiagnostic}
-                        onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
+                        onParameterTrigger={(event) => onParameterTrigger?.(activeFile, event)}
+                        onParameterInvalidate={onParameterInvalidate}
+                        onParameterEscape={onParameterEscape}
+                        parameterPopup={parameterPopup}
                         onSelectionChange={onSelectionChange}
                         onViewportChange={handleViewportChange}
                         onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
@@ -715,8 +725,6 @@ export function EditorGroup({
                         showHoverDocumentation={showHoverDocumentation}
                         hoverDocumentationDelayMs={hoverDocumentationDelayMs}
                         parameterInfoRequestNonce={parameterInfoRequestNonce}
-                        parameterInfoAutoPopup={parameterInfoAutoPopup}
-                        parameterInfoDelayMs={parameterInfoDelayMs}
                         parameterInfoShowFullSignatures={parameterInfoShowFullSignatures}
                         codeStyle={activeCodeStyle}
                       />
@@ -770,7 +778,10 @@ export function EditorGroup({
                       onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
                       getCompletionIdentity={() => onCompletionIdentity(activeFile)}
                       onCompletionDiagnostic={onCompletionDiagnostic}
-                      onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
+                      onParameterTrigger={(event) => onParameterTrigger?.(activeFile, event)}
+                      onParameterInvalidate={onParameterInvalidate}
+                      onParameterEscape={onParameterEscape}
+                      parameterPopup={parameterPopup}
                       onSelectionChange={onSelectionChange}
                       onViewportChange={handleViewportChange}
                       onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
@@ -786,8 +797,6 @@ export function EditorGroup({
                       showHoverDocumentation={showHoverDocumentation}
                       hoverDocumentationDelayMs={hoverDocumentationDelayMs}
                       parameterInfoRequestNonce={parameterInfoRequestNonce}
-                      parameterInfoAutoPopup={parameterInfoAutoPopup}
-                      parameterInfoDelayMs={parameterInfoDelayMs}
                       parameterInfoShowFullSignatures={parameterInfoShowFullSignatures}
                       codeStyle={activeCodeStyle}
                     />

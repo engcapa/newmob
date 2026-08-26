@@ -1614,6 +1614,16 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         range: null,
       } as T;
     }
+    case "lsp_signature_help": {
+      // Browser preview has no language server; the empty-signature shape
+      // mirrors the native unavailable result (§8.20.2 W1).
+      return {
+        status: stubLspDocumentStatus(args as InvokeArgs),
+        signatures: [],
+        activeSignature: 0,
+        activeParameter: 0,
+      } as T;
+    }
     case "lsp_definition":
     case "lsp_type_definition":
     case "lsp_implementation":

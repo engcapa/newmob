@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  extractProviderDocLinks,
   openExternalDocumentation,
   referenceHrefFromEventTarget,
   validateExternalDocUrl,
@@ -56,5 +57,33 @@ describe("referenceDocumentation", () => {
     anchor.appendChild(child);
     expect(referenceHrefFromEventTarget(child)).toBe("https://docs.example.dev/reference");
     expect(referenceHrefFromEventTarget(document.createElement("button"))).toBeNull();
+  });
+
+  it("§8.20.2: extracts candidate links from provider documentation bodies", () => {
+    // Markdown links, html anchors and bare https URLs are all provider facts.
+    expect(extractProviderDocLinks(
+      "See [java.util.Map](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Map.html) docs.\n"
+      + "<a href='https://example.dev/guide'>Guide</a>\n"
+      + "Spec: https://spec.example.dev/rfc/1.",
+    )).toEqual([
+      "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Map.html",
+      "https://example.dev/guide",
+      "https://spec.example.dev/rfc/1",
+    ]);
+    // Duplicates collapse; order preserved.
+    expect(extractProviderDocLinks(
+      "[a](https://x.dev/a) [b](https://x.dev/a)",
+    )).toEqual(["https://x.dev/a"]);
+  });
+
+  it("§8.20.2: never synthesizes or accepts non-provider URL shapes", () => {
+    // No body / no URLs → empty. A symbol name alone must never produce one.
+    expect(extractProviderDocLinks(null)).toEqual([]);
+    expect(extractProviderDocLinks("")).toEqual([]);
+    expect(extractProviderDocLinks("StringUtils.isBlank(CharSequence)")).toEqual([]);
+    // Non-http(s) schemes are dropped — the controller re-validates anyway.
+    expect(extractProviderDocLinks("[x](javascript:alert(1)) file:///etc/passwd")).toEqual([]);
+    // Trailing punctuation is trimmed so markdown sentences do not corrupt.
+    expect(extractProviderDocLinks("See https://x.dev/doc.")).toEqual(["https://x.dev/doc"]);
   });
 });

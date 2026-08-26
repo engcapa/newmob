@@ -341,6 +341,10 @@ controls:
   - id: status-bar
     selector: '[data-testid="status-bar"]'
     kind: display
+  - id: status-message
+    selector: '[data-testid="status-bar-message"]'
+    kind: display
+    optional: true       # transient status text (operation feedback)
 -->
 
 - 显示活跃连接数
@@ -5534,6 +5538,15 @@ controls:
     selector: '[data-testid="keymap-replace-editor.replace-0"]'
     kind: display
     optional: true       # only after recording a chord
+  # §8.20.2 W1 reference-information surfaces rendered by the workspace.
+  - id: parameter-info-tooltip
+    selector: '[data-testid="code-workspace-parameter-info"]'
+    kind: display
+    optional: true       # Parameter Info tooltip; session-published only
+  - id: quick-doc-popup
+    selector: '[data-testid="code-workspace-quick-doc"]'
+    kind: display
+    optional: true       # explicit Quick Documentation popup
   - id: keymap-settings-close
     selector: '[data-testid="keymap-settings-close"]'
     kind: interactive

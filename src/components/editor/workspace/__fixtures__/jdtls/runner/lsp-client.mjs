@@ -79,6 +79,9 @@ export class LspClient {
         this.options.onDiagnostics?.(message.params);
         return;
       }
+      if (message.method === "client/registerCapability") {
+        this.options.onRegisterCapability?.(message.params);
+      }
       // Server→client requests we honour: configuration defaults and the
       // register/unregister round-trips jdtls issues during import.
       if (message.method === "workspace/configuration" || message.method === "client/registerCapability"
@@ -96,8 +99,15 @@ export class LspClient {
       if (!entry) return;
       this.pending.delete(message.id);
       clearTimeout(entry.timer);
-      if (message.error) entry.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
-      else entry.resolve(message.result);
+      if (message.error) {
+        const error = new Error(message.error.message ?? JSON.stringify(message.error));
+        // LSP error codes ride along so scenarios can distinguish
+        // RequestCancelled (-32800) from real failures.
+        error.code = typeof message.error.code === "number" ? message.error.code : null;
+        entry.reject(error);
+      } else {
+        entry.resolve(message.result);
+      }
     }
   }
 
@@ -108,8 +118,18 @@ export class LspClient {
   }
 
   request(method, params, timeoutMs = 120_000) {
+    const { id, promise } = this.requestTracked(method, params, timeoutMs);
+    void id;
+    return promise;
+  }
+
+  /**
+   * Same as request() but also resolves the wire id so the caller can send
+   * `$/cancelRequest` for it (§8.20.2 W1 supersede-cancel evidence).
+   */
+  requestTracked(method, params, timeoutMs = 120_000) {
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out after ${timeoutMs}ms${this.exitInfo ? ` (server exit ${JSON.stringify(this.exitInfo)})\n${this.stderrTail ?? ""}` : ""}`));
@@ -123,6 +143,12 @@ export class LspClient {
       }
       this.#write({ jsonrpc: "2.0", id, method, params });
     });
+    return { id, promise };
+  }
+
+  /** Mirror of the production backend: notify (not request) cancellation. */
+  cancelRequest(requestId) {
+    this.notify("$/cancelRequest", { id: requestId });
   }
 
   notify(method, params) {

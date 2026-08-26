@@ -8055,6 +8055,8 @@ pub async fn lsp_signature_help(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspSignatureHelpResult, String> {
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
     let session = match state
@@ -8092,17 +8094,25 @@ pub async fn lsp_signature_help(
         }),
         None => json!({ "triggerKind": 1, "isRetrigger": false }),
     };
+    // §8.20.2 W1: same cancellation identity as lsp_hover — a newer request
+    // for the same key aborts this one via `$/cancelRequest`.
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => tokio_util::sync::CancellationToken::new(),
+    };
     let result = session
-        .request(
+        .request_with_cancellation(
             "textDocument/signatureHelp",
             json!({
                 "textDocument": { "uri": document.uri },
                 "position": { "line": line, "character": character },
                 "context": context,
             }),
+            &cancellation,
         )
         .await
         .unwrap_or(Value::Null);
+    let cancelled = cancellation.is_cancelled();
     let status = state
         .lsp
         .document_status(
@@ -8111,6 +8121,16 @@ pub async fn lsp_signature_help(
             custom_server_command.as_ref(),
         )
         .await;
+    if cancelled {
+        // Cancelled requests report no content; the status snapshot stays
+        // fresh so the next parameter request can proceed immediately.
+        return Ok(LspSignatureHelpResult {
+            status,
+            signatures: Vec::new(),
+            active_signature: 0,
+            active_parameter: 0,
+        });
+    }
     let (signatures, active_signature, active_parameter) = parse_signature_help(&result);
     Ok(LspSignatureHelpResult {
         status,

@@ -1,14 +1,16 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-single",
-  "generatedAt": "2026-08-24T07:16:47.272Z",
+  "generatedAt": "2026-08-26T02:21:44.581Z",
   "sanitized": true,
   "toolchain": {
     "java": {
       "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
       "info": {
         "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
-        "major": 21
+        "major": 21,
+        "version": "21.0.4"
       }
     },
     "jdtls": {
@@ -35,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 4246,
+          "msTotal": 2433,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -59,7 +61,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 607,
+          "msTotal": 464,
           "itemCount": 58,
           "isIncomplete": true,
           "satisfied": true,
@@ -83,7 +85,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 55,
+          "msTotal": 46,
           "itemCount": 14,
           "isIncomplete": false,
           "satisfied": true,
@@ -165,7 +167,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 150,
+          "msTotal": 138,
           "itemCount": 2,
           "isIncomplete": false,
           "satisfied": true,
@@ -174,16 +176,16 @@
         }
       ],
       "resolve": {
-        "ms": 248,
+        "ms": 774,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport org.apache.commons.lang3.StringUtils;"
         ]
       },
       "acceptance": {
-        "originalSha256": "15e9164d815a71b8bb6d8164682bc405029df3831d1e028bddaed59bc0a88062",
-        "appliedSha256": "1dfc8524af7256de46334b3e1698cbfb2ac402e00d3f2abe9822a022a43517a9",
-        "revertedSha256": "15e9164d815a71b8bb6d8164682bc405029df3831d1e028bddaed59bc0a88062",
+        "originalSha256": "d1a95976fce19b5ab5c4719fccbc59875db10f684e5177eef08323a8fc554d59",
+        "appliedSha256": "eeb6e0ed331b0512f0b284654482d6981a403cd957f3ba62c946df6ef1d44e30",
+        "revertedSha256": "d1a95976fce19b5ab5c4719fccbc59875db10f684e5177eef08323a8fc554d59",
         "revertRestoresOriginalHash": true
       },
       "notes": null
@@ -200,7 +202,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 221,
+          "msTotal": 226,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -211,13 +213,286 @@
       "resolve": null,
       "acceptance": null,
       "notes": "candidate must come from junit test scope (proves test source set import)"
+    },
+    {
+      "caseId": "sig-overload-family",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "signature",
+      "position": {
+        "line": 42,
+        "character": 22
+      },
+      "scopeRequested": "default",
+      "signatureHelp": {
+        "attempts": 1,
+        "msTotal": 144,
+        "signaturesCount": 13,
+        "labels": [
+          "append(double d) : StringBuilder",
+          "append(float f) : StringBuilder",
+          "append(long lng) : StringBuilder",
+          "append(int i) : StringBuilder",
+          "append(char c) : StringBuilder",
+          "append(boolean b) : StringBuilder",
+          "append(char[] str) : StringBuilder",
+          "append(CharSequence s) : StringBuilder",
+          "append(StringBuffer sb) : StringBuilder",
+          "append(String str) : StringBuilder",
+          "append(Object obj) : StringBuilder",
+          "append(char[] str, int offset, int len) : StringBuilder",
+          "append(CharSequence s, int start, int end) : StringBuilder"
+        ],
+        "activeSignature": 9,
+        "activeParameter": 0,
+        "satisfied": true,
+        "evaluationReason": null
+      },
+      "supersede": null,
+      "notes": "StringBuilder.append overload family; caret right after the open paren → activeParameter 0"
+    },
+    {
+      "caseId": "sig-active-parameter-advance",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "signature",
+      "position": {
+        "line": 43,
+        "character": 27
+      },
+      "scopeRequested": "default",
+      "signatureHelp": {
+        "attempts": 1,
+        "msTotal": 97,
+        "signaturesCount": 13,
+        "labels": [
+          "append(double d) : StringBuilder",
+          "append(float f) : StringBuilder",
+          "append(long lng) : StringBuilder",
+          "append(int i) : StringBuilder",
+          "append(char c) : StringBuilder",
+          "append(boolean b) : StringBuilder",
+          "append(char[] str) : StringBuilder",
+          "append(CharSequence s) : StringBuilder",
+          "append(StringBuffer sb) : StringBuilder",
+          "append(String str) : StringBuilder",
+          "append(Object obj) : StringBuilder",
+          "append(char[] str, int offset, int len) : StringBuilder",
+          "append(CharSequence s, int start, int end) : StringBuilder"
+        ],
+        "activeSignature": 12,
+        "activeParameter": 1,
+        "satisfied": true,
+        "evaluationReason": null
+      },
+      "supersede": null,
+      "notes": "caret between args of the 3-arg CharSequence,int,int overload → activeParameter advances to 1"
+    },
+    {
+      "caseId": "sig-nested-inner",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "signature",
+      "position": {
+        "line": 44,
+        "character": 60
+      },
+      "scopeRequested": "default",
+      "signatureHelp": {
+        "attempts": 1,
+        "msTotal": 99,
+        "signaturesCount": 3,
+        "labels": [
+          "parseInt(String s) : int",
+          "parseInt(String s, int radix) : int",
+          "parseInt(CharSequence s, int beginIndex, int endIndex, int radix) : int"
+        ],
+        "activeSignature": 0,
+        "activeParameter": 0,
+        "satisfied": true,
+        "evaluationReason": null
+      },
+      "supersede": null,
+      "notes": "inner call of a nested expression owns the tooltip at its own paren"
+    },
+    {
+      "caseId": "sig-nested-outer",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "signature",
+      "position": {
+        "line": 44,
+        "character": 43
+      },
+      "scopeRequested": "default",
+      "signatureHelp": {
+        "attempts": 1,
+        "msTotal": 69,
+        "signaturesCount": 9,
+        "labels": [
+          "valueOf(double d) : String",
+          "valueOf(float f) : String",
+          "valueOf(long l) : String",
+          "valueOf(int i) : String",
+          "valueOf(char c) : String",
+          "valueOf(boolean b) : String",
+          "valueOf(char[] data) : String",
+          "valueOf(Object obj) : String",
+          "valueOf(char[] data, int offset, int count) : String"
+        ],
+        "activeSignature": 3,
+        "activeParameter": 0,
+        "satisfied": true,
+        "evaluationReason": null
+      },
+      "supersede": null,
+      "notes": "outer call resolves when the caret sits at the outer argument list"
+    },
+    {
+      "caseId": "sig-generic",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "signature",
+      "position": {
+        "line": 45,
+        "character": 48
+      },
+      "scopeRequested": "default",
+      "signatureHelp": {
+        "attempts": 1,
+        "msTotal": 280,
+        "signaturesCount": 1,
+        "labels": [
+          "singletonList(T o) : List<T>"
+        ],
+        "activeSignature": 0,
+        "activeParameter": 0,
+        "satisfied": true,
+        "evaluationReason": null
+      },
+      "supersede": null,
+      "notes": "generic method signature; labels recorded for IDEA compare"
+    },
+    {
+      "caseId": "sig-supersede-cancel",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "supersede-cancel",
+      "position": {
+        "line": 42,
+        "character": 22
+      },
+      "scopeRequested": "default",
+      "signatureHelp": null,
+      "supersede": {
+        "firstOutcome": "rejected:-32800",
+        "firstCancelled": true,
+        "msFirst": 110,
+        "secondSatisfied": true,
+        "msSecond": 96
+      },
+      "notes": "$/cancelRequest on the in-flight request mirrors the production cancel bridge; second request must satisfy"
+    },
+    {
+      "caseId": "hover-project-symbol",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "hover",
+      "position": {
+        "line": 46,
+        "character": 30
+      },
+      "scopeRequested": "default",
+      "hover": {
+        "msFirst": 92,
+        "attempts": 1,
+        "contentsPresent": true,
+        "contentsKind": "markup-array",
+        "externalLinks": [],
+        "excerpt": "void com.example.single.App.signatureTargets() Signature/hover targets for the W1 reference-information evidence: real compilable call expressions whose argumen",
+        "satisfied": true,
+        "evaluationReason": null
+      },
+      "notes": "project symbol carries javadoc; provider must surface it through hover"
+    },
+    {
+      "caseId": "hover-jdk-symbol",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "hover",
+      "position": {
+        "line": 44,
+        "character": 38
+      },
+      "scopeRequested": "default",
+      "hover": {
+        "msFirst": 129,
+        "attempts": 1,
+        "contentsPresent": true,
+        "contentsKind": "markup-array",
+        "externalLinks": [],
+        "excerpt": "String java.lang.String.valueOf(int i) Returns the string representation of the `int` argument. The representation is exactly the one returned by the `Integer.t",
+        "satisfied": true,
+        "evaluationReason": null
+      },
+      "notes": "JDK class documentation attached to String.valueOf"
+    },
+    {
+      "caseId": "hover-library-symbol",
+      "file": "src/main/java/com/example/single/App.java",
+      "kind": "hover",
+      "position": {
+        "line": 50,
+        "character": 52
+      },
+      "scopeRequested": "default",
+      "hover": {
+        "msFirst": 99,
+        "attempts": 1,
+        "contentsPresent": true,
+        "contentsKind": "markup-array",
+        "externalLinks": [],
+        "excerpt": "boolean org.apache.commons.lang3.StringUtils.isBlank(CharSequence cs) Checks if a CharSequence is empty (\"\"), null or whitespace only. Whitespace is defined by ",
+        "satisfied": true,
+        "evaluationReason": null
+      },
+      "notes": "commons-lang3 dependency symbol — synthesized from .class metadata when sources are absent"
     }
   ],
   "failures": [],
+  "providerChannels": {
+    "declaredTypeInfoChannel": false,
+    "declaredStaticDataChannel": false,
+    "topLevelCapabilityKeys": [
+      "callHierarchyProvider",
+      "codeActionProvider",
+      "codeLensProvider",
+      "declarationProvider",
+      "definitionProvider",
+      "documentFormattingProvider",
+      "documentHighlightProvider",
+      "documentOnTypeFormattingProvider",
+      "documentRangeFormattingProvider",
+      "documentSymbolProvider",
+      "executeCommandProvider",
+      "foldingRangeProvider",
+      "hoverProvider",
+      "implementationProvider",
+      "inlayHintProvider",
+      "referencesProvider",
+      "renameProvider",
+      "selectionRangeProvider",
+      "semanticTokensProvider",
+      "textDocumentSync",
+      "typeDefinitionProvider",
+      "typeHierarchyProvider",
+      "workspace",
+      "workspaceSymbolProvider"
+    ],
+    "signatureHelpProviderDeclaredStatically": false,
+    "hoverProviderDeclaredStatically": false,
+    "signatureHelpProvenByScenarios": true,
+    "hoverProvenByScenarios": true,
+    "dynamicRegistrations": []
+  },
   "restart": {
     "performed": true,
-    "msToReadyAfterRestart": 7187,
+    "msToReadyAfterRestart": 7060,
     "completionOkAfterRestart": true,
-    "reason": null
+    "signatureHelpOkAfterRestart": true,
+    "reason": null,
+    "signatureReason": null
   }
 }
