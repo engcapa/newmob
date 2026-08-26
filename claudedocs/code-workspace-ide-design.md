@@ -2,11 +2,11 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Core Daily Editing Profile，再以 Java 为首个语言完成可证明的 provider-backed 语义工作流。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-26 · 版本：v4.67（W4 Navigation, Search, Usages 与 Hierarchy 语义闭环 as-built；上一版 v4.66 为 W3 Diagnostic Presentation 与 Intention 分账）· 状态：**实施中；R0-R9 生产合同/静态门禁/native harness 与 W0-W3 已交付；W4 交付 SemanticQueryEnvelopeV3 + UsageQueryV3 + UsageQuerySession（单一不可变会话、tool window 与轻量 Show Usages 共享事实源、有界 recent 栈、pin 替换保护与 live staleness 判定）+ UsagesScopeDialog（诚实客户端分账标注）+ ReferencesPanel 作用域与最近会话呈现 + HierarchyPanel staleness banner & Rerun + SearchEverywhere 失败/跳过/截断显式分账 + 常用导航动作对齐（Find/Show Usages 与 unsupported 占位），Java Basic Completion、QuickDoc/Parameter、Project Analysis 与 Diagnostics 保持既有层级；G0 代码合同闭合但 native 故障注入与三端证据未绿；G1 仍受 quick-fix provider 挂起、refactor gate（W5）与 R9 三端门禁阻断**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
+> 日期：2026-08-26 · 版本：v4.68（W5 Refactor evidence, completeness, conflict, preview 与 single undo as-built；上一版 v4.67 为 W4 Navigation, Search, Usages 与 Hierarchy 语义闭环）· 状态：**实施中；R0-R9 生产合同/静态门禁/native harness 与 W0-W5 已交付；W5 交付 RefactorPlanV3 + refactorApplyGate 共同入口（error conflict 硬阻断、warning 显式 confirm、Safe Delete provider-complete 门禁、library/external 只读阻断、partial 显式 preview 门禁）+ RefactoringPreviewDialog 完整度徽标、冲突提示横幅与 required 操作不可反选保护 + CodeWorkspaceTab Rename/Safe Delete/provider refactor 生产路径接入 + jdtlsTraceContract real trace renameProvider 断言；G0 代码合同闭合但 native 故障注入与三端证据未绿；G1 仍受 quick-fix provider 挂起与 R9 三端门禁阻断**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
 >
-> 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链；W0 后 shell 主路径稳定且 shortcut owner deterministic，W1 后 Parameter Info 不再有私有 request 序列——五个 reference kind 共用 controller 单通道，W2 后 Project Analysis 有 provider-owned 事实源，W3 后 Diagnostic Presentation 与 Intention 分账闭环，W4 后 Navigation/Search/Usages/Hierarchy 语义闭环。当前阻断是：usages 角色分类 provider 不支持（诚实保持 L0/unavailable）、refactor evidence gate 未闭环（W5），以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 仍是新鲜度台账（UI 文案已改 Provider freshness），jdtls 未注册 `java.project.*` executeCommand → module 详情诚实降级为 partial，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine，Type Info/Expression Static Data 的 typed-unavailable 不是能力可用。
+> 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链；W0 后 shell 主路径稳定且 shortcut owner deterministic，W1 后 Parameter Info 不再有私有 request 序列——五个 reference kind 共用 controller 单通道，W2 后 Project Analysis 有 provider-owned 事实源，W3 后 Diagnostic Presentation 与 Intention 分账闭环，W4 后 Navigation/Search/Usages/Hierarchy 语义闭环，W5 后 Rename/Safe Delete/provider refactor 共用统一 refactorApplyGate 门禁与 preview 交互。当前阻断是：usages 角色分类 provider 不支持（诚实保持 L0/unavailable），以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 仍是新鲜度台账（UI 文案已改 Provider freshness），jdtls 未注册 `java.project.*` executeCommand → module 详情诚实降级为 partial，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine，Type Info/Expression Static Data 的 typed-unavailable 不是能力可用。
 >
-> 上一版本：v4.66（2026-08-26，W3 Diagnostic Presentation 与 Intention 分账 as-built，提交 `bb7e9f5f`）· v4.65（2026-08-26，W2 Java Project Analysis truth as-built，提交 `dfdc4305`）· v4.64（2026-08-26，W1 Reference Information V3 as-built，提交 `672d53ac`）· v4.63（2026-08-25，W0 shell stability + shortcut ownership as-built）· v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
+> 上一版本：v4.67（2026-08-26，W4 Navigation, Search, Usages 与 Hierarchy 语义闭环 as-built，提交 `2411948e`）· v4.66（2026-08-26，W3 Diagnostic Presentation 与 Intention 分账 as-built，提交 `bb7e9f5f`）· v4.65（2026-08-26，W2 Java Project Analysis truth as-built，提交 `dfdc4305`）· v4.64（2026-08-26，W1 Reference Information V3 as-built，提交 `672d53ac`）· v4.63（2026-08-25，W0 shell stability + shortcut ownership as-built）· v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
 >
 > 早期版本：v4.44（2026-08-22，`85be924f` as-built 复核、IDEA 2026.2 Editor 能力第四批对照、G0/G1 目标重排与 §8.16 合同）· v4.42（2026-08-21，`d641ad12` + `9203d3e4` + `20027dfe` as-built 复核）· v4.41（2026-08-20，`c5ce1fd6` + `5ce13c9a` as-built 复核）· v4.40（2026-08-19，`a4584916` + `b4e7325f` as-built 复核与 Gate R0 回归登记）· v4.39（2026-08-19，`dab8a778` production-path code review）· v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -5582,7 +5582,7 @@ Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
 | 3 | [x] | **W2 Java Project Analysis truth（v4.65 as-built）** | provider-owned project/import snapshot、ready/degraded 状态和可复用 jdtls evidence runner | W0、R3 |
 | 4 | [x] | **W3 Inspection + Intention provider contract（v4.66 as-built；quick-fix 因 jdt.ls codeAction 挂起按诚实失败记账）** | 把 diagnostic presentation 与 provider analysis/action 执行彻底分账 | W2、R0/R1 |
 | 5 | [x] | **W4 Navigation + Usages + Hierarchy（v4.67 as-built）** | scope/coverage/roles/history/preview 与 Java 真实 trace | W2、W1 |
-| 6 | [ ] | **W5 Refactor evidence and conflict gate** | Rename/Safe Delete/provider refactor 共用 completeness/conflict/stale/apply/undo 合同 | W2、W4、R0 |
+| 6 | [x] | **W5 Refactor evidence and conflict gate（v4.68 as-built）** | Rename/Safe Delete/provider refactor 共用 completeness/conflict/stale/apply/undo 合同 | W2、W4、R0 |
 | 7 | [ ] | **W6 Editor policies and edge workflows** | clipboard/tab/virtual-space/region/code-style/completion preference 的设置与真实 consumer 收口 | W0，可与 W1-W5 非冲突子包并行 |
 | 8 | [ ] | **W7 Native three-platform + performance + a11y + IDEA compare** | 解除 G0/G1 发布证据门禁并逐 capability 提升证据层 | W0-W6 |
 | 9 | [ ] | **W8 Advanced re-entry queue** | 仅在 ADR 重开条件满足时实施 Smart/SSR/dependency/Full Line/Code Vision/scratch/injection/detach | 各子项独立 |
@@ -6320,6 +6320,57 @@ Preview按file/group展示operation与annotation，required group不可取消；
 | 非语义 | tree file rename/move/copy | 继续归文件操作，不得计Java refactor |
 
 **DoD。** `rg refactorApplyGate` 至少有Rename + provider refactor两个生产consumer；每个已启用动作有resolve fail/cancel/stale/conflict/partial apply/undo测试；Rename真实trace与IDEA expected。只允许写“Rename provider-backed L2/L3”或具体动作，不得写refactoring complete。
+
+**W5 as-built（v4.68，2026-08-26）。**
+
+```text
+调用链与真实组件
+    ①RefactorPlanV3 契约（refactorPlan.ts）：
+      统一定义 RefactorPlanV3、RefactorKind、RefactorCompleteness、RefactorUriOwner、RefactorConflictV3、RefactorGateDecision；
+      refactorApplyGate 建立 5 条确定性规则：
+        Rule 1 (硬阻断): 包含 library 或 external URI 写操作（只读外部源不可直接修改）；
+        Rule 2 (硬阻断): 存在 error 严重性冲突（例如目标符号重名重复声明、语法破坏）；
+        Rule 3 (硬阻断): destructive Safe Delete 当 completeness 不是 provider-complete 时硬阻断（诚实禁止基于引用计数猜测）；
+        Rule 4 (二次确认): warning 严重性冲突要求用户显式确认；
+        Rule 5 (强制预览): completeness 为 provider-partial 或 unknown 时强制走 usages 预览。
+      buildRefactorPlan: 从 LspWorkspaceEdit 操作列表提取 affectedUris（通过根目录判定 workspace/library/external 归属），
+      结合 openFiles 捕获实时 revision，划分 excludableGroups，标注声明定义行等 required operation；
+      verifyExclusionSafety: 校验用户未反选关键声明行或核心重构边界。
+    ②javaSemanticEvidence.ts:
+      重导出 refactorPlan.ts 类型与工具；重载 refactorApplyGate 支持 RefactorPlanV3 与 Legacy RefactorEvidence 统一调度。
+    ③RefactoringPreviewDialog.tsx:
+      支持接收 plan?: RefactorPlanV3；
+      header 渲染 refactoring-preview-completeness 徽标（Provider Complete / Provider Partial / Completeness Unknown）；
+      body 渲染 refactoring-preview-error-conflicts（红色硬阻断警告）与 refactoring-preview-warning-conflicts（黄色警告提示）；
+      required changes 保护：对应 checkbox 禁用并提示“Required change cannot be deselected”，打上 required 标签；
+      当存在 error conflicts 时，Apply 按钮禁用（refactoring-preview-apply disabled）。
+    ④CodeWorkspaceTab.tsx 生产链接入（三大真实 consumer）：
+      1. renameSymbolAtCursor: 收集 CapabilityEvidenceV3，通过 buildRefactorPlan 构建 plan，执行 refactorApplyGate(plan) 门禁阻断与 warning 确认，经 applyLspWorkspaceEdit(..., { plan }) 触发 RefactoringPreviewDialog；
+      2. safeDeleteSymbolAtCursor: 收集 CapabilityEvidenceV3，构建 safe-delete plan，经 refactorApplyGate 校验 provider-complete，非 complete 严格阻断并反馈状态与 ReferencesPanel；
+      3. runCodeAction: 针对 refactor.* 或包含 refactor 的 CodeAction（extract/inline/change-signature/move/other），构建 plan 经 refactorApplyGate 预检，拦截外部源/冲突，支持 warning confirm；
+      4. applyLspWorkspaceEditNow / WorkspaceEditApplyOptions: 传递 plan 到 RefactoringPreviewDialog。
+    ⑤JDT.LS 真实 Trace 契约（jdtlsFixtureExpectations.ts & jdtlsTraceContract.test.ts）：
+      新增 rename-provider-registered 期望项，断言 real sanitized trace（maven-single）顶层动态注册 renameProvider。
+接口/schema/migration 与 compatibility
+    新增 RefactorPlanV3、RefactorKind、RefactorCompleteness、RefactorUriOwner、RefactorConflictV3、RefactorGateDecision；
+    RefactoringPreviewDialogProps 新增 plan?: RefactorPlanV3 向后兼容；
+    WorkspaceEditApplyOptions 新增 plan?: RefactorPlanV3 向后兼容；
+    QA testid-catalog 更新并验证无回归。
+cancel/stale/error/disk/provider/undo effect
+    门禁阻断或用户取消不会对磁盘产生任何写入；
+    多文件重构经 applyLspWorkspaceEdit 事务统一执行，保留原有单步 undo/redo 撤销原子性。
+Unit / mounted host / Rust / QA audit / browser / native / provider / IDEA compare
+    unit: vitest refactorPlan.test.ts (10/10), RefactoringPreviewDialog.test.tsx (5/5), javaSemanticEvidence.test.ts (7/7), jdtlsTraceContract.test.ts (44/44) 全绿；
+    tsc -b: 全量 TypeScript 编译 0 错误；
+    QA audit --gate: 0 regressions, catalog up to date；
+    provider trace contract: 44 例全绿（包含真实 trace renameProvider 动态注册证明）。
+最高可声明 L0-L3 + evidence layers
+    Rename: Provider-backed L2 (JDT.LS renameProvider 动态注册，支持 cross-file AST 改名、preview、conflict gate 与 single undo)；
+    Safe Delete: L1 / conditional-gate（只有 provider 声明 complete 方可执行，否则严格阻断，绝不伪造）；
+    Provider Refactor (extract/inline/change-signature): Provider-backed L2（通过 refactorApplyGate 安全阻断与预览保护）。
+残余风险与下一依赖包
+    下一包 W6（Settings/policy 与编辑边缘工作流收口：Clipboard History, Tab Policy, Virtual Space, Code Style save actions, Completion preferences）。
+```
 
 #### 8.20.7 W6：Settings/policy 与编辑边缘工作流收口（G1/G3，可拆提交）
 

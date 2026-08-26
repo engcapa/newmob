@@ -69,6 +69,7 @@ interface ProviderChannels {
   hoverProvider: boolean;
   declaredTypeInfoChannel: boolean;
   declaredStaticDataChannel: boolean;
+  topLevelCapabilityKeys?: readonly string[];
 }
 
 interface AnalysisSnapshot {
@@ -296,6 +297,11 @@ describe("§8.19.4 real jdtls trace contract", () => {
           expect(quickFix!.satisfied).toBe(false);
           expect(quickFix!.reason ?? "").toContain("provider-hang");
           expect((quickFix!.providerHang?.attempts ?? 0)).toBeGreaterThanOrEqual(1);
+          break;
+        }
+        case "rename-provider-registered": {
+          const registered = trace.providerChannels?.topLevelCapabilityKeys ?? [];
+          expect(registered).toContain("renameProvider");
           break;
         }
       }

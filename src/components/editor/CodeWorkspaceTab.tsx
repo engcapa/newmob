@@ -332,6 +332,11 @@ import {
   type WorkspaceEditPreview,
 } from "./workspace/workspaceEditPreview";
 import { RefactoringPreviewDialog } from "./workspace/RefactoringPreviewDialog";
+import {
+  buildRefactorPlan,
+  refactorApplyGate,
+  type RefactorPlanV3,
+} from "./workspace/refactorPlan";
 import { KeymapCheatSheetDialog } from "./workspace/KeymapCheatSheetDialog";
 import { KeymapSettingsDialog } from "./workspace/KeymapSettingsDialog";
 import {
@@ -7310,6 +7315,8 @@ export function CodeWorkspaceTab({
     recordHistory?: boolean;
     /** Restrict provider edits to the opened workspace roots. */
     semanticWorkspaceOnly?: boolean;
+    /** Optional refactoring plan with completeness, conflicts, and required groups. */
+    plan?: RefactorPlanV3;
   };
 
   const applyLspWorkspaceEditNow = useCallback(async (
@@ -7445,6 +7452,7 @@ export function CodeWorkspaceTab({
                     label: options.label?.trim() || preview.label,
                   },
                   originalEdit: edit,
+                  plan: options.plan,
                   resolve,
                 });
               });
@@ -7870,6 +7878,78 @@ export function CodeWorkspaceTab({
       let semanticCommandRevision: number | null = null;
       const result = await executeCodeAction(executableAction, {
         applyEdit: async (edit) => {
+          let plan: RefactorPlanV3 | undefined;
+          const isRefactorAction =
+            executableAction.kind?.startsWith("refactor") ||
+            executableAction.title.toLowerCase().includes("refactor");
+          if (isRefactorAction) {
+            const kindStr = executableAction.kind ?? "";
+            const refactorKind = kindStr.includes("extract")
+              ? "extract"
+              : kindStr.includes("inline")
+              ? "inline"
+              : kindStr.includes("change-signature")
+              ? "change-signature"
+              : kindStr.includes("move")
+              ? "move"
+              : "other";
+            const fileDescriptor = lspDescriptorForFile(file);
+            const docUri = fileDescriptor?.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? fileDescriptor?.filePath ?? file.path;
+            const evidence = buildCapabilityEvidence({
+              capabilityId: `refactor.action:${executableAction.kind ?? "custom"}`,
+              languageId: fileDescriptor?.languageId ?? "java",
+              provider: {
+                id: fileDescriptor?.languageId ?? "jdtls",
+                version: null,
+                generation: semanticToken?.generation ?? lspSessionGeneration(),
+              },
+              projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+              uri: docUri,
+              revision: file.documentRevision ?? 0,
+              scope: "project",
+              complete: false,
+              reason: "provider code action edit",
+            });
+            plan = buildRefactorPlan({
+              actionId: intentionCandidateId ?? executableAction.title,
+              kind: refactorKind,
+              evidence,
+              edit,
+              roots: rootsRef.current,
+              openFiles: openFilesRef.current,
+              completeness: "provider-partial",
+            });
+            const gate = refactorApplyGate(plan);
+            if (!gate.allowed) {
+              setStatusMessage(`Refactoring blocked: ${gate.reason}`);
+              return [
+                {
+                  operationIndex: null,
+                  path: file.path,
+                  status: "failed",
+                  reason: gate.reason || "blocked by refactor gate",
+                },
+              ];
+            }
+            if (gate.requiresConfirm) {
+              const confirmed = await confirmAppDialog({
+                title: "Refactoring Warning",
+                message: gate.reason ?? "This refactoring produced warnings. Proceed?",
+                confirmLabel: "Proceed",
+              });
+              if (!confirmed) {
+                setStatusMessage("Refactoring cancelled");
+                return [
+                  {
+                    operationIndex: null,
+                    path: file.path,
+                    status: "skipped",
+                    reason: "cancelled by user",
+                  },
+                ];
+              }
+            }
+          }
           const outcomes = await applyLspWorkspaceEdit(edit, {
             // The applier only opens the dialog for multi-file/resource edits;
             // single-file quick fixes remain an immediate action.
@@ -7877,6 +7957,7 @@ export function CodeWorkspaceTab({
             label: executableAction.title,
             semanticGeneration: semanticToken?.generation,
             semanticRevision: semanticToken?.revision,
+            plan,
           });
           semanticEditApplied = !outcomes.some((outcome) => (
             outcome.status === "failed" || outcome.status === "skipped"
@@ -11094,12 +11175,58 @@ export function CodeWorkspaceTab({
         setStatusMessage("Rename result became stale because the workspace changed; run Rename again");
         return;
       }
+      const documentUri = descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath;
+      const evidence = buildCapabilityEvidence({
+        capabilityId: "refactor.rename",
+        languageId: descriptor.languageId ?? "java",
+        provider: {
+          id: descriptor.languageId ?? "jdtls",
+          version: null,
+          generation: lspSessionGeneration(),
+        },
+        projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+        uri: documentUri,
+        revision: live.documentRevision ?? 0,
+        position,
+        scope: "project",
+        complete: false,
+        reason: "provider rename response; AST completeness not guaranteed",
+      });
+      const plan = buildRefactorPlan({
+        actionId: `rename:${documentUri}:${position.line}:${position.character}`,
+        kind: "rename",
+        evidence,
+        edit: renamed.edit,
+        roots: rootsRef.current,
+        openFiles: openFilesRef.current,
+        completeness: "provider-partial",
+        requiredOperationIndexes: [0],
+      });
+      const gate = refactorApplyGate(plan);
+      if (!gate.allowed) {
+        semanticIndex.abandonBuild(buildToken);
+        setStatusMessage(`Rename blocked: ${gate.reason}`);
+        return;
+      }
+      if (gate.requiresConfirm) {
+        const confirmed = await confirmAppDialog({
+          title: "Rename Warning",
+          message: gate.reason ?? "The rename produced warnings. Proceed anyway?",
+          confirmLabel: "Proceed",
+        });
+        if (!confirmed) {
+          semanticIndex.abandonBuild(buildToken);
+          setStatusMessage("Rename cancelled");
+          return;
+        }
+      }
       await applyLspWorkspaceEdit(renamed.edit, {
         preview: true,
-        label: "Rename symbol",
+        label: `Rename symbol to "${nextName}"`,
         semanticGeneration: buildToken.generation,
         semanticRevision: buildToken.revision,
         semanticWorkspaceOnly: true,
+        plan,
       });
     } catch (err) {
       semanticIndex.failBuild(buildToken, errorMessage(err));
@@ -11262,11 +11389,54 @@ export function CodeWorkspaceTab({
         setStatusMessage("Safe Delete cancelled; references remain open for review");
         return;
       }
+      const documentUri = descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath;
+      const evidence = buildCapabilityEvidence({
+        capabilityId: "refactor.safeDelete",
+        languageId: descriptor.languageId ?? "java",
+        provider: {
+          id: descriptor.languageId ?? "jdtls",
+          version: null,
+          generation: lspSessionGeneration(),
+        },
+        projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+        uri: documentUri,
+        revision: live.documentRevision ?? 0,
+        position,
+        scope: "project",
+        complete: deletion.complete,
+        reason: deletion.complete
+          ? "all references resolved within workspace roots"
+          : "references could not be completely resolved",
+      });
+      const plan = buildRefactorPlan({
+        actionId: `safe-delete:${documentUri}:${prepared.range.start.line}:${prepared.range.start.character}`,
+        kind: "safe-delete",
+        evidence,
+        edit: deletion.edit,
+        roots: rootsRef.current,
+        openFiles: openFilesRef.current,
+        completeness: deletion.complete ? "provider-complete" : "provider-partial",
+      });
+      const gate = refactorApplyGate(plan);
+      if (!gate.allowed) {
+        semanticIndex.abandonBuild(buildToken);
+        const reason = gate.reason || "Safe Delete blocked by refactor gate";
+        if (referencesRequestSequenceRef.current === referencesRequestId) {
+          setReferencesResult((current) => ({
+            ...current,
+            loading: false,
+            error: reason,
+          }));
+        }
+        setStatusMessage(`Safe Delete blocked: ${reason}`);
+        return;
+      }
       await applyLspWorkspaceEdit(deletion.edit, {
         label: "Safe delete symbol",
         semanticGeneration: buildToken.generation,
         semanticRevision: buildToken.revision,
         semanticWorkspaceOnly: true,
+        plan,
       });
     } catch (error) {
       semanticIndex.failBuild(buildToken, errorMessage(error));
@@ -12698,6 +12868,7 @@ export function CodeWorkspaceTab({
     title: string;
     preview: WorkspaceEditPreview;
     originalEdit: LspWorkspaceEdit;
+    plan?: RefactorPlanV3;
     resolve: (filtered: LspWorkspaceEdit | boolean) => void;
   } | null>(null);
 
@@ -14538,6 +14709,7 @@ export function CodeWorkspaceTab({
           title={refactoringPreviewModal.title}
           preview={refactoringPreviewModal.preview}
           originalEdit={refactoringPreviewModal.originalEdit}
+          plan={refactoringPreviewModal.plan}
           onConfirm={(filteredEdit) => {
             refactoringPreviewModal.resolve(filteredEdit);
             setRefactoringPreviewModal(null);
