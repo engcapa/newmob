@@ -79,6 +79,10 @@ export class LspClient {
         this.options.onDiagnostics?.(message.params);
         return;
       }
+      if (message.method === "$/progress") {
+        this.options.onWorkDoneProgress?.(message.params);
+        // Fall through: $/progress is a notification, nothing to answer.
+      }
       if (message.method === "client/registerCapability") {
         this.options.onRegisterCapability?.(message.params);
       }

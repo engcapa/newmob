@@ -317,6 +317,9 @@ const FIXTURES = {
       },
     ],
     restartAfterCases: { file: APP_MAIN, token: "Stri", expect: { labelEquals: "String" } },
+    // §8.20.3 W2: a build-file change must bump the provider's analysis
+    // generation (fresh import progress), and reverting must restore the model.
+    buildChangeScenario: { file: "pom.xml" },
   },
 
   "maven-multi-module": {
@@ -526,6 +529,8 @@ async function startSession(jdtls, fixtureId, options = {}) {
   mkdirSync(dataDir, { recursive: true });
   const diagnosticsLog = [];
   const registeredMethods = [];
+  const registeredExecuteCommands = [];
+  const progressEvents = [];
   const client = new LspClient(options.javaPath, launchArgs(jdtls, dataDir), {
     onDiagnostics: (params) => {
       for (const diagnostic of params?.diagnostics ?? []) {
@@ -544,8 +549,25 @@ async function startSession(jdtls, fixtureId, options = {}) {
     // providerChannels can distinguish "absent" from "registered later".
     onRegisterCapability: (params) => {
       for (const registration of params?.registrations ?? []) {
-        if (registration?.method) registeredMethods.push(registration.method);
+        if (!registration?.method) continue;
+        registeredMethods.push(registration.method);
+        if (registration.method === "workspace/executeCommand") {
+          for (const command of registration.registerOptions?.commands ?? []) {
+            if (typeof command === "string") registeredExecuteCommands.push(command);
+          }
+        }
       }
+    },
+    // §8.20.3 W2: work-done progress is the provider's import/analysis lifecycle.
+    onWorkDoneProgress: (params) => {
+      if (!params?.token) return;
+      progressEvents.push({
+        token: String(params.token),
+        kind: params.value?.kind ?? null,
+        title: params.value?.title ?? null,
+        message: params.value?.message ?? null,
+        percentage: typeof params.value?.percentage === "number" ? params.value.percentage : null,
+      });
     },
   }).start();
   const startedAt = Date.now();
@@ -561,11 +583,130 @@ async function startSession(jdtls, fixtureId, options = {}) {
     client,
     diagnosticsLog,
     registeredMethods,
+    registeredExecuteCommands,
+    progressEvents,
+    serverInfo: initializeResult?.serverInfo ?? null,
     serverCapabilities: initializeResult?.capabilities ?? {},
+    startedAt,
     msToInitialize: Date.now() - startedAt,
     projectDir,
     dataDir,
   };
+}
+
+// ---------------------------------------------------------------------------
+// §8.20.3 W2: Project Analysis snapshot collection (provider-owned facts)
+// ---------------------------------------------------------------------------
+
+const BUILD_DESCRIPTOR_FILES = new Set([
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "settings.gradle",
+  "settings.gradle.kts",
+]);
+
+function collectBuildFileHashes(projectDir) {
+  const found = [];
+  const walk = (dir, depth) => {
+    if (depth > 3) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!["target", "build", ".git", "node_modules"].includes(entry.name)) {
+          walk(full, depth + 1);
+        }
+        continue;
+      }
+      if (!BUILD_DESCRIPTOR_FILES.has(entry.name)) continue;
+      found.push({ path: full, sha256: sha256(readFileSync(full, "utf8")) });
+    }
+  };
+  walk(projectDir, 0);
+  found.sort((left, right) => left.path.localeCompare(right.path));
+  return found;
+}
+
+async function executeCommandProbe(client, command, args) {
+  return client.request("workspace/executeCommand", { command, arguments: args });
+}
+
+/**
+ * Provider-owned analysis snapshot for one settled session: server identity,
+ * registered executeCommands (gating truth), java project list + classpath
+ * probe when available, build-file hashes and the import progress trail.
+ */
+async function collectAnalysisSnapshot(session, mainUri) {
+  const registered = [...new Set(session.registeredExecuteCommands)].sort();
+  const snapshot = {
+    serverInfo: session.serverInfo
+      ? {
+        name: session.serverInfo.name ?? null,
+        version: session.serverInfo.version ?? null,
+      }
+      : null,
+    registeredCommands: registered,
+    javaProjects: [],
+    classpathProbe: null,
+    probeReason: null,
+    buildFiles: collectBuildFileHashes(session.projectDir).map((file) => ({
+      ...file,
+      path: file.path.replaceAll(session.projectDir, "${project}"),
+    })),
+    importProgress: {
+      events: session.progressEvents.length,
+      beginTokens: new Set(
+        session.progressEvents.filter((event) => event.kind === "begin").map((event) => event.token),
+      ).size,
+      titles: [...new Set(session.progressEvents.map((event) => event.title).filter(Boolean))].slice(0, 8),
+      anyWithPercentage: session.progressEvents.some((event) => event.percentage !== null),
+    },
+  };
+
+  if (registered.includes("java.project.list")) {
+    try {
+      const value = await executeCommandProbe(session.client, "java.project.list", []);
+      snapshot.javaProjects = (Array.isArray(value) ? value : value?.projects ?? [])
+        .map((item) => ({
+          id: typeof item === "string" ? item : item?.uri ?? item?.rootUri ?? "",
+          rootUri: typeof item === "string" ? item : item?.uri ?? item?.rootUri ?? null,
+        }))
+        .filter((item) => item.id);
+    } catch (error) {
+      snapshot.probeReason = `java.project.list-failed:${error.message.split("\n")[0]}`;
+    }
+  } else {
+    snapshot.probeReason = "command-not-registered:java.project.list";
+  }
+
+  if (registered.includes("java.project.getClasspaths")) {
+    try {
+      const value = await executeCommandProbe(session.client, "java.project.getClasspaths", [mainUri]);
+      const entries = Array.isArray(value)
+        ? value.filter((entry) => typeof entry === "string")
+        : Array.isArray(value?.classpaths)
+          ? value.classpaths.filter((entry) => typeof entry === "string")
+          : null;
+      if (entries) {
+        const sorted = [...entries].sort();
+        snapshot.classpathProbe = {
+          root: typeof value?.root === "string"
+            ? value.root.replace(/^file:\/\//, "").replaceAll(session.projectDir, "${project}")
+            : null,
+          entryCount: sorted.length,
+          entriesSha256: sha256(sorted.join("\n")),
+          sampleKinds: sorted.slice(0, 4).map((entry) => (entry.includes(".jar") ? "jar" : "dir")),
+        };
+      } else {
+        snapshot.probeReason = "java.project.getClasspaths-unrecognized-shape";
+      }
+    } catch (error) {
+      snapshot.probeReason = `java.project.getClasspaths-failed:${error.message.split("\n")[0]}`;
+    }
+  } else if (!snapshot.probeReason) {
+    snapshot.probeReason = "command-not-registered:java.project.getClasspaths";
+  }
+  return snapshot;
 }
 
 function openFile(client, projectDir, relPath) {
@@ -1056,6 +1197,87 @@ async function runFixture(fixtureId, toolchain, jdtls, gradleHome) {
       trace.scenarios.push(scenario);
     }
 
+    // ---- §8.20.3 W2: Project Analysis snapshot on the settled session. ----
+    const mainEntry = openedUris.get(spec.filesToOpen[0].path);
+    const analysis = await collectAnalysisSnapshot(session, mainEntry.uri);
+    analysis.diagnosticFlags = {
+      incompleteOrMissingMentioned: session.diagnosticsLog.some((entry) => (
+        /incomplete|missing|could not be resolved|unresolved/i.test(entry.message)
+      )),
+    };
+    trace.analysis = analysis;
+    trace.analysisTiming = {
+      firstCompletionSatisfiedMs: (() => {
+        for (const scenario of trace.scenarios) {
+          const last = scenario.requests?.at(-1);
+          if (last?.satisfied && scenario.position) {
+            return Date.now() - session.startedAt;
+          }
+        }
+        return null;
+      })(),
+    };
+
+    // Build-file change → fresh import progress (generation bump evidence),
+    // then a byte-exact revert whose classpath fingerprint returns to baseline.
+    if (spec.buildChangeScenario) {
+      const relFile = spec.buildChangeScenario.file;
+      const absPath = join(session.projectDir, relFile);
+      const original = readFileSync(absPath, "utf8");
+      const eventsBefore = session.progressEvents.length;
+      writeFileSync(absPath, `${original}\n<!-- w2-generation-bump-probe -->\n`);
+      session.client.notify("workspace/didChangeWatchedFiles", {
+        changes: [{ uri: `file://${absPath}`, type: 2 }],
+      });
+      let reimportObserved = false;
+      const deadline = Date.now() + 120_000;
+      while (Date.now() < deadline) {
+        const fresh = session.progressEvents.slice(eventsBefore);
+        if (fresh.some((event) => event.kind === "begin")) {
+          reimportObserved = true;
+          break;
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 3_000));
+      }
+      writeFileSync(absPath, original);
+      session.client.notify("workspace/didChangeWatchedFiles", {
+        changes: [{ uri: `file://${absPath}`, type: 2 }],
+      });
+      // Give the importer time to chew on the revert before the probe.
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 5_000));
+      let classpathShaAfterRevert = null;
+      try {
+        const value = await executeCommandProbe(
+          session.client,
+          "java.project.getClasspaths",
+          [mainEntry.uri],
+        );
+        const entries = Array.isArray(value)
+          ? value.filter((entry) => typeof entry === "string")
+          : Array.isArray(value?.classpaths) ? value.classpaths : [];
+        classpathShaAfterRevert = sha256([...entries].sort().join("\n"));
+      } catch {
+        classpathShaAfterRevert = null;
+      }
+      analysis.buildChange = {
+        mutatedFile: relFile,
+        reimportProgressObserved: reimportObserved,
+        revertedByteExact: readFileSync(absPath, "utf8") === original,
+        // Meaningful only when a classpath probe exists to compare against;
+        // lifecycle-only providers leave this null instead of implying drift.
+        classpathStableAfterRevert: analysis.classpathProbe?.entriesSha256
+          ? classpathShaAfterRevert !== null
+            && classpathShaAfterRevert === analysis.classpathProbe.entriesSha256
+          : null,
+      };
+      if (!reimportObserved) {
+        trace.failures.push(`build-change: no provider progress after ${relFile} change`);
+      }
+      if (!analysis.buildChange.revertedByteExact) {
+        trace.failures.push(`build-change: ${relFile} not restored byte-exactly`);
+      }
+    }
+
     if (spec.restartAfterCases) {
       const restartStarted = Date.now();
       await session.client.kill();
@@ -1095,6 +1317,20 @@ async function runFixture(fixtureId, toolchain, jdtls, gradleHome) {
           signatureHelpOkAfterRestart: fixtureId === "maven-single" ? signatureOkAfterRestart : null,
           reason: wait.evaluation.reason ?? null,
           signatureReason,
+        };
+        // §8.20.3 W2 offline-cache hint: a warm second session should reach
+        // its first satisfied completion noticeably faster than the cold one.
+        const firstMs = trace.analysisTiming?.firstCompletionSatisfiedMs ?? null;
+        const restartFirstMs = wait.satisfied ? Date.now() - second.startedAt : null;
+        trace.analysisTiming = {
+          ...trace.analysisTiming,
+          offlineCacheHint: {
+            coldSessionFirstSatisfiedMs: firstMs,
+            restartedSessionFirstSatisfiedMs: restartFirstMs,
+            fasterThanCold: firstMs !== null && restartFirstMs !== null
+              ? restartFirstMs < firstMs
+              : null,
+          },
         };
         if (!wait.satisfied) trace.failures.push(`restart: ${wait.evaluation.reason}`);
       } finally {

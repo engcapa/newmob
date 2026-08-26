@@ -33,7 +33,23 @@ export type TraceAssertion =
   /** §8.20.2 W1: the provider declares NO channel for this reference kind. */
   | { type: "channel-absent"; channel: "typeInfoChannel" | "staticDataChannel" }
   /** §8.20.2 W1: signatureHelp recovers on a fresh session after SIGKILL. */
-  | { type: "restart-signature-ok" };
+  | { type: "restart-signature-ok" }
+  /** §8.20.3 W2: the provider reported its own identity (serverInfo). */
+  | { type: "analysis-server-info" }
+  /** §8.20.3 W2: import/analysis work-done progress was observed live. */
+  | { type: "analysis-progress-observed" }
+  /**
+   * §8.20.3 W2: lifecycle-only provider — java.project.* executeCommands are
+   * NOT registered, so module facts are honestly absent (degraded/partial
+   * contract, never complete).
+   */
+  | { type: "analysis-lifecycle-only" }
+  /** §8.20.3 W2: a build-file change triggered fresh provider progress. */
+  | { type: "analysis-build-change-generation" }
+  /** §8.20.3 W2: warm restart reached first satisfied completion faster. */
+  | { type: "analysis-offline-cache-faster" }
+  /** §8.20.3 W2: diagnostics flagged incomplete/missing classpath members. */
+  | { type: "analysis-broken-classpath-flagged" };
 
 export interface JdtlsTraceExpectation {
   caseId: string;
@@ -216,5 +232,63 @@ export const JDTLS_FIXTURE_EXPECTATIONS: readonly JdtlsTraceExpectation[] = [
     fixture: "maven-single",
     assert: { type: "restart-signature-ok" },
     ideaExpected: "After a provider restart, Parameter Info recovers together with completion on the same project.",
+  },
+
+  // ---- §8.20.3 W2: Project Analysis truth over real jdtls. ---------------
+  {
+    caseId: "analysis-server-info",
+    fixture: "maven-single",
+    scenarioKey: "__analysis",
+    assert: { type: "analysis-server-info" },
+    ideaExpected: "IDEA knows its own build (Help → About); the workspace must equally surface WHICH provider version backs semantic features.",
+  },
+  {
+    caseId: "analysis-progress-observed",
+    fixture: "maven-single",
+    scenarioKey: "__analysis",
+    assert: { type: "analysis-progress-observed" },
+    ideaExpected: "IDEA shows live import/analysis progress and gates smart features on it; the workspace derives its phase from exactly these provider reports.",
+  },
+  {
+    caseId: "analysis-lifecycle-only",
+    fixture: "maven-single",
+    scenarioKey: "__analysis",
+    assert: { type: "analysis-lifecycle-only" },
+    ideaExpected: "IDEA exposes full module/source-root/classpath models via PSI; plain LSP lifecycle alone must degrade to partial — never claim complete.",
+  },
+  {
+    caseId: "analysis-build-change-generation",
+    fixture: "maven-single",
+    scenarioKey: "__analysis",
+    assert: { type: "analysis-build-change-generation" },
+    ideaExpected: "Editing a pom/build file re-imports the project in IDEA; stale semantic results are invalidated by that generation bump.",
+  },
+  {
+    caseId: "analysis-offline-cache-faster",
+    fixture: "maven-single",
+    scenarioKey: "__analysis",
+    assert: { type: "analysis-offline-cache-faster" },
+    ideaExpected: "IDEA's warmed indexes make project reopen faster than first import; reused provider state should show the same direction.",
+  },
+  {
+    caseId: "analysis-server-info-gradle",
+    fixture: "gradle-single",
+    scenarioKey: "__analysis",
+    assert: { type: "analysis-server-info" },
+    ideaExpected: "Provider identity is workspace-independent infrastructure truth.",
+  },
+  {
+    caseId: "analysis-progress-observed-multi-module",
+    fixture: "maven-multi-module",
+    scenarioKey: "__analysis",
+    assert: { type: "analysis-progress-observed" },
+    ideaExpected: "Multi-module imports report per-project progress; the phase derivation consumes it identically.",
+  },
+  {
+    caseId: "analysis-broken-classpath-flagged",
+    fixture: "maven-broken-classpath",
+    scenarioKey: "__analysis",
+    assert: { type: "analysis-broken-classpath-flagged" },
+    ideaExpected: "Broken classpath surfaces as degraded analysis state in IDEA, explaining why semantic actions cannot be trusted there.",
   },
 ];

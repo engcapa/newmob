@@ -408,6 +408,7 @@ import {
   type ParameterInvalidateReason,
   type ReferenceSessionContext,
 } from "./workspace/referenceInfoSession";
+import { useWorkspaceProjectAnalysis } from "./workspace/useWorkspaceProjectAnalysis";
 import { type LocationPeekState } from "./workspace/LocationPeek";
 import {
   type GoToSymbolQueryResult,
@@ -1878,6 +1879,7 @@ export function CodeWorkspaceTab({
     isDocumentSynced: isLspDocumentSynced,
     documentVersion: lspDocumentVersion,
     sessionGeneration: lspSessionGeneration,
+    serverStatuses: lspServerStatuses,
     syncDocument: syncLspDocument,
     waitForSyncQueue: waitForLspDocumentSyncQueue,
     saveDocument: saveLspDocument,
@@ -1890,6 +1892,42 @@ export function CodeWorkspaceTab({
     updateLspFiles: setLspFiles,
     onError: setStatusMessage,
     onRestart: invalidateSemanticAfterLspRestart,
+  });
+  // §8.20.3 W2: provider-owned Project Analysis snapshot (phase/progress/
+  // modules/classpath fingerprint). The generation resync rides the statuses
+  // identity — a restart refreshes them, which re-probes on the new session.
+  const [projectAnalysisGeneration, setProjectAnalysisGeneration] = useState(0);
+  useEffect(() => {
+    setProjectAnalysisGeneration(lspSessionGeneration());
+  }, [lspServerStatuses, lspSessionGeneration]);
+  const projectAnalysisRoots = useMemo(
+    () => roots.map((root) => root.path),
+    [roots],
+  );
+  const projectAnalysisDescriptorForRoot = useCallback(
+    (root: string) => lspDescriptorForPath(root, root),
+    [lspDescriptorForPath],
+  );
+  const javaServerStatus = useMemo(
+    () => lspServerStatuses.find((server) => server.presetId === "java") ?? null,
+    [lspServerStatuses],
+  );
+  const {
+    snapshot: projectAnalysisSnapshot,
+    probing: projectAnalysisProbing,
+    refresh: refreshProjectAnalysis,
+  } = useWorkspaceProjectAnalysis({
+    workspaceInstanceId,
+    roots: projectAnalysisRoots,
+    provider: {
+      configured: !!(javaServerStatus?.available || javaServerStatus?.active),
+      active: !!javaServerStatus?.active,
+      opening: false,
+      lastError: javaServerStatus?.error ?? null,
+    },
+    progresses: lspProgresses,
+    sessionGeneration: projectAnalysisGeneration,
+    descriptorForRoot: projectAnalysisDescriptorForRoot,
   });
   const treePaneStyle = useMemo(() => ({
     "--taomni-code-tree-font-size": `${treeFontSize}px`,
@@ -13640,6 +13678,9 @@ export function CodeWorkspaceTab({
                 status={activeLspState?.status ?? null}
                 semanticTokenCount={semanticTokensByGroup[activeEditorGroupId]?.length ?? 0}
                 semanticIndex={semanticIndex.snapshot}
+                projectAnalysis={projectAnalysisSnapshot}
+                projectAnalysisProbing={projectAnalysisProbing}
+                onRefreshProjectAnalysis={refreshProjectAnalysis}
                 profile={inspectionProfile}
                 onUpdateRule={updateInspectionProfileRule}
                 onCreateBaseline={createInspectionBaselineFromScope}

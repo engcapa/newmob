@@ -17,11 +17,16 @@ trace。任何 capability 在没有对应 trace 证据前,只能声明
 
 | 项目 | 构建工具 | 覆盖场景 |
 |---|---|---|
-| `maven-single/` | maven | JDK type、static member(`Arrays.`)、overload 家族(`appen`)、依赖类型 + resolve import(commons-lang3)、test source set(junit)；§8.20.2 W1: signatureHelp overload 家族/activeParameter 推进/嵌套调用/泛型签名、supersede-cancel(`$/cancelRequest` → -32800)、hover(project javadoc/JDK/commons-lang3 FQN)、provider channel absence、restart 后 completion+signatureHelp 双恢复 |
-| `maven-multi-module/` | maven | 跨模块类型(CoreUtil)+ resolve import、同名类型歧义(两个 `Result`) |
-| `gradle-single/` | gradle | Gradle 导入 sanity(JDK type) |
-| `gradle-multi-module/` | gradle | 跨模块类型(GCore)+ resolve import |
-| `maven-broken-classpath/` | maven | 坏 classpath:缺失依赖候选绝不出现、java.lang 仍可补全 |
+| `maven-single/` | maven | JDK type、static member(`Arrays.`)、overload 家族(`appen`)、依赖类型 + resolve import(commons-lang3)、test source set(junit)；§8.20.2 W1: signatureHelp overload 家族/activeParameter 推进/嵌套调用/泛型签名、supersede-cancel(`$/cancelRequest` → -32800)、hover(project javadoc/JDK/commons-lang3 FQN)、provider channel absence、restart 后 completion+signatureHelp 双恢复；§8.20.3 W2: 分析快照(serverInfo/import progress/build-change generation bump/offline-cache hint) |
+| `maven-multi-module/` | maven | 跨模块类型(CoreUtil)+ resolve import、同名类型歧义(两个 `Result`)；W2 分析快照 |
+| `gradle-single/` | gradle | Gradle 导入 sanity(JDK type)；W2 分析快照 |
+| `gradle-multi-module/` | gradle | 跨模块类型(GCore)+ resolve import；W2 分析快照 |
+| `maven-broken-classpath/` | maven | 坏 classpath:缺失依赖候选绝不出现、java.lang 仍可补全；W2: incomplete/missing 诊断标记(degraded 证据) |
+
+W2 分析快照(`trace.analysis`)记录：serverInfo(提供方自报身份)、
+registered executeCommands（**当前 jdt.ls 不注册 `java.project.*`** →
+module/classpath 详情诚实缺席，lifecycle-only 降级）、build-file 哈希、
+import progress 轨迹(events/begin tokens/titles/百分比)。
 
 补全目标写在 `completionTargets()` 的不可达块里,每行一个裸前缀
 token;runner 按"整行等于 token"(成员触发则行尾)定位 caret,与编译

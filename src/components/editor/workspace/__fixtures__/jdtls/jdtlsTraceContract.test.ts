@@ -71,6 +71,24 @@ interface ProviderChannels {
   declaredStaticDataChannel: boolean;
 }
 
+interface AnalysisSnapshot {
+  serverInfo?: { name: string | null; version: string | null } | null;
+  registeredCommands?: readonly string[];
+  javaProjects?: readonly unknown[];
+  classpathProbe?: { entriesSha256: string } | null;
+  probeReason?: string | null;
+  importProgress?: {
+    events: number;
+    beginTokens: number;
+    anyWithPercentage: boolean;
+  };
+  diagnosticFlags?: { incompleteOrMissingMentioned: boolean };
+  buildChange?: {
+    reimportProgressObserved: boolean;
+    revertedByteExact: boolean;
+  };
+}
+
 interface FixtureTrace {
   schemaVersion: number;
   fixtureId: JdtlsFixtureId;
@@ -79,6 +97,12 @@ interface FixtureTrace {
   buildModelFingerprint: string;
   scenarios: TraceScenario[];
   providerChannels?: ProviderChannels;
+  analysis?: AnalysisSnapshot;
+  analysisTiming?: {
+    offlineCacheHint?: {
+      fasterThanCold: boolean | null;
+    };
+  };
   restart?: {
     performed: boolean;
     completionOkAfterRestart: boolean;
@@ -197,6 +221,49 @@ describe("§8.19.4 real jdtls trace contract", () => {
         case "restart-signature-ok": {
           expect(trace.restart?.performed).toBe(true);
           expect(trace.restart?.signatureHelpOkAfterRestart, "signatureHelp did not recover after restart").toBe(true);
+          break;
+        }
+        // §8.20.3 W2: Project Analysis truth assertions.
+        case "analysis-server-info": {
+          const analysis = trace.analysis;
+          expect(analysis?.serverInfo, `no serverInfo recorded for ${entry.fixture}`).not.toBeNull();
+          expect(analysis!.serverInfo!.name ?? "").not.toBe("");
+          break;
+        }
+        case "analysis-progress-observed": {
+          const progress = trace.analysis?.importProgress;
+          expect(progress, `no importProgress recorded for ${entry.fixture}`).toBeDefined();
+          expect(progress!.events).toBeGreaterThan(0);
+          expect(progress!.beginTokens).toBeGreaterThanOrEqual(1);
+          break;
+        }
+        case "analysis-lifecycle-only": {
+          const analysis = trace.analysis;
+          expect(analysis, `no analysis snapshot for ${entry.fixture}`).toBeDefined();
+          // The java.project.* commands are genuinely absent from the
+          // provider's registrations — module facts must NOT be fabricated.
+          expect(analysis!.registeredCommands ?? []).not.toContain("java.project.list");
+          expect(analysis!.registeredCommands ?? []).not.toContain("java.project.getClasspaths");
+          expect((analysis!.javaProjects ?? []).length).toBe(0);
+          expect(analysis!.probeReason ?? "").toContain("command-not-registered");
+          break;
+        }
+        case "analysis-build-change-generation": {
+          const change = trace.analysis?.buildChange;
+          expect(change, `no buildChange record for ${entry.fixture}`).toBeDefined();
+          expect(change!.reimportProgressObserved, "provider did not re-import after build-file change").toBe(true);
+          expect(change!.revertedByteExact, "fixture build file not restored byte-exactly").toBe(true);
+          break;
+        }
+        case "analysis-offline-cache-faster": {
+          const hint = trace.analysisTiming?.offlineCacheHint;
+          expect(hint, `no offlineCacheHint for ${entry.fixture}`).toBeDefined();
+          expect(hint!.fasterThanCold, "warm session was not faster than cold import").toBe(true);
+          break;
+        }
+        case "analysis-broken-classpath-flagged": {
+          const flagged = trace.analysis?.diagnosticFlags?.incompleteOrMissingMentioned;
+          expect(flagged, `broken classpath was not flagged in ${entry.fixture} diagnostics`).toBe(true);
           break;
         }
       }

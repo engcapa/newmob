@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-single",
-  "generatedAt": "2026-08-26T02:21:44.581Z",
+  "generatedAt": "2026-08-26T05:04:24.477Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 2433,
+          "msTotal": 2724,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -61,7 +61,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 464,
+          "msTotal": 479,
           "itemCount": 58,
           "isIncomplete": true,
           "satisfied": true,
@@ -85,7 +85,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 46,
+          "msTotal": 60,
           "itemCount": 14,
           "isIncomplete": false,
           "satisfied": true,
@@ -167,7 +167,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 138,
+          "msTotal": 140,
           "itemCount": 2,
           "isIncomplete": false,
           "satisfied": true,
@@ -176,7 +176,7 @@
         }
       ],
       "resolve": {
-        "ms": 774,
+        "ms": 719,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport org.apache.commons.lang3.StringUtils;"
@@ -202,7 +202,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 226,
+          "msTotal": 171,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -225,7 +225,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 144,
+        "msTotal": 151,
         "signaturesCount": 13,
         "labels": [
           "append(double d) : StringBuilder",
@@ -261,7 +261,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 97,
+        "msTotal": 71,
         "signaturesCount": 13,
         "labels": [
           "append(double d) : StringBuilder",
@@ -297,7 +297,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 99,
+        "msTotal": 77,
         "signaturesCount": 3,
         "labels": [
           "parseInt(String s) : int",
@@ -323,7 +323,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 69,
+        "msTotal": 72,
         "signaturesCount": 9,
         "labels": [
           "valueOf(double d) : String",
@@ -355,7 +355,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 280,
+        "msTotal": 160,
         "signaturesCount": 1,
         "labels": [
           "singletonList(T o) : List<T>"
@@ -381,9 +381,9 @@
       "supersede": {
         "firstOutcome": "rejected:-32800",
         "firstCancelled": true,
-        "msFirst": 110,
+        "msFirst": 60,
         "secondSatisfied": true,
-        "msSecond": 96
+        "msSecond": 55
       },
       "notes": "$/cancelRequest on the in-flight request mirrors the production cancel bridge; second request must satisfy"
     },
@@ -397,7 +397,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 92,
+        "msFirst": 68,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -418,7 +418,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 129,
+        "msFirst": 107,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -439,7 +439,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 99,
+        "msFirst": 70,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -487,9 +487,57 @@
     "hoverProvenByScenarios": true,
     "dynamicRegistrations": []
   },
+  "analysis": {
+    "serverInfo": {
+      "name": "JDT Language Server (Standard)",
+      "version": "1.61.0-SNAPSHOT"
+    },
+    "registeredCommands": [],
+    "javaProjects": [],
+    "classpathProbe": null,
+    "probeReason": "command-not-registered:java.project.list",
+    "buildFiles": [
+      {
+        "path": "${project}/pom.xml",
+        "sha256": "c2ccbbe9c9ed21fc1e12c1a03a964d0f91cec3bbc6706922a22654a88d3b045f"
+      }
+    ],
+    "importProgress": {
+      "events": 36,
+      "beginTokens": 11,
+      "titles": [
+        "Synchronizing projects",
+        "Building",
+        "Initialize Workspace",
+        "Detect installed JVMs",
+        "LookupJDKToolchainsJob",
+        "Reporting encoding changes.",
+        "Searching...",
+        "Validate documents"
+      ],
+      "anyWithPercentage": true
+    },
+    "diagnosticFlags": {
+      "incompleteOrMissingMentioned": false
+    },
+    "buildChange": {
+      "mutatedFile": "pom.xml",
+      "reimportProgressObserved": true,
+      "revertedByteExact": true,
+      "classpathStableAfterRevert": false
+    }
+  },
+  "analysisTiming": {
+    "firstCompletionSatisfiedMs": 8602,
+    "offlineCacheHint": {
+      "coldSessionFirstSatisfiedMs": 8602,
+      "restartedSessionFirstSatisfiedMs": 6212,
+      "fasterThanCold": true
+    }
+  },
   "restart": {
     "performed": true,
-    "msToReadyAfterRestart": 7060,
+    "msToReadyAfterRestart": 6334,
     "completionOkAfterRestart": true,
     "signatureHelpOkAfterRestart": true,
     "reason": null,

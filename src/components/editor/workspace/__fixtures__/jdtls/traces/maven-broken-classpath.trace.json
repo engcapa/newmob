@@ -1,14 +1,16 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-broken-classpath",
-  "generatedAt": "2026-08-24T07:17:55.215Z",
+  "generatedAt": "2026-08-26T05:31:43.200Z",
   "sanitized": true,
   "toolchain": {
     "java": {
       "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
       "info": {
         "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
-        "major": 21
+        "major": 21,
+        "version": "21.0.4"
       }
     },
     "jdtls": {
@@ -35,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 3273,
+          "msTotal": 2345,
           "itemCount": 0,
           "isIncomplete": false,
           "satisfied": true,
@@ -59,7 +61,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 554,
+          "msTotal": 202,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -73,6 +75,78 @@
     }
   ],
   "failures": [],
+  "providerChannels": {
+    "declaredTypeInfoChannel": false,
+    "declaredStaticDataChannel": false,
+    "topLevelCapabilityKeys": [
+      "callHierarchyProvider",
+      "codeActionProvider",
+      "codeLensProvider",
+      "declarationProvider",
+      "definitionProvider",
+      "documentFormattingProvider",
+      "documentHighlightProvider",
+      "documentOnTypeFormattingProvider",
+      "documentRangeFormattingProvider",
+      "documentSymbolProvider",
+      "executeCommandProvider",
+      "foldingRangeProvider",
+      "hoverProvider",
+      "implementationProvider",
+      "inlayHintProvider",
+      "referencesProvider",
+      "renameProvider",
+      "selectionRangeProvider",
+      "semanticTokensProvider",
+      "textDocumentSync",
+      "typeDefinitionProvider",
+      "typeHierarchyProvider",
+      "workspace",
+      "workspaceSymbolProvider"
+    ],
+    "signatureHelpProviderDeclaredStatically": false,
+    "hoverProviderDeclaredStatically": false,
+    "signatureHelpProvenByScenarios": false,
+    "hoverProvenByScenarios": false,
+    "dynamicRegistrations": []
+  },
+  "analysis": {
+    "serverInfo": {
+      "name": "JDT Language Server (Standard)",
+      "version": "1.61.0-SNAPSHOT"
+    },
+    "registeredCommands": [],
+    "javaProjects": [],
+    "classpathProbe": null,
+    "probeReason": "command-not-registered:java.project.list",
+    "buildFiles": [
+      {
+        "path": "${project}/pom.xml",
+        "sha256": "eb8fced014238d27a03ef2701d2c6cb330c4966d5fb40bbf0fb45f226d1b3442"
+      }
+    ],
+    "importProgress": {
+      "events": 31,
+      "beginTokens": 10,
+      "titles": [
+        "Synchronizing projects",
+        "Building",
+        "Initialize Workspace",
+        "Detect installed JVMs",
+        "LookupJDKToolchainsJob",
+        "Reporting encoding changes.",
+        "Searching...",
+        "Validate documents"
+      ],
+      "anyWithPercentage": true
+    },
+    "diagnosticFlags": {
+      "incompleteOrMissingMentioned": true
+    }
+  },
+  "analysisTiming": {
+    "firstCompletionSatisfiedMs": 5607
+  },
   "diagnosticsSummary": {
     "count": 4,
     "mentionsMissingLib": true,

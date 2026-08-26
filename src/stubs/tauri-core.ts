@@ -1624,6 +1624,23 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         activeParameter: 0,
       } as T;
     }
+    case "lsp_java_project_model": {
+      // §8.20.3 W2: lifecycle-only facts in browser mode — no provider, so
+      // phase derivation degrades honestly instead of pretending readiness.
+      return {
+        status: stubLspDocumentStatus(args as InvokeArgs),
+        active: false,
+        processId: null,
+        serverName: null,
+        serverVersion: null,
+        registeredCommands: [],
+        buildFiles: [],
+        javaHomeUsed: null,
+        javaProjects: [],
+        classpathProbe: null,
+        probeReason: "no-active-session",
+      } as T;
+    }
     case "lsp_definition":
     case "lsp_type_definition":
     case "lsp_implementation":

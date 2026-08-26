@@ -2,11 +2,11 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Core Daily Editing Profile，再以 Java 为首个语言完成可证明的 provider-backed 语义工作流。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-26 · 版本：v4.64（W1 Reference Information V3 as-built；上一版 v4.63 为 W0 shell stability + shortcut ownership）· 状态：**实施中；R0-R9 生产合同/静态门禁/native harness 与 W0（C1/C4 实跑双绿）、W1（五 kind 单通道 + Parameter 单一 request 通道 + Type/External/Static Data 诚实入口 + jdtls signatureHelp/hover/supersede-cancel/provider-channels trace）已交付，Java Basic Completion 与 QuickDoc/Parameter 主路径达 provider 层 G1 L2（Linux、jdtls 1.61/JDK 21）；G0 的代码合同已闭合但 native 故障注入与三端证据未绿；G1 仍受 Project Analysis 状态（W2）、diagnostics/intention 最小闭环（W3）、常用导航/usages（W4）与 R9 三端门禁阻断；G2/G3 继续逐 capability 记账**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
+> 日期：2026-08-26 · 版本：v4.65（W2 Java Project Analysis truth as-built；上一版 v4.64 为 W1 Reference Information V3）· 状态：**实施中；R0-R9 生产合同/静态门禁/native harness 与 W0（shell 稳定）、W1（Reference 五 kind 单通道）、W2（provider-owned Project Analysis 快照：phase 状态机 + fingerprint + AnalysisPanel 展示 + jdtls import-progress/build-change/offline-cache/broken-classpath trace）已交付，Java Basic Completion、QuickDoc/Parameter 主路径达 provider 层 G1 L2（Linux、jdtls 1.61/JDK 21）；G0 的代码合同已闭合但 native 故障注入与三端证据未绿；G1 仍受 diagnostics/intention 最小闭环（W3）、常用导航/usages（W4）、refactor evidence gate（W5）与 R9 三端门禁阻断；G2/G3 继续逐 capability 记账**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
 >
-> 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链；W0 后 shell 主路径稳定且 shortcut owner deterministic，W1 后 Parameter Info 不再有私有 request 序列——五个 reference kind 共用 controller 单通道（request-id 唯一来源）、Type Info/External Documentation/Expression Static Data 有诚实入口。当前阻断是：Project Analysis 状态不解释 semantic 动作可用性（W2）、diagnostic presentation 与 provider inspection/intention 未分账（W3）、usages 角色分类与 refactor evidence gate 未闭环（W4/W5），以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 是 provider 结果的新鲜度台账而不是索引，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine，Type Info/Expression Static Data 的 typed-unavailable 不是能力可用。
+> 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链；W0 后 shell 主路径稳定且 shortcut owner deterministic，W1 后 Parameter Info 不再有私有 request 序列——五个 reference kind 共用 controller 单通道，W2 后 Project Analysis 有 provider-owned 事实源：phase 状态机（unconfigured/scanning/importing/analyzing/ready/degraded/offline/error）由真实 session/progress/probe 推导，AnalysisPanel 展示 phase/provider/modules/completeness/diagnostics 并解释 semantic 动作为何不可用。当前阻断是：diagnostic presentation 与 provider inspection/intention 未分账（W3）、usages 角色分类未闭环（W4）、refactor evidence gate 未闭环（W5），以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 仍是新鲜度台账（UI 文案已改 Provider freshness），jdtls 未注册 `java.project.*` executeCommand → module 详情诚实降级为 partial，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine，Type Info/Expression Static Data 的 typed-unavailable 不是能力可用。
 >
-> 上一版本：v4.63（2026-08-25，W0 shell stability + shortcut ownership as-built）· v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
+> 上一版本：v4.64（2026-08-26，W1 Reference Information V3 as-built，提交 `672d53ac`）· v4.63（2026-08-25，W0 shell stability + shortcut ownership as-built）· v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
 >
 > 早期版本：v4.44（2026-08-22，`85be924f` as-built 复核、IDEA 2026.2 Editor 能力第四批对照、G0/G1 目标重排与 §8.16 合同）· v4.42（2026-08-21，`d641ad12` + `9203d3e4` + `20027dfe` as-built 复核）· v4.41（2026-08-20，`c5ce1fd6` + `5ce13c9a` as-built 复核）· v4.40（2026-08-19，`a4584916` + `b4e7325f` as-built 复核与 Gate R0 回归登记）· v4.39（2026-08-19，`dab8a778` production-path code review）· v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -36,7 +36,7 @@
 1. W0 已修复两个 shell 阻断：tree IPC 判别联合 + stub 同 shape 消除 `TC-IDE-C1-01` 渲染崩溃；ShellShortcutClaim/Route router 使最后标签关闭后的 `Ctrl+Shift+T` 正确归属 Code Workspace Reopen Closed Tab。C1/C4 browser 实跑绿；不得继续引用这两个旧缺陷。
 2. R0 已修复 v4.50 所列 intended hash、discarded writeback、closed-file committer 与 per-operation resume 缺口；当前 G0 红色来自 native 故障注入和三端证据尚未执行，而不是仍存在那些旧代码缺陷。不得继续复制 v4.50 的旧结论。
 3. W1 已闭合 Reference 单通道：Parameter Info 不再走 host 私有序列，五 kind 共用 `ReferenceInfoController.requestTyped`（request-id 唯一来源），旧 `context-info` 迁移为显式 unavailable，Type Info/External Documentation/Expression Static Data 有诚实入口且 jdtls trace 覆盖 signatureHelp/hover/supersede-cancel/provider-channel-absence。仍缺：Type Info/Static Data 的真实 provider 通道（当前 typed-unavailable）、External Doc 在 provider 未返回链接时不可用、IDEA 实机对录与三端重复。
-4. `workspaceSemanticIndex.ts` 只记录 provider query 的 revision/generation/coverage，不扫描文件、不保存 symbol/reference graph，也不等价于 IDEA 2026.2 的 Project Analysis。Java module/source-set/dependency/classpath import snapshot、degraded/ready 状态与 smart feature 可用性仍需 provider-owned 事实源（W2）。
+4. W2 已建立 provider-owned Project Analysis 事实源（`projectAnalysisModel.ts` 状态机 + `useWorkspaceProjectAnalysis.ts` + Rust `lsp_java_project_model`）：phase 由 session/progress/probe 推导，build-file/JDK/provider 指纹进入 projectFingerprint，jdtls import-progress/build-change/offline-cache/broken-classpath 有五项目真实 trace。仍缺：jdtls 未注册 `java.project.*` executeCommand → module/source-root 详情诚实降级 partial（重开条件：找到注册开关或接 Gradle/Maven tooling API）；source/test/generated/excluded roots 无 provider 通道。
 5. Java Basic Completion 已有真实 Linux jdtls 证据，但第二次调用只会诚实记录 provider scope unchanged；completion exclude/prioritize 设置、Smart/Type-Matching expected-type evidence 与 Full Line runtime 均未实现。Full Line 按 R8 ADR 继续 defer。
 6. 当前 `inspectionProfile.ts` 只隐藏或改色 provider diagnostics，suppression/baseline 也只是客户端呈现过滤；没有 IDEA-like inspection catalog/profile/scope executor、provider suppression edit、全项目检查、data-flow/nullability 或 Expression Static Data 语义。Alt+Enter CodeAction 入口存在不等于 intention/inspection 对齐（W3）。
 7. Find Usages 已有 identity/rerun/pin/library filter，但 Reads/Writes/Declarations 因 provider 无角色证据而禁用，缺 scope dialog、轻量 Show Usages、recent usages 与真实 jdtls trace。声明/类型/实现/层级/Search Everywhere 虽有 LSP 入口，也未形成 Java 对照矩阵（W4）。
@@ -875,7 +875,7 @@ R2 必须先修 catalog ownership 和 broken cases，再把 `TC-IDE-C0/C1/C2/C3/
 | **ActionHost/Keymap** | R1 已把业务键位迁入 workspace-scoped host，支持 two-stroke、mouse dispatcher、IME/dead-key/AltGr gate、可编辑 scheme/conflict；W0 补齐 ShellShortcutClaim/Route root router 与 tree IPC 判别联合 | native 态四上下文（editor-open/editor-empty/terminal-focused/dialog-open）回归未跑（W7） | **核心合同 L2(browser 实跑绿)**；W7 复验 |
 | **Basic Completion** | R3 有 resolve failure choice、invocation scope 事实、one-dispatch/one-undo；五个 Maven/Gradle fixture、九场景在 Linux jdtls 1.61/JDK 21 留有脱敏 trace | 无 IDEA 实机对录、Windows/macOS 未跑；第二次调用的 provider scope 可为 unchanged；exclude/prioritize/Smart 不可用 | **Java Basic G1 L2 provider-backed（Linux）**；W2/W7 |
 | **Reference Information** | QuickDoc popup/tool window/pin/history/URL policy可达；W1 后五 kind 共用 `requestTyped` 单通道（request-id 唯一来源、per-kind supersede、context-info 显式迁移）；Parameter 由 `ParameterInfoSession` 驱动（设置延迟/显式零延迟/Esc 按 kind/caret-doc-provider 关闭），host 纯显示；`lsp_signature_help` 接入 `$/cancelRequest` bridge；Type/External/Static Data 有生产入口与 typed unavailable；jdtls trace 覆盖 overload/nested/generic signatureHelp、project/JDK/library hover、supersede-cancel、channel absence、restart 恢复 | Type Info/Expression Static Data 当前无 LSP provider 通道（保持 L0/L1 unavailable-contract）；External Doc 仅在 last ready QuickDoc 含真实 https 链接时可用；IDEA 实机对录与 Windows/macOS 未跑 | **QuickDoc L2(jsdom+provider Linux)，Parameter L2(单通道合同)+provider trace(Linux)，External L1，Type/Static L0-L1**；W1 ✅ |
-| **Project Analysis / Java context** | SDK/JDK 探测、jdtls session、progress 与 `WorkspaceSemanticIndexSnapshot` freshness/coverage 事实存在 | snapshot 不扫描/索引 symbol；没有统一 module/source/test/generated/excluded/dependency import snapshot，ready 不代表 IDEA smart mode 等价 | **provider lifecycle L1**；W2 |
+| **Project Analysis / Java context** | W2 后 provider-owned 事实源：`JavaProjectAnalysisSnapshotV1`（phase 状态机 + `projectFingerprint`(roots/build-hash/JDK-hash/provider/classpath) + progress + completeness）由 `lsp_java_project_model`（serverInfo/pid/registered executeCommands/build-file hashes）与 session/progress 推导；AnalysisPanel 展示 phase/provider/modules/diagnostics 并解释 semantic 动作可用性；五 fixture trace 覆盖 server-info/import-progress/lifecycle-only 降级/build-change generation/offline-cache/broken-classpath 标记 | jdtls 未注册 `java.project.*` → modules/classpath 详情缺失（partial，非 complete）；source/test/excluded roots 无通道；ready ≠ IDEA smart mode 等价；Windows/macOS 未跑 | **provider lifecycle+phase L1/L2(单机 Linux trace)**；W7 补平台 |
 | **Diagnostics / Intention** | provider diagnostics、Problems/Analysis、CodeAction/resolve/apply、presentation profile/suppression/baseline UI存在 | profile 只影响展示；无 provider inspection catalog/scope/settings/suppression edit；无全项目 inspection/data-flow/nullability 证明；真实 jdtls quick-fix trace缺失 | **diagnostics L2，inspection/intention suite L1**；W3 |
 | **Search / Navigation / Hierarchy** | Search Everywhere 有 All/Class/File/Symbol/Action/Text；definition/type/implementation、call/type hierarchy、Recent/Last Edit/Back/Forward 与结构视图均有生产入口；W0 后 C1 shell 崩溃已修（palette 流程实跑绿） | symbol fan-out 完整性依赖 provider；siblings/method navigation 等 IDEA 子项未闭合；Java fixture/IDEA compare不足 | **mixed L1/L2**；W4 |
 | **Usages** | identity/project fingerprint、rerun、pin replace guard、分页与 library owner filter 已生产化 | Reads/Writes/Declarations禁用；无 scope dialog、轻量 Show Usages、recent query；无真实 jdtls role/coverage/cancel/restart trace | **L1**；W4 |
@@ -891,7 +891,7 @@ R2 必须先修 catalog ownership 和 broken cases，再把 `TC-IDE-C0/C1/C2/C3/
 | 目标 | 当前状态 | 已完成 | 解除条件 |
 |---|---|---|---|
 | **G0 Editor Integrity** | **红（代码合同闭合，发布证据未闭合）** | R0/R1 typed effect、恢复、单一 action/keymap runtime | W7 的 Linux/Windows/macOS 故障矩阵；无未解释磁盘 effect、IME/action ownership 或恢复失败 |
-| **G1 Core Daily Editing** | **未达** | Basic Completion Linux L2；W0 shell 主路径稳定 + shortcut owner deterministic（C1/C4 实跑绿）；W1 Parameter/QuickDoc 单通道 + 五 kind 诚实入口（C5 实跑绿）；常用编辑/QuickDoc/format/clipboard/tabs/splits 多数达 jsdom/browser L2 | W2 项目分析状态；W3 diagnostics/intention 最小闭环；W4 常用导航/usages；W7 三端/a11y |
+| **G1 Core Daily Editing** | **未达** | Basic Completion Linux L2；W0 shell 主路径稳定 + shortcut owner deterministic（C1/C4 实跑绿）；W1 Parameter/QuickDoc 单通道 + 五 kind 诚实入口（C5 实跑绿）；W2 Project Analysis 状态诚实可解释（五 fixture trace 绿）；常用编辑/QuickDoc/format/clipboard/tabs/splits 多数达 jsdom/browser L2 | W3 diagnostics/intention 最小闭环；W4 常用导航/usages；W7 三端/a11y |
 | **G2 Java Semantic Workflow** | **未达；仅 Basic Completion 单项到 provider L2** | 真实 jdtls completion fixture 与通用 semantic identity/effect底座 | W2-W5 逐 capability真实 trace + IDEA expected/observed；每项独立升 L2/L3，不设整包布尔完成 |
 | **G3 Advanced Editing** | **分项可用/多数延期** | clipboard history、Code Style首批、local Surround/Complete Statement子集 | W6收口已生产子项；W8只在重开条件满足后实施 SSR/dependency/Full Line/Code Vision/scratch/injection/detach |
 
@@ -5579,7 +5579,7 @@ Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
 |---:|---|---|---|---|
 | 1 | [x] | **W0 Shell stability + shortcut ownership（v4.63 as-built）** | 修复 C1 渲染崩溃与 `Ctrl+Shift+T` owner 冲突，恢复 G1 可执行基线 | R1 |
 | 2 | [x] | **W1 Reference Information V3（v4.64 as-built）** | Parameter/QuickDoc 单一请求通道；按 IDEA 2026.2 修正 Type/External/Expression Static Data 边界 | W0、R3/R6 |
-| 3 | [ ] | **W2 Java Project Analysis truth** | provider-owned project/import snapshot、ready/degraded 状态和可复用 jdtls evidence runner | W0、R3 |
+| 3 | [x] | **W2 Java Project Analysis truth（v4.65 as-built）** | provider-owned project/import snapshot、ready/degraded 状态和可复用 jdtls evidence runner | W0、R3 |
 | 4 | [ ] | **W3 Inspection + Intention provider contract** | 把 diagnostic presentation 与 provider analysis/action 执行彻底分账 | W2、R0/R1 |
 | 5 | [ ] | **W4 Navigation + Usages + Hierarchy** | scope/coverage/roles/history/preview 与 Java 真实 trace | W2、W1 |
 | 6 | [ ] | **W5 Refactor evidence and conflict gate** | Rename/Safe Delete/provider refactor 共用 completeness/conflict/stale/apply/undo 合同 | W2、W4、R0 |
@@ -5957,6 +5957,100 @@ UI 在状态栏/Language面板展示 phase、provider、module数、degraded rea
 fixture扩展五个现有项目：记录 module/source/test/classpath fingerprint、import progress、broken classpath degraded、build file修改触发新 generation、SIGKILL restart、offline cache。所有 W3-W5 runner场景复用同一 snapshot/request schema，禁止各自重新探测 JDK/jdtls。
 
 **DoD。** Project Analysis 状态能解释 completion/usages/refactor为何 unavailable；Maven/Gradle single/multi/broken五项目 snapshot契约绿；root/build/JDK/restart stale测试绿；真实 trace脱敏。G1只要求状态诚实和恢复可用，G2的 complete仍按具体 provider/fixture决定。
+
+**W2 as-built（v4.65，2026-08-26）。** 按 §8.19.11 模板：
+
+```text
+包 ID / commit / capability ID
+    W2 / 本包提交（feat/code-workspace-idea-parity） /
+    editor.project-analysis（provider-owned 事实源 + phase 状态机）,
+    editor.provider-freshness-copy（台账文案分账）
+As-built production call chain
+    ①纯模型 projectAnalysisModel.ts：JavaProjectAnalysisSnapshotV1 逐字实现
+      §8.20.3 schema；deriveProjectAnalysisSnapshot 为纯状态机——
+      unconfigured(未配 provider) → error(active=false+lastError) →
+      scanning(opening) → offline(configured 未起) → importing/analyzing
+      （$/progress 标题桶：import|sync|gradle|maven|configure→importing，
+      其余任何 live work→analyzing，未知标题绝不 ready-underneath）→
+      ready 仅当 progress 结束且 semantic probe ok → degraded 当 probe
+      unavailable/failed（reason 入 diagnostics）；completeness=complete 需
+      module list + classpath fingerprint 双证，lifecycle-only 强制 partial。
+      computeProjectFingerprint=sha256(canonical roots + build-file 哈希 +
+      JDK homeHash/version + provider id/version + classpath hash +
+      module fingerprints)，home 明文只进哈希；projectSnapshotStaleFor 覆盖
+      generation/root/build/JDK/classpath 五维 stale。
+    ②Rust lsp_java_project_model：新 session 字段 serverInfo(initialize
+      结果)与 tooling_java_home_used(jdtls 启动 JDK)；命令永不 reject——
+      返回 status/active/pid/serverInfo/registered executeCommands/
+      buildFiles(depth≤3, size≤1MB, sha256)/javaHomeUsed/javaProjects/
+      classpathProbe(entryCount+entriesSha256，路径不出 IPC)/probeReason；
+      探针严格以 client/registerCapability 实际注册的 java.project.* 为门，
+      未注册→command-not-registered（与 runner 同一真相源）。lib.rs 注册 +
+      browser stub 同 shape(no-active-session)。
+    ③useWorkspaceProjectAnalysis.ts：session 状态 + $/progress 事件（复用
+      useWorkspaceLspClientEvents）+ sdkResolveWorkspace(JDK identity) +
+      lsp_java_project_model 组装快照；generation+roots 变化自动重探，
+      refresh() 手动重探；AnalysisPanel 新增 Project analysis 区块
+      （phase/provider·version·pid/completeness/modules/diagnostics/
+      fingerprint/gen + Refresh 按钮 testid analysis-project-*），并附一行
+      “semantic actions follow this state”解释 completion/usages/refactor
+      为何不可用（DoD 的“状态能解释”）。旧 workspaceSemanticIndex.ts 内部
+      兼容不动，workspaceSemanticIndexStatusLabel 文案改为 Provider
+      fresh/working/error/stale · generation N，AnalysisPanel 标题改
+      “Provider freshness”——全仓不再出现“Index ready”式声明。
+修改 owner 文件（无关文件数 0）
+    projectAnalysisModel.ts(+test)、useWorkspaceProjectAnalysis.ts(新)、
+    AnalysisPanel.tsx(+test)、CodeWorkspaceTab.tsx、workspaceSemanticIndex.ts、
+    lib/editor/lsp.ts(lspJavaProjectModel+types)、src/stubs/tauri-core.ts、
+    src-tauri/src/lsp.rs(serverInfo/tooling_java_home_used 字段、
+    java_project_model、sha256 helpers、LspJava*Result 结构)、
+    src-tauri/src/lib.rs(命令注册)、jdtls runner(lsp-client $/progress+
+    run-jdtls 分析快照/buildChange/offlineCacheHint)、
+    jdtlsFixtureExpectations.ts+jdtlsTraceContract.test.ts(+6 断言类型)、
+    fixtures README、docs v4.65。
+旧缺陷/旧状态 -> 新状态机
+    ①freshness ledger 被 UI 读成"Index ready"（v4.62 权威审计点名的冒充）
+      → 文案分账为 Provider freshness，Project truth 由新事实源承担。
+    ②phase 无从回答"为什么补全/重构不可用" → AnalysisPanel 直接展示
+      phase+diagnostics+解释行。
+接口/schema/migration 与 compatibility
+    JavaProjectAnalysisSnapshotV1 schemaVersion:1 固定；lsp_java_project_model
+    为新增命令（无破坏）；workspaceSemanticIndexStatusLabel 返回串变化
+    （两处 UI consumer 同提交迁移，测试同步）；Rust 新字段全部可空向后兼容。
+cancel/stale/error/disk/provider/undo effect
+    stale：generation+五维指纹双重判定（单测覆盖 restart/build/JDK/
+    classpath 各维）；error：provider lastError 与 probeReason 分开记账；
+    disk：无写盘；undo：不涉及。
+Unit / mounted host / Rust / QA audit / browser / native / provider / IDEA compare
+    unit：vitest 全量绿（model 17 例含 SHA-256 已知向量/状态机全迁移/
+    fingerprint 五维/stale 四维/modulesFromProviderModel 绑定规则；
+    AnalysisPanel 新增 Project analysis 区块用例）；pnpm build 绿；
+    cargo check 0 error + cargo test --lib lsp:: 绿。
+    provider：五 fixture trace 重生成全绿——server-info(JDT Language Server
+    (Standard) 1.61.0-SNAPSHOT)/import-progress(maven-single 36 events·
+    11 begin tokens·含百分比)/lifecycle-only(java.project.* 未注册→诚实
+    partial)/build-change(pom 变更→re-import progress 观察到+字节级还原)
+    /offline-cache(重启后首 satisfied 6212ms < 冷启 8602ms)/broken-classpath
+    (incompleteOrMissingMentioned=true 且健康项目=false)；trace contract
+    42 例绿。QA audit --gate 绿。native/IDEA compare：未跑。
+未运行项及原因
+    Windows/macOS（无环境，W7 矩阵统一）；browser C5 复跑未做（本轮无
+    键位/交互变化，AnalysisPanel 区块有 jsdom 用例覆盖）。
+最高可声明 L0-L3 + evidence layers
+    Project Analysis lifecycle+phase：L1/L2——jsdom 合同 L2 + 单机 Linux
+    provider trace L1/L2（lifecycle 维度真实证据完整；module 详情维度因
+    provider 未注册命令为 typed-unavailable，L0/L1）。三端/platform-
+    unverified 保留。
+禁止声明仍有哪些
+    不得宣称 "ready = IDEA smart mode"；不得宣称 module/source-root 模型
+    可用；completeness=partial 时不得说 complete；Provider freshness 台账
+    不得再被称作索引。
+残余风险与下一依赖包
+    jdt.ls 的 java.project.* 注册开关未定位（重开条件：定位后解锁
+    classpath/module 详情→completeness 升级）；CapabilityEvidenceV3.
+    projectFingerprint 现已可用——W3-W5 按合同消费。下一包 W3
+    （Inspection + Intention provider contract）。
+```
 
 #### 8.20.4 W3：Inspection、Diagnostic Presentation 与 Intention 分账（G1/G2）
 

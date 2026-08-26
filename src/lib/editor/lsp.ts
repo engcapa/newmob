@@ -570,6 +570,44 @@ export interface LspReferenceRequestOptions {
   requestSeq?: number;
 }
 
+// §8.20.3 W2: provider-owned Project Analysis facts.
+export interface LspJavaProjectModuleInfo {
+  id: string;
+  rootUri: string | null;
+}
+
+export interface LspJavaClasspathProbeInfo {
+  rootUri: string | null;
+  entryCount: number;
+  entriesSha256: string;
+}
+
+export interface LspBuildFileHashInfo {
+  path: string;
+  sha256: string;
+}
+
+export interface LspJavaProjectModelResult {
+  status: LspDocumentStatus;
+  active: boolean;
+  processId: number | null;
+  serverName: string | null;
+  serverVersion: string | null;
+  registeredCommands: string[];
+  buildFiles: LspBuildFileHashInfo[];
+  javaHomeUsed: string | null;
+  javaProjects: LspJavaProjectModuleInfo[];
+  classpathProbe: LspJavaClasspathProbeInfo | null;
+  probeReason: string | null;
+}
+
+export function lspJavaProjectModel(descriptor: LspDocumentDescriptor): Promise<LspJavaProjectModelResult> {
+  return invoke<LspJavaProjectModelResult>("lsp_java_project_model", {
+    ...documentArgs(descriptor),
+    documentUri: descriptor.documentUri?.trim() || null,
+  });
+}
+
 export function lspSignatureHelp(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
