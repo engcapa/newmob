@@ -201,6 +201,31 @@ describe("recursiveLayoutTree", () => {
     }
   });
 
+  it("atomicCloseTabInLeaf respects policy activateOnClose left", () => {
+    const tree: LayoutNode = {
+      type: "leaf",
+      id: "primary",
+      openFileKeys: ["a.ts", "b.ts", "c.ts"],
+      activeKey: "b.ts",
+    };
+    const groups = {
+      primary: { id: "primary", openOrder: ["a.ts", "b.ts", "c.ts"], activeKey: "b.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const res = atomicCloseTabInLeaf(
+      tree,
+      groups,
+      "primary",
+      "primary",
+      "b.ts",
+      { schemaVersion: 3, limitPerLeaf: 10, order: "open-order", openPosition: "end", activateOnClose: "left", pinnedRow: "same", previewMode: true, reusePreview: true },
+    );
+    expect(res.kind).toBe("changed");
+    if (res.kind === "changed") {
+      expect(res.groups.primary.activeKey).toBe("a.ts");
+    }
+  });
+
   it("atomicMoveTab transfers tab across leaves and groups atomically", () => {
     const tree: LayoutNode = {
       type: "split",

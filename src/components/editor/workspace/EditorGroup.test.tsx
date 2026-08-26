@@ -349,4 +349,35 @@ describe("EditorGroup tabs", () => {
     // Since mock CodeMirrorHost doesn't fire viewport events by default, we verify the component renders without error
     expect(screen.getByTestId("mock-code-mirror")).toBeInTheDocument();
   });
+
+  it("orders tabs according to tabPolicy using orderTabsForDisplay", () => {
+    const z = file("zeta");
+    const a = file("alpha");
+    const b = file("beta");
+
+    render(
+      <EditorGroup
+        {...props({
+          openOrder: ["zeta", "alpha", "beta"],
+          openFiles: { zeta: z, alpha: a, beta: b },
+          activeKey: "alpha",
+          pinnedKeys: [],
+          tabPolicy: {
+            schemaVersion: 3,
+            limitPerLeaf: 10,
+            order: "alphabetical",
+            openPosition: "end",
+            activateOnClose: "mru",
+            pinnedRow: "same",
+            previewMode: true,
+            reusePreview: true,
+          },
+        })}
+      />,
+    );
+
+    const tabs = document.querySelectorAll("[data-editor-tab-key]");
+    const keys = Array.from(tabs).map((el) => el.getAttribute("data-editor-tab-key"));
+    expect(keys).toEqual(["alpha", "beta", "zeta"]);
+  });
 });

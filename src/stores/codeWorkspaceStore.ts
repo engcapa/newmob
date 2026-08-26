@@ -30,6 +30,7 @@ import {
   type LayoutNode,
 } from "../components/editor/workspace/recursiveLayoutTree";
 import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/codeWorkspaceModel";
+import type { AnyWorkspaceTabPolicy } from "../components/editor/workspace/workspaceTabPolicy";
 
 export type BottomDockTabId =
   | "problems"
@@ -281,7 +282,13 @@ interface CodeWorkspaceStoreState {
     fileKey: string,
   ) => void;
   setLeafActiveTab: (instanceId: string, leafId: string, fileKey: string | null) => void;
-  closeLayoutTabInLeaf: (instanceId: string, leafId: string, fileKey: string) => void;
+  closeLayoutTabInLeaf: (
+    instanceId: string,
+    leafId: string,
+    fileKey: string,
+    policy?: AnyWorkspaceTabPolicy,
+    lastUsedByKey?: ReadonlyMap<string, number>,
+  ) => void;
   setMarkdownMode: (instanceId: string, fileKey: string, mode: "edit" | "preview" | "split") => void;
   replaceFileState: (instanceId: string, replacement: CodeWorkspaceFileStateReplacement) => void;
   updateOpenFiles: (instanceId: string, updater: Updater<Record<string, OpenFileState>>) => void;
@@ -569,7 +576,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     });
   },
 
-  closeLayoutTabInLeaf: (instanceId, leafId, fileKey) => {
+  closeLayoutTabInLeaf: (instanceId, leafId, fileKey, policy, lastUsedByKey) => {
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
@@ -580,6 +587,8 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         current.activeEditorGroupId,
         leafId,
         fileKey,
+        policy,
+        lastUsedByKey,
       );
       const result = commitLayoutMutation(currentTree, current.editorGroups, current.activeEditorGroupId, rawResult);
       if (result.kind !== "changed") {

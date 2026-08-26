@@ -246,6 +246,7 @@ import {
 } from "./workspace/workspaceLayoutPersistence";
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
 import { CodeStyleSettingsDialog } from "./workspace/CodeStyleSettingsDialog";
+import { WorkspaceTabPolicySettingsDialog } from "./workspace/WorkspaceTabPolicySettingsDialog";
 import {
   activeSchemeForLanguage,
   readCodeStyleSchemeStore,
@@ -1567,6 +1568,7 @@ export function CodeWorkspaceTab({
   );
   const [activeEditorFontSizes, setActiveEditorFontSizes] = useState<Record<EditorGroupId, number>>({});
   const [editorAppearanceSettingsOpen, setEditorAppearanceSettingsOpen] = useState(false);
+  const [tabPolicySettingsOpen, setTabPolicySettingsOpen] = useState(false);
   const [columnSelectionMode, setColumnSelectionMode] = useState(false);
   const [treeFontSize, setTreeFontSizeState] = useState(() => readCodeWorkspaceTreeFontSize());
   const [roots, setRoots] = useState<CodeWorkspaceRootInfo[]>(() => initialRoots(workspace));
@@ -2314,13 +2316,27 @@ export function CodeWorkspaceTab({
         const alreadyOpen = group.openOrder.includes(key);
         let nextOrder = group.openOrder;
         let previewKey = group.previewKey;
+        const effectivePreview = options.preview && tabPolicyRef.current.previewMode;
         if (!alreadyOpen) {
-          if (options.preview && previewKey && previewKey !== key && !group.pinnedKeys.includes(previewKey)) {
+          if (effectivePreview && tabPolicyRef.current.reusePreview && previewKey && previewKey !== key && !group.pinnedKeys.includes(previewKey)) {
             nextOrder = nextOrder.filter((entry) => entry !== previewKey);
           }
-          nextOrder = [...nextOrder, key];
+          if (tabPolicyRef.current.openPosition === "after-active") {
+            const activeIdx = nextOrder.indexOf(group.activeKey ?? "");
+            if (activeIdx >= 0) {
+              nextOrder = [
+                ...nextOrder.slice(0, activeIdx + 1),
+                key,
+                ...nextOrder.slice(activeIdx + 1),
+              ];
+            } else {
+              nextOrder = [...nextOrder, key];
+            }
+          } else {
+            nextOrder = [...nextOrder, key];
+          }
         }
-        if (options.preview) {
+        if (effectivePreview) {
           previewKey = group.pinnedKeys.includes(key) ? null : key;
         } else if (previewKey === key) {
           previewKey = null;
@@ -5163,7 +5179,8 @@ export function CodeWorkspaceTab({
         });
         if (!confirmed) return;
       }
-      closeLayoutTabInLeaf(workspaceInstanceId, groupId, key);
+      const lastUsedMap = new Map(mruFileKeysRef.current.map((k, idx) => [k, 1_000_000 - idx]));
+      closeLayoutTabInLeaf(workspaceInstanceId, groupId, key, tabPolicyRef.current, lastUsedMap);
       if (usedByOtherGroup) return;
       // Transaction owner hand-off: any in-flight save for this buffer must
       // discard its writeback/watcher/LSP side effects from here on.
@@ -8922,6 +8939,13 @@ export function CodeWorkspaceTab({
       category: "View",
       keywords: ["font", "theme", "contrast", "wrap", "breadcrumbs", "virtual space", "zoom"],
       run: () => setEditorAppearanceSettingsOpen(true),
+    },
+    {
+      id: "workspace.editorTabPolicySettings",
+      title: "Editor Tab Policy Settings",
+      category: "View",
+      keywords: ["tab", "policy", "limit", "pinned", "preview", "order", "activate"],
+      run: () => setTabPolicySettingsOpen(true),
     },
     {
       id: "workspace.editor.copy",
@@ -13465,6 +13489,8 @@ export function CodeWorkspaceTab({
         parameterPopup={groupId === activeEditorGroupId && parameterPopup.phase === "shown"
           ? parameterPopup.view
           : null}
+        tabPolicy={tabPolicy}
+        lastUsedByKey={new Map(mruFileKeysRef.current.map((k, idx) => [k, 1_000_000 - idx]))}
         openOrder={group.openOrder}
         openFiles={openFiles}
         activeKey={group.activeKey}
@@ -14674,6 +14700,43 @@ export function CodeWorkspaceTab({
             setStatusMessage("Cleared clipboard history for current workspace session");
           }}
           onClose={() => setEditorAppearanceSettingsOpen(false)}
+        />
+      )}
+      {tabPolicySettingsOpen && (
+        <WorkspaceTabPolicySettingsDialog
+          open={tabPolicySettingsOpen}
+          policy={tabPolicy}
+          openTabs={openOrder.map((key) => ({
+            key,
+            title: openFiles[key]?.title ?? key,
+            dirty: !!openFiles[key]?.dirty,
+            pinned: (selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).editorGroups[activeEditorGroupId]?.pinnedKeys ?? []).includes(key),
+          }))}
+          onApply={(nextPolicy) => {
+            setTabPolicy(nextPolicy);
+            tabPolicyRef.current = nextPolicy;
+            const currentUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+            for (const [groupId, group] of Object.entries(currentUi.editorGroups)) {
+              const meta = new Map(group.openOrder.map((k) => [
+                k,
+                {
+                  key: k,
+                  dirty: !!openFilesRef.current[k]?.dirty,
+                  pinned: group.pinnedKeys.includes(k),
+                  preview: group.previewKey === k,
+                  lastUsedAt: 1_000_000 - mruFileKeysRef.current.indexOf(k),
+                },
+              ]));
+              const eviction = enforceTabPolicy(group.openOrder, meta, nextPolicy);
+              if (eviction.kind === "evicted") {
+                for (const evictedKey of eviction.evictedKeys) {
+                  void closeFileRef.current?.(evictedKey, groupId, { discard: true });
+                }
+              }
+            }
+            setStatusMessage(`Saved editor tab policy (limit: ${nextPolicy.limitPerLeaf}, order: ${nextPolicy.order})`);
+          }}
+          onClose={() => setTabPolicySettingsOpen(false)}
         />
       )}
       {intelligenceSettingsOpen && (

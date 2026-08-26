@@ -70,6 +70,12 @@ import {
   setScrollLeft,
   type EditorTabScrollState,
 } from "./editorTabScroll";
+import {
+  orderTabsForDisplay,
+  DEFAULT_WORKSPACE_TAB_POLICY_V3,
+  type TabEvictionMeta,
+  type WorkspaceTabPolicyV3,
+} from "./workspaceTabPolicy";
 
 export type MarkdownViewMode = "edit" | "preview" | "split";
 
@@ -89,6 +95,8 @@ interface EditorGroupProps {
   visible: boolean;
   /** Temporarily blocks mutations while an external resource edit is committing. */
   readOnly?: boolean;
+  tabPolicy?: WorkspaceTabPolicyV3;
+  lastUsedByKey?: ReadonlyMap<string, number>;
   openOrder: string[];
   openFiles: Record<string, OpenFileViewModel>;
   activeKey: string | null;
@@ -232,6 +240,8 @@ export function EditorGroup({
   visible,
   onClipboardUnavailable,
   readOnly = false,
+  tabPolicy,
+  lastUsedByKey,
   openOrder,
   openFiles,
   activeKey,
@@ -359,11 +369,31 @@ export function EditorGroup({
     atEnd: true,
   });
   useEffect(() => setGitDiffPeek(null), [activeKey]);
-  const pinnedSet = new Set(pinnedKeys);
-  const orderedKeys = [
-    ...openOrder.filter((key) => pinnedSet.has(key)),
-    ...openOrder.filter((key) => !pinnedSet.has(key)),
-  ];
+  const tabEvictionMeta = useMemo(() => {
+    const map = new Map<string, TabEvictionMeta>();
+    for (const key of openOrder) {
+      map.set(key, {
+        key,
+        dirty: !!openFiles[key]?.dirty,
+        pinned: pinnedKeys.includes(key),
+        preview: previewKey === key,
+        lastUsedAt: lastUsedByKey?.get(key) ?? 0,
+      });
+    }
+    return map;
+  }, [openOrder, openFiles, pinnedKeys, previewKey, lastUsedByKey]);
+
+  const pinnedSet = useMemo(() => new Set(pinnedKeys), [pinnedKeys]);
+
+  const orderedKeys = useMemo(() => {
+    return [
+      ...orderTabsForDisplay(
+        openOrder,
+        tabEvictionMeta,
+        tabPolicy ?? DEFAULT_WORKSPACE_TAB_POLICY_V3,
+      ),
+    ];
+  }, [openOrder, tabEvictionMeta, tabPolicy]);
 
   const updateTabScrollState = useCallback(() => {
     const el = tabScrollRef.current;
