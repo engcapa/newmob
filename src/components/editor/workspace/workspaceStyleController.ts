@@ -439,6 +439,8 @@ export class WorkspaceStyleController {
     options?: {
       formatOnSave?: boolean;
       formatFn?: (text: string) => Promise<string | null>;
+      organizeImportsOnSave?: boolean;
+      organizeImportsFn?: (text: string) => Promise<string | null>;
       getLatestBufferVersion?: () => number;
     },
   ): Promise<SaveCommitOutcome> {
@@ -480,6 +482,8 @@ export class WorkspaceStyleController {
       },
       formatOnSave: options?.formatOnSave,
       formatFn: options?.formatFn,
+      organizeImportsOnSave: options?.organizeImportsOnSave,
+      organizeImportsFn: options?.organizeImportsFn,
       expectedVersion: transaction.bufferVersion,
       getLatestBufferVersion: options?.getLatestBufferVersion,
     });

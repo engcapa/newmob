@@ -8,25 +8,104 @@
  * silently pretending directory-wide reformat support.
  */
 
-export interface CodeStyleSchemeV2 {
-  schemaVersion: 2;
+export interface CodeStyleSaveActionsV3 {
+  format: boolean;
+  organizeImports: boolean;
+  rearrange: boolean;
+  cleanup: boolean;
+}
+
+export interface CodeStyleExclusionsV3 {
+  patterns: string[];
+  formatterMarkers: boolean;
+}
+
+export interface CodeStyleSchemeV3 {
+  schemaVersion: 3;
   id: string;
   name: string;
   languageId: string | "shared";
   basedOn: string | null;
   values: Record<string, { value: unknown; source: "scheme" | "default" }>;
-  saveActions: { reformat: boolean; organizeImports: boolean; cleanup: boolean };
+  saveActions: CodeStyleSaveActionsV3;
+  exclusions: CodeStyleExclusionsV3;
 }
 
-export const DEFAULT_CODE_STYLE_SCHEME: CodeStyleSchemeV2 = Object.freeze({
-  schemaVersion: 2,
+export type CodeStyleSchemeV2 = CodeStyleSchemeV3;
+export type CodeStyleScheme = CodeStyleSchemeV3;
+
+export const DEFAULT_CODE_STYLE_SCHEME: CodeStyleSchemeV3 = Object.freeze({
+  schemaVersion: 3,
   id: "default",
   name: "Default",
   languageId: "shared",
   basedOn: null,
   values: {},
-  saveActions: { reformat: false, organizeImports: false, cleanup: false },
+  saveActions: { format: false, organizeImports: false, rearrange: false, cleanup: false },
+  exclusions: { patterns: [], formatterMarkers: true },
 });
+
+export function migrateSchemeToV3(
+  raw: any,
+  legacyFormatOnSave?: boolean,
+): CodeStyleSchemeV3 {
+  if (!raw) return { ...DEFAULT_CODE_STYLE_SCHEME };
+  const rawSaveActions = raw.saveActions ?? {};
+  const format = rawSaveActions.format === true
+    || rawSaveActions.reformat === true
+    || legacyFormatOnSave === true;
+  const organizeImports = rawSaveActions.organizeImports === true;
+  const rearrange = false;
+  const cleanup = false;
+
+  const rawExclusions = raw.exclusions ?? {};
+  const patterns = Array.isArray(rawExclusions.patterns)
+    ? rawExclusions.patterns.filter((p: unknown) => typeof p === "string" && (p as string).trim())
+    : [];
+  const formatterMarkers = rawExclusions.formatterMarkers !== false;
+
+  return {
+    schemaVersion: 3,
+    id: raw.id ?? "default",
+    name: raw.name ?? "Default",
+    languageId: raw.languageId ?? "shared",
+    basedOn: raw.basedOn ?? null,
+    values: raw.values ?? {},
+    saveActions: { format, organizeImports, rearrange, cleanup },
+    exclusions: { patterns, formatterMarkers },
+  };
+}
+
+export function resolveEffectiveSaveActions(
+  scheme: CodeStyleSchemeV3 | null | undefined,
+  preferenceFormatOnSave?: boolean,
+): CodeStyleSaveActionsV3 {
+  return {
+    format: scheme?.saveActions?.format === true || preferenceFormatOnSave === true,
+    organizeImports: scheme?.saveActions?.organizeImports === true,
+    rearrange: false,
+    cleanup: false,
+  };
+}
+
+export type CodeStyleFieldProvenanceSource =
+  | "explicit"
+  | "EditorConfig"
+  | "scheme"
+  | "language"
+  | "sniffed"
+  | "fallback";
+
+export function normalizeProvenanceLabel(source: string | undefined): CodeStyleFieldProvenanceSource {
+  if (!source) return "fallback";
+  const lower = source.toLowerCase();
+  if (lower.includes("explicit")) return "explicit";
+  if (lower.includes("editorconfig")) return "EditorConfig";
+  if (lower.includes("scheme")) return "scheme";
+  if (lower.includes("sniffed") || lower.includes("detected")) return "sniffed";
+  if (lower.includes("language")) return "language";
+  return "fallback";
+}
 
 export type CodeStyleFieldSource =
   | "explicit-override"
@@ -120,10 +199,16 @@ export interface FormatPlan {
   capabilities: { formatting: boolean; rangeFormatting: boolean; rearrangeSupported: boolean; cleanupSupported: boolean };
 }
 
+export function isFormatScopeSupported(scope: FormatPlan["scope"]): boolean {
+  return scope === "selection" || scope === "file";
+}
+
 /**
  * Build a plan for the requested scope. Stages without provider/syntax
  * evidence are simply absent — the caller reports them as unavailable
  * rather than faking rearrange/cleanup from formatted text heuristics.
+ * selection and file scopes are G1 supported; directory and module scopes
+ * remain disabled until a directory-wide provider owner is registered.
  */
 export function buildFormatPlan(input: {
   scope: FormatPlan["scope"];
@@ -132,6 +217,15 @@ export function buildFormatPlan(input: {
   readOnlyPaths: ReadonlySet<string>;
   capabilities: FormatPlan["capabilities"];
 }): FormatPlan {
+  if (!isFormatScopeSupported(input.scope)) {
+    return {
+      scope: input.scope,
+      stages: [],
+      excluded: input.targets.map((uri) => ({ uri, reason: "unsupported" as const })),
+      capabilities: input.capabilities,
+    };
+  }
+
   const excluded: Array<{ uri: string; reason: FormatExclusionReason }> = [];
   const eligible: string[] = [];
   for (const target of input.targets) {

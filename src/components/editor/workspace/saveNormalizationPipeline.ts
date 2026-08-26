@@ -14,11 +14,22 @@
 import type { ResolvedCodeStyle } from "./editorConfigResolver";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 
+export type SaveStageKind = "format" | "organize-imports" | "normalization";
+export type SaveStageStatus = "executed" | "unavailable" | "failed";
+
+export interface SaveStageReport {
+  stage: SaveStageKind;
+  status: SaveStageStatus;
+  error?: string;
+}
+
 export interface SaveNormalizationOptions {
   text: string;
   codeStyle: ResolvedCodeStyle | EffectiveCodeStyle;
   formatOnSave?: boolean;
   formatFn?: (text: string) => Promise<string | null>;
+  organizeImportsOnSave?: boolean;
+  organizeImportsFn?: (text: string) => Promise<string | null>;
   getLatestBufferText?: () => string;
   expectedVersion?: number;
   getLatestBufferVersion?: () => number;
@@ -27,12 +38,14 @@ export interface SaveNormalizationOptions {
 export interface SaveNormalizationResult {
   text: string;
   formatted: boolean;
+  importsOrganized: boolean;
   whitespaceTrimmed: boolean;
   newlineAdjusted: boolean;
   eolNormalized: boolean;
   cancelledDueToEdit: boolean;
   encodingError?: boolean;
   diagnostics: string[];
+  stages: SaveStageReport[];
   resolvedEol?: "lf" | "crlf" | "cr";
   resolvedCharset?: string;
   resolvedBom?: boolean;
@@ -115,10 +128,13 @@ export async function runSaveNormalizationPipeline(
 
   let currentText = initialText;
   let formatted = false;
+  let importsOrganized = false;
   let whitespaceTrimmed = false;
   let newlineAdjusted = false;
   let eolNormalized = false;
   const diagnostics: string[] = [];
+  const stages: SaveStageReport[] = [];
+  let stopEffectful = false;
 
   const explicitEol = codeStyle.endOfLine;
   const eolChar = explicitEol === "crlf" ? "\r\n" : explicitEol === "cr" ? "\r" : explicitEol === "lf" ? "\n" : undefined;
@@ -134,33 +150,78 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
-  // Stage 1: Optional language formatter
-  if (formatOnSave && formatFn) {
-    try {
-      const formattedResult = await formatFn(currentText);
-      if (formattedResult !== null && formattedResult !== undefined) {
-        // Check if concurrent edits occurred while formatter was running
-        if (getLatestBufferVersion && expectedVersion !== undefined) {
-          const latestVer = getLatestBufferVersion();
-          if (latestVer !== expectedVersion) {
-            return {
-              text: initialText,
-              formatted: false,
-              whitespaceTrimmed: false,
-              newlineAdjusted: false,
-              eolNormalized: false,
-              cancelledDueToEdit: true,
-              diagnostics: ["Formatter cancelled because buffer was modified concurrently."],
-            };
+  // Stage 1: format
+  if (formatOnSave) {
+    if (formatFn) {
+      try {
+        const formattedResult = await formatFn(currentText);
+        if (formattedResult !== null && formattedResult !== undefined) {
+          if (getLatestBufferVersion && expectedVersion !== undefined) {
+            const latestVer = getLatestBufferVersion();
+            if (latestVer !== expectedVersion) {
+              return {
+                text: initialText,
+                formatted: false,
+                importsOrganized: false,
+                whitespaceTrimmed: false,
+                newlineAdjusted: false,
+                eolNormalized: false,
+                cancelledDueToEdit: true,
+                diagnostics: ["Formatter cancelled because buffer was modified concurrently."],
+                stages: [{ stage: "format", status: "failed", error: "concurrent edit" }],
+              };
+            }
           }
+          currentText = formattedResult;
+          formatted = true;
+          stages.push({ stage: "format", status: "executed" });
+        } else {
+          stages.push({ stage: "format", status: "unavailable" });
         }
-        currentText = formattedResult;
-        formatted = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        diagnostics.push(`Format on save failed: ${msg}`);
+        stages.push({ stage: "format", status: "failed", error: msg });
+        stopEffectful = true;
       }
-    } catch (err) {
-      diagnostics.push(`Format on save failed: ${err instanceof Error ? err.message : String(err)}`);
+    } else {
+      stages.push({ stage: "format", status: "unavailable" });
     }
+  } else {
+    stages.push({ stage: "format", status: "unavailable" });
   }
+
+  // Stage 2: organize-imports
+  if (stopEffectful) {
+    stages.push({
+      stage: "organize-imports",
+      status: "failed",
+      error: "Skipped due to prior format failure",
+    });
+  } else if (options.organizeImportsOnSave) {
+    if (options.organizeImportsFn) {
+      try {
+        const organizedResult = await options.organizeImportsFn(currentText);
+        if (organizedResult !== null && organizedResult !== undefined) {
+          currentText = organizedResult;
+          importsOrganized = true;
+          stages.push({ stage: "organize-imports", status: "executed" });
+        } else {
+          stages.push({ stage: "organize-imports", status: "unavailable" });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        diagnostics.push(`Organize imports on save failed: ${msg}`);
+        stages.push({ stage: "organize-imports", status: "failed", error: msg });
+      }
+    } else {
+      stages.push({ stage: "organize-imports", status: "unavailable" });
+    }
+  } else {
+    stages.push({ stage: "organize-imports", status: "unavailable" });
+  }
+
+  // Stage 3: normalization
 
   // Stage 2: Trim trailing whitespace
   if (codeStyle.trimTrailingWhitespace) {
@@ -217,12 +278,14 @@ export async function runSaveNormalizationPipeline(
           return {
             text: initialText,
             formatted: false,
+            importsOrganized: false,
             whitespaceTrimmed: false,
             newlineAdjusted: false,
             eolNormalized: false,
             cancelledDueToEdit: false,
             encodingError: true,
             diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds Latin-1 range (cannot be represented in Latin-1).`],
+            stages: [...stages, { stage: "normalization", status: "failed", error: "Latin-1 encoding error" }],
           };
         }
       }
@@ -234,12 +297,14 @@ export async function runSaveNormalizationPipeline(
           return {
             text: initialText,
             formatted: false,
+            importsOrganized: false,
             whitespaceTrimmed: false,
             newlineAdjusted: false,
             eolNormalized: false,
             cancelledDueToEdit: false,
             encodingError: true,
             diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds ASCII range (cannot be represented in US-ASCII).`],
+            stages: [...stages, { stage: "normalization", status: "failed", error: "US-ASCII encoding error" }],
           };
         }
       }
@@ -247,6 +312,11 @@ export async function runSaveNormalizationPipeline(
       resolvedCharset = charset.toUpperCase();
     }
   }
+
+  stages.push({
+    stage: "normalization",
+    status: "executed",
+  });
 
   // Final race condition check
   if (getLatestBufferText) {
@@ -256,11 +326,13 @@ export async function runSaveNormalizationPipeline(
       return {
         text: latestText,
         formatted,
+        importsOrganized,
         whitespaceTrimmed,
         newlineAdjusted,
         eolNormalized,
         cancelledDueToEdit: true,
         diagnostics: ["Normalization aborted due to newer buffer edits."],
+        stages,
       };
     }
   }
@@ -268,11 +340,13 @@ export async function runSaveNormalizationPipeline(
   return {
     text: currentText,
     formatted,
+    importsOrganized,
     whitespaceTrimmed,
     newlineAdjusted,
     eolNormalized,
     cancelledDueToEdit: false,
     diagnostics,
+    stages,
     resolvedEol: codeStyle.endOfLine,
     resolvedCharset,
     resolvedBom,

@@ -59,17 +59,28 @@ function normalizeScheme(raw: unknown): CodeStyleSchemeV2 | null {
   const saveActionsSource = (source.saveActions && typeof source.saveActions === "object"
     ? source.saveActions
     : {}) as Record<string, unknown>;
+  const exclusionsSource = (source.exclusions && typeof source.exclusions === "object"
+    ? source.exclusions
+    : {}) as Record<string, unknown>;
+  const patterns = Array.isArray(exclusionsSource.patterns)
+    ? exclusionsSource.patterns.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    : [];
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id,
     name,
     languageId,
     basedOn: typeof source.basedOn === "string" ? source.basedOn : null,
     values,
     saveActions: {
-      reformat: saveActionsSource.reformat === true,
+      format: saveActionsSource.format === true || saveActionsSource.reformat === true,
       organizeImports: saveActionsSource.organizeImports === true,
-      cleanup: saveActionsSource.cleanup === true,
+      rearrange: false,
+      cleanup: false,
+    },
+    exclusions: {
+      patterns,
+      formatterMarkers: exclusionsSource.formatterMarkers !== false,
     },
   };
 }

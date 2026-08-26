@@ -179,4 +179,73 @@ describe("saveNormalizationPipeline", () => {
     expect(result.resolvedCharset).toBe("UTF-8");
     expect(result.resolvedBom).toBe(true);
   });
+
+  it("reports stages executed in order format -> organize-imports -> normalization", async () => {
+    const style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      trimTrailingWhitespace: true,
+      source: "scheme",
+      label: "Spaces: 2",
+    };
+
+    const formatFn = vi.fn(async (text: string) => `/* formatted */\n${text}`);
+    const organizeImportsFn = vi.fn(async (text: string) => `import A;\n${text}`);
+
+    const result = await runSaveNormalizationPipeline({
+      text: "const x = 1;   \n",
+      codeStyle: style,
+      formatOnSave: true,
+      formatFn,
+      organizeImportsOnSave: true,
+      organizeImportsFn,
+    });
+
+    expect(result.formatted).toBe(true);
+    expect(result.importsOrganized).toBe(true);
+    expect(result.whitespaceTrimmed).toBe(true);
+    expect(result.stages).toEqual([
+      { stage: "format", status: "executed" },
+      { stage: "organize-imports", status: "executed" },
+      { stage: "normalization", status: "executed" },
+    ]);
+    expect(result.text).toBe("import A;\n/* formatted */\nconst x = 1;\n");
+  });
+
+  it("stops subsequent effectful provider stages on format error but preserves user text through normalization", async () => {
+    const style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      trimTrailingWhitespace: true,
+      source: "scheme",
+      label: "Spaces: 2",
+    };
+
+    const formatFn = vi.fn(async () => {
+      throw new Error("LSP formatter crashed");
+    });
+    const organizeImportsFn = vi.fn(async (text: string) => `import B;\n${text}`);
+
+    const userText = "const draft = 42;   \n";
+    const result = await runSaveNormalizationPipeline({
+      text: userText,
+      codeStyle: style,
+      formatOnSave: true,
+      formatFn,
+      organizeImportsOnSave: true,
+      organizeImportsFn,
+    });
+
+    expect(result.formatted).toBe(false);
+    expect(organizeImportsFn).not.toHaveBeenCalled();
+    expect(result.stages[0]).toMatchObject({ stage: "format", status: "failed" });
+    expect(result.stages[1]).toMatchObject({ stage: "organize-imports", status: "failed" });
+    expect(result.stages[2]).toMatchObject({ stage: "normalization", status: "executed" });
+    // User text preserved with safe whitespace trimming, never dropped!
+    expect(result.text).toBe("const draft = 42;\n");
+  });
 });

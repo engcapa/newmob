@@ -11,7 +11,13 @@ import {
   type CodeStyleSchemeStoreState,
   type SchemeMutationError,
 } from "./workspaceCodeStyleSchemes";
-import { DEFAULT_CODE_STYLE_SCHEME, type CodeStyleSchemeV2 } from "./workspaceCodeStyleScheme";
+import {
+  DEFAULT_CODE_STYLE_SCHEME,
+  normalizeProvenanceLabel,
+  type CodeStyleExclusionsV3,
+  type CodeStyleSaveActionsV3,
+  type CodeStyleSchemeV3,
+} from "./workspaceCodeStyleScheme";
 
 const MUTATION_ERROR_LABEL: Record<SchemeMutationError, string> = {
   "unknown-scheme": "Scheme no longer exists",
@@ -94,6 +100,50 @@ export function CodeStyleSettingsDialog({
     });
   };
 
+  const [newExclusionPattern, setNewExclusionPattern] = useState("");
+
+  const updateSaveActions = (patch: Partial<CodeStyleSaveActionsV3>): void => {
+    if (isBuiltIn) return;
+    const saveActions: CodeStyleSaveActionsV3 = {
+      format: selected.saveActions?.format ?? false,
+      organizeImports: selected.saveActions?.organizeImports ?? false,
+      rearrange: false,
+      cleanup: false,
+      ...patch,
+    };
+    onChange({
+      ...store,
+      schemes: store.schemes.map((entry) =>
+        entry.id === selected.id ? { ...entry, saveActions } : entry
+      ),
+    });
+  };
+
+  const updateExclusions = (patch: Partial<CodeStyleExclusionsV3>): void => {
+    if (isBuiltIn) return;
+    const exclusions: CodeStyleExclusionsV3 = {
+      patterns: selected.exclusions?.patterns ?? [],
+      formatterMarkers: selected.exclusions?.formatterMarkers ?? true,
+      ...patch,
+    };
+    onChange({
+      ...store,
+      schemes: store.schemes.map((entry) =>
+        entry.id === selected.id ? { ...entry, exclusions } : entry
+      ),
+    });
+  };
+
+  const handleAddExclusion = (): void => {
+    const trimmed = newExclusionPattern.trim();
+    if (!trimmed || isBuiltIn) return;
+    const existing = selected.exclusions?.patterns ?? [];
+    if (!existing.includes(trimmed)) {
+      updateExclusions({ patterns: [...existing, trimmed] });
+    }
+    setNewExclusionPattern("");
+  };
+
   return (
     <div
       className="fixed inset-0 z-[900] flex items-center justify-center bg-black/40 p-4"
@@ -144,7 +194,7 @@ export function CodeStyleSettingsDialog({
               data-testid="code-style-scheme-list"
               className="min-h-0 flex-1 overflow-y-auto py-1"
             >
-              {store.schemes.map((scheme: CodeStyleSchemeV2) => (
+              {store.schemes.map((scheme: CodeStyleSchemeV3) => (
                 <li key={scheme.id}>
                   <button
                     type="button"
@@ -328,7 +378,7 @@ export function CodeStyleSettingsDialog({
                     ["insertFinalNewline", "Insert final newline", "bool"],
                   ] as const).map(([key, label, kind]) => (
                     <label key={key} className="flex items-center gap-2 text-[11px]">
-                      <span className="w-36 shrink-0 truncate" title={label}>{label}</span>
+                      <span className="w-32 shrink-0 truncate" title={label}>{label}</span>
                       {kind === "bool" ? (
                         <input
                           type="checkbox"
@@ -359,8 +409,123 @@ export function CodeStyleSettingsDialog({
                           onChange={(event) => writeValue(key, event.target.value)}
                         />
                       )}
+                      <span
+                        data-testid={`code-style-field-provenance-${key}`}
+                        className="ml-auto rounded border border-[var(--taomni-code-border)] px-1 py-0.5 text-[9px] text-[var(--taomni-code-muted)]"
+                      >
+                        {selected.values[key]?.value !== undefined
+                          ? "scheme"
+                          : normalizeProvenanceLabel(provenance?.source)}
+                      </span>
                     </label>
                   ))}
+                </div>
+
+                <div className="mt-4 border-t border-[var(--taomni-code-border)] pt-3">
+                  <div className="mb-2 font-medium text-[11px]">Save Actions</div>
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        data-testid="code-style-save-format"
+                        disabled={isBuiltIn}
+                        checked={selected.saveActions?.format === true}
+                        onChange={(event) => updateSaveActions({ format: event.target.checked })}
+                      />
+                      <span>Format on Save</span>
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        data-testid="code-style-save-organize-imports"
+                        disabled={isBuiltIn}
+                        checked={selected.saveActions?.organizeImports === true}
+                        onChange={(event) => updateSaveActions({ organizeImports: event.target.checked })}
+                      />
+                      <span>Organize Imports on Save</span>
+                    </label>
+                    <label className="flex items-center gap-2 opacity-50" title="Requires language rearrange provider">
+                      <input
+                        type="checkbox"
+                        data-testid="code-style-save-rearrange"
+                        disabled
+                        checked={false}
+                      />
+                      <span>Rearrange code (disabled)</span>
+                    </label>
+                    <label className="flex items-center gap-2 opacity-50" title="Requires cleanup provider">
+                      <input
+                        type="checkbox"
+                        data-testid="code-style-save-cleanup"
+                        disabled
+                        checked={false}
+                      />
+                      <span>Code cleanup (disabled)</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="mt-4 border-t border-[var(--taomni-code-border)] pt-3">
+                  <div className="mb-2 font-medium text-[11px]">Exclusions & Formatter Markers</div>
+                  <label className="mb-2 flex items-center gap-2 text-[11px]">
+                    <input
+                      type="checkbox"
+                      data-testid="code-style-formatter-markers"
+                      disabled={isBuiltIn}
+                      checked={selected.exclusions?.formatterMarkers !== false}
+                      onChange={(event) => updateExclusions({ formatterMarkers: event.target.checked })}
+                    />
+                    <span>Honor @formatter:off / on markers</span>
+                  </label>
+                  <div className="text-[11px] font-medium text-[var(--taomni-code-muted)]">Exclude Glob Patterns</div>
+                  <div className="mt-1 flex items-center gap-1">
+                    <input
+                      data-testid="code-style-add-exclusion-input"
+                      placeholder="e.g. **/*.generated.ts"
+                      disabled={isBuiltIn}
+                      value={newExclusionPattern}
+                      onChange={(event) => setNewExclusionPattern(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && newExclusionPattern.trim()) {
+                          handleAddExclusion();
+                        }
+                      }}
+                      className="min-w-0 flex-1 rounded border border-[var(--taomni-code-border)] bg-transparent px-1.5 py-0.5 text-xs"
+                    />
+                    <button
+                      type="button"
+                      data-testid="code-style-add-exclusion-btn"
+                      disabled={isBuiltIn || !newExclusionPattern.trim()}
+                      onClick={handleAddExclusion}
+                      className="rounded border border-[var(--taomni-code-border)] px-2 py-0.5 text-xs hover:bg-[var(--taomni-code-hover)] disabled:opacity-40"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div data-testid="code-style-exclusions-list" className="mt-2 space-y-1">
+                    {(selected.exclusions?.patterns ?? []).map((pat, idx) => (
+                      <div key={pat} className="flex items-center justify-between rounded bg-[var(--taomni-code-active-line-bg)] px-2 py-0.5 text-[11px]">
+                        <span className="font-mono">{pat}</span>
+                        {!isBuiltIn && (
+                          <button
+                            type="button"
+                            data-testid={`code-style-remove-exclusion-${idx}`}
+                            className="text-[var(--taomni-code-muted)] hover:text-red-400"
+                            onClick={() => {
+                              const nextPatterns = (selected.exclusions?.patterns ?? []).filter((_, i) => i !== idx);
+                              updateExclusions({ patterns: nextPatterns });
+                            }}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-3 text-[10px] text-[var(--taomni-code-muted)]">
+                  Format scopes: Selection and File supported. Directory and Module scopes disabled (requires directory provider owner).
                 </div>
               </>
             )}
