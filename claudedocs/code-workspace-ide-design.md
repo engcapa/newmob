@@ -5583,8 +5583,8 @@ Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
 | 4 | [x] | **W3 Inspection + Intention provider contract（v4.66 as-built；quick-fix 因 jdt.ls codeAction 挂起按诚实失败记账）** | 把 diagnostic presentation 与 provider analysis/action 执行彻底分账 | W2、R0/R1 |
 | 5 | [x] | **W4 Navigation + Usages + Hierarchy（v4.67 as-built）** | scope/coverage/roles/history/preview 与 Java 真实 trace | W2、W1 |
 | 6 | [x] | **W5 Refactor evidence and conflict gate（v4.68 as-built）** | Rename/Safe Delete/provider refactor 共用 completeness/conflict/stale/apply/undo 合同 | W2、W4、R0 |
-| 7 | [ ] | **W6 Editor policies and edge workflows** | clipboard/tab/virtual-space/region/code-style/completion preference 的设置与真实 consumer 收口 | W0，可与 W1-W5 非冲突子包并行 |
-| 8 | [ ] | **W7 Native three-platform + performance + a11y + IDEA compare** | 解除 G0/G1 发布证据门禁并逐 capability 提升证据层 | W0-W6 |
+| 7 | [x] | **W6 Editor policies and edge workflows（v4.69 as-built：W6-A through W6-E all verified & committed）** | clipboard/tab/virtual-space/region/code-style/completion preference 的设置与真实 consumer 收口 | W0，可与 W1-W5 非冲突子包并行 |
+| 8 | [x] | **W7 Native three-platform + performance + a11y + IDEA compare（v4.70 as-built：manifest.v1.md rollup）** | 解除 G0/G1 发布证据门禁并逐 capability 提升证据层 | W0-W6 |
 | 9 | [ ] | **W8 Advanced re-entry queue** | 仅在 ADR 重开条件满足时实施 Smart/SSR/dependency/Full Line/Code Vision/scratch/injection/detach | 各子项独立 |
 
 所有 provider-backed 包共用下列证据外壳；不要再为 completion、reference、usages、refactor 各造一套“差不多”的 identity：
