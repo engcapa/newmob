@@ -191,7 +191,10 @@ export interface FormatPlanStage {
   editsCount: number;
 }
 
+export type FormatPlanState = "ready" | "unavailable";
+
 export interface FormatPlan {
+  state?: FormatPlanState;
   scope: "selection" | "file" | "directory" | "module";
   stages: readonly FormatPlanStage[];
   excluded: readonly { uri: string; reason: FormatExclusionReason }[];
@@ -207,8 +210,9 @@ export function isFormatScopeSupported(scope: FormatPlan["scope"]): boolean {
  * Build a plan for the requested scope. Stages without provider/syntax
  * evidence are simply absent — the caller reports them as unavailable
  * rather than faking rearrange/cleanup from formatted text heuristics.
- * selection and file scopes are G1 supported; directory and module scopes
- * remain disabled until a directory-wide provider owner is registered.
+ * Selection and file scopes are G1 supported; directory and module scopes
+ * remain plan-level unavailable until a directory-wide provider owner is registered.
+ * Excluded list strictly records genuine pattern/read-only/marker exclusions.
  */
 export function buildFormatPlan(input: {
   scope: FormatPlan["scope"];
@@ -217,15 +221,7 @@ export function buildFormatPlan(input: {
   readOnlyPaths: ReadonlySet<string>;
   capabilities: FormatPlan["capabilities"];
 }): FormatPlan {
-  if (!isFormatScopeSupported(input.scope)) {
-    return {
-      scope: input.scope,
-      stages: [],
-      excluded: input.targets.map((uri) => ({ uri, reason: "unsupported" as const })),
-      capabilities: input.capabilities,
-    };
-  }
-
+  const isSupported = isFormatScopeSupported(input.scope);
   const excluded: Array<{ uri: string; reason: FormatExclusionReason }> = [];
   const eligible: string[] = [];
   for (const target of input.targets) {
@@ -237,12 +233,12 @@ export function buildFormatPlan(input: {
       eligible.push(target);
     }
   }
-  void eligible;
+
   const stages: FormatPlanStage[] = [];
   const documentFormat = input.scope === "selection"
     ? input.capabilities.rangeFormatting
     : input.capabilities.formatting;
-  if (documentFormat && (input.scope === "selection" || input.scope === "file")) {
+  if (isSupported && documentFormat) {
     stages.push({ kind: "format", source: "lsp", editsCount: 0 });
   }
   if (input.capabilities.rearrangeSupported) {
@@ -251,5 +247,11 @@ export function buildFormatPlan(input: {
   if (input.capabilities.cleanupSupported) {
     stages.push({ kind: "cleanup", source: "lsp", editsCount: 0 });
   }
-  return { scope: input.scope, stages, excluded, capabilities: input.capabilities };
+  return {
+    state: isSupported ? "ready" : "unavailable",
+    scope: input.scope,
+    stages,
+    excluded,
+    capabilities: input.capabilities,
+  };
 }

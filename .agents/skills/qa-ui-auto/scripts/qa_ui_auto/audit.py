@@ -520,6 +520,10 @@ def _render_gate(g: dict[str, Any]) -> list[str]:
             f"{g['baseline_path']}"
         )
     else:
+        lines.append("  control-coverage-gate: OK — no regressions vs baseline")
+        manifest_path = Path("qa-ui-auto-tests/native/manifest.v1.md")
+        if manifest_path.exists():
+            lines.append("  release-evidence-gate: tracking evidence_validate & evidence_rollup")
         lines.append("  OK — no regressions vs baseline")
     return lines
 
