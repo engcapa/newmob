@@ -1440,6 +1440,7 @@ describe("CodeWorkspaceTab", () => {
       softWrap: { patterns: [], useOriginalIndent: true, additionalIndent: 0, showMarkers: false },
       virtualSpace: { afterLineEnd: false, atFileBottom: false },
       breadcrumbs: { visible: true, placement: "top", languages: ["*"] },
+      clipboard: { historyEnabled: true, historyMaxItems: 30, historyMaxTotalBytes: 1024 * 1024 },
     });
     await waitFor(() => expect(
       registrationRef.current?.items.some((item) => item.id === "workspace.editorAppearanceSettings"),

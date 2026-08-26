@@ -2082,7 +2082,13 @@ export function CodeWorkspaceTab({
 
   useEffect(() => {
     editorAppearanceProfileRef.current = editorAppearanceProfile;
-  }, [editorAppearanceProfile]);
+    const store = clipboardStoreForWorkspace(workspaceInstanceId);
+    store.setHistoryEnabled(editorAppearanceProfile.clipboard.historyEnabled);
+    store.setHistoryLimits(
+      editorAppearanceProfile.clipboard.historyMaxItems,
+      editorAppearanceProfile.clipboard.historyMaxTotalBytes,
+    );
+  }, [editorAppearanceProfile, workspaceInstanceId]);
 
   useEffect(() => {
     const result = readEditorAppearanceProfileWithDiagnostics(
@@ -14661,6 +14667,11 @@ export function CodeWorkspaceTab({
           onApply={(next) => {
             updateEditorAppearanceProfile(next);
             setStatusMessage("Saved workspace editor appearance settings");
+          }}
+          onClearClipboardHistory={() => {
+            clipboardStoreForWorkspace(workspaceInstanceId).clearHistory();
+            setClipboardHistoryEntries([]);
+            setStatusMessage("Cleared clipboard history for current workspace session");
           }}
           onClose={() => setEditorAppearanceSettingsOpen(false)}
         />
