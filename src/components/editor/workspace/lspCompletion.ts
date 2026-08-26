@@ -17,6 +17,7 @@ import type {
 } from "../../../lib/editor/lsp";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import { isInsideStringOrComment } from "./syntaxContext";
+import type { WorkspaceCompletionPreferences } from "./intelligencePreferences";
 
 /**
  * Mandatory request identity for every production completion request
@@ -71,6 +72,7 @@ export interface LspCompletionHooks {
    * inserted and the diagnostic reports the unavailable import.
    */
   onResolveGate?: (request: CompletionResolveGateRequest) => void;
+  controller?: LspCompletionController;
 }
 
 /**
@@ -532,6 +534,55 @@ export const DEFAULT_COMPLETION_TRIGGERS = [".", ":"];
  * re-queries as the user types.
  */
 export const MAX_COMPLETION_OPTIONS = 200;
+
+export class LspCompletionController {
+  private preferences: WorkspaceCompletionPreferences;
+
+  constructor(initialPreferences?: Partial<WorkspaceCompletionPreferences>) {
+    this.preferences = {
+      autoTrigger: true,
+      triggerDelayMs: 50,
+      minPrefixLength: 1,
+      maxItems: 50,
+      showDocumentation: true,
+      documentationDelayMs: 250,
+      ...initialPreferences,
+    };
+  }
+
+  getPreferences(): WorkspaceCompletionPreferences {
+    return { ...this.preferences };
+  }
+
+  setPreferences(next: Partial<WorkspaceCompletionPreferences>): void {
+    this.preferences = {
+      ...this.preferences,
+      ...next,
+    };
+  }
+
+  shouldAutoTrigger(prefixLength: number, explicit: boolean): boolean {
+    if (explicit) return true;
+    if (!this.preferences.autoTrigger) return false;
+    return prefixLength >= this.preferences.minPrefixLength;
+  }
+
+  getMaxItems(): number {
+    return this.preferences.maxItems;
+  }
+
+  getTriggerDelayMs(): number {
+    return this.preferences.triggerDelayMs;
+  }
+
+  getDocumentationDelayMs(): number {
+    return this.preferences.documentationDelayMs;
+  }
+
+  shouldShowDocumentation(): boolean {
+    return this.preferences.showDocumentation;
+  }
+}
 
 export function mergeCompletionTriggers(server: readonly string[] | null | undefined): string[] {
   const set = new Set<string>();
@@ -1294,11 +1345,20 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     // mapping a response that became stale while the user kept typing.
     context.addEventListener("abort", () => {}, { onDocChange: true });
 
+    // Check auto-trigger preference
+    if (!context.explicit && hooks.controller) {
+      const typedLen = word ? word.text.length : 0;
+      if (!hooks.controller.shouldAutoTrigger(typedLen, false)) {
+        return null;
+      }
+    }
+
     // For plain non-trigger typing (e.g. typing identifiers in Java without `.` or `:`),
     // settle briefly so rapid typing does not spam heavy LSP queries on every keystroke.
     if (!context.explicit && !triggerOnly && !afterTrigger) {
+      const delayMs = hooks.controller?.getTriggerDelayMs() ?? 120;
       await new Promise<void>((resolve) => {
-        const timer = window.setTimeout(resolve, 120);
+        const timer = window.setTimeout(resolve, delayMs);
         context.addEventListener("abort", () => {
           window.clearTimeout(timer);
           resolve();
@@ -1396,7 +1456,8 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     // The server response is already relevance ordered. Mapping more entries
     // than the popup can consume only allocates closures/documentation helpers
     // on the renderer thread, which is especially visible for jdtls lists.
-    const maxItemsToProcess = Math.min(rawItems.length, MAX_COMPLETION_OPTIONS);
+    const maxItemsLimit = hooks.controller?.getMaxItems() ?? MAX_COMPLETION_OPTIONS;
+    const maxItemsToProcess = Math.min(rawItems.length, maxItemsLimit);
     for (let i = 0; i < maxItemsToProcess; i += 1) {
       const item = rawItems[i];
       if (!item) continue;
@@ -1426,6 +1487,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             );
           }
         : undefined;
+      const showDoc = hooks.controller?.shouldShowDocumentation() ?? true;
       mapped.push({
         label,
         displayLabel,
@@ -1433,7 +1495,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         boost,
         type: completionKindToType(item.kind),
         detail: truncatedDetail,
-        info: item.documentation || resolveItem
+        info: showDoc && (item.documentation || resolveItem)
           ? () => completionInfo(item, resolveItem, token, isStillCurrent)
           : undefined,
         apply: (view, _completion, from, to) =>

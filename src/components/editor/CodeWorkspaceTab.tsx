@@ -315,6 +315,7 @@ import {
   writeWorkspaceIntelligencePreferences,
   type WorkspaceIntelligencePreferences,
 } from "./workspace/intelligencePreferences";
+import { WorkspaceLspSessionManager } from "./workspace/workspaceLspSessionManager";
 import { applyLspTextEditsToString } from "./workspace/lspTextEdits";
 import { isLargeFileContent } from "./workspace/largeFile";
 import {
@@ -1655,6 +1656,13 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     parameterInfoSession.setPreferences(intelligencePreferences.parameterInfo);
   }, [intelligencePreferences.parameterInfo, parameterInfoSession]);
+  const workspaceLspSessionManagerRef = useRef<WorkspaceLspSessionManager | null>(null);
+  if (!workspaceLspSessionManagerRef.current) {
+    workspaceLspSessionManagerRef.current = new WorkspaceLspSessionManager(intelligencePreferences.completion);
+  }
+  useEffect(() => {
+    workspaceLspSessionManagerRef.current?.setCompletionPreferences(intelligencePreferences.completion);
+  }, [intelligencePreferences.completion]);
   const [intelligenceSettingsOpen, setIntelligenceSettingsOpen] = useState(false);
   const [breadcrumbSymbolsByGroup, setBreadcrumbSymbolsByGroup] = useState<Record<EditorGroupId, LspDocumentSymbol[]>>({
     primary: [],
@@ -13481,6 +13489,7 @@ export function CodeWorkspaceTab({
         hoverDocumentationDelayMs={intelligencePreferences.quickDoc.hoverDelayMs}
         parameterInfoRequestNonce={groupId === activeEditorGroupId ? parameterInfoRequestNonce : 0}
         parameterInfoShowFullSignatures={intelligencePreferences.parameterInfo.showFullSignatures}
+        completionController={workspaceLspSessionManagerRef.current?.getCompletionController()}
         onParameterTrigger={handleParameterTrigger}
         onParameterInvalidate={handleParameterInvalidate}
         onParameterEscape={handleParameterEscape}

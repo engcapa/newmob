@@ -21,6 +21,7 @@ function clonePreferences(
     inlayHintLanguages: { ...preferences.inlayHintLanguages },
     parameterInfo: { ...preferences.parameterInfo },
     quickDoc: { ...preferences.quickDoc },
+    completion: { ...preferences.completion },
   };
 }
 
@@ -175,6 +176,129 @@ export function WorkspaceIntelligenceSettingsDialog({
                 }))}
               />
               <span>Show all overload signatures</span>
+            </label>
+          </section>
+
+          <section aria-labelledby="completion-settings-heading" className="space-y-3 border-t border-[var(--taomni-code-border)] pt-4">
+            <h3 id="completion-settings-heading" className="font-medium">Code Completion</h3>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                data-testid="workspace-completion-auto-trigger"
+                checked={draft.completion.autoTrigger}
+                onChange={(event) => setDraft((current) => ({
+                  ...current,
+                  completion: { ...current.completion, autoTrigger: event.target.checked },
+                }))}
+              />
+              <span>Auto-trigger code completion while typing</span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Auto-trigger delay</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  max={5_000}
+                  step={25}
+                  aria-label="Completion auto-trigger delay"
+                  data-testid="workspace-completion-trigger-delay"
+                  value={draft.completion.triggerDelayMs}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      triggerDelayMs: Number(event.target.value),
+                    },
+                  }))}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">ms</span>
+              </span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Minimum prefix length</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  step={1}
+                  aria-label="Completion minimum prefix length"
+                  data-testid="workspace-completion-min-prefix"
+                  value={draft.completion.minPrefixLength}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      minPrefixLength: Number(event.target.value),
+                    },
+                  }))}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">chars</span>
+              </span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Maximum items in popup</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  step={10}
+                  aria-label="Completion maximum items"
+                  data-testid="workspace-completion-max-items"
+                  value={draft.completion.maxItems}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      maxItems: Number(event.target.value),
+                    },
+                  }))}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">items</span>
+              </span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                data-testid="workspace-completion-show-doc"
+                checked={draft.completion.showDocumentation}
+                onChange={(event) => setDraft((current) => ({
+                  ...current,
+                  completion: {
+                    ...current.completion,
+                    showDocumentation: event.target.checked,
+                  },
+                }))}
+              />
+              <span>Show documentation beside completion item</span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Documentation popup delay</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  max={5_000}
+                  step={50}
+                  aria-label="Completion documentation delay"
+                  data-testid="workspace-completion-doc-delay"
+                  value={draft.completion.documentationDelayMs}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      documentationDelayMs: Number(event.target.value),
+                    },
+                  }))}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">ms</span>
+              </span>
             </label>
           </section>
         </div>

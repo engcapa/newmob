@@ -30,6 +30,23 @@ describe("WorkspaceIntelligenceSettingsDialog", () => {
       target: { value: "350" },
     });
     fireEvent.click(screen.getByTestId("workspace-parameter-info-full-signatures"));
+
+    // Code completion fields
+    fireEvent.click(screen.getByTestId("workspace-completion-auto-trigger"));
+    fireEvent.change(screen.getByTestId("workspace-completion-trigger-delay"), {
+      target: { value: "150" },
+    });
+    fireEvent.change(screen.getByTestId("workspace-completion-min-prefix"), {
+      target: { value: "3" },
+    });
+    fireEvent.change(screen.getByTestId("workspace-completion-max-items"), {
+      target: { value: "100" },
+    });
+    fireEvent.click(screen.getByTestId("workspace-completion-show-doc"));
+    fireEvent.change(screen.getByTestId("workspace-completion-doc-delay"), {
+      target: { value: "500" },
+    });
+
     fireEvent.click(screen.getByTestId("workspace-intelligence-settings-apply"));
 
     expect(onApply).toHaveBeenCalledWith(expect.objectContaining({
@@ -42,6 +59,14 @@ describe("WorkspaceIntelligenceSettingsDialog", () => {
         autoPopup: false,
         delayMs: 350,
         showFullSignatures: true,
+      },
+      completion: {
+        autoTrigger: false,
+        triggerDelayMs: 150,
+        minPrefixLength: 3,
+        maxItems: 100,
+        showDocumentation: false,
+        documentationDelayMs: 500,
       },
     }));
     expect(onClose).toHaveBeenCalledOnce();
@@ -64,6 +89,14 @@ describe("WorkspaceIntelligenceSettingsDialog", () => {
             delayMs: 400,
             showFullSignatures: true,
           },
+          completion: {
+            autoTrigger: false,
+            triggerDelayMs: 400,
+            minPrefixLength: 4,
+            maxItems: 120,
+            showDocumentation: false,
+            documentationDelayMs: 600,
+          },
         }}
         onApply={onApply}
         onClose={vi.fn()}
@@ -76,5 +109,11 @@ describe("WorkspaceIntelligenceSettingsDialog", () => {
     expect(screen.getByTestId("workspace-quick-doc-hover-delay")).toHaveValue(300);
     expect(screen.getByTestId("workspace-parameter-info-auto-popup")).toBeChecked();
     expect(screen.getByTestId("workspace-parameter-info-delay")).toHaveValue(0);
+    expect(screen.getByTestId("workspace-completion-auto-trigger")).toBeChecked();
+    expect(screen.getByTestId("workspace-completion-trigger-delay")).toHaveValue(50);
+    expect(screen.getByTestId("workspace-completion-min-prefix")).toHaveValue(1);
+    expect(screen.getByTestId("workspace-completion-max-items")).toHaveValue(50);
+    expect(screen.getByTestId("workspace-completion-show-doc")).toBeChecked();
+    expect(screen.getByTestId("workspace-completion-doc-delay")).toHaveValue(250);
   });
 });

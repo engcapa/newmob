@@ -12,6 +12,15 @@ export interface WorkspaceQuickDocPreferences {
   defaultTarget: QuickDocDefaultTarget;
 }
 
+export interface WorkspaceCompletionPreferences {
+  autoTrigger: boolean;
+  triggerDelayMs: number;
+  minPrefixLength: number;
+  maxItems: number;
+  showDocumentation: boolean;
+  documentationDelayMs: number;
+}
+
 export interface WorkspaceIntelligencePreferences {
   inlayHintsEnabled: boolean;
   inlayHintLanguages: Record<string, boolean>;
@@ -20,7 +29,17 @@ export interface WorkspaceIntelligencePreferences {
   stickyLinesEnabled: boolean;
   parameterInfo: WorkspaceParameterInfoPreferences;
   quickDoc: WorkspaceQuickDocPreferences;
+  completion: WorkspaceCompletionPreferences;
 }
+
+export const DEFAULT_WORKSPACE_COMPLETION_PREFERENCES: WorkspaceCompletionPreferences = {
+  autoTrigger: true,
+  triggerDelayMs: 50,
+  minPrefixLength: 1,
+  maxItems: 50,
+  showDocumentation: true,
+  documentationDelayMs: 250,
+};
 
 export const DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES: WorkspaceIntelligencePreferences = {
   inlayHintsEnabled: false,
@@ -38,6 +57,7 @@ export const DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES: WorkspaceIntelligencePr
     hoverDelayMs: 300,
     defaultTarget: "popup",
   },
+  completion: DEFAULT_WORKSPACE_COMPLETION_PREFERENCES,
 };
 
 const MAX_INTELLIGENCE_DELAY_MS = 5_000;
@@ -79,6 +99,36 @@ export function normalizeWorkspaceIntelligencePreferences(
         DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES.quickDoc.hoverDelayMs,
       ),
       defaultTarget: quickDoc?.defaultTarget === "tool-window" ? "tool-window" : "popup",
+    },
+    completion: {
+      autoTrigger: value?.completion?.autoTrigger !== false,
+      triggerDelayMs: normalizedDelay(
+        value?.completion?.triggerDelayMs,
+        DEFAULT_WORKSPACE_COMPLETION_PREFERENCES.triggerDelayMs,
+      ),
+      minPrefixLength: Math.min(
+        10,
+        Math.max(
+          0,
+          Math.round(
+            Number(value?.completion?.minPrefixLength ?? DEFAULT_WORKSPACE_COMPLETION_PREFERENCES.minPrefixLength),
+          ),
+        ),
+      ),
+      maxItems: Math.min(
+        200,
+        Math.max(
+          1,
+          Math.round(
+            Number(value?.completion?.maxItems ?? DEFAULT_WORKSPACE_COMPLETION_PREFERENCES.maxItems),
+          ),
+        ),
+      ),
+      showDocumentation: value?.completion?.showDocumentation !== false,
+      documentationDelayMs: normalizedDelay(
+        value?.completion?.documentationDelayMs,
+        DEFAULT_WORKSPACE_COMPLETION_PREFERENCES.documentationDelayMs,
+      ),
     },
   };
 }

@@ -39,6 +39,14 @@ describe("workspace intelligence preferences", () => {
         hoverDelayMs: 725,
         defaultTarget: "tool-window",
       },
+      completion: {
+        autoTrigger: false,
+        triggerDelayMs: 120,
+        minPrefixLength: 2,
+        maxItems: 80,
+        showDocumentation: false,
+        documentationDelayMs: 400,
+      },
     });
     const restored = readWorkspaceIntelligencePreferences("ws");
     expect(inlayHintsEnabledForLanguage(restored, "typescript")).toBe(false);
@@ -56,6 +64,14 @@ describe("workspace intelligence preferences", () => {
       showOnHover: false,
       hoverDelayMs: 725,
       defaultTarget: "tool-window",
+    });
+    expect(restored.completion).toEqual({
+      autoTrigger: false,
+      triggerDelayMs: 120,
+      minPrefixLength: 2,
+      maxItems: 80,
+      showDocumentation: false,
+      documentationDelayMs: 400,
     });
   });
 
@@ -76,6 +92,37 @@ describe("workspace intelligence preferences", () => {
       showOnHover: true,
       hoverDelayMs: 5_000,
       defaultTarget: "popup",
+    });
+    expect(restored.completion).toEqual({
+      autoTrigger: true,
+      triggerDelayMs: 50,
+      minPrefixLength: 1,
+      maxItems: 50,
+      showDocumentation: true,
+      documentationDelayMs: 250,
+    });
+  });
+
+  it("normalizes and clamps out-of-range completion preferences", () => {
+    window.localStorage.setItem("taomni.codeWorkspace.intelligence.v1.completion-clamp", JSON.stringify({
+      completion: {
+        autoTrigger: false,
+        triggerDelayMs: 99_999, // exceeds 5000 max -> 5000
+        minPrefixLength: -5,    // below 0 min -> 0
+        maxItems: 500,          // exceeds 200 max -> 200
+        showDocumentation: false,
+        documentationDelayMs: -100, // below 0 min -> 0
+      },
+    }));
+
+    const restored = readWorkspaceIntelligencePreferences("completion-clamp");
+    expect(restored.completion).toEqual({
+      autoTrigger: false,
+      triggerDelayMs: 5_000,
+      minPrefixLength: 0,
+      maxItems: 200,
+      showDocumentation: false,
+      documentationDelayMs: 0,
     });
   });
 });

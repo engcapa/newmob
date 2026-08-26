@@ -46,6 +46,7 @@ import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type { FileCoverage } from "./coverageModel";
 import {
   mergeCompletionTriggers,
+  LspCompletionController,
   type CompletionAcceptanceDiagnostic,
   type CompletionRequestIdentity,
   type CompletionRequestToken,
@@ -200,6 +201,7 @@ interface EditorGroupProps {
     kind: CompletionAcceptanceDiagnostic,
     detail?: string,
   ) => void;
+  completionController?: LspCompletionController;
   /** §8.20.2 W1 single channel: file-scoped trigger event into the session. */
   onParameterTrigger?: (
     file: OpenFileViewModel,
@@ -317,6 +319,7 @@ export function EditorGroup({
   onCompleteResolve,
   onCompletionIdentity,
   onCompletionDiagnostic,
+  completionController,
   onParameterTrigger,
   onParameterInvalidate,
   onParameterEscape,
@@ -748,6 +751,7 @@ export function EditorGroup({
                         onContextMenu={(request) => onEditorContextMenu(activeFile, { ...request, groupId })}
                         onCommandPortChange={handleEditorCommandPortChange}
                         completionTriggers={completionTriggers}
+                        completionController={completionController}
                         signatureTriggers={signatureTriggers}
                         softWrap={softWrap}
                         appearance={appearance}
@@ -820,6 +824,7 @@ export function EditorGroup({
                       onContextMenu={(request) => onEditorContextMenu(activeFile, { ...request, groupId })}
                       onCommandPortChange={handleEditorCommandPortChange}
                       completionTriggers={completionTriggers}
+                      completionController={completionController}
                       signatureTriggers={signatureTriggers}
                       softWrap={softWrap}
                       appearance={appearance}

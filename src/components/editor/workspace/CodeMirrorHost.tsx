@@ -85,6 +85,7 @@ import {
   cancelLspSnippetSession,
   cycleLspSnippetChoice,
   createLspCompletionSource,
+  LspCompletionController,
   lspSnippetSessionInvalidator,
   resetBasicCompletionSession,
   type CompletionAcceptanceDiagnostic,
@@ -255,6 +256,7 @@ interface CodeMirrorHostProps {
   onContextMenu?: (info: EditorContextMenuRequest) => void;
   onCommandPortChange?: (registration: EditorCommandPortRegistration) => void;
   completionTriggers?: string[];
+  completionController?: LspCompletionController;
   signatureTriggers?: string[];
   /** Wrap logical lines at the viewport edge (IDEA soft-wrap mode). */
   softWrap?: boolean;
@@ -1278,6 +1280,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onContextMenu,
   onCommandPortChange,
   completionTriggers,
+  completionController,
   signatureTriggers,
   showHoverDocumentation = true,
   hoverDocumentationDelayMs = 300,
@@ -1300,6 +1303,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const completionControllerRef = useRef(completionController);
+  completionControllerRef.current = completionController;
   // §8.18.2: the mount-once editor effect reads the live host through a ref so
   // editor.* actions register against the workspace controller's instance.
   const workspaceActionHostRef = useRef<WorkspaceActionHost | null>(workspaceActionHost);
@@ -1680,6 +1685,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
               getDocumentRevision: () => getCompletionIdentityRef.current()?.documentRevision ?? -1,
               reportDiagnostic: (kind, detail) => onCompletionDiagnosticRef.current(kind, detail),
               onResolveGate: (request) => presentResolveGate(request),
+              controller: completionControllerRef.current,
             }),
           ],
         }),
@@ -1687,6 +1693,9 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         // immediately instead of waiting for activateOnTypingDelay.
         EditorView.updateListener.of((update) => {
           if (!update.docChanged || update.transactions.every((tr) => !tr.isUserEvent("input.type"))) {
+            return;
+          }
+          if (completionControllerRef.current && !completionControllerRef.current.shouldAutoTrigger(1, false)) {
             return;
           }
           const triggers = completionTriggersRef.current;
