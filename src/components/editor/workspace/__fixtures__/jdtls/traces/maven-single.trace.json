@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-single",
-  "generatedAt": "2026-08-26T05:04:24.477Z",
+  "generatedAt": "2026-08-26T11:37:48.532Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 2724,
+          "msTotal": 2178,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -61,7 +61,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 479,
+          "msTotal": 491,
           "itemCount": 58,
           "isIncomplete": true,
           "satisfied": true,
@@ -85,7 +85,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 60,
+          "msTotal": 36,
           "itemCount": 14,
           "isIncomplete": false,
           "satisfied": true,
@@ -167,7 +167,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 140,
+          "msTotal": 141,
           "itemCount": 2,
           "isIncomplete": false,
           "satisfied": true,
@@ -176,7 +176,7 @@
         }
       ],
       "resolve": {
-        "ms": 719,
+        "ms": 520,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport org.apache.commons.lang3.StringUtils;"
@@ -202,7 +202,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 171,
+          "msTotal": 148,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -225,7 +225,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 151,
+        "msTotal": 65,
         "signaturesCount": 13,
         "labels": [
           "append(double d) : StringBuilder",
@@ -261,7 +261,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 71,
+        "msTotal": 81,
         "signaturesCount": 13,
         "labels": [
           "append(double d) : StringBuilder",
@@ -297,7 +297,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 77,
+        "msTotal": 95,
         "signaturesCount": 3,
         "labels": [
           "parseInt(String s) : int",
@@ -323,7 +323,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 72,
+        "msTotal": 64,
         "signaturesCount": 9,
         "labels": [
           "valueOf(double d) : String",
@@ -355,7 +355,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 160,
+        "msTotal": 128,
         "signaturesCount": 1,
         "labels": [
           "singletonList(T o) : List<T>"
@@ -381,9 +381,9 @@
       "supersede": {
         "firstOutcome": "rejected:-32800",
         "firstCancelled": true,
-        "msFirst": 60,
+        "msFirst": 59,
         "secondSatisfied": true,
-        "msSecond": 55
+        "msSecond": 56
       },
       "notes": "$/cancelRequest on the in-flight request mirrors the production cancel bridge; second request must satisfy"
     },
@@ -397,7 +397,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 68,
+        "msFirst": 51,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -418,7 +418,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 107,
+        "msFirst": 110,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -439,7 +439,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 70,
+        "msFirst": 48,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -457,7 +457,6 @@
     "declaredStaticDataChannel": false,
     "topLevelCapabilityKeys": [
       "callHierarchyProvider",
-      "codeActionProvider",
       "codeLensProvider",
       "declarationProvider",
       "definitionProvider",
@@ -487,6 +486,27 @@
     "hoverProvenByScenarios": true,
     "dynamicRegistrations": []
   },
+  "quickFix": {
+    "caseId": "import-quick-fix",
+    "file": "src/main/java/com/example/single/QuickFixTarget.java",
+    "diagnosticMessage": "StringUtils cannot be resolved",
+    "actionTitle": null,
+    "actionKind": null,
+    "isPreferred": null,
+    "offeredTitles": [],
+    "resolved": false,
+    "resolveFailure": null,
+    "importInsertText": null,
+    "appliedSha256": null,
+    "originalSha256": null,
+    "revertedRestoresOriginalHash": false,
+    "msTotal": 245004,
+    "satisfied": false,
+    "reason": "provider-hang: textDocument/codeAction gave no response across 1 attempt(s) (healthy + broken files alike)",
+    "providerHang": {
+      "attempts": 1
+    }
+  },
   "analysis": {
     "serverInfo": {
       "name": "JDT Language Server (Standard)",
@@ -503,8 +523,8 @@
       }
     ],
     "importProgress": {
-      "events": 36,
-      "beginTokens": 11,
+      "events": 44,
+      "beginTokens": 13,
       "titles": [
         "Synchronizing projects",
         "Building",
@@ -512,8 +532,8 @@
         "Detect installed JVMs",
         "LookupJDKToolchainsJob",
         "Reporting encoding changes.",
-        "Searching...",
-        "Validate documents"
+        "Validate documents",
+        "Searching..."
       ],
       "anyWithPercentage": true
     },
@@ -524,20 +544,20 @@
       "mutatedFile": "pom.xml",
       "reimportProgressObserved": true,
       "revertedByteExact": true,
-      "classpathStableAfterRevert": false
+      "classpathStableAfterRevert": null
     }
   },
   "analysisTiming": {
-    "firstCompletionSatisfiedMs": 8602,
+    "firstCompletionSatisfiedMs": 251869,
     "offlineCacheHint": {
-      "coldSessionFirstSatisfiedMs": 8602,
-      "restartedSessionFirstSatisfiedMs": 6212,
+      "coldSessionFirstSatisfiedMs": 251869,
+      "restartedSessionFirstSatisfiedMs": 5037,
       "fasterThanCold": true
     }
   },
   "restart": {
     "performed": true,
-    "msToReadyAfterRestart": 6334,
+    "msToReadyAfterRestart": 5152,
     "completionOkAfterRestart": true,
     "signatureHelpOkAfterRestart": true,
     "reason": null,

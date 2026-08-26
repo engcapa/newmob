@@ -89,6 +89,23 @@ interface AnalysisSnapshot {
   };
 }
 
+interface QuickFixTrace {
+  satisfied: boolean;
+  reason: string | null;
+  diagnosticMessage: string | null;
+  actionTitle: string | null;
+  actionKind: string | null;
+  offeredTitles: readonly string[];
+  resolved: boolean;
+  resolveFailure: string | null;
+  importInsertText: string | null;
+  appliedSha256: string | null;
+  originalSha256: string | null;
+  revertedRestoresOriginalHash: boolean;
+  providerHang?: { attempts: number };
+  quickFixCancel?: { outcome: string; empty?: boolean };
+}
+
 interface FixtureTrace {
   schemaVersion: number;
   fixtureId: JdtlsFixtureId;
@@ -98,6 +115,7 @@ interface FixtureTrace {
   scenarios: TraceScenario[];
   providerChannels?: ProviderChannels;
   analysis?: AnalysisSnapshot;
+  quickFix?: QuickFixTrace;
   analysisTiming?: {
     offlineCacheHint?: {
       fasterThanCold: boolean | null;
@@ -264,6 +282,20 @@ describe("§8.19.4 real jdtls trace contract", () => {
         case "analysis-broken-classpath-flagged": {
           const flagged = trace.analysis?.diagnosticFlags?.incompleteOrMissingMentioned;
           expect(flagged, `broken classpath was not flagged in ${entry.fixture} diagnostics`).toBe(true);
+          break;
+        }
+        case "quickfix-provider-hang-recorded": {
+          const quickFix = trace.quickFix;
+          expect(quickFix, `no quickFix record for ${entry.fixture}`).toBeDefined();
+          // The unresolved-type diagnostic itself IS real…
+          expect(quickFix!.diagnosticMessage ?? "").toContain("cannot be resolved");
+          // …but jdt.ls 1.61 never ANSWERS textDocument/codeAction (hang on
+          // healthy and broken files alike). Record that honestly — an
+          // explicit provider-hang reason with at least one full-budget
+          // attempt — never fake a fix.
+          expect(quickFix!.satisfied).toBe(false);
+          expect(quickFix!.reason ?? "").toContain("provider-hang");
+          expect((quickFix!.providerHang?.attempts ?? 0)).toBeGreaterThanOrEqual(1);
           break;
         }
       }

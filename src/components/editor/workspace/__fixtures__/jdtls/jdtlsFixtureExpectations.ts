@@ -49,7 +49,13 @@ export type TraceAssertion =
   /** §8.20.3 W2: warm restart reached first satisfied completion faster. */
   | { type: "analysis-offline-cache-faster" }
   /** §8.20.3 W2: diagnostics flagged incomplete/missing classpath members. */
-  | { type: "analysis-broken-classpath-flagged" };
+  | { type: "analysis-broken-classpath-flagged" }
+  /**
+   * §8.20.4 W3: the unresolved-type diagnostic IS published, but jdt.ls 1.61
+   * never ANSWERS textDocument/codeAction (hang on healthy and broken files
+   * alike). The trace must record that honestly instead of faking a fix.
+   */
+  | { type: "quickfix-provider-hang-recorded" };
 
 export interface JdtlsTraceExpectation {
   caseId: string;
@@ -290,5 +296,12 @@ export const JDTLS_FIXTURE_EXPECTATIONS: readonly JdtlsTraceExpectation[] = [
     scenarioKey: "__analysis",
     assert: { type: "analysis-broken-classpath-flagged" },
     ideaExpected: "Broken classpath surfaces as degraded analysis state in IDEA, explaining why semantic actions cannot be trusted there.",
+  },
+  {
+    caseId: "import-quick-fix",
+    fixture: "maven-single",
+    scenarioKey: "__quickFix",
+    assert: { type: "quickfix-provider-hang-recorded" },
+    ideaExpected: "IDEA offers Import on an unresolved simple name and one undo restores the pre-fix state. Real jdt.ls 1.61 under this launch recipe never answers codeAction — a documented provider difference (re-open when the server-side block is identified or a newer jdt.ls responds).",
   },
 ];

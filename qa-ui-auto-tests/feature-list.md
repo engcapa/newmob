@@ -5547,6 +5547,23 @@ controls:
     selector: '[data-testid="code-workspace-quick-doc"]'
     kind: display
     optional: true       # explicit Quick Documentation popup
+  # §8.20.4 W3 Problems-surface controls (diagnostics presentation owner).
+  - id: problems-dock-tab
+    selector: '[data-testid="code-workspace-bottom-tab-problems"]'
+    kind: interactive
+    optional: true       # bottom dock tab switching to Problems
+  - id: problems-panel
+    selector: '[data-testid="code-workspace-problems-panel"]'
+    kind: display
+    optional: true
+  - id: problems-scope-project
+    selector: '[data-testid="problems-scope-project"]'
+    kind: interactive
+    optional: true       # whole-project diagnostics toggle
+  - id: problems-full-project-note
+    selector: '[data-testid="problems-full-project-note"]'
+    kind: display
+    optional: true       # "On-the-fly diagnostics only" honest gate note
   - id: keymap-settings-close
     selector: '[data-testid="keymap-settings-close"]'
     kind: interactive

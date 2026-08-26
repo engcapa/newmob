@@ -353,6 +353,14 @@ import {
   safeDeleteFileCount,
 } from "./workspace/safeDelete";
 import { executeCodeAction } from "./workspace/codeActionExecution";
+import { buildCapabilityEvidence, evidencePresentationLine } from "./workspace/capabilityEvidence";
+import { toProviderDiagnosticsV3 } from "./workspace/inspectionProviderAdapter";
+import {
+  INTENTION_RESOLVE_TIMEOUT_MS,
+  candidateFromProviderAction,
+  IntentionSession,
+} from "./workspace/intentionSession";
+import type { MenuItem } from "../ContextMenu";
 import {
   transformWorkspaceResourceExpandedDirKeys,
   transformWorkspaceResourceFileKey,
@@ -810,6 +818,7 @@ import {
   readInspectionProfile,
   removeInspectionBaselineEntry,
   removeInspectionSuppression,
+  diagnosticInspectionId,
   replaceInspectionBaseline,
   serializeInspectionBaseline,
   updateInspectionRule,
@@ -3494,7 +3503,7 @@ export function CodeWorkspaceTab({
   ) => {
     const path = inspectionPathForFileKey(fileKeyValue);
     persistInspectionProfile((current) => addInspectionSuppression(current, diagnostic, path, scope));
-    setStatusMessage(`Suppressed ${diagnostic.source ?? "inspection"}:${diagnostic.code ?? "*"} for ${scope}`);
+    setStatusMessage(`Hidden locally (${scope}): ${diagnostic.source ?? "inspection"}:${diagnostic.code ?? "*"}`);
   }, [inspectionPathForFileKey, persistInspectionProfile, setStatusMessage]);
   const addInspectionBaseline = useCallback((fileKeyValue: string, diagnostic: LspDiagnostic) => {
     const path = inspectionPathForFileKey(fileKeyValue);
@@ -7739,11 +7748,45 @@ export function CodeWorkspaceTab({
     updateLspStatusForFile,
   ]);
 
+  // §8.20.4 W3: ONE frozen Intention session per request, shared by Alt+Enter,
+  // the gutter bulb, Problems quick fix and Search Actions. Candidates carry
+  // stable ids; resolve state and disabled reasons live here, not in UI copies.
+  const intentionSessionRef = useRef<IntentionSession | null>(null);
+  if (!intentionSessionRef.current) intentionSessionRef.current = new IntentionSession();
+  useEffect(() => () => intentionSessionRef.current?.dispose(), []);
+  // Diagnostics whose provider suppression edit applied successfully
+  // ("Suppressed in source"); distinct from local hide (profile suppressions).
+  const [suppressedInSourceKeys, setSuppressedInSourceKeys] = useState<Set<string>>(new Set());
+  const markProviderSuppressionApplied = useCallback((action: LspCodeAction, file: OpenFileState) => {
+    if (!/suppress/i.test(`${action.kind ?? ""} ${action.title}`)) return;
+    const path = inspectionPathForFileKey(file.key);
+    const diagnostics = lspFilesRef.current[file.key]?.diagnostics ?? [];
+    setSuppressedInSourceKeys((current) => {
+      const next = new Set(current);
+      for (const diagnostic of diagnostics) {
+        next.add(`${path}:${diagnosticInspectionId(diagnostic)}:${diagnostic.range.start.line}`);
+      }
+      return next;
+    });
+    setStatusMessage("Suppressed in source by the language server");
+  }, [inspectionPathForFileKey, setStatusMessage]);
+
   const runCodeAction = useCallback(async (
     action: LspCodeAction,
     file: OpenFileState,
     semanticToken: WorkspaceSemanticIndexBuildToken | null = null,
+    intentionCandidateId?: string,
   ) => {
+    // §8.20.4 W3: resolve state lives on the frozen Intention session keyed
+    // by stable candidate id; a timeout/failed resolve KEEPS the candidates.
+    const markIntentionResolve = (state: "resolving" | "resolved" | "failed", message?: string) => {
+      if (!intentionCandidateId) return;
+      const session = intentionSessionRef.current;
+      if (!session) return;
+      if (state === "resolving") session.markResolving(intentionCandidateId);
+      else if (state === "resolved") session.markResolved(intentionCandidateId);
+      else session.markFailed(intentionCandidateId, message ?? "resolve failed");
+    };
     try {
       const assertSemanticCurrent = () => {
         if (
@@ -7763,14 +7806,26 @@ export function CodeWorkspaceTab({
       if (hasDeferredData) {
         const descriptor = lspDescriptorForFile(file);
         if (descriptor) {
+          markIntentionResolve("resolving");
           try {
-            const resolved = await lspCodeActionResolve(descriptor, raw);
+            // §8.20.4: resolve timeout keeps the frozen candidates and marks
+            // the failure retryable instead of dropping the popup's options.
+            const resolved = await Promise.race([
+              lspCodeActionResolve(descriptor, raw),
+              new Promise<never>((_, rejectTimeout) => window.setTimeout(
+                () => rejectTimeout(new Error(`resolve timed out after ${INTENTION_RESOLVE_TIMEOUT_MS}ms`)),
+                INTENTION_RESOLVE_TIMEOUT_MS,
+              )),
+            ]);
             updateLspStatusForFile(file, resolved.status);
             if (resolved.action) executableAction = resolved.action;
+            markIntentionResolve("resolved");
           } catch (error) {
             // A server may advertise data but not implement resolve. Keep the
-            // original action usable and make the fallback visible.
-            setStatusMessage(`Code action resolve failed: ${errorMessage(error)}`);
+            // original action usable and make the fallback + Retry visible.
+            const message = `Code action resolve failed: ${errorMessage(error)} — you can retry`;
+            markIntentionResolve("failed", errorMessage(error));
+            setStatusMessage(message);
           }
         }
       }
@@ -7830,12 +7885,19 @@ export function CodeWorkspaceTab({
         },
       });
       if (result.status === "executed-command") {
+        markProviderSuppressionApplied(action, file);
         setStatusMessage(`Executed code action: ${executableAction.title}`);
         return { ok: true, message: null };
       } else if (result.status === "empty") {
         const message = "Code action had no edit or command to apply";
         setStatusMessage(message);
         return { ok: false, message };
+      }
+      if (result.status === "applied-edit") {
+        // §8.20.4 naming rule: a provider suppression edit that applied
+        // successfully earns "Suppressed in source"; everything else stays
+        // "hidden locally".
+        markProviderSuppressionApplied(action, file);
       }
       return { ok: true, message: null };
     } catch (error) {
@@ -8053,12 +8115,69 @@ export function CodeWorkspaceTab({
       if (a.isPreferred !== b.isPreferred) return a.isPreferred ? -1 : 1;
       return a.title.localeCompare(b.title);
     });
-    openTreeContextMenuAt(clientX, clientY, sorted.map((action) => ({
-      label: action.title,
-      onClick: () => void runCodeAction(action, file, requested.semanticToken),
-    })));
+    // §8.20.4 W3: freeze the candidate list into the shared Intention session
+    // with per-candidate evidence; the menu renders the frozen snapshot so all
+    // entry points see identical ids, resolve states and disabled reasons.
+    const descriptor = lspDescriptorForFile(file);
+    const evidence = buildCapabilityEvidence({
+      capabilityId: "codeAction.intention",
+      languageId: lspFilesRef.current[file.key]?.status?.languageId ?? descriptor?.languageId ?? "plaintext",
+      provider: { id: "jdtls", version: null, generation: lspSessionGeneration() },
+      projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+      uri: descriptor?.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor?.filePath ?? file.key,
+      revision: file.documentRevision,
+      scope: "document",
+    });
+    const intentionSnapshot = intentionSessionRef.current!.open(
+      sorted.map((action) => candidateFromProviderAction(action, evidence)),
+      {
+        fileKey: file.key,
+        uri: evidence.document.uri,
+        documentRevision: file.documentRevision,
+        providerGeneration: lspSessionGeneration(),
+        projectFingerprint: evidence.projectFingerprint,
+      },
+    );
+    // Grouped rendering: provider candidates first, then local editor actions
+    // (none registered in this funnel yet — the group renders only when present).
+    // Candidates were built 1:1 over `sorted`, so index maps back to the action.
+    const menuItems: MenuItem[] = [];
+    const candidateIndexById = new Map<string, number>();
+    sorted.forEach((_action, index) => {
+      const candidate = intentionSnapshot.candidates[index];
+      if (candidate && !candidateIndexById.has(candidate.id)) {
+        candidateIndexById.set(candidate.id, index);
+      }
+    });
+    for (const group of intentionSnapshot.groups) {
+      menuItems.push({ label: group.label, disabled: true });
+      for (const candidate of group.candidates) {
+        const actionIndex = candidateIndexById.get(candidate.id);
+        const action = actionIndex !== undefined ? sorted[actionIndex] : undefined;
+        if (!action) continue;
+        menuItems.push({
+          label: candidate.disabledReason
+            ? `${candidate.title} (${candidate.disabledReason})`
+            : candidate.title,
+          disabled: candidate.disabledReason !== null,
+          onClick: () => void runCodeAction(
+            action,
+            file,
+            requested.semanticToken,
+            candidate.id,
+          ),
+        });
+      }
+      if (group.source === "provider-code-action" && intentionSnapshot.groups.length > 1) {
+        menuItems.push({ label: "", separator: true });
+      }
+    }
+    openTreeContextMenuAt(clientX, clientY, menuItems);
   }, [
+    lspDescriptorForFile,
+    lspSessionGeneration,
     openTreeContextMenuAt,
+    projectAnalysisSnapshot?.projectFingerprint,
     requestCodeActions,
     runCodeAction,
     semanticIndex.current,
@@ -11525,6 +11644,35 @@ export function CodeWorkspaceTab({
 
   const problemsScopeFiles = problemsScope === "project" ? projectProblemFiles : problemFiles;
   const analysisFiles = problemsScopeFiles;
+  // §8.20.4 DoD: every diagnostic row shows provider/scope/revision/completeness.
+  const problemEvidenceLinesByKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const file of problemsScopeFiles) {
+      const state = lspFilesRef.current[file.key];
+      if (!state) continue;
+      for (const wrapped of toProviderDiagnosticsV3(state.diagnostics ?? [], {
+        languageId: state.status?.languageId ?? "plaintext",
+        provider: { id: "jdtls", version: state.status?.displayName ?? null, generation: lspSessionGeneration() },
+        projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+        uri: state.status?.uri ?? file.key,
+        revision: openFilesRef.current[file.key]?.documentRevision ?? 0,
+      })) {
+        map.set(
+          `${file.key}:${wrapped.diagnostic.message}:${wrapped.diagnostic.range.start.line}`,
+          evidencePresentationLine(wrapped.evidence),
+        );
+      }
+    }
+    return map;
+  }, [lspSessionGeneration, problemsScopeFiles, projectAnalysisSnapshot?.projectFingerprint]);
+  const evidenceLineForProblem = useCallback((fileKey: string, diagnostic: LspDiagnostic) => (
+    problemEvidenceLinesByKey.get(`${fileKey}:${diagnostic.message}:${diagnostic.range.start.line}`) ?? null
+  ), [problemEvidenceLinesByKey]);
+  const suppressedInSourceForProblem = useCallback((fileKey: string, diagnostic: LspDiagnostic) => (
+    suppressedInSourceKeys.has(
+      `${inspectionPathForFileKey(fileKey)}:${diagnosticInspectionId(diagnostic)}:${diagnostic.range.start.line}`,
+    )
+  ), [inspectionPathForFileKey, suppressedInSourceKeys]);
   const createInspectionBaselineFromScope = useCallback(() => {
     const sources = problemsScopeFiles.flatMap((file) => file.diagnostics.map((diagnostic) => ({
       diagnostic,
@@ -13664,6 +13812,11 @@ export function CodeWorkspaceTab({
                 loading={problemsScope === "project" && projectProblemsLoading}
                 diagnosticTransform={inspectionTransform}
                 onOpenRelatedInformation={openRelatedDiagnostic}
+                evidenceLine={evidenceLineForProblem}
+                suppressedInSource={suppressedInSourceForProblem}
+                fullProjectNote={activeCapabilities?.workspaceDiagnostics === true
+                  ? null
+                  : "On-the-fly diagnostics only — this server does not expose workspace-wide diagnostics."}
               />
             ),
           },

@@ -77,6 +77,10 @@ export class LspClient {
     if (typeof message.id === "undefined" && message.method) {
       if (message.method === "textDocument/publishDiagnostics") {
         this.options.onDiagnostics?.(message.params);
+        // §8.20.4 W3: keep the RAW payload so quick-fix scenarios can echo
+        // server diagnostics back verbatim (jdtls matches context entries
+        // against its internal problems by code + exact range).
+        this.options.onRawDiagnostics?.(message.params);
         return;
       }
       if (message.method === "$/progress") {

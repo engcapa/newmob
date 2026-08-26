@@ -70,3 +70,16 @@ steps:
       contains: "Expression Static Data"
       timeout_sec: 15
   - screenshot: tc-ide-c5-expression-static-data-unavailable.png
+
+  # §8.20.4 W3 DoD: unsupported full-project analysis has honest QA — the
+  # Problems panel states "On-the-fly diagnostics only" when the provider
+  # does not expose workspace-wide diagnostics (browser preview never does).
+  - click: '[data-testid="code-workspace-bottom-tab-problems"]'
+  - wait_for: '[data-testid="code-workspace-problems-panel"]'
+  - click: '[data-testid="problems-scope-project"]'
+  - assert_visible: '[data-testid="problems-full-project-note"]'
+  - assert_text:
+      selector: '[data-testid="problems-full-project-note"]'
+      contains: "On-the-fly diagnostics only"
+      timeout_sec: 10
+  - screenshot: tc-ide-c5-full-project-on-the-fly-only.png

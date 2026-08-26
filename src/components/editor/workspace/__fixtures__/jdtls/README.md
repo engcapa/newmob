@@ -17,7 +17,8 @@ trace。任何 capability 在没有对应 trace 证据前,只能声明
 
 | 项目 | 构建工具 | 覆盖场景 |
 |---|---|---|
-| `maven-single/` | maven | JDK type、static member(`Arrays.`)、overload 家族(`appen`)、依赖类型 + resolve import(commons-lang3)、test source set(junit)；§8.20.2 W1: signatureHelp overload 家族/activeParameter 推进/嵌套调用/泛型签名、supersede-cancel(`$/cancelRequest` → -32800)、hover(project javadoc/JDK/commons-lang3 FQN)、provider channel absence、restart 后 completion+signatureHelp 双恢复；§8.20.3 W2: 分析快照(serverInfo/import progress/build-change generation bump/offline-cache hint) |
+| `maven-single/` | maven | JDK type、static member(`Arrays.`)、overload 家族(`appen`)、依赖类型 + resolve import(commons-lang3)、test source set(junit)；§8.20.2 W1: signatureHelp overload 家族/activeParameter 推进/嵌套调用/泛型签名、supersede-cancel(`$/cancelRequest` → -32800)、hover(project javadoc/JDK/commons-lang3 FQN)、provider channel absence、restart 后 completion+signatureHelp 双恢复；§8.20.3 W2: 分析快照(serverInfo/import progress/build-change generation bump/offline-cache hint)；§8.20.4 W3: 未解析类型 + Import quick fix(post-image hash + undo 还原) + codeAction cancel 探针 |
+| `QuickFixTarget.java`(maven-single 内) | — | 简名 `StringUtils` 无 import → unresolved 诊断 + Import quick fix 的专用靶文件 |
 | `maven-multi-module/` | maven | 跨模块类型(CoreUtil)+ resolve import、同名类型歧义(两个 `Result`)；W2 分析快照 |
 | `gradle-single/` | gradle | Gradle 导入 sanity(JDK type)；W2 分析快照 |
 | `gradle-multi-module/` | gradle | 跨模块类型(GCore)+ resolve import；W2 分析快照 |
