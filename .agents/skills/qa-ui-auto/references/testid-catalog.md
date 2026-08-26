@@ -161,6 +161,12 @@
 - `[data-testid="keymap-row-editor.replace"]` — display [optional] — F25.5.keymap-row-editor-replace
 - `[data-testid="keymap-add-editor.replace"]` — interactive [optional] — F25.5.keymap-add-editor-replace
 - `[data-testid="keymap-replace-editor.replace-0"]` — display [optional] — F25.5.keymap-replace-slot
+- `[data-testid="code-workspace-parameter-info"]` — display [optional] — F25.5.parameter-info-tooltip
+- `[data-testid="code-workspace-quick-doc"]` — display [optional] — F25.5.quick-doc-popup
+- `[data-testid="code-workspace-bottom-tab-problems"]` — interactive [optional] — F25.5.problems-dock-tab
+- `[data-testid="code-workspace-problems-panel"]` — display [optional] — F25.5.problems-panel
+- `[data-testid="problems-scope-project"]` — interactive [optional] — F25.5.problems-scope-project
+- `[data-testid="problems-full-project-note"]` — display [optional] — F25.5.problems-full-project-note
 - `[data-testid="keymap-settings-close"]` — interactive [optional] — F25.5.keymap-settings-close
 
 ## code-workspace/execution (F25.1)
@@ -569,6 +575,7 @@
 ## main/statusbar (F1.7)
 
 - `[data-testid="status-bar"]` — display — F1.7.status-bar
+- `[data-testid="status-bar-message"]` — display [optional] — F1.7.status-message
 
 ## main/tabs (F1.5)
 

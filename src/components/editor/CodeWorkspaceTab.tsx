@@ -417,6 +417,13 @@ import {
   type ReferenceSessionContext,
 } from "./workspace/referenceInfoSession";
 import { useWorkspaceProjectAnalysis } from "./workspace/useWorkspaceProjectAnalysis";
+import {
+  DEFAULT_SCOPE_SELECTION,
+  libraryUriClassifierForRoots,
+  UsageQuerySession,
+  type UsagesScopeSelection,
+} from "./workspace/usageQuerySession";
+import { UsagesScopeDialog } from "./workspace/UsagesScopeDialog";
 import { type LocationPeekState } from "./workspace/LocationPeek";
 import {
   type GoToSymbolQueryResult,
@@ -1653,6 +1660,18 @@ export function CodeWorkspaceTab({
     error: null,
   });
   const referencesRequestSequenceRef = useRef(0);
+  // §8.20.5 W4: ONE immutable usages session backs the tool window, the
+  // lightweight Show Usages popup and the recent-query stack.
+  const usageSessionRef = useRef<UsageQuerySession | null>(null);
+  if (!usageSessionRef.current) usageSessionRef.current = new UsageQuerySession();
+  useEffect(() => () => usageSessionRef.current?.dispose(), []);
+  const [usagesScopeSelection, setUsagesScopeSelection] = useState<UsagesScopeSelection>({ ...DEFAULT_SCOPE_SELECTION });
+  const [usagesScopeDialog, setUsagesScopeDialog] = useState<{
+    open: boolean;
+    file: OpenFileState;
+    position: LspPosition;
+  } | null>(null);
+  const [usagesRecentsRevision, setUsagesRecentsRevision] = useState(0);
   // §8.19.7: pin ownership + rerun origin marker live above the panel so a
   // new Find Usages asks before replacing a pinned session and rerun targets
   // the recorded symbol identity instead of the current caret.
@@ -1667,6 +1686,13 @@ export function CodeWorkspaceTab({
   } | null>(null);
   const findReferencesRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<void>>(async () => {});
   const [callHierarchyRoot, setCallHierarchyRoot] = useState<HierarchyRootState | null>(null);
+  // §8.20.5 W4: per-mode provenance for stale detection (provider restart /
+  // project fingerprint move) surfaced as a Rerun banner in HierarchyPanel.
+  const hierarchyProvenanceRef = useRef<Partial<Record<"call" | "type", {
+    generation: number;
+    projectFingerprint: string;
+  }>>>({});
+  const [hierarchyProvenanceRevision, setHierarchyProvenanceRevision] = useState(0);
   const [typeHierarchyRoot, setTypeHierarchyRoot] = useState<HierarchyRootState | null>(null);
   const setIntelligencePreferences = useCallback((
     update: WorkspaceIntelligencePreferences
@@ -5457,6 +5483,14 @@ export function CodeWorkspaceTab({
         return;
       }
       const root: HierarchyRootState = { descriptor, item };
+      hierarchyProvenanceRef.current = {
+        ...hierarchyProvenanceRef.current,
+        [mode]: {
+          generation: lspSessionGeneration(),
+          projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+        },
+      };
+      setHierarchyProvenanceRevision((revision) => revision + 1);
       if (mode === "call") {
         setCallHierarchyRoot(root);
         setBottomDockTab("call-hierarchy");
@@ -5472,6 +5506,8 @@ export function CodeWorkspaceTab({
     activeEditorGroupId,
     activeFile,
     cursorPositions,
+    lspSessionGeneration,
+    projectAnalysisSnapshot?.projectFingerprint,
     lspDescriptorForFile,
     setBottomDockOpen,
     setBottomDockTab,
@@ -9406,6 +9442,76 @@ export function CodeWorkspaceTab({
       },
     },
     {
+      // §8.20.5 W4: lightweight popup over the SAME immutable session as the
+      // tool window. With a live session it just re-presents it; otherwise a
+      // fresh scoped Find Usages runs first.
+      id: "workspace.showUsages",
+      title: "Show Usages",
+      category: "Navigation",
+      keybinding: "Ctrl+Alt+F7",
+      keywords: ["usages", "popup", "lightweight"],
+      when: (context) => context.focus === "editor" && !!activeFile,
+      run: (context) => {
+        const target = resolveEditorTarget(context);
+        if (!target.file || target.position === undefined) return;
+        const snapshot = usageSessionRef.current?.getCurrent();
+        if (snapshot && snapshot.state === "ready" && snapshot.envelope.results.length > 0) {
+          setLocationPeek({
+            title: `Usages of ${snapshot.symbol.displayName} (${snapshot.envelope.results.length})`,
+            locations: snapshot.envelope.results.map(({ role: _role, ...location }) => location),
+          });
+          return;
+        }
+        void findReferencesRef.current(target.file, target.position);
+      },
+    },
+    {
+      id: "workspace.previousMethod",
+      title: "Previous Method",
+      category: "Navigation",
+      keybinding: "Alt+Up",
+      provenance: "unsupported",
+      keywords: ["previous", "method", "function", "navigate"],
+      when: () => false,
+      run: () => {
+        setStatusMessage("Previous Method requires a language-specific syntax model (unsupported)");
+      },
+    },
+    {
+      id: "workspace.nextMethod",
+      title: "Next Method",
+      category: "Navigation",
+      keybinding: "Alt+Down",
+      provenance: "unsupported",
+      keywords: ["next", "method", "function", "navigate"],
+      when: () => false,
+      run: () => {
+        setStatusMessage("Next Method requires a language-specific syntax model (unsupported)");
+      },
+    },
+    {
+      id: "workspace.previousSibling",
+      title: "Previous Sibling",
+      category: "Navigation",
+      provenance: "unsupported",
+      keywords: ["previous", "sibling", "element", "navigate"],
+      when: () => false,
+      run: () => {
+        setStatusMessage("Previous Sibling requires a language-specific syntax model (unsupported)");
+      },
+    },
+    {
+      id: "workspace.nextSibling",
+      title: "Next Sibling",
+      category: "Navigation",
+      provenance: "unsupported",
+      keywords: ["next", "sibling", "element", "navigate"],
+      when: () => false,
+      run: () => {
+        setStatusMessage("Next Sibling requires a language-specific syntax model (unsupported)");
+      },
+    },
+    {
       id: "workspace.toggleTodosPane",
       title: "Toggle TODOs / Bookmarks",
       category: "View",
@@ -11192,21 +11298,8 @@ export function CodeWorkspaceTab({
   ]);
   safeDeleteSymbolRef.current = safeDeleteSymbolAtCursor;
 
-  const findReferences = useCallback(
-    async (file: OpenFileState, position: LspPosition) => {
-      // §8.19.7 pin safety: a pinned session is never silently overwritten —
-      // the user decides whether this request replaces it.
-      if (referencesPinnedRef.current) {
-        const replacePinned = await confirmAppDialog({
-          title: "Replace Pinned Usages",
-          message: "The references result is pinned. Replace it with a new Find Usages session?",
-          confirmLabel: "Replace",
-        });
-        if (!replacePinned) {
-          setStatusMessage("Kept the pinned usages result; new request cancelled");
-          return;
-        }
-      }
+  const runFindReferences = useCallback(
+    async (file: OpenFileState, position: LspPosition, selection: UsagesScopeSelection) => {
       referencesRequestSequenceRef.current += 1;
       const requestId = referencesRequestSequenceRef.current;
       setBottomDockOpen(true);
@@ -11219,6 +11312,10 @@ export function CodeWorkspaceTab({
         semanticGeneration: null,
         semanticRevision: null,
       });
+      usageSessionRef.current?.startLoading(
+        { uri: "", range: { start: position, end: position }, displayName: "", providerSymbolId: null },
+        selection,
+      );
       const expectedRevision = semanticIndex.current().revision;
       const live = await ensureWorkspaceSemanticDocumentsSynced(file.key, expectedRevision);
       if (!live) {
@@ -11276,7 +11373,8 @@ export function CodeWorkspaceTab({
           providerGeneration: lspSessionGeneration(),
           workspaceRoots: rootsRef.current.map((root) => root.path),
         });
-        const result = await lspReferences(descriptor, position, true);
+        // §8.20.5 W4: includeDeclaration now comes from the scope selection.
+        const result = await lspReferences(descriptor, position, selection.includeDeclaration);
         updateLspStatusForFile(live, result.status);
         const completion = semanticIndex.finishQuery(buildToken, {
           kind: "references",
@@ -11297,17 +11395,41 @@ export function CodeWorkspaceTab({
         }
         if (referencesRequestSequenceRef.current !== requestId) return;
         referencesRerunRef.current = { fileKey: live.key, uri: identity.uri, position, symbolName };
+        // §8.20.5 W4: freeze the scoped result into the shared session — the
+        // tool window rows, the Show Usages popup and recents all read THIS
+        // snapshot; nothing copies result truth elsewhere.
+        const snapshot = usageSessionRef.current?.start({
+          symbol: {
+            uri: descriptor.documentUri ?? descriptor.filePath,
+            range: symbolRange ?? { start: position, end: position },
+            displayName: symbolName,
+            providerSymbolId: null,
+          },
+          selection,
+          evidence: {
+            languageId: descriptor.languageId ?? "plaintext",
+            provider: { id: "jdtls", version: null, generation: lspSessionGeneration() },
+            projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? identity.projectFingerprint,
+            uri: identity.uri,
+            revision: live.documentRevision ?? 0,
+            scope: "project",
+          },
+          locations: result.locations,
+          isLibraryUri: libraryUriClassifierForRoots(rootsRef.current, relativePathWithinRoot),
+        }) ?? null;
+        const scopedLocations = (snapshot?.envelope.results ?? []).map(({ role: _role, ...location }) => location);
+        setUsagesRecentsRevision((revision) => revision + 1);
         setReferencesResult({
           loading: false,
           origin: live.subtitle,
-          locations: result.locations,
+          locations: scopedLocations,
           error: null,
           semanticGeneration: buildToken.generation,
           semanticRevision: buildToken.revision,
           symbolName,
           identity,
         });
-        setStatusMessage(`${result.locations.length} reference${result.locations.length === 1 ? "" : "s"} found`);
+        setStatusMessage(`${scopedLocations.length} reference${scopedLocations.length === 1 ? "" : "s"} found${scopedLocations.length !== result.locations.length ? ` (${result.locations.length} unscoped)` : ""}`);
       } catch (err) {
         semanticIndex.failBuild(buildToken, errorMessage(err));
         if (referencesRequestSequenceRef.current !== requestId) return;
@@ -11324,6 +11446,9 @@ export function CodeWorkspaceTab({
     [
       ensureWorkspaceSemanticDocumentsSynced,
       lspDescriptorForFile,
+      lspSessionGeneration,
+      projectAnalysisSnapshot?.projectFingerprint,
+      rootsRef,
       semanticIndex.beginBuild,
       semanticIndex.current,
       semanticIndex.failBuild,
@@ -11332,10 +11457,38 @@ export function CodeWorkspaceTab({
       updateLspStatusForFile,
     ],
   );
+
+  // §8.20.5: manual Find Usages opens the scope dialog first; the recorded
+  // selection then drives the request (rerun reuses it without asking).
+  const findReferences = useCallback(
+    async (file: OpenFileState, position: LspPosition) => {
+      if (referencesPinnedRef.current) {
+        const replacePinned = await confirmAppDialog({
+          title: "Replace Pinned Usages",
+          message: "The references result is pinned. Replace it with a new Find Usages session?",
+          confirmLabel: "Replace",
+        });
+        if (!replacePinned) {
+          setStatusMessage("Kept the pinned usages result; new request cancelled");
+          return;
+        }
+      }
+      setUsagesScopeDialog({ open: true, file, position });
+    },
+    [setStatusMessage],
+  );
   findReferencesRef.current = findReferences;
 
+  const confirmUsagesScope = useCallback((selection: UsagesScopeSelection) => {
+    setUsagesScopeSelection(selection);
+    const pending = usagesScopeDialog;
+    setUsagesScopeDialog(null);
+    if (pending) void runFindReferences(pending.file, pending.position, selection);
+  }, [runFindReferences, usagesScopeDialog]);
+
   // §8.19.7 rerun: replay against the recorded origin uri+position marker so
-  // the same symbol identity is re-queried even after the caret moved.
+  // the same symbol identity is re-queried even after the caret moved — with
+  // the LAST scope selection, no dialog (refresh semantics).
   const rerunFindReferences = useCallback(() => {
     const marker = referencesRerunRef.current;
     if (!marker) return;
@@ -11344,8 +11497,8 @@ export function CodeWorkspaceTab({
       setStatusMessage("The usages session's origin buffer is closed; reopen it to rerun");
       return;
     }
-    void findReferences(live, marker.position);
-  }, [findReferences, setStatusMessage]);
+    void runFindReferences(live, marker.position, usagesScopeSelection);
+  }, [findReferences, runFindReferences, setStatusMessage, usagesScopeSelection]);
 
   const showEditorContextMenu = useCallback((
     file: OpenFileState,
@@ -13878,8 +14031,21 @@ export function CodeWorkspaceTab({
                 semanticIndex={semanticIndex.snapshot}
                 onOpenLocation={(location) => void openLspLocation(location)}
                 pinned={referencesPinned}
-                onPinChange={setReferencesPinned}
+                onPinChange={(pinned) => {
+                  setReferencesPinned(pinned);
+                  usageSessionRef.current?.setPinned(pinned);
+                }}
                 onRerun={rerunFindReferences}
+                scopeSelection={usagesScopeSelection}
+                recentSessions={usageSessionRef.current?.getRecent().map((snapshot) => ({
+                  id: snapshot.id,
+                  label: `${snapshot.symbol.displayName || "symbol"} · ${snapshot.envelope.results.length} · ${new Date(snapshot.createdAt).toLocaleTimeString()}`,
+                })) ?? []}
+                onRestoreRecent={(id) => {
+                  usageSessionRef.current?.restore(id);
+                  setUsagesRecentsRevision((revision) => revision + 1);
+                }}
+                recentsRevision={usagesRecentsRevision}
               />
             ),
           },
@@ -13892,6 +14058,20 @@ export function CodeWorkspaceTab({
                 mode="call"
                 root={callHierarchyRoot}
                 active={bottomDockOpen && bottomDockTab === "call-hierarchy"}
+                staleReason={(() => {
+                  const provenance = hierarchyProvenanceRef.current.call;
+                  if (!provenance || !callHierarchyRoot) return null;
+                  void hierarchyProvenanceRevision;
+                  if (provenance.generation !== lspSessionGeneration()) {
+                    return "Provider restarted since this hierarchy was prepared";
+                  }
+                  const current = projectAnalysisSnapshot?.projectFingerprint ?? "";
+                  if (current && provenance.projectFingerprint !== current) {
+                    return "Project model changed since this hierarchy was prepared";
+                  }
+                  return null;
+                })()}
+                onRerunStale={() => void openHierarchy("call")}
                 onOpenLocation={(location) => void openLspLocation(location)}
                 onStatus={(status) => {
                   if (activeFile) updateLspStatusForFile(activeFile, status);
@@ -13908,6 +14088,20 @@ export function CodeWorkspaceTab({
                 mode="type"
                 root={typeHierarchyRoot}
                 active={bottomDockOpen && bottomDockTab === "type-hierarchy"}
+                staleReason={(() => {
+                  const provenance = hierarchyProvenanceRef.current.type;
+                  if (!provenance || !typeHierarchyRoot) return null;
+                  void hierarchyProvenanceRevision;
+                  if (provenance.generation !== lspSessionGeneration()) {
+                    return "Provider restarted since this hierarchy was prepared";
+                  }
+                  const current = projectAnalysisSnapshot?.projectFingerprint ?? "";
+                  if (current && provenance.projectFingerprint !== current) {
+                    return "Project model changed since this hierarchy was prepared";
+                  }
+                  return null;
+                })()}
+                onRerunStale={() => void openHierarchy("type")}
                 onOpenLocation={(location) => void openLspLocation(location)}
                 onStatus={(status) => {
                   if (activeFile) updateLspStatusForFile(activeFile, status);
@@ -14194,6 +14388,15 @@ export function CodeWorkspaceTab({
       />
       {treeContextMenu}
       {editorContextMenu}
+      <UsagesScopeDialog
+        open={!!usagesScopeDialog?.open}
+        symbolHint={usagesScopeDialog?.file.subtitle ?? null}
+        onConfirm={confirmUsagesScope}
+        onCancel={() => {
+          setUsagesScopeDialog(null);
+          setStatusMessage("Find Usages cancelled");
+        }}
+      />
       {visible && lspMessageRequest && (
         <LspMessageRequestDialog
           request={lspMessageRequest}

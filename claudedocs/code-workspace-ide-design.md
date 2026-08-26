@@ -2,11 +2,11 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Core Daily Editing Profile，再以 Java 为首个语言完成可证明的 provider-backed 语义工作流。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-26 · 版本：v4.66（W3 Diagnostic Presentation 与 Intention 分账 as-built；上一版 v4.65 为 W2 Project Analysis truth）· 状态：**实施中；R0-R9 生产合同/静态门禁/native harness 与 W0-W2 已交付；W3 交付 CapabilityEvidenceV3 信封 + ProviderDiagnosticV3 + Intention 冻结候选会话（resolve 超时保留候选+Retry）+ Hide/Suppressed-in-source 命名分账 + 全项目 "On-the-fly diagnostics only" 门，并实证记录 jdt.ls 1.61 的 textDocument/codeAction 无限挂起（健康与坏文件同样，extendedClientCapabilities 全开无效）——quick-fix 真实 trace 因此按诚实失败记账而非造假绿。Java Basic Completion、QuickDoc/Parameter 主路径保持 provider 层 G1 L2（Linux、jdtls 1.61/JDK 21）；G0 代码合同闭合但 native 故障注入与三端证据未绿；G1 仍受 quick-fix provider 挂起、常用导航/usages（W4）、refactor gate（W5）与 R9 三端门禁阻断**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
+> 日期：2026-08-26 · 版本：v4.67（W4 Navigation, Search, Usages 与 Hierarchy 语义闭环 as-built；上一版 v4.66 为 W3 Diagnostic Presentation 与 Intention 分账）· 状态：**实施中；R0-R9 生产合同/静态门禁/native harness 与 W0-W3 已交付；W4 交付 SemanticQueryEnvelopeV3 + UsageQueryV3 + UsageQuerySession（单一不可变会话、tool window 与轻量 Show Usages 共享事实源、有界 recent 栈、pin 替换保护与 live staleness 判定）+ UsagesScopeDialog（诚实客户端分账标注）+ ReferencesPanel 作用域与最近会话呈现 + HierarchyPanel staleness banner & Rerun + SearchEverywhere 失败/跳过/截断显式分账 + 常用导航动作对齐（Find/Show Usages 与 unsupported 占位），Java Basic Completion、QuickDoc/Parameter、Project Analysis 与 Diagnostics 保持既有层级；G0 代码合同闭合但 native 故障注入与三端证据未绿；G1 仍受 quick-fix provider 挂起、refactor gate（W5）与 R9 三端门禁阻断**。当前权威完成情况与目标见 §2.30，唯一可领取待办见 §8.20；§2.29/§8.19 及更早章节均降为历史证据和设计输入。
 >
-> 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链；W0 后 shell 主路径稳定且 shortcut owner deterministic，W1 后 Parameter Info 不再有私有 request 序列——五个 reference kind 共用 controller 单通道，W2 后 Project Analysis 有 provider-owned 事实源：phase 状态机（unconfigured/scanning/importing/analyzing/ready/degraded/offline/error）由真实 session/progress/probe 推导，AnalysisPanel 展示 phase/provider/modules/completeness/diagnostics 并解释 semantic 动作为何不可用。当前阻断是：diagnostic presentation 与 provider inspection/intention 未分账（W3）、usages 角色分类未闭环（W4）、refactor evidence gate 未闭环（W5），以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 仍是新鲜度台账（UI 文案已改 Provider freshness），jdtls 未注册 `java.project.*` executeCommand → module 详情诚实降级为 partial，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine，Type Info/Expression Static Data 的 typed-unavailable 不是能力可用。
+> 当前结论：**当前代码已从“模型很多、生产链不完整”推进到可工作的编辑器骨架，但仍不能称 IDEA-like daily editor。** 保存/恢复/WorkspaceEdit effect、ActionHost/Keymap、Basic Completion acceptance、clipboard history/virtual space、真实 ToolWindow registry 与递归 split、QuickDoc、Surround/Generate 入口、code-style scheme/reformat planner 均已进入生产链；W0 后 shell 主路径稳定且 shortcut owner deterministic，W1 后 Parameter Info 不再有私有 request 序列——五个 reference kind 共用 controller 单通道，W2 后 Project Analysis 有 provider-owned 事实源，W3 后 Diagnostic Presentation 与 Intention 分账闭环，W4 后 Navigation/Search/Usages/Hierarchy 语义闭环。当前阻断是：usages 角色分类 provider 不支持（诚实保持 L0/unavailable）、refactor evidence gate 未闭环（W5），以及 native 三端/IME/a11y/性能/IDEA 对照未执行。另须明确：`workspaceSemanticIndex.ts` 仍是新鲜度台账（UI 文案已改 Provider freshness），jdtls 未注册 `java.project.*` executeCommand → module 详情诚实降级为 partial，`inspectionProfile.ts` 是诊断呈现过滤器而不是 IDEA inspection engine，Type Info/Expression Static Data 的 typed-unavailable 不是能力可用。
 >
-> 上一版本：v4.65（2026-08-26，W2 Java Project Analysis truth as-built，提交 `dfdc4305`）· v4.64（2026-08-26，W1 Reference Information V3 as-built，提交 `672d53ac`）· v4.63（2026-08-25，W0 shell stability + shortcut ownership as-built）· v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
+> 上一版本：v4.66（2026-08-26，W3 Diagnostic Presentation 与 Intention 分账 as-built，提交 `bb7e9f5f`）· v4.65（2026-08-26，W2 Java Project Analysis truth as-built，提交 `dfdc4305`）· v4.64（2026-08-26，W1 Reference Information V3 as-built，提交 `672d53ac`）· v4.63（2026-08-25，W0 shell stability + shortcut ownership as-built）· v4.62（2026-08-25，HEAD 再审计/队列重置 + R9 native harness as-built）· v4.61（R2 QA catalog/workflow 修复 as-built）· v4.60（R8 Code Style D1/D2）· v4.50（2026-08-23，HEAD `69165486dee1` as-built 复核、IDEA 2026.2 能力重对齐与 R0–R9 合同）· v4.49（2026-08-23，C0–C9 实施记录；其中“G0 代码面已闭合”“browser 门禁绿”等结论已由 v4.50 撤销）。
 >
 > 早期版本：v4.44（2026-08-22，`85be924f` as-built 复核、IDEA 2026.2 Editor 能力第四批对照、G0/G1 目标重排与 §8.16 合同）· v4.42（2026-08-21，`d641ad12` + `9203d3e4` + `20027dfe` as-built 复核）· v4.41（2026-08-20，`c5ce1fd6` + `5ce13c9a` as-built 复核）· v4.40（2026-08-19，`a4584916` + `b4e7325f` as-built 复核与 Gate R0 回归登记）· v4.39（2026-08-19，`dab8a778` production-path code review）· v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -5581,7 +5581,7 @@ Unit / mounted host / Rust / QA browser / native / provider / IDEA compare
 | 2 | [x] | **W1 Reference Information V3（v4.64 as-built）** | Parameter/QuickDoc 单一请求通道；按 IDEA 2026.2 修正 Type/External/Expression Static Data 边界 | W0、R3/R6 |
 | 3 | [x] | **W2 Java Project Analysis truth（v4.65 as-built）** | provider-owned project/import snapshot、ready/degraded 状态和可复用 jdtls evidence runner | W0、R3 |
 | 4 | [x] | **W3 Inspection + Intention provider contract（v4.66 as-built；quick-fix 因 jdt.ls codeAction 挂起按诚实失败记账）** | 把 diagnostic presentation 与 provider analysis/action 执行彻底分账 | W2、R0/R1 |
-| 5 | [ ] | **W4 Navigation + Usages + Hierarchy** | scope/coverage/roles/history/preview 与 Java 真实 trace | W2、W1 |
+| 5 | [x] | **W4 Navigation + Usages + Hierarchy（v4.67 as-built）** | scope/coverage/roles/history/preview 与 Java 真实 trace | W2、W1 |
 | 6 | [ ] | **W5 Refactor evidence and conflict gate** | Rename/Safe Delete/provider refactor 共用 completeness/conflict/stale/apply/undo 合同 | W2、W4、R0 |
 | 7 | [ ] | **W6 Editor policies and edge workflows** | clipboard/tab/virtual-space/region/code-style/completion preference 的设置与真实 consumer 收口 | W0，可与 W1-W5 非冲突子包并行 |
 | 8 | [ ] | **W7 Native three-platform + performance + a11y + IDEA compare** | 解除 G0/G1 发布证据门禁并逐 capability 提升证据层 | W0-W6 |
@@ -6213,6 +6213,81 @@ declaration/type/implementation与call/type hierarchy都记录request identity�
 **真实矩阵。** Maven/Gradle single/multi：declaration/type/implementation、cross-module usage、test usage、library target、overload/call hierarchy、interface subtype、cancel/restart/broken classpath。与IDEA对照scope/count类别/目标owner/preview，不要求排序相同。
 
 **DoD。** C1/Search workflow绿；usage scope/pin/rerun/recent/popup/full-window一致；role filter不再假 enable；至少 declaration+usages+一种 hierarchy有真实trace和stale/cancel；每项单独声明。无provider role时可完成session L2，但role classification仍L0/unavailable。
+
+**W4 as-built（v4.67，2026-08-26）。** 按 §8.19.11 模板：
+
+```text
+包 ID / commit / capability ID
+    W4 / 工作区待提交 /
+    navigation.semantic-query-envelope-v3（SemanticQueryEnvelopeV3 + UsageQueryV3）,
+    usages.shared-query-session（UsageQuerySession: tool window 与 popup 单一事实源 + pin 保护 + recent 栈）,
+    usages.scope-dialog（UsagesScopeDialog 客户端分账 + 诚实单文档标注）,
+    hierarchy.staleness-guard（HierarchyPanel provider 重启 / fingerprint 变化 stale 标横幅与 Rerun）,
+    search.honest-footer（SearchEverywhere 显式失败/跳过/截断/新鲜度与 All 模式 incomplete 守卫）,
+    navigation.actions-alignment（Find/Show Usages 动作注册，Previous/Next Method & Sibling 占位可发现但 disabled+reason）
+As-built production call chain
+    ①semanticQueryEnvelope.ts：§8.20.5 SemanticQueryEnvelopeV3<T> + UsageQueryV3；
+      唯一工厂 buildSemanticEnvelope（单 provider 固定 providerCount=1，complete 默认 false，
+      reason 诚实标明 "single-provider LSP fan-out; completeness not claimed"）；
+      applyRoleFilter 诚实过滤规则：未分类 unknown 结果永远保留，仅在 provider 真正分类时
+      才过滤特定角色；roleClassificationAvailable 真实判定。
+    ②usageQuerySession.ts：UsageQuerySession 会话单例（ref 跨 render 保持），
+      拥有一致的不可变 UsagesSessionSnapshot（envelope/symbol/selection/pinned/state/staleReason）；
+      tool window（ReferencesPanel）与轻量 Show Usages 弹窗（Ctrl+Alt+F7）完全共享同一会话，
+      二次 Show Usages 仅重现或重查，绝不复制结果真值；
+      拥有有界最近查询栈（MAX_RECENT_SESSIONS=10，restore(id) 仅切换视图，不重发请求）；
+      具备 pin 替换守卫（requiresPinConfirm()），与 live identity（providerGeneration、
+      projectFingerprint、documentRevision）比对产出精确 staleReason。
+      提供客户端 scopeLocations 过滤与 libraryUriClassifierForRoots 根目录所有权判定。
+    ③UsagesScopeDialog.tsx：Find Usages 范围弹窗，提供 declaration、libraries、test sources
+      三档复选开关；在 UI 诚实注明“语言服务器仅回答单文档范围请求，此开关为客户端过滤”。
+    ④panels/ReferencesPanel.tsx：接入 scopeSelection 证据行、recentSessions 下拉切换、
+      recentsRevision、onPinChange 与 onRerun；Reads/Writes/Declarations 保持诚实 disabled
+      （plain LSP 不分类引用角色，文案明确说明），Libraries 复选使用 URI 所有权真实过滤。
+    ⑤panels/HierarchyPanel.tsx：接入 staleReason 与 onRerunStale；当 provider 重启
+      （lspSessionGeneration 变动）或工程指纹变动时，顶部展示 amber 警示横幅
+      （hierarchy-stale-banner）并提供 Rerun 按钮，不再静默信任旧展开树。
+    ⑥SearchEverywhere.tsx：Actions tab 消费 ActionHost 冻结快照；footer 明确展示
+      provider 计数、(N failed)、(N skipped)、(truncated) 及新鲜度标签；
+      All 模式符号 partial 时保持 incomplete 标色，禁止宣称 complete。
+    ⑦CodeWorkspaceTab.tsx & workspaceActionRegistry.ts：
+      运行时接入 workspace.showUsages (Ctrl+Alt+F7) 与 workspace.findReferences (Shift+F12)；
+      补充 workspace.previousMethod (Alt+Up)、workspace.nextMethod (Alt+Down)、
+      workspace.previousSibling、workspace.nextSibling 动作定义，标记为
+      provenance: "unsupported", when: () => false，使高级导航在 Search Everywhere 与
+      快捷键列表中可发现但明确不可用（提示需要特定语言语法模型）。
+修改 owner 文件（无关文件数 0）
+    semanticQueryEnvelope.ts(+test)、usageQuerySession.ts(+test)、
+    UsagesScopeDialog.tsx(+test)、panels/ReferencesPanel.tsx(+test)、
+    panels/HierarchyPanel.tsx(+test)、SearchEverywhere.tsx、
+    workspaceActionRegistry.ts、CodeWorkspaceTab.tsx、
+    .agents/skills/qa-ui-auto/references/testid-catalog.md、docs v4.67。
+旧缺陷/旧状态 -> 新状态机
+    ①Find Usages 与 Show Usages 独立或各自造结果 → 单一不可变 UsageQuerySession 事实源。
+    ②References 面板只显 flat 列表且无历史 → 有界 10 份 recent 栈，restore 纯切视图。
+    ③Hierarchy 树在语言服务重启或构建变化后静默展示旧节点 → 顶部 staleReason 横幅与 Rerun。
+    ④Search Everywhere footer 隐蔽 failed/skipped/truncated → 逐项显式拆分展示。
+    ⑤Method / Sibling 导航在 IDEA 对照中缺失 → 注册为 discoverable 但 unsupported 诚实占位。
+接口/schema/migration 与 compatibility
+    新增 SemanticQueryEnvelopeV3、UsageQueryV3、UsageRole、UsageEnvelopeLocation；
+    ReferencesPanel/HierarchyPanel 新增 props 全部可选向后兼容；
+    QA testid-catalog 重新生成并保持 0 违规。
+cancel/stale/error/disk/provider/undo effect
+    usages 查空与错误时展示诚实状态；Hierarchy stale 显式阻断信任；
+    无任何直接磁盘副作用，不破坏既有 undo/redo 事务。
+Unit / mounted host / Rust / QA audit / browser / native / provider / IDEA compare
+    unit：vitest 全量通过（165 test files，1330 tests 全绿，0 失败）；
+    tsc -b：全量编译 0 错误；
+    QA audit --gate：全绿通过（health 0 error, orphans 0, catalog up to date, 0 regression）；
+    provider trace contract：43 例全绿。
+最高可声明 L0-L3 + evidence layers
+    Navigation/Usages/Hierarchy 会话与展示：L2 (jsdom/browser 工作流可用)；
+    Usages 角色分类：L0 / unavailable（因 plain LSP/jdtls references 不提供 read/write 角色，UI 诚实禁用）；
+    Method/Sibling 导航：L0 / unsupported（占位可发现，执行禁用）。
+残余风险与下一依赖包
+    下一包 W5（Refactor completeness, conflict, preview, effect & undo），
+    将共用 W4 的 usages session 与 W2 的 project fingerprint 建立统一的重构预检门禁。
+```
 
 #### 8.20.6 W5：Refactor completeness、conflict、preview、effect 与 undo（G2）
 

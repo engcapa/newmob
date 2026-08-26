@@ -133,4 +133,47 @@ describe("ReferencesPanel", () => {
     fireEvent.click(screen.getByTestId("references-pin-toggle"));
     expect(onPinChange).toHaveBeenCalledWith(true);
   });
+
+  it("renders scope selection line", () => {
+    render(
+      <ReferencesPanel
+        roots={[]}
+        semanticIndex={createWorkspaceSemanticIndexSnapshot()}
+        result={{ loading: false, origin: null, locations: [location], error: null }}
+        onOpenLocation={vi.fn()}
+        scopeSelection={{
+          scope: "project",
+          includeDeclaration: true,
+          includeLibraries: false,
+          includeTests: false,
+        }}
+      />,
+    );
+    const scopeLine = screen.getByTestId("references-scope-line");
+    expect(scopeLine).toHaveTextContent("Scope: project");
+    expect(scopeLine).toHaveTextContent("+declaration");
+    expect(scopeLine).toHaveTextContent("libraries hidden");
+    expect(scopeLine).toHaveTextContent("tests hidden");
+  });
+
+  it("renders recent sessions and invokes onRestoreRecent when selection changes", () => {
+    const onRestoreRecent = vi.fn();
+    render(
+      <ReferencesPanel
+        roots={[]}
+        semanticIndex={createWorkspaceSemanticIndexSnapshot()}
+        result={{ loading: false, origin: null, locations: [location], error: null }}
+        onOpenLocation={vi.fn()}
+        recentSessions={[
+          { id: "session-1", label: "MyClass.foo · 5" },
+          { id: "session-2", label: "MyClass.bar · 2" },
+        ]}
+        onRestoreRecent={onRestoreRecent}
+      />,
+    );
+    const select = screen.getByTestId("references-recent-sessions");
+    expect(select).toBeInTheDocument();
+    fireEvent.change(select, { target: { value: "session-2" } });
+    expect(onRestoreRecent).toHaveBeenCalledWith("session-2");
+  });
 });

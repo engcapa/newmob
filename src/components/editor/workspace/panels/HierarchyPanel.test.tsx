@@ -135,4 +135,27 @@ describe("HierarchyPanel", () => {
     expect(updated.expanded).toBe(true);
     expect(updated.item).toBe(root);
   });
+
+  it("renders stale banner and triggers onRerunStale", () => {
+    const root = item("root", 1);
+    const onRerunStale = vi.fn();
+    render(
+      <HierarchyPanel
+        mode="call"
+        root={{ descriptor, item: root }}
+        active
+        staleReason="Provider restarted since this hierarchy was prepared"
+        onRerunStale={onRerunStale}
+        onOpenLocation={vi.fn()}
+      />,
+    );
+
+    const banner = screen.getByTestId("hierarchy-stale-banner");
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent("Provider restarted since this hierarchy was prepared");
+
+    const rerunBtn = screen.getByTestId("hierarchy-stale-rerun");
+    fireEvent.click(rerunBtn);
+    expect(onRerunStale).toHaveBeenCalledTimes(1);
+  });
 });
