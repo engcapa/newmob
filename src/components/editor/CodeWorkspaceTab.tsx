@@ -13557,7 +13557,7 @@ export function CodeWorkspaceTab({
       <EditorGroup
         onClipboardUnavailable={setStatusMessage}
         groupId={groupId}
-        workspaceInstanceId={`${workspaceInstanceId}-${groupId}`}
+        workspaceInstanceId={workspaceInstanceId}
         visible={visible}
         workspaceActionHost={actionsController.host}
         readOnly={workspaceResourceOperationLocked}

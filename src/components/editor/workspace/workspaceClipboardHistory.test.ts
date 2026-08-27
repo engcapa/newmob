@@ -187,5 +187,40 @@ describe("§8.19.5 clipboard history ring", () => {
     expect(handle.read()?.sensitive).toBe(true);
     expect(handle.historyEntries()).toHaveLength(0);
     expect(handle.historyExclusion()).toBe<ClipboardHistoryExclusion>("sensitive");
+    handle.release();
+  });
+
+  it("§8.23.2 X1 ensures full isolation between workspace A and workspace B and proper refcount disposal", async () => {
+    const wsA1 = acquireClipboardStore("ws-alpha");
+    const wsA2 = acquireClipboardStore("ws-alpha");
+    const wsB = acquireClipboardStore("ws-beta");
+
+    // Copy in workspace Alpha
+    wsA1.write({
+      sourceViewId: "view-a1",
+      plainText: "secret alpha data",
+      rectangular: false,
+      sourceEol: "lf",
+    });
+
+    // Workspace Beta cannot see workspace Alpha data
+    expect(wsB.read()).toBeNull();
+    expect(wsB.historyEntries()).toHaveLength(0);
+
+    // Split 1 of workspace Alpha unmounts/releases, but Split 2 keeps the store alive
+    wsA1.release();
+    expect(wsA2.read()?.plainText).toBe("secret alpha data");
+    expect(wsA2.historyEntries()).toHaveLength(1);
+
+    // Split 2 releases, now the store for Alpha is disposed after microtask
+    wsA2.release();
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Re-acquiring workspace Alpha gets a fresh, empty session store (session-only lifetime)
+    const wsAFresh = acquireClipboardStore("ws-alpha");
+    expect(wsAFresh.read()).toBeNull();
+    expect(wsAFresh.historyEntries()).toHaveLength(0);
+    wsAFresh.release();
+    wsB.release();
   });
 });
