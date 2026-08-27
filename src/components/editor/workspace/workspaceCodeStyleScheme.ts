@@ -88,6 +88,86 @@ export function resolveEffectiveSaveActions(
   };
 }
 
+/**
+ * §8.21.3 V2-D: Unified EffectiveSavePolicyV4 merging scheme, legacy preference, and exclusions.
+ */
+export interface EffectiveSavePolicyV4 {
+  format: { enabled: boolean; source: "scheme" | "legacy-migrated" | "default" };
+  organizeImports: { enabled: boolean; source: "scheme" | "default" };
+  exclusions: { patterns: readonly string[]; formatterMarkers: boolean; source: string };
+  unsupported: readonly ("rearrange" | "cleanup" | "directory" | "module")[];
+}
+
+export function resolveEffectiveSavePolicy(
+  scheme: CodeStyleSchemeV3 | null | undefined,
+  legacyPreferenceFormatOnSave?: boolean,
+  _filePath?: string,
+): EffectiveSavePolicyV4 {
+  let formatEnabled = false;
+  let formatSource: "scheme" | "legacy-migrated" | "default" = "default";
+
+  if (scheme?.saveActions?.format !== undefined) {
+    formatEnabled = scheme.saveActions.format;
+    formatSource = "scheme";
+  } else if (legacyPreferenceFormatOnSave !== undefined) {
+    formatEnabled = legacyPreferenceFormatOnSave;
+    formatSource = "legacy-migrated";
+  } else {
+    formatEnabled = false;
+    formatSource = "default";
+  }
+
+  const organizeImportsEnabled = scheme?.saveActions?.organizeImports ?? false;
+  const organizeImportsSource: "scheme" | "default" = scheme ? "scheme" : "default";
+
+  const exclusions = {
+    patterns: scheme?.exclusions?.patterns ?? [],
+    formatterMarkers: scheme?.exclusions?.formatterMarkers ?? true,
+    source: scheme ? "scheme" : "default",
+  };
+
+  const unsupported: readonly ("rearrange" | "cleanup" | "directory" | "module")[] = Object.freeze([
+    "rearrange",
+    "cleanup",
+    "directory",
+    "module",
+  ]);
+
+  return {
+    format: { enabled: formatEnabled, source: formatSource },
+    organizeImports: { enabled: organizeImportsEnabled, source: organizeImportsSource },
+    exclusions,
+    unsupported,
+  };
+}
+
+export function isPathExcluded(filePath?: string | null, patterns?: readonly string[]): boolean {
+  if (!filePath || !patterns || patterns.length === 0) return false;
+  const normalized = filePath.replace(/\\/g, "/");
+  return patterns.some((pattern) => {
+    const p = pattern.trim().replace(/\\/g, "/");
+    if (!p) return false;
+    if (normalized.endsWith(p) || normalized.includes(p)) return true;
+    const regexPattern = p
+      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*\*/g, ".*")
+      .replace(/\*/g, "[^/]*");
+    try {
+      return new RegExp(`(^|/)${regexPattern}($|/)`).test(normalized);
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function containsDisabledFormatterMarker(text?: string | null): boolean {
+  if (!text) return false;
+  const offIndex = text.lastIndexOf("@formatter:off");
+  if (offIndex === -1) return false;
+  const onIndex = text.lastIndexOf("@formatter:on");
+  return onIndex < offIndex;
+}
+
 export type CodeStyleFieldProvenanceSource =
   | "explicit"
   | "EditorConfig"

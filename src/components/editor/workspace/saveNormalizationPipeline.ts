@@ -13,19 +13,32 @@
 
 import type { ResolvedCodeStyle } from "./editorConfigResolver";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
+import {
+  type EffectiveSavePolicyV4,
+  isPathExcluded,
+  containsDisabledFormatterMarker,
+} from "./workspaceCodeStyleScheme";
 
 export type SaveStageKind = "format" | "organize-imports" | "normalization";
-export type SaveStageStatus = "executed" | "unavailable" | "failed";
+export type SaveStageStatus =
+  | "executed"
+  | "disabled"
+  | "unavailable"
+  | "failed"
+  | "skipped-prior-failure";
 
 export interface SaveStageReport {
   stage: SaveStageKind;
   status: SaveStageStatus;
   error?: string;
+  reason?: string;
 }
 
 export interface SaveNormalizationOptions {
   text: string;
   codeStyle: ResolvedCodeStyle | EffectiveCodeStyle;
+  savePolicy?: EffectiveSavePolicyV4;
+  filePath?: string;
   formatOnSave?: boolean;
   formatFn?: (text: string) => Promise<string | null>;
   organizeImportsOnSave?: boolean;
@@ -150,75 +163,89 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
+  const formatEnabled = options.savePolicy
+    ? options.savePolicy.format.enabled
+    : (formatOnSave ?? false);
+  const pathIsExcluded = options.savePolicy && options.filePath
+    ? isPathExcluded(options.filePath, options.savePolicy.exclusions.patterns)
+    : false;
+  const markerOff = options.savePolicy?.exclusions.formatterMarkers
+    ? containsDisabledFormatterMarker(currentText)
+    : false;
+
   // Stage 1: format
-  if (formatOnSave) {
-    if (formatFn) {
-      try {
-        const formattedResult = await formatFn(currentText);
-        if (formattedResult !== null && formattedResult !== undefined) {
-          if (getLatestBufferVersion && expectedVersion !== undefined) {
-            const latestVer = getLatestBufferVersion();
-            if (latestVer !== expectedVersion) {
-              return {
-                text: initialText,
-                formatted: false,
-                importsOrganized: false,
-                whitespaceTrimmed: false,
-                newlineAdjusted: false,
-                eolNormalized: false,
-                cancelledDueToEdit: true,
-                diagnostics: ["Formatter cancelled because buffer was modified concurrently."],
-                stages: [{ stage: "format", status: "failed", error: "concurrent edit" }],
-              };
-            }
-          }
-          currentText = formattedResult;
-          formatted = true;
-          stages.push({ stage: "format", status: "executed" });
-        } else {
-          stages.push({ stage: "format", status: "unavailable" });
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        diagnostics.push(`Format on save failed: ${msg}`);
-        stages.push({ stage: "format", status: "failed", error: msg });
-        stopEffectful = true;
-      }
-    } else {
-      stages.push({ stage: "format", status: "unavailable" });
-    }
+  if (!formatEnabled) {
+    stages.push({ stage: "format", status: "disabled", reason: "format-disabled" });
+  } else if (pathIsExcluded) {
+    stages.push({ stage: "format", status: "disabled", reason: "path-excluded" });
+  } else if (markerOff) {
+    stages.push({ stage: "format", status: "disabled", reason: "formatter-marker-off" });
+  } else if (!formatFn) {
+    stages.push({ stage: "format", status: "unavailable", reason: "no-provider" });
   } else {
-    stages.push({ stage: "format", status: "unavailable" });
+    try {
+      const formattedResult = await formatFn(currentText);
+      if (formattedResult !== null && formattedResult !== undefined) {
+        if (getLatestBufferVersion && expectedVersion !== undefined) {
+          const latestVer = getLatestBufferVersion();
+          if (latestVer !== expectedVersion) {
+            return {
+              text: initialText,
+              formatted: false,
+              importsOrganized: false,
+              whitespaceTrimmed: false,
+              newlineAdjusted: false,
+              eolNormalized: false,
+              cancelledDueToEdit: true,
+              diagnostics: ["Formatter cancelled because buffer was modified concurrently."],
+              stages: [{ stage: "format", status: "failed", error: "concurrent edit" }],
+            };
+          }
+        }
+        currentText = formattedResult;
+        formatted = true;
+        stages.push({ stage: "format", status: "executed" });
+      } else {
+        stages.push({ stage: "format", status: "unavailable" });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      diagnostics.push(`Format on save failed: ${msg}`);
+      stages.push({ stage: "format", status: "failed", error: msg });
+      stopEffectful = true;
+    }
   }
 
   // Stage 2: organize-imports
+  const organizeImportsEnabled = options.savePolicy
+    ? options.savePolicy.organizeImports.enabled
+    : (options.organizeImportsOnSave ?? false);
+
   if (stopEffectful) {
     stages.push({
       stage: "organize-imports",
-      status: "failed",
+      status: "skipped-prior-failure",
       error: "Skipped due to prior format failure",
     });
-  } else if (options.organizeImportsOnSave) {
-    if (options.organizeImportsFn) {
-      try {
-        const organizedResult = await options.organizeImportsFn(currentText);
-        if (organizedResult !== null && organizedResult !== undefined) {
-          currentText = organizedResult;
-          importsOrganized = true;
-          stages.push({ stage: "organize-imports", status: "executed" });
-        } else {
-          stages.push({ stage: "organize-imports", status: "unavailable" });
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        diagnostics.push(`Organize imports on save failed: ${msg}`);
-        stages.push({ stage: "organize-imports", status: "failed", error: msg });
-      }
-    } else {
-      stages.push({ stage: "organize-imports", status: "unavailable" });
-    }
+  } else if (!organizeImportsEnabled) {
+    stages.push({ stage: "organize-imports", status: "disabled" });
+  } else if (!options.organizeImportsFn) {
+    stages.push({ stage: "organize-imports", status: "unavailable", reason: "no-provider" });
   } else {
-    stages.push({ stage: "organize-imports", status: "unavailable" });
+    try {
+      const organizedResult = await options.organizeImportsFn(currentText);
+      if (organizedResult !== null && organizedResult !== undefined) {
+        currentText = organizedResult;
+        importsOrganized = true;
+        stages.push({ stage: "organize-imports", status: "executed" });
+      } else {
+        stages.push({ stage: "organize-imports", status: "unavailable" });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      diagnostics.push(`Organize imports on save failed: ${msg}`);
+      stages.push({ stage: "organize-imports", status: "failed", error: msg });
+    }
   }
 
   // Stage 3: normalization

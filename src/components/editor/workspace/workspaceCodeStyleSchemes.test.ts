@@ -13,6 +13,11 @@ import {
   setActiveCodeStyleScheme,
   writeCodeStyleSchemeStore,
 } from "./workspaceCodeStyleSchemes";
+import {
+  containsDisabledFormatterMarker,
+  isPathExcluded,
+  resolveEffectiveSavePolicy,
+} from "./workspaceCodeStyleScheme";
 
 afterEach(() => {
   window.localStorage.clear();
@@ -132,5 +137,37 @@ describe("§8.19.9 R8-D1 code style scheme store", () => {
       endOfLine: "crlf",
       trimTrailingWhitespace: true,
     });
+  });
+
+  it("resolves EffectiveSavePolicyV4 merging scheme, legacy preference, and exclusions", () => {
+    // Scheme with saveActions
+    const scheme = {
+      schemaVersion: 3 as const,
+      id: "custom",
+      name: "Custom",
+      languageId: "shared",
+      basedOn: null,
+      values: {},
+      saveActions: { format: true, organizeImports: true, rearrange: false, cleanup: false },
+      exclusions: { patterns: ["**/dist/**", "*.min.js"], formatterMarkers: true },
+    };
+
+    const policyFromScheme = resolveEffectiveSavePolicy(scheme, false);
+    expect(policyFromScheme.format).toEqual({ enabled: true, source: "scheme" });
+    expect(policyFromScheme.organizeImports).toEqual({ enabled: true, source: "scheme" });
+    expect(policyFromScheme.exclusions.patterns).toEqual(["**/dist/**", "*.min.js"]);
+    expect(policyFromScheme.unsupported).toEqual(["rearrange", "cleanup", "directory", "module"]);
+
+    // Legacy migrated preference when scheme has undefined saveActions
+    const policyFromLegacy = resolveEffectiveSavePolicy(null, true);
+    expect(policyFromLegacy.format).toEqual({ enabled: true, source: "legacy-migrated" });
+    expect(policyFromLegacy.organizeImports).toEqual({ enabled: false, source: "default" });
+
+    // Exclusions and marker checks
+    expect(isPathExcluded("src/dist/bundle.js", policyFromScheme.exclusions.patterns)).toBe(true);
+    expect(isPathExcluded("src/main.ts", policyFromScheme.exclusions.patterns)).toBe(false);
+
+    expect(containsDisabledFormatterMarker("hello\n// @formatter:off\nworld")).toBe(true);
+    expect(containsDisabledFormatterMarker("hello\n// @formatter:off\n// @formatter:on\nworld")).toBe(false);
   });
 });

@@ -243,9 +243,67 @@ describe("saveNormalizationPipeline", () => {
     expect(result.formatted).toBe(false);
     expect(organizeImportsFn).not.toHaveBeenCalled();
     expect(result.stages[0]).toMatchObject({ stage: "format", status: "failed" });
-    expect(result.stages[1]).toMatchObject({ stage: "organize-imports", status: "failed" });
+    expect(result.stages[1]).toMatchObject({ stage: "organize-imports", status: "skipped-prior-failure" });
     expect(result.stages[2]).toMatchObject({ stage: "normalization", status: "executed" });
     // User text preserved with safe whitespace trimming, never dropped!
     expect(result.text).toBe("const draft = 42;\n");
+  });
+
+  it("respects EffectiveSavePolicyV4 exclusions and reports disabled status", async () => {
+    const style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      source: "scheme",
+      label: "Spaces: 2",
+    };
+
+    const formatFn = vi.fn(async (t: string) => `formatted:\n${t}`);
+
+    // Excluded path
+    const resultPathExcluded = await runSaveNormalizationPipeline({
+      text: "const a = 1;\n",
+      codeStyle: style,
+      filePath: "src/generated/code.ts",
+      savePolicy: {
+        format: { enabled: true, source: "scheme" },
+        organizeImports: { enabled: false, source: "default" },
+        exclusions: { patterns: ["**/generated/**"], formatterMarkers: true, source: "scheme" },
+        unsupported: ["rearrange", "cleanup", "directory", "module"],
+      },
+      formatFn,
+    });
+    expect(resultPathExcluded.formatted).toBe(false);
+    expect(formatFn).not.toHaveBeenCalled();
+    expect(resultPathExcluded.stages[0]).toMatchObject({
+      stage: "format",
+      status: "disabled",
+      reason: "path-excluded",
+    });
+    expect(resultPathExcluded.stages[1]).toMatchObject({
+      stage: "organize-imports",
+      status: "disabled",
+    });
+
+    // Formatter marker @formatter:off
+    const resultMarkerOff = await runSaveNormalizationPipeline({
+      text: "// @formatter:off\nconst b = 2;\n",
+      codeStyle: style,
+      filePath: "src/manual.ts",
+      savePolicy: {
+        format: { enabled: true, source: "scheme" },
+        organizeImports: { enabled: false, source: "default" },
+        exclusions: { patterns: [], formatterMarkers: true, source: "scheme" },
+        unsupported: ["rearrange", "cleanup", "directory", "module"],
+      },
+      formatFn,
+    });
+    expect(resultMarkerOff.formatted).toBe(false);
+    expect(resultMarkerOff.stages[0]).toMatchObject({
+      stage: "format",
+      status: "disabled",
+      reason: "formatter-marker-off",
+    });
   });
 });

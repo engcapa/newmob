@@ -248,7 +248,9 @@ import {
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
 import { CodeStyleSettingsDialog } from "./workspace/CodeStyleSettingsDialog";
 import { WorkspaceTabPolicySettingsDialog } from "./workspace/WorkspaceTabPolicySettingsDialog";
+import { resolveEffectiveSavePolicy } from "./workspace/workspaceCodeStyleScheme";
 import {
+  BUILT_IN_SCHEME_ID,
   activeSchemeForLanguage,
   readCodeStyleSchemeStore,
   schemeStyleFields,
@@ -4860,6 +4862,17 @@ export function CodeWorkspaceTab({
         text: file.text,
       };
 
+      const schemeLanguageKey = file.languagePath.split(".").pop()?.toLowerCase() ?? "";
+      const activeScheme = activeSchemeForLanguage(
+        codeStyleSchemesRef.current,
+        schemeLanguageKey || null,
+      );
+      const effectiveSavePolicy = resolveEffectiveSavePolicy(
+        activeScheme,
+        intelligencePreferences.formatOnSave,
+        absPath,
+      );
+
       // The controller prepares (style/normalization/policy freeze into one
       // PreparedSave); the commit core is the single byte writer + writeback
       // owner shared with every other save path (§8.17.1).
@@ -4867,7 +4880,8 @@ export function CodeWorkspaceTab({
         tx,
         (prepared) => commitOpenBufferPreparedSave(prepared),
         {
-          formatOnSave: intelligencePreferences.formatOnSave,
+          savePolicy: effectiveSavePolicy,
+          formatOnSave: effectiveSavePolicy.format.enabled,
           formatFn: async (currentText) => {
             try {
               return await formatFileText({ ...file, text: currentText });
@@ -4876,6 +4890,8 @@ export function CodeWorkspaceTab({
               return null;
             }
           },
+          organizeImportsOnSave: effectiveSavePolicy.organizeImports.enabled,
+          organizeImportsFn: async () => null,
           getLatestBufferVersion: () => openFilesRef.current[key]?.documentRevision ?? file.documentRevision ?? 0,
         },
       );
@@ -5593,12 +5609,31 @@ export function CodeWorkspaceTab({
     }));
   }, [setIntelligencePreferences]);
   const setFormatOnSave = useCallback((enabled: boolean) => {
+    setCodeStyleSchemes((current) => {
+      const active = activeSchemeForLanguage(current, activeLanguageId || null);
+      if (!active || active.id === BUILT_IN_SCHEME_ID) {
+        return current;
+      }
+      const updatedSchemes = current.schemes.map((scheme) => {
+        if (scheme.id === active.id) {
+          return {
+            ...scheme,
+            saveActions: {
+              ...scheme.saveActions,
+              format: enabled,
+            },
+          };
+        }
+        return scheme;
+      });
+      return { ...current, schemes: updatedSchemes };
+    });
     setIntelligencePreferences((current) => ({
       ...current,
       formatOnSave: enabled,
     }));
     setStatusMessage(`Format on save ${enabled ? "enabled" : "disabled"} for this workspace`);
-  }, [setIntelligencePreferences, setStatusMessage]);
+  }, [activeLanguageId, setCodeStyleSchemes, setIntelligencePreferences, setStatusMessage]);
 
   // Probe / re-open when the active buffer *identity* changes — not on every
   // text commit. Typing drives didChange through scheduleLiveLspSync only.

@@ -354,4 +354,45 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
     expect(prepared.bufferRevision).toBe(3);
     expect(prepared.styleGeneration).toBe(7);
   });
+
+  it("§8.21.3 V2-D: accepts EffectiveSavePolicyV4 and executes formatting before committing", async () => {
+    const fileProvider = { readFile: vi.fn(async () => null) };
+    const ctrl = new WorkspaceStyleController({
+      workspaceId: "ws-1",
+      roots: [{ path: "/project" }],
+      fileProvider,
+    });
+
+    const commit = vi.fn(savedCurrentCommitter());
+    const formatFn = vi.fn(async (text: string) => `formatted: ${text}`);
+
+    const tx: SaveTransactionV2 = {
+      id: "tx-save-policy",
+      workspaceId: "ws-1",
+      fileKey: "k1",
+      filePath: "/project/src/main.ts",
+      bufferVersion: 1,
+      styleGeneration: 0,
+      expectedDiskHash: null,
+      policy: { eol: "lf", encoding: "UTF-8", bom: false },
+      text: "const a = 1;\n",
+    };
+
+    const outcome = await ctrl.executeSaveTransaction(tx, commit, {
+      savePolicy: {
+        format: { enabled: true, source: "scheme" },
+        organizeImports: { enabled: false, source: "default" },
+        exclusions: { patterns: ["**/dist/**"], formatterMarkers: true, source: "scheme" },
+        unsupported: ["rearrange", "cleanup", "directory", "module"],
+      },
+      formatFn,
+      getLatestBufferVersion: () => 1,
+    });
+
+    expect(outcome.kind).toBe("saved-current");
+    expect(formatFn).toHaveBeenCalledWith("const a = 1;\n");
+    expect(commit).toHaveBeenCalled();
+    const prepared = commit.mock.calls[0][0];
+    expect(prepared.text).toBe("formatted: const a = 1;\n");
+  });
 });
