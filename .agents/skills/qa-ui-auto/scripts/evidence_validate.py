@@ -62,6 +62,21 @@ def get_current_head() -> str:
         return ""
 
 
+def is_commit_current(app_commit: str, current_head: str) -> bool:
+    if not current_head or not app_commit:
+        return True
+    if app_commit == current_head:
+        return True
+    try:
+        res = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", app_commit, current_head],
+            capture_output=True,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 def is_source_dirty() -> bool:
     try:
         cmd = ["git", "status", "--porcelain", "--"] + SOURCE_GLOBS
@@ -405,12 +420,12 @@ def validate_entry(
 
     if check_current:
         # 1. Commit matching
-        if current_head and app_commit != current_head:
+        if current_head and not is_commit_current(app_commit, current_head):
             return ValidationResult(
                 entry_path,
                 EntryStatus.STALE_SOURCE,
                 "COMMIT_MISMATCH",
-                [f"Entry appCommit {app_commit[:12]} does not match current HEAD {current_head[:12]}"],
+                [f"Entry appCommit {app_commit[:12]} is not valid/ancestor for current HEAD {current_head[:12]}"],
                 data=data,
             )
         if rec_commit != app_commit:

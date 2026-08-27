@@ -2,13 +2,13 @@ schemaVersion: 4
 capabilityId: W5-project-structure
 languageId: java
 subject:
-  appCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
-  recordedAtCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
+  appCommit: 27363b755d5754058e971e574b9af8d385ae9ae2
+  recordedAtCommit: 27363b755d5754058e971e574b9af8d385ae9ae2
   sourceTreeHash: b75b8b7448c39c0020756067a26723369565fe33c973fd3c6e1be4d4bd6ceebf
   sourceDirty: false
   bundleHash: d4128b4f64c8d68a1e22496c2dc98e252806a89fcba2cde30056b6069d3deab8
-  testPlanHash: f9e1b52d3c0df5c55a3549dbc4da79aa8bcd1c0dbde0c28863e64036131f9113
-recordedAtCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
+  testPlanHash: 95e02da1c142b07be949bf9e5b37863d6cf1db58bb19700c45949b2600950b55
+recordedAtCommit: 27363b755d5754058e971e574b9af8d385ae9ae2
 owner:
   featureId: F25.8
   paths:
@@ -31,7 +31,7 @@ command: python -m qa_ui_auto.runner --filter TC-IDE-C7-01
 artifacts:
 - kind: summary
   path: qa-ui-auto-tests/native/evidence/artifacts/w5-project-structure-summary.json
-  sha256: e2c1ce1b147dd0030daea3760982e420f5c597fe634640ccabed6963b729006f
+  sha256: fca6fca0aaa53e1f02b5d842eb6f022e4ed25e9a33612e16f43e10dd13fc429d
   redacted: true
 claimKeys:
 - W5-project-structure
