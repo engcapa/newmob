@@ -20,8 +20,11 @@ import {
   completionKindToType,
   createFixtureCompletionSource,
   createLspCompletionSource,
+  compareCompletionCandidates,
+  matchCompletionQuery,
   lspSnippetToCmSnippet,
   LspCompletionController,
+  WorkspaceCompletionPolicyController,
   matchesCaseRule,
   matchesSymbolPattern,
   symbolIdentityFromItem,
@@ -1251,5 +1254,45 @@ describe("§8.21.3 V2-E BasicCompletionPolicyV2", () => {
     expect(view.state.doc.toString()).toBe("Amb");
 
     view.destroy();
+  });
+
+  describe("§8.22.7 U2-E Live Completion Policy", () => {
+    it("classifies candidate match tiers: exact > prefix > camelCase > fuzzy", () => {
+      expect(matchCompletionQuery("testValue", "testValue").tier).toBe(1);
+      expect(matchCompletionQuery("testValue", "TESTVALUE").tier).toBe(1);
+      expect(matchCompletionQuery("testValue", "test").tier).toBe(2);
+      expect(matchCompletionQuery("fileName", "fN").tier).toBe(3);
+      expect(matchCompletionQuery("get_user_by_id", "gubi").tier).toBe(3);
+      expect(matchCompletionQuery("findElementById", "feid").tier).toBe(4);
+      expect(matchCompletionQuery("other", "xyz").tier).toBe(5);
+    });
+
+    it("sorts candidates according to IDEA heuristic ranking", () => {
+      const optExact = { label: "item" };
+      const optPrefix = { label: "itemValue" };
+      const optCamel = { label: "insertTrailingEmptyMask" }; // camelCase initials "item"
+      const optFuzzy = { label: "intermittent" }; // subsequence "i-t-e-m"
+      const optOther = { label: "zebra" };
+
+      const list = [optOther, optFuzzy, optCamel, optPrefix, optExact];
+      list.sort((a, b) => compareCompletionCandidates(a, b, "item", "provider-relevance"));
+
+      expect(list[0].label).toBe("item");
+      expect(list[1].label).toBe("itemValue");
+      expect(list[2].label).toBe("insertTrailingEmptyMask");
+      expect(list[3].label).toBe("intermittent");
+      expect(list[4].label).toBe("zebra");
+    });
+
+    it("WorkspaceCompletionPolicyController exposes unified configuration", () => {
+      const controller = new WorkspaceCompletionPolicyController({
+        minPrefixLength: 2,
+        sortMode: "alphabetical",
+      });
+
+      expect(controller.shouldAutoTrigger(1, false)).toBe(false);
+      expect(controller.shouldAutoTrigger(2, false)).toBe(true);
+      expect(controller.getSortMode()).toBe("alphabetical");
+    });
   });
 });

@@ -624,6 +624,71 @@ export class LspCompletionController {
 }
 
 /**
+ * §8.22.7 U2-E: Canonical Workspace Completion Policy Controller.
+ */
+export const WorkspaceCompletionPolicyController = LspCompletionController;
+
+export type CompletionMatchTier =
+  | 1 // Exact match
+  | 2 // Prefix match
+  | 3 // Word boundary / camelCase match
+  | 4 // Subsequence / fuzzy match
+  | 5; // No match
+
+export function matchCompletionQuery(label: string, query: string): { tier: CompletionMatchTier; score: number } {
+  if (!query) return { tier: 2, score: 0 };
+  const lowerLabel = label.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+
+  // Tier 1: Exact match
+  if (label === query) return { tier: 1, score: 1000 };
+  if (lowerLabel === lowerQuery) return { tier: 1, score: 900 };
+
+  // Tier 2: Prefix match
+  if (label.startsWith(query)) return { tier: 2, score: 800 - label.length };
+  if (lowerLabel.startsWith(lowerQuery)) return { tier: 2, score: 700 - label.length };
+
+  // Tier 3: CamelCase / word boundary match
+  const words = label.split(/(?=[A-Z])|[\_\-\.]/g).filter(Boolean);
+  const wordPrefixes = words.map((w) => w[0]?.toLowerCase()).join("");
+  if (wordPrefixes.startsWith(lowerQuery) || words.some((w) => w.toLowerCase().startsWith(lowerQuery))) {
+    return { tier: 3, score: 500 - label.length };
+  }
+
+  // Tier 4: Subsequence fuzzy match
+  let queryIdx = 0;
+  for (let i = 0; i < lowerLabel.length && queryIdx < lowerQuery.length; i++) {
+    if (lowerLabel[i] === lowerQuery[queryIdx]) {
+      queryIdx++;
+    }
+  }
+  if (queryIdx === lowerQuery.length) {
+    return { tier: 4, score: 300 - label.length };
+  }
+
+  return { tier: 5, score: 0 };
+}
+
+export function compareCompletionCandidates(
+  a: Completion,
+  b: Completion,
+  query: string,
+  sortMode: CompletionSortMode = "provider-relevance",
+): number {
+  if (sortMode === "alphabetical") {
+    return a.label.localeCompare(b.label);
+  }
+
+  const matchA = matchCompletionQuery(a.label, query);
+  const matchB = matchCompletionQuery(b.label, query);
+
+  if (matchA.tier !== matchB.tier) {
+    return matchA.tier - matchB.tier;
+  }
+  return 0;
+}
+
+/**
  * §8.21.3 V2-E: Symbol identity extraction for exclusion and prioritization.
  * Uses provider item's FQN/detail/data; never relies solely on unqualified label.
  */
@@ -1684,9 +1749,12 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     }
     if (context.aborted) return null;
 
-    // §8.21.3 V2-E: Client-side explicit alphabetical sorting vs provider relevance
+    // §8.22.7 U2-E: IDEA heuristic ranking vs alphabetical vs provider relevance
+    const query = word ? context.state.doc.sliceString(word.from, context.pos) : "";
     if (policy.sortMode === "alphabetical") {
       mapped.sort((a, b) => a.label.localeCompare(b.label));
+    } else {
+      mapped.sort((a, b) => compareCompletionCandidates(a, b, query, policy.sortMode));
     }
 
     // Prefer textEdit start when every item shares the same replace range so
