@@ -7,13 +7,13 @@
 
 | Attribute | Value |
 |---|---|
-| Current Git Commit | `12520ebc7e26660ac385bcd1715023f298c79bcd` |
+| Current Git Commit | `70cb05aed7c576d5a5c59dc7f88cda83c8bbb444` |
 | Tested Source Fingerprint | `b75b8b7448c39c00` |
 | Test Plan Fingerprint | `f9e1b52d3c0df5c5` |
 | Active Entries (valid-current) | 9 |
 | Historical / Stale Entries | 0 |
 | Rollup Generator | `evidence_rollup.py v4` |
-| Evidence Digest | `3f50a5f4d7cd919a` |
+| Evidence Digest | `619839398078fe00` |
 
 ---
 

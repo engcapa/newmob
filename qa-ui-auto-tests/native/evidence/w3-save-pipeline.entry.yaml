@@ -2,13 +2,13 @@ schemaVersion: 4
 capabilityId: W3-save-pipeline
 languageId: java
 subject:
-  appCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
-  recordedAtCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+  appCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
+  recordedAtCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
   sourceTreeHash: b75b8b7448c39c0020756067a26723369565fe33c973fd3c6e1be4d4bd6ceebf
   sourceDirty: false
   bundleHash: d4128b4f64c8d68a1e22496c2dc98e252806a89fcba2cde30056b6069d3deab8
   testPlanHash: f9e1b52d3c0df5c55a3549dbc4da79aa8bcd1c0dbde0c28863e64036131f9113
-recordedAtCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+recordedAtCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
 owner:
   featureId: F25.6
   paths:
@@ -31,7 +31,7 @@ command: python -m qa_ui_auto.runner --filter TC-IDE-C0-01
 artifacts:
 - kind: summary
   path: qa-ui-auto-tests/native/evidence/artifacts/w3-save-pipeline-summary.json
-  sha256: 3e2ac74c61990415797824080148ab5cd274bf1dfaef841affc75070db9cf065
+  sha256: d5e5a9ce24ed273a4894561f3bca375825c5149ec34dde81eca45f7a720a96e2
   redacted: true
 claimKeys:
 - W3-save-pipeline

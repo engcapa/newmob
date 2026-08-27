@@ -2,13 +2,13 @@ schemaVersion: 4
 capabilityId: W1-caret-movement
 languageId: null
 subject:
-  appCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
-  recordedAtCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+  appCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
+  recordedAtCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
   sourceTreeHash: b75b8b7448c39c0020756067a26723369565fe33c973fd3c6e1be4d4bd6ceebf
   sourceDirty: false
   bundleHash: d4128b4f64c8d68a1e22496c2dc98e252806a89fcba2cde30056b6069d3deab8
   testPlanHash: f9e1b52d3c0df5c55a3549dbc4da79aa8bcd1c0dbde0c28863e64036131f9113
-recordedAtCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+recordedAtCommit: 70cb05aed7c576d5a5c59dc7f88cda83c8bbb444
 owner:
   featureId: F25.1
   paths:
@@ -31,7 +31,7 @@ command: python -m qa_ui_auto.runner --filter TC-IDE-C2-01
 artifacts:
 - kind: summary
   path: qa-ui-auto-tests/native/evidence/artifacts/w1-caret-movement-summary.json
-  sha256: 6e7a4afacfdbe0ffde31b9425b7a6f2a042b2fe3f0d7d3605497d521e785857f
+  sha256: ce2a06d3510b1a09cdd8a1f8188c11095dcb20fdc9dd0fd4bda276a2127f2cd8
   redacted: true
 claimKeys:
 - W1-caret-movement
