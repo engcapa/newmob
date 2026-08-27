@@ -201,6 +201,7 @@ import {
   type WorkspaceDiskEffectLedgerEntryV4,
 } from "./workspace/workspaceRecovery";
 import {
+  applyWorkspaceTabPolicyTransaction,
   computeWorkspaceTabPolicyApplication,
   enforceTabPolicy,
   pushClosedTab,
@@ -14805,57 +14806,49 @@ export function CodeWorkspaceTab({
           }))}
           onApply={(nextPolicyRaw) => {
             const currentUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
-            const execution = computeWorkspaceTabPolicyApplication({
-              rawPolicy: nextPolicyRaw,
-              editorGroups: currentUi.editorGroups,
+            void applyWorkspaceTabPolicyTransaction({
+              workspaceInstanceId,
+              nextPolicyRaw,
+              currentGroups: currentUi.editorGroups,
               openFiles: openFilesRef.current,
               mruFileKeys: mruFileKeysRef.current,
+              commitAtomicUpdate: ({ nextGroups, policy }) => {
+                useCodeWorkspaceStore.getState().updateEditorGroups(workspaceInstanceId, () => nextGroups as typeof currentUi.editorGroups);
+                setTabPolicy(policy);
+                tabPolicyRef.current = policy;
+                setTabPolicyRevision((r) => r + 1);
+
+                const persistableGroups = Object.fromEntries(
+                  (Object.entries(nextGroups) as Array<[EditorGroupId, typeof currentUi.editorGroups.primary]>)
+                    .map(([groupId, group]) => [groupId, {
+                      ...group,
+                      openOrder: group.openOrder.filter((key) => !libraryBuffersRef.current[key]),
+                      pinnedKeys: group.pinnedKeys.filter((key) => !libraryBuffersRef.current[key]),
+                      activeKey: group.activeKey && libraryBuffersRef.current[group.activeKey] ? null : group.activeKey,
+                      previewKey: group.previewKey && libraryBuffersRef.current[group.previewKey] ? null : group.previewKey,
+                    }]),
+                ) as typeof currentUi.editorGroups;
+
+                writeWorkspaceLayoutSnapshot(workspaceInstanceId, snapshotFromWorkspaceUi({
+                  bottomDockOpen,
+                  bottomDockTab,
+                  rightPaneOpen,
+                  rightPaneTab,
+                  languagePanelOpen,
+                  splitOrientation,
+                  activeEditorGroupId,
+                  expandedRootIds,
+                  expandedDirKeys,
+                  editorGroups: persistableGroups,
+                  layoutTreeV2: currentUi.layoutTreeV2,
+                  tabPolicy: policy,
+                }), {
+                  onIssue: (message) => setStatusMessage(message),
+                });
+              },
+            }).then((result) => {
+              setStatusMessage(result.message);
             });
-
-            for (const [groupId, evictedKeys] of Object.entries(execution.evictionsByGroup)) {
-              for (const evictedKey of evictedKeys) {
-                void closeFileRef.current?.(evictedKey, groupId, { discard: true });
-              }
-            }
-
-            setTabPolicy(execution.policy);
-            tabPolicyRef.current = execution.policy;
-            setTabPolicyRevision((r) => r + 1);
-
-            // Immediate snapshot write without waiting for deferred layout debounce (§8.21.3 V2-B)
-            const persistableGroups = Object.fromEntries(
-              (Object.entries(currentUi.editorGroups) as Array<[EditorGroupId, typeof currentUi.editorGroups.primary]>)
-                .map(([groupId, group]) => [groupId, {
-                  ...group,
-                  openOrder: group.openOrder.filter((key) => !libraryBuffersRef.current[key] && !execution.allEvictedKeys.includes(key)),
-                  pinnedKeys: group.pinnedKeys.filter((key) => !libraryBuffersRef.current[key]),
-                  activeKey: group.activeKey && (libraryBuffersRef.current[group.activeKey] || execution.allEvictedKeys.includes(group.activeKey))
-                    ? null
-                    : group.activeKey,
-                  previewKey: group.previewKey && (libraryBuffersRef.current[group.previewKey] || execution.allEvictedKeys.includes(group.previewKey))
-                    ? null
-                    : group.previewKey,
-                }]),
-            ) as typeof currentUi.editorGroups;
-
-            writeWorkspaceLayoutSnapshot(workspaceInstanceId, snapshotFromWorkspaceUi({
-              bottomDockOpen,
-              bottomDockTab,
-              rightPaneOpen,
-              rightPaneTab,
-              languagePanelOpen,
-              splitOrientation,
-              activeEditorGroupId,
-              expandedRootIds,
-              expandedDirKeys,
-              editorGroups: persistableGroups,
-              layoutTreeV2: currentUi.layoutTreeV2,
-              tabPolicy: execution.policy,
-            }), {
-              onIssue: (message) => setStatusMessage(message),
-            });
-
-            setStatusMessage(execution.message);
           }}
           onClose={() => setTabPolicySettingsOpen(false)}
         />

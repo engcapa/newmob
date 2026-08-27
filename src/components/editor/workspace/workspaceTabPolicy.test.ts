@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CLOSED_TAB_STACK_LIMIT,
   DEFAULT_WORKSPACE_TAB_POLICY,
+  applyWorkspaceTabPolicyTransaction,
   buildReopenTreeRoute,
   computeWorkspaceTabPolicyApplication,
   enforceTabPolicy,
@@ -244,5 +245,86 @@ describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () =
     expect(res.allEvictedKeys).toEqual([]);
     expect(res.protectedCount).toBe(2);
     expect(res.message).toContain("limit: 1, order: open-order");
+  });
+
+  describe("§8.22.4 U2-B applyWorkspaceTabPolicyTransaction", () => {
+    it("aborts entire multi-group transaction with zero mutations when user cancels dirty tab close", async () => {
+      let committed = false;
+      const initialGroups = {
+        primary: {
+          openOrder: ["dirty1", "dirty2"],
+          pinnedKeys: [],
+          previewKey: null,
+          activeKey: "dirty2",
+        },
+        secondary: {
+          openOrder: ["clean2", "clean3"],
+          pinnedKeys: [],
+          previewKey: null,
+          activeKey: "clean3",
+        },
+      };
+
+      const result = await applyWorkspaceTabPolicyTransaction({
+        workspaceInstanceId: "ws-tab-tx-abort",
+        nextPolicyRaw: { limitPerLeaf: 1, order: "open-order" },
+        currentGroups: initialGroups,
+        openFiles: {
+          dirty1: { dirty: true },
+          dirty2: { dirty: true },
+          clean2: { dirty: false },
+          clean3: { dirty: false },
+        },
+        mruFileKeys: ["dirty1", "dirty2", "clean2", "clean3"],
+        confirmDirtyClose: async () => false, // User clicks Cancel
+        commitAtomicUpdate: () => {
+          committed = true;
+        },
+      });
+
+      expect(result.status).toBe("aborted");
+      expect(result.reason).toBe("user-cancelled");
+      expect(committed).toBe(false);
+    });
+
+    it("commits atomically across all groups in a single update when confirmed", async () => {
+      let committedResult: any = null;
+      const initialGroups = {
+        primary: {
+          openOrder: ["clean1", "clean2"],
+          pinnedKeys: [],
+          previewKey: null,
+          activeKey: "clean2",
+        },
+        secondary: {
+          openOrder: ["clean3", "clean4"],
+          pinnedKeys: [],
+          previewKey: null,
+          activeKey: "clean4",
+        },
+      };
+
+      const result = await applyWorkspaceTabPolicyTransaction({
+        workspaceInstanceId: "ws-tab-tx-commit",
+        nextPolicyRaw: { limitPerLeaf: 1, order: "open-order" },
+        currentGroups: initialGroups,
+        openFiles: {
+          clean1: { dirty: false },
+          clean2: { dirty: false },
+          clean3: { dirty: false },
+          clean4: { dirty: false },
+        },
+        mruFileKeys: ["clean2", "clean1", "clean4", "clean3"],
+        commitAtomicUpdate: (update) => {
+          committedResult = update;
+        },
+      });
+
+      expect(result.status).toBe("applied");
+      expect(committedResult).not.toBeNull();
+      expect(committedResult.nextGroups.primary.openOrder).toHaveLength(1);
+      expect(committedResult.nextGroups.secondary.openOrder).toHaveLength(1);
+      expect(result.allEvictedKeys).toHaveLength(2);
+    });
   });
 });
