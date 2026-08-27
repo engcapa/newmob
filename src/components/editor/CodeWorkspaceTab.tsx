@@ -14808,9 +14808,27 @@ export function CodeWorkspaceTab({
             void applyWorkspaceTabPolicyTransaction({
               workspaceInstanceId,
               nextPolicyRaw,
+              currentPolicy: tabPolicyRef.current,
               currentGroups: currentUi.editorGroups,
               openFiles: openFilesRef.current,
               mruFileKeys: mruFileKeysRef.current,
+              confirmDirtyClose: async (dirtyKeys) => {
+                const names = dirtyKeys.map((k) => openFilesRef.current[k]?.title ?? k).join(", ");
+                return window.confirm(`The following files have unsaved changes:\n${names}\n\nApply tab limit policy and discard changes?`);
+              },
+              onEvictClosedFile: (evictedKey) => {
+                // If not open in any other group, clean from openFiles
+                const stillOpen = Object.values(currentUi.editorGroups).some(
+                  (g) => g.openOrder.includes(evictedKey),
+                );
+                if (!stillOpen) {
+                  setOpenFiles((prev) => {
+                    const next = { ...prev };
+                    delete next[evictedKey];
+                    return next;
+                  });
+                }
+              },
               commitAtomicUpdate: ({ nextGroups, policy }) => {
                 useCodeWorkspaceStore.getState().patchInstance(workspaceInstanceId, { editorGroups: nextGroups as typeof currentUi.editorGroups });
                 setTabPolicy(policy);

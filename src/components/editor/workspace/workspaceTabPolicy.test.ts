@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CLOSED_TAB_STACK_LIMIT,
   DEFAULT_WORKSPACE_TAB_POLICY,
+  DEFAULT_WORKSPACE_TAB_POLICY_V3,
   applyWorkspaceTabPolicyTransaction,
   buildReopenTreeRoute,
   computeWorkspaceTabPolicyApplication,
@@ -325,6 +326,74 @@ describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () =
       expect(committedResult.nextGroups.primary.openOrder).toHaveLength(1);
       expect(committedResult.nextGroups.secondary.openOrder).toHaveLength(1);
       expect(result.allEvictedKeys).toHaveLength(2);
+    });
+
+    it("§8.23.3 X2 applies and commits policy update even with 0 evictions", async () => {
+      let committedResult: any = null;
+      const initialGroups = {
+        primary: {
+          openOrder: ["clean1"],
+          pinnedKeys: [],
+          previewKey: null,
+          activeKey: "clean1",
+        },
+      };
+
+      const result = await applyWorkspaceTabPolicyTransaction({
+        workspaceInstanceId: "ws-tab-tx-zero-evict",
+        nextPolicyRaw: { limitPerLeaf: 10, order: "alphabetical" },
+        currentPolicy: { ...DEFAULT_WORKSPACE_TAB_POLICY_V3, order: "open-order" },
+        currentGroups: initialGroups,
+        openFiles: { clean1: { dirty: false } },
+        mruFileKeys: ["clean1"],
+        commitAtomicUpdate: (update) => {
+          committedResult = update;
+        },
+      });
+
+      expect(result.status).toBe("applied");
+      expect(committedResult).not.toBeNull();
+      expect(committedResult.policy.order).toBe("alphabetical");
+      expect(committedResult.evictedKeys).toHaveLength(0);
+    });
+
+    it("§8.23.3 X2 aborts with 'stale' status when layout revision changed concurrently", async () => {
+      let committed = false;
+      const result = await applyWorkspaceTabPolicyTransaction({
+        workspaceInstanceId: "ws-tab-tx-stale",
+        nextPolicyRaw: { limitPerLeaf: 5 },
+        baseLayoutRevision: 1,
+        currentLayoutRevision: 2, // Changed concurrently
+        currentGroups: { primary: { openOrder: ["f1"], pinnedKeys: [], previewKey: null, activeKey: "f1" } },
+        openFiles: { f1: { dirty: false } },
+        mruFileKeys: ["f1"],
+        commitAtomicUpdate: () => {
+          committed = true;
+        },
+      });
+
+      expect(result.status).toBe("stale");
+      expect(result.reason).toBe("layout-revision-changed");
+      expect(committed).toBe(false);
+    });
+
+    it("§8.23.3 X2 calls onEvictClosedFile for evicted keys to purge open buffers", async () => {
+      const closedFiles: string[] = [];
+      const result = await applyWorkspaceTabPolicyTransaction({
+        workspaceInstanceId: "ws-tab-tx-lifecycle",
+        nextPolicyRaw: { limitPerLeaf: 1 },
+        currentGroups: { primary: { openOrder: ["f1", "f2"], pinnedKeys: [], previewKey: null, activeKey: "f2" } },
+        openFiles: { f1: { dirty: false }, f2: { dirty: false } },
+        mruFileKeys: ["f2", "f1"],
+        onEvictClosedFile: (k) => {
+          closedFiles.push(k);
+        },
+        commitAtomicUpdate: () => {},
+      });
+
+      expect(result.status).toBe("applied");
+      expect(result.allEvictedKeys).toEqual(["f1"]);
+      expect(closedFiles).toEqual(["f1"]);
     });
   });
 });

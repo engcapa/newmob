@@ -476,8 +476,8 @@ export function computeWorkspaceTabPolicyApplication(
 }
 
 export interface WorkspaceTabPolicyTransactionResult {
-  status: "applied" | "aborted" | "no-op";
-  reason?: "user-cancelled" | "empty";
+  status: "applied" | "no-op" | "aborted" | "stale";
+  reason?: "user-cancelled" | "empty" | "layout-revision-changed";
   policy: WorkspaceTabPolicyV3;
   evictedKeysByGroup: Record<string, readonly string[]>;
   allEvictedKeys: readonly string[];
@@ -485,13 +485,17 @@ export interface WorkspaceTabPolicyTransactionResult {
 }
 
 /**
- * §8.22.4 U2-B: Top-level atomic tab policy transaction.
+ * §8.23.3 X2: Top-level atomic tab policy transaction.
  * Pre-computes evictions across all groups, confirms dirty closures asynchronously,
- * aborts without partial mutations if cancelled, and commits atomically on success.
+ * aborts without partial mutations if cancelled or layout is stale, commits policy
+ * on zero-eviction policy changes, and closes evicted files completely through lifecycle.
  */
 export async function applyWorkspaceTabPolicyTransaction(params: {
   workspaceInstanceId: string;
   nextPolicyRaw: unknown;
+  currentPolicy?: WorkspaceTabPolicyV3;
+  baseLayoutRevision?: number;
+  currentLayoutRevision?: number;
   currentGroups: Record<string, {
     openOrder: readonly string[];
     pinnedKeys: readonly string[];
@@ -502,6 +506,7 @@ export async function applyWorkspaceTabPolicyTransaction(params: {
   mruFileKeys: readonly string[];
   allowDirtyCandidates?: boolean;
   confirmDirtyClose?: (dirtyKeys: readonly string[]) => Promise<boolean>;
+  onEvictClosedFile?: (fileKey: string) => Promise<void> | void;
   commitAtomicUpdate: (result: {
     nextGroups: Record<string, {
       openOrder: readonly string[];
@@ -513,6 +518,23 @@ export async function applyWorkspaceTabPolicyTransaction(params: {
     policy: WorkspaceTabPolicyV3;
   }) => void;
 }): Promise<WorkspaceTabPolicyTransactionResult> {
+  // Stale check
+  if (
+    params.baseLayoutRevision != null &&
+    params.currentLayoutRevision != null &&
+    params.baseLayoutRevision !== params.currentLayoutRevision
+  ) {
+    const { policy } = migrateWorkspaceTabPolicy(params.nextPolicyRaw);
+    return {
+      status: "stale",
+      reason: "layout-revision-changed",
+      policy,
+      evictedKeysByGroup: {},
+      allEvictedKeys: [],
+      message: "Layout changed concurrently; tab policy application aborted",
+    };
+  }
+
   const execution = computeWorkspaceTabPolicyApplication({
     rawPolicy: params.nextPolicyRaw,
     editorGroups: params.currentGroups,
@@ -522,6 +544,25 @@ export async function applyWorkspaceTabPolicyTransaction(params: {
   });
 
   if (execution.allEvictedKeys.length === 0) {
+    const policyChanged =
+      !params.currentPolicy ||
+      JSON.stringify(params.currentPolicy) !== JSON.stringify(execution.policy);
+
+    if (policyChanged) {
+      params.commitAtomicUpdate({
+        nextGroups: params.currentGroups,
+        evictedKeys: [],
+        policy: execution.policy,
+      });
+      return {
+        status: "applied",
+        policy: execution.policy,
+        evictedKeysByGroup: {},
+        allEvictedKeys: [],
+        message: "Tab policy updated successfully with 0 evictions",
+      };
+    }
+
     return {
       status: "no-op",
       policy: execution.policy,
@@ -574,6 +615,13 @@ export async function applyWorkspaceTabPolicyTransaction(params: {
       activeKey: nextActive,
       previewKey: nextPreview,
     };
+  }
+
+  // Purge closed files via lifecycle if requested
+  if (params.onEvictClosedFile) {
+    for (const evictedKey of execution.allEvictedKeys) {
+      await params.onEvictClosedFile(evictedKey);
+    }
   }
 
   // Single atomic store commit
