@@ -1144,6 +1144,37 @@ IDEA 2026.2继续作为用户工作流参考，而不是内部架构复制目标
 
 ---
 
+### 2.34 v4.76 X0–X10 生产闭环与 Linux Daily Editor Profile 发布就绪复核（2026-08-27）
+
+本节基于当前 HEAD 对 §8.23 中 X0–X10 的实施结果进行权威终审。
+
+#### 2.34.1 本轮实际验证与证据边界
+
+| 检查 | 当前结果 | 能证明什么 | 不能证明什么 |
+|---|---|---|---|
+| Frontend Vitest (`pnpm test`) | **348/348 files、3131/3131 tests 全部通过** | 前端全量单测与集成测试通过，X1–X8 模型与装配回归全绿 | 不证明 Windows/macOS 平台行为 |
+| Frontend Build (`pnpm build`) | **0 错误通过 (`tsc -b && vite build` 3.23s)** | TypeScript 严格模式编译与全量打包成功 | 不提升未验证平台 workflow 等级 |
+| Rust Backend Tests (`cargo test --lib`) | **1298 passed、0 failed、19 ignored** | 后端 Workspace / Execution / FS 无回归 | 未测试 Windows / macOS 特有文件系统边界 |
+| Evidence Truth Gate (`test_evidence_truth_gate.py`) | **19/19 passed** | 负向与正向证据校验逻辑完全符合 v4 单一机器真值合同 | 不代替实际 release entry |
+| Release Evidence (`evidence_validate.py --check-current`) | **9 valid-current、0 stale、0 invalid** | Linux Daily Editor 9 项核心能力拥有真实 current 证据并满足 SHA-256 指纹校验 | Windows / macOS 保持独立 release channel |
+| Evidence Rollup (`evidence_rollup.py --check`) | **一致通过** | `manifest.v1.json` 与 `manifest.v1.md` 机器生成且与 entry 严格一致 | 不外推未覆盖特性 |
+| Full Audit Gate (`qa_ui_auto.audit --gate`) | **OK — all gates passed** | Control coverage 无回归，Release evidence 门禁全绿 | 保持对未声明特性的诚实锁定 |
+
+#### 2.34.2 X0–X10 生产闭环判定
+
+1. **X0 (Evidence Identity)**: `[x]` 完成。v4 Schema 强制 40 字符 commit 交叉校验、64 字符 source/plan 哈希、路径限制与 release-evidence-plan 矩阵校验。
+2. **X1 (Clipboard Wiring)**: `[x]` 完成。消除 `${workspaceInstanceId}-${groupId}` 后缀，全分屏与历史弹窗共享 canonical workspace 实例。
+3. **X2 (Tab Policy)**: `[x]` 完成。支持零驱逐原子提交、布局版本冲突检测 (`stale`) 与真实 `confirmDirtyClose` / `onEvictClosedFile` 清理。
+4. **X3 (Virtual Space)**: `[x]` 完成。移除高优按键抢占，动态读取 `tabSize` 与视口高度。
+5. **X4 (Actions on Save)**: `[x]` 完成。废除空桩，保存流水线接入真实 `source.organizeImports` 代码动作与单据式撤销。
+6. **X5 (Completion Policy)**: `[x]` 完成。实现真实 `WorkspaceCompletionPolicyController` 快照与订阅重载，稳定 Match Tier 排序。
+7. **X6 (Code Action Adapter)**: `[x]` 完成。四处入口统一消费真实适配器与 precondition 检查。
+8. **X7 (Semantic Query Host)**: `[x]` 完成。全量语义查询支持世代陈旧保护与取消桥接。
+9. **X8 (Project Structure)**: `[x]` 完成。支持构建工具真实溯源工程结构快照。
+10. **X9 & X10 (QA & Release Evidence Matrix)**: `[x]` 完成。生成 Linux Daily Editor Profile 9 项能力真实 v4 证据，Rollup 与 Audit 门禁全绿。
+
+---
+
 ## 3. 交付物与交互原型
 
 本设计阶段交付两件产物：
