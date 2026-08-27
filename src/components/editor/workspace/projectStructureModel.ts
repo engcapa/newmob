@@ -20,7 +20,7 @@ export interface ProjectStructureModuleV2 {
 }
 
 export interface ProjectStructureFact {
-  source: "jdtls-command" | "maven-model" | "gradle-model" | "user-config";
+  source: "jdtls-command" | "maven-model" | "gradle-model" | "user-config" | "descriptor-only";
   freshness: string;
 }
 
@@ -225,7 +225,7 @@ export function inferProjectStructureFromBuildFiles(
         buildSystem: "maven",
       });
       buildExcludes.push(`${parentDir}/target`);
-      facts[`descriptor.${desc.path}`] = { source: "maven-model", freshness: now };
+      facts[`descriptor.${desc.path}`] = { source: "descriptor-only", freshness: now };
     } else if (fileName === "build.gradle" || fileName === "build.gradle.kts") {
       const modName = parentDir.split("/").pop() || "gradle-module";
       modules.push({
@@ -239,7 +239,7 @@ export function inferProjectStructureFromBuildFiles(
         buildSystem: "gradle",
       });
       buildExcludes.push(`${parentDir}/build`, `${parentDir}/.gradle`);
-      facts[`descriptor.${desc.path}`] = { source: "gradle-model", freshness: now };
+      facts[`descriptor.${desc.path}`] = { source: "descriptor-only", freshness: now };
     }
   }
 
