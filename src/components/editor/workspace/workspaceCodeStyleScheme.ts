@@ -106,12 +106,18 @@ export function resolveEffectiveSavePolicy(
   let formatEnabled = false;
   let formatSource: "scheme" | "legacy-migrated" | "default" = "default";
 
-  if (scheme?.saveActions?.format !== undefined) {
+  if (scheme && scheme.id !== "default" && scheme.saveActions?.format !== undefined) {
     formatEnabled = scheme.saveActions.format;
+    formatSource = "scheme";
+  } else if (scheme?.saveActions?.format === true) {
+    formatEnabled = true;
     formatSource = "scheme";
   } else if (legacyPreferenceFormatOnSave !== undefined) {
     formatEnabled = legacyPreferenceFormatOnSave;
     formatSource = "legacy-migrated";
+  } else if (scheme?.saveActions?.format !== undefined) {
+    formatEnabled = scheme.saveActions.format;
+    formatSource = "scheme";
   } else {
     formatEnabled = false;
     formatSource = "default";
