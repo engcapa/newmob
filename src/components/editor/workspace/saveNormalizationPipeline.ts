@@ -235,6 +235,22 @@ export async function runSaveNormalizationPipeline(
     try {
       const organizedResult = await options.organizeImportsFn(currentText);
       if (organizedResult !== null && organizedResult !== undefined) {
+        if (getLatestBufferVersion && expectedVersion !== undefined) {
+          const latestVer = getLatestBufferVersion();
+          if (latestVer !== expectedVersion) {
+            return {
+              text: initialText,
+              formatted,
+              importsOrganized: false,
+              whitespaceTrimmed: false,
+              newlineAdjusted: false,
+              eolNormalized: false,
+              cancelledDueToEdit: true,
+              diagnostics: ["Organize imports cancelled because buffer was modified concurrently."],
+              stages: [...stages, { stage: "organize-imports", status: "failed", error: "concurrent edit" }],
+            };
+          }
+        }
         currentText = organizedResult;
         importsOrganized = true;
         stages.push({ stage: "organize-imports", status: "executed" });
@@ -379,3 +395,13 @@ export async function runSaveNormalizationPipeline(
     resolvedBom,
   };
 }
+
+/**
+ * §8.22.6 U2-D: Actions on Save Pipeline coordinator.
+ */
+export const WorkspaceSavePipeline = {
+  run: runSaveNormalizationPipeline,
+  trimTrailingWhitespace,
+  adjustFinalNewline,
+  normalizeLineEndings,
+};
