@@ -246,6 +246,11 @@ pub fn temporary_file_path(default_name: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn clipboard_read_text(state: State<'_, AppState>) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(text) = platform::clipboard_read_text_fallback()? {
+        return Ok(text);
+    }
+
     let mut guard = state
         .clipboard
         .lock()
@@ -425,17 +430,9 @@ pub fn clipboard_write_multi_format(payload: ClipboardMultiFormat) -> Result<(),
 
 #[tauri::command]
 pub fn clipboard_read_files(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let _ = state;
     let native = platform::clipboard_read_files().unwrap_or_default();
-    if !native.is_empty() {
-        return Ok(native);
-    }
-
-    let text = clipboard_read_text(state).unwrap_or_default();
-    let files = clipboard_paths_from_uri_text(&text)
-        .into_iter()
-        .filter(|path| PathBuf::from(path.as_str()).exists())
-        .collect();
-    Ok(files)
+    Ok(native)
 }
 
 #[tauri::command]
