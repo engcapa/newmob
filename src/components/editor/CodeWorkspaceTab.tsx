@@ -225,6 +225,7 @@ import {
   type BackForwardHistoryBridge,
   type WorkspaceLocationController,
 } from "./workspace/navigationHistoryModel";
+import { WorkspaceSemanticQueryHost } from "./workspace/workspaceSemanticQueryHost";
 import {
   createSingleLeafLayout,
   findLeafNode,
@@ -2017,6 +2018,8 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     setExternalFileConflicts([]);
   }, [workspaceInstanceId]);
+
+  const semanticQueryHostRef = useRef(new WorkspaceSemanticQueryHost());
 
   useEffect(() => {
     const entries = readWorkspaceRecoveryEntries(workspaceInstanceId);
@@ -11172,9 +11175,28 @@ export function CodeWorkspaceTab({
       // Record the origin code focus before jumping (IDEA Navigate Back).
       recordNavigationLocation(file.ref, position);
       try {
-        const result = await lspDefinition(descriptor, position);
-        updateLspStatusForFile(file, result.status);
-        return navigateLocations("Definitions", result.locations, "No definition found");
+        const queryRes = await semanticQueryHostRef.current.execute(
+          "definitions",
+          file.path,
+          position,
+          async () => {
+            const result = await lspDefinition(descriptor, position);
+            updateLspStatusForFile(file, result.status);
+            return result.locations;
+          },
+          {
+            generation: file.documentRevision,
+            getLiveGeneration: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+          },
+        );
+        if (queryRes.status === "stale" || queryRes.status === "cancelled") {
+          return false;
+        }
+        if (queryRes.status === "unavailable" || queryRes.status === "error") {
+          setStatusMessage(queryRes.error ?? "No definition found");
+          return false;
+        }
+        return navigateLocations("Definitions", queryRes.items, "No definition found");
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
@@ -11188,13 +11210,28 @@ export function CodeWorkspaceTab({
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return false;
       try {
-        const result = await lspDefinition(descriptor, position);
-        updateLspStatusForFile(file, result.status);
-        if (!result.locations.length) {
+        const queryRes = await semanticQueryHostRef.current.execute(
+          "definitions",
+          file.path,
+          position,
+          async () => {
+            const result = await lspDefinition(descriptor, position);
+            updateLspStatusForFile(file, result.status);
+            return result.locations;
+          },
+          {
+            generation: file.documentRevision,
+            getLiveGeneration: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+          },
+        );
+        if (queryRes.status === "stale" || queryRes.status === "cancelled") {
+          return false;
+        }
+        if (!queryRes.items.length) {
           setStatusMessage("No definition found");
           return false;
         }
-        setLocationPeek({ title: "Quick Definition", locations: result.locations });
+        setLocationPeek({ title: "Quick Definition", locations: queryRes.items });
         return true;
       } catch (err) {
         setStatusMessage(errorMessage(err));
@@ -11215,9 +11252,28 @@ export function CodeWorkspaceTab({
       }
       recordNavigationLocation(file.ref, position);
       try {
-        const result = await lspTypeDefinition(descriptor, position);
-        updateLspStatusForFile(file, result.status);
-        return navigateLocations("Type definitions", result.locations, "No type definition found");
+        const queryRes = await semanticQueryHostRef.current.execute(
+          "typeDefinitions",
+          file.path,
+          position,
+          async () => {
+            const result = await lspTypeDefinition(descriptor, position);
+            updateLspStatusForFile(file, result.status);
+            return result.locations;
+          },
+          {
+            generation: file.documentRevision,
+            getLiveGeneration: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+          },
+        );
+        if (queryRes.status === "stale" || queryRes.status === "cancelled") {
+          return false;
+        }
+        if (queryRes.status === "unavailable" || queryRes.status === "error") {
+          setStatusMessage(queryRes.error ?? "No type definition found");
+          return false;
+        }
+        return navigateLocations("Type definitions", queryRes.items, "No type definition found");
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
@@ -11237,9 +11293,28 @@ export function CodeWorkspaceTab({
       }
       recordNavigationLocation(file.ref, position);
       try {
-        const result = await lspImplementation(descriptor, position);
-        updateLspStatusForFile(file, result.status);
-        return navigateLocations("Implementations", result.locations, "No implementation found");
+        const queryRes = await semanticQueryHostRef.current.execute(
+          "implementations",
+          file.path,
+          position,
+          async () => {
+            const result = await lspImplementation(descriptor, position);
+            updateLspStatusForFile(file, result.status);
+            return result.locations;
+          },
+          {
+            generation: file.documentRevision,
+            getLiveGeneration: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+          },
+        );
+        if (queryRes.status === "stale" || queryRes.status === "cancelled") {
+          return false;
+        }
+        if (queryRes.status === "unavailable" || queryRes.status === "error") {
+          setStatusMessage(queryRes.error ?? "No implementation found");
+          return false;
+        }
+        return navigateLocations("Implementations", queryRes.items, "No implementation found");
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;

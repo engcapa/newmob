@@ -93,6 +93,23 @@ export class WorkspaceSemanticQueryHost {
 
       const rawItems = await fetcher(controller.signal);
 
+      // Post-await generation staleness check (§8.24.8 Y7)
+      if (
+        options?.generation != null &&
+        options.getLiveGeneration &&
+        options.generation !== options.getLiveGeneration()
+      ) {
+        return {
+          queryId,
+          kind,
+          status: "stale",
+          items: [],
+          truncated: false,
+          totalCount: 0,
+          durationMs: Date.now() - startTime,
+        };
+      }
+
       if (controller.signal.aborted) {
         return {
           queryId,

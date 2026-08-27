@@ -119,4 +119,27 @@ describe("§8.22.9 U4 WorkspaceSemanticQueryHost", () => {
     expect(result.status).toBe("stale");
     expect(result.items).toEqual([]);
   });
+
+  it("§8.24.8 Y7 returns 'stale' when generation changes during async await fetch", async () => {
+    const host = new WorkspaceSemanticQueryHost();
+    let currentGen = 10;
+
+    const result = await host.execute(
+      "implementations",
+      "file:///repo/App.java",
+      { line: 20, character: 4 },
+      async () => {
+        // Mutate live generation while query is in-flight
+        currentGen = 11;
+        return ["impl1", "impl2"];
+      },
+      {
+        generation: 10,
+        getLiveGeneration: () => currentGen,
+      },
+    );
+
+    expect(result.status).toBe("stale");
+    expect(result.items).toEqual([]);
+  });
 });
