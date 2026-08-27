@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { LspCodeAction, LspWorkspaceEdit } from "../../../lib/editor/lsp";
-import { executeCodeAction } from "./codeActionExecution";
+import { executeCodeAction, ActionExecutionTelemetry, CodeActionExecutionCoordinator } from "./codeActionExecution";
 
 const edit: LspWorkspaceEdit = { documentEdits: [], operations: [] };
 
@@ -83,9 +83,68 @@ describe("executeCodeAction", () => {
       executeCommand,
     });
 
-    expect(applyEdit).toHaveBeenCalledWith(customEdit);
+    expect(applyEdit).toHaveBeenCalledWith(customEdit, expect.anything());
     expect(executeCommand).not.toHaveBeenCalled();
     expect(result.status).toBe("applied-edit");
+  });
+
+  describe("§8.22.8 U3 Provider Code Action Production Integration", () => {
+    beforeEach(() => {
+      ActionExecutionTelemetry.clear();
+    });
+
+    it("resolves unpopulated action via resolveAction hook before execution", async () => {
+      const applyEdit = vi.fn(async () => [{ operationIndex: 0, path: "/repo/App.java", status: "applied-disk" as const }]);
+      const unresolvedAction = action({
+        title: "Add import 'java.util.Map'",
+        kind: "quickfix.import",
+        edit: null,
+        command: null,
+      });
+
+      const resolvedAction = action({
+        title: "Add import 'java.util.Map'",
+        kind: "quickfix.import",
+        edit: { documentEdits: [{ uri: "file:///repo/App.java", edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "import java.util.Map;\n" }] }], operations: [] },
+      });
+
+      const resolveAction = vi.fn(async () => resolvedAction);
+
+      const result = await CodeActionExecutionCoordinator.execute(unresolvedAction, {
+        applyEdit,
+        executeCommand: vi.fn(async () => {}),
+        resolveAction,
+      });
+
+      expect(resolveAction).toHaveBeenCalledWith(unresolvedAction);
+      expect(applyEdit).toHaveBeenCalled();
+      expect(result.status).toBe("applied-edit");
+      expect((result as any).undoToken).toBeDefined();
+
+      const telemetry = ActionExecutionTelemetry.recent();
+      expect(telemetry).toHaveLength(1);
+      expect(telemetry[0].title).toBe("Add import 'java.util.Map'");
+      expect(telemetry[0].status).toBe("applied-edit");
+    });
+
+    it("blocks Java quickfix when file language is not Java (language-mismatch)", async () => {
+      const applyEdit = vi.fn(async () => []);
+      const javaAction = action({
+        title: "Import 'java.util.List'",
+        kind: "quickfix.import.java",
+        edit: { documentEdits: [], operations: [] },
+      });
+
+      const result = await CodeActionExecutionCoordinator.execute(javaAction, {
+        languageId: "typescript",
+        applyEdit,
+        executeCommand: vi.fn(async () => {}),
+      });
+
+      expect(result.status).toBe("language-mismatch");
+      expect(applyEdit).not.toHaveBeenCalled();
+      expect((result as any).reason).toContain("cannot be executed in non-Java file");
+    });
   });
 });
 
