@@ -158,4 +158,20 @@ describe("HierarchyPanel", () => {
     fireEvent.click(rerunBtn);
     expect(onRerunStale).toHaveBeenCalledTimes(1);
   });
+
+  it("prohibits expanding stale nodes until rerun", () => {
+    const root = item("root", 1);
+    render(
+      <HierarchyPanel
+        mode="call"
+        root={{ descriptor, item: root, rootQueryId: "qid-1", providerGeneration: 1, projectFingerprint: "fp-1" }}
+        active
+        staleReason="Provider restarted"
+        onOpenLocation={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand root" }));
+    expect(lspMocks.lspCallHierarchyIncoming).not.toHaveBeenCalled();
+  });
 });

@@ -49,7 +49,7 @@ export function UsagesScopeDialog({ open, symbolHint, onConfirm, onCancel }: Usa
           ))}
         </div>
         <div className="mt-1 text-[10px] text-[var(--taomni-code-muted)]">
-          The language server answers one document-scope request; these toggles scope that response client-side.
+          References are requested from the language server with project scope (provider-requested); sub-scopes are client-post-filtered.
         </div>
         <div className="mt-2 flex justify-end gap-1">
           <button

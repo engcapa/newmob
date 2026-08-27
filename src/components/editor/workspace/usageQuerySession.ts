@@ -312,6 +312,24 @@ export class UsageQuerySession {
   }
 }
 
+export type UsagesScopeProvenance = "provider-requested" | "client-post-filtered" | "unsupported";
+
+/**
+ * §8.21.5 V4: Returns provenance attribution for each scope category.
+ */
+export function usagesScopeProvenance(scope: UsagesScope): UsagesScopeProvenance {
+  switch (scope) {
+    case "project":
+      return "provider-requested";
+    case "open-files":
+    case "tests":
+    case "libraries":
+      return "client-post-filtered";
+    case "custom":
+      return "unsupported";
+  }
+}
+
 /** Scope-dialog option model: what the picker may offer and why anything is
  * disabled. Plain LSP supports declaration toggling + client-side buckets;
  * provider-native scopes stay disabled with reasons until they exist. */
@@ -322,6 +340,7 @@ export function usagesScopeOptions(
   label: string;
   checked: boolean;
   disabled: boolean;
+  provenance: UsagesScopeProvenance;
   reason: string | null;
   toggle: (current: UsagesScopeSelection) => UsagesScopeSelection;
 }> {
@@ -332,6 +351,7 @@ export function usagesScopeOptions(
       label: "Include declaration",
       checked: selection.includeDeclaration,
       disabled: false,
+      provenance: "provider-requested",
       reason: null,
       toggle: (current) => ({ ...current, includeDeclaration: !current.includeDeclaration }),
     },
@@ -340,6 +360,7 @@ export function usagesScopeOptions(
       label: "Libraries / dependencies",
       checked: selection.includeLibraries,
       disabled: false,
+      provenance: "client-post-filtered",
       reason: null,
       toggle: (current) => ({ ...current, includeLibraries: !current.includeLibraries }),
     },
@@ -348,6 +369,7 @@ export function usagesScopeOptions(
       label: "Test sources (client-side path match)",
       checked: selection.includeTests,
       disabled: false,
+      provenance: "client-post-filtered",
       reason: null,
       toggle: (current) => ({ ...current, includeTests: !current.includeTests }),
     },

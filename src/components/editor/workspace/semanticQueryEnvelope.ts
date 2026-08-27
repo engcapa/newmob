@@ -1,9 +1,32 @@
-import type { LspLocation, LspRange } from "../../../lib/editor/lsp";
+import type { LspLocation, LspPosition, LspRange } from "../../../lib/editor/lsp";
 import {
   buildCapabilityEvidence,
   type BuildEvidenceInput,
   type CapabilityEvidenceV3,
 } from "./capabilityEvidence";
+
+/**
+ * §8.21.5 V4: Runner and production semantic provider trace contract.
+ */
+export interface SemanticProviderTraceV1<T = unknown> {
+  capabilityId: "definition" | "type-definition" | "implementation" | "references" | "call-hierarchy" | "type-hierarchy";
+  fixture: string;
+  request: { method: string; uriHash: string; position: LspPosition; requestId: string };
+  provider: { id: string; version: string; generation: number };
+  projectFingerprint: string;
+  result: {
+    state: "ready" | "empty" | "cancelled" | "failed" | "unsupported";
+    count: number;
+    owners: readonly string[];
+    truncated: boolean;
+  };
+  assertions: {
+    expectedTargets: readonly string[];
+    libraryReadOnly: boolean;
+    restartInvalidated: boolean;
+  };
+  payload?: T;
+}
 
 /**
  * §8.20.5 W4 typed semantic query envelope. Every navigation/usages/hierarchy

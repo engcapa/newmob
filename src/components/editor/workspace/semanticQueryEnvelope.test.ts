@@ -86,4 +86,33 @@ describe("applyRoleFilter §8.20.5 honesty rule", () => {
     expect(query.roleFilter).toEqual(["read", "write"]);
     expect(query.symbol.displayName).toBe("A");
   });
+
+  it("validates SemanticProviderTraceV1 structure matches §8.21.5", () => {
+    const trace = {
+      capabilityId: "definition" as const,
+      fixture: "maven-single",
+      request: {
+        method: "textDocument/definition",
+        uriHash: "hash123",
+        position: { line: 12, character: 8 },
+        requestId: "req-def-1",
+      },
+      provider: { id: "jdtls", version: "1.61.0", generation: 1 },
+      projectFingerprint: "fp-root",
+      result: {
+        state: "ready" as const,
+        count: 2,
+        owners: ["workspace", "library"],
+        truncated: false,
+      },
+      assertions: {
+        expectedTargets: ["file:///repo/A.java", "file:///repo/B.java"],
+        libraryReadOnly: true,
+        restartInvalidated: true,
+      },
+    };
+    expect(trace.capabilityId).toBe("definition");
+    expect(trace.result.state).toBe("ready");
+    expect(trace.assertions.libraryReadOnly).toBe(true);
+  });
 });

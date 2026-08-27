@@ -141,12 +141,13 @@ describe("UsageQuerySession §8.20.5 shared immutable session", () => {
 });
 
 describe("usagesScopeOptions §8.20.5 dialog model", () => {
-  it("offers declaration/libraries/tests toggles with no fake provider scopes", () => {
+  it("offers declaration/libraries/tests toggles with no fake provider scopes and accurate provenance", () => {
     const options = usagesScopeOptions(DEFAULT_SCOPE_SELECTION);
     expect(options.map((option) => option.id)).toEqual(["declaration", "libraries", "tests"]);
     for (const option of options) {
       expect(option.disabled).toBe(false);
       expect(option.reason).toBeNull();
+      expect(option.provenance).toBeDefined();
     }
     const toggled = options[0]!.toggle(DEFAULT_SCOPE_SELECTION);
     expect(toggled.includeDeclaration).toBe(false);
