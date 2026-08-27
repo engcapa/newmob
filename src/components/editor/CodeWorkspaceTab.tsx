@@ -4906,7 +4906,7 @@ export function CodeWorkspaceTab({
               );
               if (actions.length > 0) {
                 const res = await runCodeAction(actions[0], file, semanticToken);
-                if (res && res.status === "applied-edit") {
+                if (res && res.ok) {
                   return openFilesRef.current[key]?.text ?? null;
                 }
               }
