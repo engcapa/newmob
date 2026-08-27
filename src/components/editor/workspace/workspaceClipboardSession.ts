@@ -270,9 +270,20 @@ export class WorkspaceClipboardStore {
 
 const storesByWorkspace = new Map<string, WorkspaceClipboardStore>();
 const refcountsByWorkspace = new Map<string, number>();
+const storeRevisionsByWorkspace = new Map<string, number>();
+
+export interface WorkspaceClipboardSnapshot {
+  revision: number;
+  history: readonly EditorClipboardSession[];
+  exclusion: ClipboardHistoryExclusion;
+  isHistoryEnabled: boolean;
+  limits: { maxItems: number; maxTotalBytes: number };
+}
 
 export interface WorkspaceClipboardHandle {
   readonly workspaceId: string;
+  attachConsumer(consumerId?: string): () => void;
+  getSnapshot(): WorkspaceClipboardSnapshot;
   write(input: Parameters<WorkspaceClipboardStore["write"]>[0]): EditorClipboardSession;
   read(): EditorClipboardSession | null;
   clear(reason?: ClipboardClearReason): void;
@@ -298,19 +309,44 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
   if (!store) {
     store = new WorkspaceClipboardStore();
     storesByWorkspace.set(workspaceInstanceId, store);
+    storeRevisionsByWorkspace.set(workspaceInstanceId, 0);
   }
   refcountsByWorkspace.set(workspaceInstanceId, (refcountsByWorkspace.get(workspaceInstanceId) ?? 0) + 1);
+
+  const bump = () => {
+    const next = (storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0) + 1;
+    storeRevisionsByWorkspace.set(workspaceInstanceId, next);
+  };
 
   const live = (): WorkspaceClipboardStore => {
     const current = storesByWorkspace.get(workspaceInstanceId) ?? store!;
     return current;
   };
 
-  return {
+  const handle: WorkspaceClipboardHandle = {
     workspaceId: workspaceInstanceId,
-    write: (input) => live().write(input),
+    attachConsumer(_consumerId?: string) {
+      refcountsByWorkspace.set(workspaceInstanceId, (refcountsByWorkspace.get(workspaceInstanceId) ?? 0) + 1);
+      return () => handle.release();
+    },
+    getSnapshot() {
+      return {
+        revision: storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0,
+        history: live().historyEntries(),
+        exclusion: live().historyExclusion(),
+        isHistoryEnabled: live().isHistoryEnabled(),
+        limits: live().historyLimits(),
+      };
+    },
+    write: (input) => {
+      bump();
+      return live().write(input);
+    },
     read: () => live().read(),
-    clear: (reason) => live().clear(reason),
+    clear: (reason) => {
+      bump();
+      live().clear(reason);
+    },
     release() {
       const next = (refcountsByWorkspace.get(workspaceInstanceId) ?? 1) - 1;
       if (next > 0) {
@@ -325,19 +361,37 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
         if ((refcountsByWorkspace.get(workspaceInstanceId) ?? 0) !== 0) return;
         refcountsByWorkspace.delete(workspaceInstanceId);
         storesByWorkspace.delete(workspaceInstanceId);
+        storeRevisionsByWorkspace.delete(workspaceInstanceId);
         store!.clear("workspace-close");
       });
     },
     historyEntries: () => live().historyEntries(),
-    pasteFromHistory(index) { return live().pasteFromHistory(index); },
-    removeHistoryEntry: (index) => live().removeHistoryEntry(index),
-    clearHistory: () => live().clearHistory(),
-    setHistoryEnabled: (enabled) => live().setHistoryEnabled(enabled),
+    pasteFromHistory(index) {
+      bump();
+      return live().pasteFromHistory(index);
+    },
+    removeHistoryEntry: (index) => {
+      bump();
+      return live().removeHistoryEntry(index);
+    },
+    clearHistory: () => {
+      bump();
+      live().clearHistory();
+    },
+    setHistoryEnabled: (enabled) => {
+      bump();
+      live().setHistoryEnabled(enabled);
+    },
     isHistoryEnabled: () => live().isHistoryEnabled(),
-    setHistoryLimits: (maxItems, maxTotalBytes) => live().setHistoryLimits(maxItems, maxTotalBytes),
+    setHistoryLimits: (maxItems, maxTotalBytes) => {
+      bump();
+      live().setHistoryLimits(maxItems, maxTotalBytes);
+    },
     historyLimits: () => live().historyLimits(),
     historyExclusion: () => live().historyExclusion(),
   };
+
+  return handle;
 }
 
 /**

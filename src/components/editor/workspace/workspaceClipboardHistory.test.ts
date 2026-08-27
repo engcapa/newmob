@@ -223,4 +223,26 @@ describe("§8.19.5 clipboard history ring", () => {
     wsAFresh.release();
     wsB.release();
   });
+
+  it("§8.24.2 provides attachConsumer and getSnapshot with monotonic revision tracking", async () => {
+    const handle = acquireClipboardStore("ws-snapshot");
+    const initialSnap = handle.getSnapshot();
+    expect(initialSnap.revision).toBe(0);
+    expect(initialSnap.history).toHaveLength(0);
+
+    const detachChild = handle.attachConsumer("split-child-1");
+    writeText(handle, "data-1");
+    const snap1 = handle.getSnapshot();
+    expect(snap1.revision).toBeGreaterThan(0);
+    expect(snap1.history).toHaveLength(1);
+
+    writeText(handle, "data-2");
+    const snap2 = handle.getSnapshot();
+    expect(snap2.revision).toBeGreaterThan(snap1.revision);
+    expect(snap2.history).toHaveLength(2);
+
+    detachChild();
+    expect(handle.getSnapshot().history).toHaveLength(2);
+    handle.release();
+  });
 });
