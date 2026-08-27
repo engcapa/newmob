@@ -4,7 +4,9 @@ import {
   buildProjectStructureSnapshotV2,
   createWorkspaceProjectContext,
   findPathSourceSet,
+  inferProjectStructureFromBuildFiles,
   isPathExcluded,
+  WorkspaceProjectStructureStore,
 } from "./projectStructureModel";
 
 const sampleModule1: JavaProjectModuleV1 = {
@@ -130,5 +132,63 @@ describe("§8.21.6 V5 projectStructureModel", () => {
       kind: "test",
     });
     expect(findPathSourceSet(structure, "/workspace/other/file.txt")).toBeNull();
+  });
+
+  describe("§8.22.10 U5 Project Structure Production Ingestion", () => {
+    it("infers multi-build modules from Cargo.toml, package.json, and pom.xml", () => {
+      const descriptors = [
+        {
+          path: "/repo/Cargo.toml",
+          content: '[package]\nname = "my-crate"\nversion = "0.1.0"',
+        },
+        {
+          path: "/repo/frontend/package.json",
+          content: JSON.stringify({ name: "my-ui", dependencies: { react: "^19.0.0" } }),
+        },
+        {
+          path: "/repo/backend/pom.xml",
+          content: "<project><artifactId>backend-service</artifactId></project>",
+        },
+      ];
+
+      const result = inferProjectStructureFromBuildFiles(descriptors);
+      expect(result.status).toBe("resolved");
+      expect(result.snapshot).not.toBeNull();
+      expect(result.snapshot?.modules).toHaveLength(3);
+
+      const modIds = result.snapshot!.modules.map((m) => m.id);
+      expect(modIds).toContain("cargo:my-crate");
+      expect(modIds).toContain("npm:my-ui");
+      expect(modIds).toContain("mvn:backend-service");
+
+      expect(result.snapshot?.excludedRoots).toContain("/repo/target");
+      expect(result.snapshot?.excludedRoots).toContain("/repo/frontend/node_modules");
+      expect(result.snapshot?.excludedRoots).toContain("/repo/backend/target");
+    });
+
+    it("returns honest unresolved status when no descriptors exist without fabricating JDK", () => {
+      const result = inferProjectStructureFromBuildFiles([]);
+      expect(result.status).toBe("unresolved");
+      expect(result.snapshot).toBeNull();
+      expect(result.diagnostics).toContain("No build descriptors found in workspace");
+    });
+
+    it("WorkspaceProjectStructureStore manages refresh lifecycle and increments generation", () => {
+      const store = new WorkspaceProjectStructureStore();
+      expect(store.getState().status).toBe("idle");
+      expect(store.getState().generation).toBe(0);
+
+      const state1 = store.refresh([
+        {
+          path: "/repo/Cargo.toml",
+          content: '[package]\nname = "taomni-cli"',
+        },
+      ]);
+
+      expect(state1.status).toBe("resolved");
+      expect(state1.generation).toBe(1);
+      expect(state1.snapshot?.modules[0].id).toBe("cargo:taomni-cli");
+      expect(state1.lastRefreshed).not.toBeNull();
+    });
   });
 });

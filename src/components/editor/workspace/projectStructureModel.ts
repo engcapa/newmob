@@ -145,6 +145,167 @@ export function createWorkspaceProjectContext(
 }
 
 /**
+ * §8.22.10 U5: Infer project structure directly from build descriptors.
+ * Supports Cargo.toml, package.json, pom.xml, and build.gradle.
+ */
+export interface BuildDescriptorInput {
+  path: string;
+  content: string;
+}
+
+export function inferProjectStructureFromBuildFiles(
+  descriptors: readonly BuildDescriptorInput[],
+  generation: number = 1,
+): { snapshot: ProjectStructureSnapshotV2 | null; status: "resolved" | "unresolved"; diagnostics: string[] } {
+  if (descriptors.length === 0) {
+    return {
+      snapshot: null,
+      status: "unresolved",
+      diagnostics: ["No build descriptors found in workspace"],
+    };
+  }
+
+  const modules: JavaProjectModuleV1[] = [];
+  const buildExcludes: string[] = [];
+  const depsByModule: Record<string, string[]> = {};
+  const facts: Record<string, ProjectStructureFact> = {};
+  const now = new Date().toISOString();
+
+  for (const desc of descriptors) {
+    const parentDir = desc.path.split("/").slice(0, -1).join("/") || "/";
+    const fileName = desc.path.split("/").pop() ?? "";
+
+    if (fileName === "Cargo.toml") {
+      const pkgMatch = /name\s*=\s*"([^"]+)"/.exec(desc.content);
+      const modName = pkgMatch ? pkgMatch[1] : "cargo-package";
+      modules.push({
+        id: `cargo:${modName}`,
+        root: parentDir,
+        sourceRoots: [`${parentDir}/src`],
+        testRoots: [`${parentDir}/tests`],
+        generatedRoots: [],
+        buildSystem: "custom",
+      });
+      buildExcludes.push(`${parentDir}/target`);
+      facts[`descriptor.${desc.path}`] = { source: "user-config", freshness: now };
+    } else if (fileName === "package.json") {
+      try {
+        const pkg = JSON.parse(desc.content);
+        const modName = pkg.name || "node-module";
+        const deps = Object.keys(pkg.dependencies || {});
+        depsByModule[`npm:${modName}`] = deps;
+        modules.push({
+          id: `npm:${modName}`,
+          root: parentDir,
+          sourceRoots: [`${parentDir}/src`],
+          testRoots: [`${parentDir}/test`, `${parentDir}/__tests__`],
+          generatedRoots: [],
+          buildSystem: "custom",
+        });
+        buildExcludes.push(`${parentDir}/node_modules`, `${parentDir}/dist`);
+        facts[`descriptor.${desc.path}`] = { source: "user-config", freshness: now };
+      } catch {
+        // invalid JSON
+      }
+    } else if (fileName === "pom.xml") {
+      const artMatch = /<artifactId>([^<]+)<\/artifactId>/.exec(desc.content);
+      const modName = artMatch ? artMatch[1].trim() : "maven-module";
+      modules.push({
+        id: `mvn:${modName}`,
+        root: parentDir,
+        sourceRoots: [`${parentDir}/src/main/java`],
+        testRoots: [`${parentDir}/src/test/java`],
+        generatedRoots: [`${parentDir}/target/generated-sources`],
+        buildSystem: "maven",
+      });
+      buildExcludes.push(`${parentDir}/target`);
+      facts[`descriptor.${desc.path}`] = { source: "maven-model", freshness: now };
+    } else if (fileName === "build.gradle" || fileName === "build.gradle.kts") {
+      const modName = parentDir.split("/").pop() || "gradle-module";
+      modules.push({
+        id: `gradle:${modName}`,
+        root: parentDir,
+        sourceRoots: [`${parentDir}/src/main/java`, `${parentDir}/src/main/kotlin`],
+        testRoots: [`${parentDir}/src/test/java`],
+        generatedRoots: [`${parentDir}/build/generated`],
+        buildSystem: "gradle",
+      });
+      buildExcludes.push(`${parentDir}/build`, `${parentDir}/.gradle`);
+      facts[`descriptor.${desc.path}`] = { source: "gradle-model", freshness: now };
+    }
+  }
+
+  if (modules.length === 0) {
+    return {
+      snapshot: null,
+      status: "unresolved",
+      diagnostics: ["Build descriptors present but could not be parsed into modules"],
+    };
+  }
+
+  const snapshot = buildProjectStructureSnapshotV2({
+    generation,
+    modules,
+    buildExcludedRoots: buildExcludes,
+    dependenciesByModule: depsByModule,
+  });
+
+  return {
+    snapshot: {
+      ...snapshot,
+      facts: { ...snapshot.facts, ...facts },
+    },
+    status: "resolved",
+    diagnostics: [],
+  };
+}
+
+export interface WorkspaceProjectStructureState {
+  status: "idle" | "loading" | "resolved" | "unresolved" | "error";
+  snapshot: ProjectStructureSnapshotV2 | null;
+  diagnostics: readonly string[];
+  generation: number;
+  lastRefreshed: number | null;
+}
+
+export class WorkspaceProjectStructureStore {
+  private state: WorkspaceProjectStructureState = {
+    status: "idle",
+    snapshot: null,
+    diagnostics: [],
+    generation: 0,
+    lastRefreshed: null,
+  };
+
+  getState(): WorkspaceProjectStructureState {
+    return { ...this.state };
+  }
+
+  refresh(descriptors: readonly BuildDescriptorInput[]): WorkspaceProjectStructureState {
+    const nextGen = this.state.generation + 1;
+    const result = inferProjectStructureFromBuildFiles(descriptors, nextGen);
+    this.state = {
+      status: result.status,
+      snapshot: result.snapshot,
+      diagnostics: result.diagnostics,
+      generation: nextGen,
+      lastRefreshed: Date.now(),
+    };
+    return this.getState();
+  }
+
+  clear(): void {
+    this.state = {
+      status: "idle",
+      snapshot: null,
+      diagnostics: [],
+      generation: 0,
+      lastRefreshed: null,
+    };
+  }
+}
+
+/**
  * Tests whether a path belongs to an excluded root.
  */
 export function isPathExcluded(
