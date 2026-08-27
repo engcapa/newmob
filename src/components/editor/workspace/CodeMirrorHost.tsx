@@ -1727,7 +1727,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         desiredVisualColumnField,
         virtualSpaceTypingHandler,
         virtualSpaceClickHandler,
-        Prec.high(keymap.of(virtualSpaceKeymap)),
+        keymap.of(virtualSpaceKeymap),
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),

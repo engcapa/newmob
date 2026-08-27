@@ -348,7 +348,7 @@ export const desiredVisualColumnField = StateField.define<readonly number[]>({
     const effect = tr.effects.find((candidate) => candidate.is(setDesiredVisualColumns));
     if (effect) return effect.value;
     if (tr.selection) {
-      const tabWidth = 4;
+      const tabWidth = tr.state.tabSize;
       return tr.state.selection.ranges.map((range) => {
         const line = tr.state.doc.lineAt(range.head);
         const docCol = range.head - line.from;
@@ -359,6 +359,18 @@ export const desiredVisualColumnField = StateField.define<readonly number[]>({
     return value;
   },
 });
+
+function computeViewportLineDelta(view: EditorView, direction: "up" | "down" | "pageUp" | "pageDown"): number {
+  if (direction === "up") return -1;
+  if (direction === "down") return 1;
+  const dir = direction === "pageUp" ? -1 : 1;
+  if (view.dom && view.dom.clientHeight > 0) {
+    const lineHeight = view.defaultLineHeight || 20;
+    const linesPerPage = Math.max(1, Math.floor(view.dom.clientHeight / lineHeight) - 1);
+    return dir * linesPerPage;
+  }
+  return dir * 15;
+}
 
 /**
  * Vertical movement (Up / Down / PageUp / PageDown) with per-caret desired visual column.
@@ -371,9 +383,9 @@ export function virtualVerticalMoveCommand(
 ): boolean {
   const policy = view.state.facet(editorVirtualSpacePolicy);
   const state = view.state;
-  const tabWidth = 4;
+  const tabWidth = state.tabSize;
   const desired = state.field(desiredVisualColumnField, false) ?? [];
-  const lineDelta = direction === "up" ? -1 : direction === "down" ? 1 : direction === "pageUp" ? -15 : 15;
+  const lineDelta = computeViewportLineDelta(view, direction);
 
   let changed = false;
   const nextRanges: ReturnType<typeof EditorSelection.cursor>[] = [];
@@ -562,7 +574,7 @@ export function virtualTabCommand(view: EditorView): boolean {
   const allAtEnd = state.selection.ranges.every((range) => range.head >= state.doc.lineAt(range.head).to);
   if (!allAtEnd && (!field || field.size === 0)) return false;
 
-  const tabWidth = 4;
+  const tabWidth = state.tabSize;
   const next = new Map(field ?? new Map());
   let changed = false;
 
