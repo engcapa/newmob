@@ -21,6 +21,7 @@ import {
   type VncPointerState,
 } from "../../lib/vncPointerScheduler";
 import { useVncStore } from "../../stores/vncStore";
+import { isEditableTarget, isTerminalFocused } from "../../lib/terminal/keyboardGuards";
 import { useAppStore } from "../../stores/appStore";
 import { ExternalLink, Maximize, Maximize2, Minimize, Minimize2, RefreshCw } from "lucide-react";
 import { useCaptureStore, type CaptureSource } from "../../stores/captureStore";
@@ -763,7 +764,10 @@ export default function VncPanel({
     };
 
     const handleKey = (e: KeyboardEvent) => {
-      if (viewOnly || e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
+      const activeEl = document.activeElement;
+      if (viewOnly || isEditableTarget(e.target, activeEl))
+        return;
+      if (!isTerminalFocused(containerRef.current, activeEl))
         return;
 
       const pendingPaste = pasteInFlightRef.current;
@@ -807,6 +811,10 @@ export default function VncPanel({
     // dispatches a paste event directly to the WebView.
     const handlePaste = (e: ClipboardEvent) => {
       if (!allowClipboardSend) return;
+      const activeEl = document.activeElement;
+      if (isEditableTarget(e.target, activeEl)) return;
+      if (!isTerminalFocused(containerRef.current, activeEl)) return;
+
       const text = e.clipboardData?.getData("text/plain") ?? "";
       const html = e.clipboardData?.getData("text/html") || undefined;
       const rtf = e.clipboardData?.getData("text/rtf") || undefined;
