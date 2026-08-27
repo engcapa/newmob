@@ -1,0 +1,21 @@
+{
+  "capabilityId": "W2-tab-policy",
+  "environment": {
+    "arch": "x86_64",
+    "filesystem": "ext4",
+    "ime": "none",
+    "keyboard": "us",
+    "os": "Linux x86_64",
+    "platform": "linux",
+    "scale": 1.0,
+    "webview": "WebKitGTK 2.44"
+  },
+  "execution": {
+    "command": "python -m qa_ui_auto.runner --filter TC-IDE-C4-01",
+    "durationMs": 42,
+    "exitCode": 0
+  },
+  "featureId": "F25.2",
+  "recordedAtCommit": "12520ebc7e26660ac385bcd1715023f298c79bcd",
+  "status": "passed"
+}

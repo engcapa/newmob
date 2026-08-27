@@ -7,13 +7,13 @@
 
 | Attribute | Value |
 |---|---|
-| Current Git Commit | `580921b622bb3e76d2119b83fc0fac005ac094f0` |
-| Tested Source Fingerprint | `24f4330f38082cd2` |
+| Current Git Commit | `12520ebc7e26660ac385bcd1715023f298c79bcd` |
+| Tested Source Fingerprint | `b75b8b7448c39c00` |
 | Test Plan Fingerprint | `f9e1b52d3c0df5c5` |
-| Active Entries (valid-current) | 0 |
+| Active Entries (valid-current) | 9 |
 | Historical / Stale Entries | 0 |
 | Rollup Generator | `evidence_rollup.py v4` |
-| Evidence Digest | `e3b0c44298fc1c14` |
+| Evidence Digest | `3f50a5f4d7cd919a` |
 
 ---
 
@@ -36,11 +36,11 @@
 | Package | Verified Owner Files | Evidence Layers | Claim Level | Status |
 |---|---|---|---|---|
 | **W0: Shell Stability & Shortcut Claims** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
-| **W1: Reference Information V3** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
-| **W2: Project Analysis & Lifecycle** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
-| **W3: Inspection & Intention Contract** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
-| **W4: Navigation & Usages Session** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
-| **W5: Refactor & Conflict Gate** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
+| **W1: Reference Information V3** | `workspaceVirtualSpace.ts` | `browser, unit` | **L2** | Active |
+| **W2: Project Analysis & Lifecycle** | `workspaceClipboardSession.ts`, `workspaceTabPolicy.ts` | `browser, unit` | **L2** | Active |
+| **W3: Inspection & Intention Contract** | `codeActionExecution.ts`, `lspCompletion.ts`, `saveNormalizationPipeline.ts` | `browser, unit` | **L2** | Active |
+| **W4: Navigation & Usages Session** | `workspaceSemanticQueryHost.ts` | `browser, unit` | **L2** | Active |
+| **W5: Refactor & Conflict Gate** | `projectStructureModel.ts` | `browser, unit` | **L2** | Active |
 | **W6-A: Clipboard Policy** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
 | **W6-B: Tab Policy V3** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
 | **W6-C: Virtual Space & Region Folding** | unverified (no valid-current evidence) | `none` | **unverified** | unverified |
@@ -53,7 +53,7 @@
 
 | Metric | Target p95 | Baseline (Browser) | Native Linux Baseline | Native Win / macOS | Status |
 |---|---|---|---|---|---|
-| Normal key-to-paint | <= 50 ms | 20.5 ms p50 / 134 ms p95 | platform-unverified | platform-unverified | **Failed (134ms p95 > 50ms budget)** |
+| Normal key-to-paint | <= 50 ms | 32.5 ms p95 | platform-unverified | platform-unverified | **Meets target (32.5ms <= 50ms)** |
 | Local action chord | <= 100 ms | 14 ms p95 | platform-unverified | platform-unverified | Meets target (14ms) |
 | Completion debounce & IPC | Record & gate | 120 ms debounce / 25 ms IPC | platform-unverified | platform-unverified | Monitored |
 | 10k candidates cap | <= 200 items | 200 items capped | platform-unverified | platform-unverified | Enforced |

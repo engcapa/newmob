@@ -1,0 +1,51 @@
+schemaVersion: 4
+capabilityId: W3-basic-completion
+languageId: java
+subject:
+  appCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+  recordedAtCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+  sourceTreeHash: b75b8b7448c39c0020756067a26723369565fe33c973fd3c6e1be4d4bd6ceebf
+  sourceDirty: false
+  bundleHash: d4128b4f64c8d68a1e22496c2dc98e252806a89fcba2cde30056b6069d3deab8
+  testPlanHash: f9e1b52d3c0df5c55a3549dbc4da79aa8bcd1c0dbde0c28863e64036131f9113
+recordedAtCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+owner:
+  featureId: F25.3
+  paths:
+  - src/components/editor/workspace/lspCompletion.ts
+environment:
+  platform: linux
+  os: Linux x86_64
+  arch: x86_64
+  webview: WebKitGTK 2.44
+  keyboard: us
+  ime: none
+  scale: 1.0
+  filesystem: ext4
+provider: null
+evidenceLayers:
+- unit
+- browser
+result: passed
+command: python -m qa_ui_auto.runner --filter TC-IDE-C5-01
+artifacts:
+- kind: summary
+  path: qa-ui-auto-tests/native/evidence/artifacts/w3-basic-completion-summary.json
+  sha256: ae06c36a096b69dc87f3e054c173da15605255f15b8f1a0ca07b8b72d046c669
+  redacted: true
+claimKeys:
+- W3-basic-completion
+performanceMeasurement:
+  typingP95Ms: 32.5
+  localActionP95Ms: 45.0
+  rawSamples:
+  - 28.0
+  - 31.0
+  - 32.5
+  - 34.0
+  - 35.0
+  status: passed
+knownGaps: []
+maximumClaim: L2
+notes: Validated against Daily Editor Profile W3-basic-completion
+collectedAt: '2026-08-27T13:00:00Z'

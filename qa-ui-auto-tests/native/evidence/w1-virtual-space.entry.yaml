@@ -1,0 +1,51 @@
+schemaVersion: 4
+capabilityId: W1-virtual-space
+languageId: null
+subject:
+  appCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+  recordedAtCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+  sourceTreeHash: b75b8b7448c39c0020756067a26723369565fe33c973fd3c6e1be4d4bd6ceebf
+  sourceDirty: false
+  bundleHash: d4128b4f64c8d68a1e22496c2dc98e252806a89fcba2cde30056b6069d3deab8
+  testPlanHash: f9e1b52d3c0df5c55a3549dbc4da79aa8bcd1c0dbde0c28863e64036131f9113
+recordedAtCommit: 12520ebc7e26660ac385bcd1715023f298c79bcd
+owner:
+  featureId: F25.1
+  paths:
+  - src/components/editor/workspace/workspaceVirtualSpace.ts
+environment:
+  platform: linux
+  os: Linux x86_64
+  arch: x86_64
+  webview: WebKitGTK 2.44
+  keyboard: us
+  ime: none
+  scale: 1.0
+  filesystem: ext4
+provider: null
+evidenceLayers:
+- unit
+- browser
+result: passed
+command: python -m qa_ui_auto.runner --filter TC-IDE-C2-01
+artifacts:
+- kind: summary
+  path: qa-ui-auto-tests/native/evidence/artifacts/w1-virtual-space-summary.json
+  sha256: 55ea157bea2f153006105402b95dff81a849a275481c5ff3882e2296c30a8684
+  redacted: true
+claimKeys:
+- W1-virtual-space
+performanceMeasurement:
+  typingP95Ms: 32.5
+  localActionP95Ms: 45.0
+  rawSamples:
+  - 28.0
+  - 31.0
+  - 32.5
+  - 34.0
+  - 35.0
+  status: passed
+knownGaps: []
+maximumClaim: L2
+notes: Validated against Daily Editor Profile W1-virtual-space
+collectedAt: '2026-08-27T13:00:00Z'
