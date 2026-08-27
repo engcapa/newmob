@@ -112,6 +112,18 @@ export async function readFiles(): Promise<string[]> {
   }
 }
 
+export async function parseFilePaths(text: string): Promise<string[]> {
+  if (!text || !text.trim()) return [];
+  if (isTauriRuntime()) {
+    try {
+      return await invoke<string[]>("clipboard_parse_file_paths", { text });
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 export async function writeFiles(paths: string[]): Promise<void> {
   if (paths.length === 0) return;
   await invoke("clipboard_write_files", { paths });

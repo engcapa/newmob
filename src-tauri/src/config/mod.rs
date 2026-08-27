@@ -436,6 +436,15 @@ pub fn clipboard_read_files(state: State<'_, AppState>) -> Result<Vec<String>, S
 }
 
 #[tauri::command]
+pub fn clipboard_parse_file_paths(text: String) -> Result<Vec<String>, String> {
+    let files = clipboard_paths_from_uri_text(&text)
+        .into_iter()
+        .filter(|path| PathBuf::from(path.as_str()).exists())
+        .collect();
+    Ok(files)
+}
+
+#[tauri::command]
 pub fn clipboard_write_files(paths: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
@@ -485,7 +494,13 @@ fn clipboard_paths_from_uri_text(text: &str) -> Vec<String> {
         }
     }
     for line in text.lines() {
-        let value = line.trim();
+        let mut value = line.trim();
+        if (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+            || (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+        {
+            value = &value[1..value.len() - 1];
+        }
+        let value = value.trim();
         if value.is_empty()
             || value.starts_with('#')
             || value.eq_ignore_ascii_case("copy")
@@ -950,6 +965,21 @@ mod tests {
                 "/home/me/plain file.txt".to_string(),
                 "/home/me/dir".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn clipboard_uri_text_parses_quoted_paths() {
+        let single_quoted = clipboard_paths_from_uri_text("'/home/zhyhang/图片/2026-08-27_23-08.png'");
+        assert_eq!(
+            single_quoted,
+            vec!["/home/zhyhang/图片/2026-08-27_23-08.png".to_string()]
+        );
+
+        let double_quoted = clipboard_paths_from_uri_text("\"/tmp/screenshot.png\"");
+        assert_eq!(
+            double_quoted,
+            vec!["/tmp/screenshot.png".to_string()]
         );
     }
 }
