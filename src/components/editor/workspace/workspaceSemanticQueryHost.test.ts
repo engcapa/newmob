@@ -100,4 +100,23 @@ describe("§8.22.9 U4 WorkspaceSemanticQueryHost", () => {
     expect(result.items).toEqual([]);
     expect(result.error).toBe("LSP server unreachable");
   });
+
+  it("§8.23.8 X7 returns 'stale' status when document generation changed before query completes", async () => {
+    const host = new WorkspaceSemanticQueryHost();
+    let currentGen = 5;
+
+    const result = await host.execute(
+      "definitions",
+      "file:///repo/App.java",
+      { line: 10, character: 2 },
+      async () => ["def1"],
+      {
+        generation: 4, // Stale generation
+        getLiveGeneration: () => currentGen,
+      },
+    );
+
+    expect(result.status).toBe("stale");
+    expect(result.items).toEqual([]);
+  });
 });

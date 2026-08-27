@@ -1,11 +1,14 @@
 import type { LspPosition } from "../../../lib/editor/lsp";
 
 export type SemanticQueryKind =
+  | "definitions"
+  | "declarations"
+  | "implementations"
+  | "typeDefinitions"
   | "references"
-  | "implementation"
-  | "super-methods"
   | "call-hierarchy"
-  | "type-hierarchy";
+  | "type-hierarchy"
+  | "super-methods";
 
 export interface SemanticQueryRequest<T = unknown> {
   id: string;
@@ -14,12 +17,13 @@ export interface SemanticQueryRequest<T = unknown> {
   position: LspPosition;
   signal: AbortSignal;
   payload?: T;
+  generation?: number;
 }
 
 export interface SemanticQueryResult<TItem> {
   queryId: string;
   kind: SemanticQueryKind;
-  status: "success" | "cancelled" | "unavailable" | "error";
+  status: "success" | "cancelled" | "unavailable" | "error" | "stale";
   items: TItem[];
   truncated: boolean;
   totalCount: number;
@@ -33,16 +37,37 @@ export class WorkspaceSemanticQueryHost {
   private activeControllers = new Map<SemanticQueryKind, AbortController>();
 
   /**
-   * Dispatches a semantic query. Automatically cancels any prior in-flight query of the same kind.
+   * §8.23.8 X7: Dispatches a semantic query. Automatically cancels any prior in-flight query
+   * of the same kind, checks document generation staleness, and maps LSP outcomes.
    */
   async execute<TItem>(
     kind: SemanticQueryKind,
     _uri: string,
     _position: LspPosition,
     fetcher: (signal: AbortSignal) => Promise<TItem[] | null>,
+    options?: {
+      generation?: number;
+      getLiveGeneration?: () => number;
+    },
   ): Promise<SemanticQueryResult<TItem>> {
     const startTime = Date.now();
     const queryId = `query-${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+    if (
+      options?.generation != null &&
+      options.getLiveGeneration &&
+      options.generation !== options.getLiveGeneration()
+    ) {
+      return {
+        queryId,
+        kind,
+        status: "stale",
+        items: [],
+        truncated: false,
+        totalCount: 0,
+        durationMs: Date.now() - startTime,
+      };
+    }
 
     // Cancel in-flight query for this kind
     const previous = this.activeControllers.get(kind);

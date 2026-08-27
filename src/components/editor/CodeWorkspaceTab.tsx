@@ -4892,7 +4892,29 @@ export function CodeWorkspaceTab({
             }
           },
           organizeImportsOnSave: effectiveSavePolicy.organizeImports.enabled,
-          organizeImportsFn: async () => null,
+          organizeImportsFn: async () => {
+            try {
+              const wholeFileRange: LspRange = {
+                start: { line: 0, character: 0 },
+                end: { line: (file.text ?? "").split("\n").length, character: 0 },
+              };
+              const { actions, semanticToken } = await requestCodeActions(
+                file,
+                wholeFileRange,
+                [],
+                ["source.organizeImports"],
+              );
+              if (actions.length > 0) {
+                const res = await runCodeAction(actions[0], file, semanticToken);
+                if (res && res.status === "applied-edit") {
+                  return openFilesRef.current[key]?.text ?? null;
+                }
+              }
+            } catch (err) {
+              formatError = errorMessage(err);
+            }
+            return null;
+          },
           getLatestBufferVersion: () => openFilesRef.current[key]?.documentRevision ?? file.documentRevision ?? 0,
         },
       );
