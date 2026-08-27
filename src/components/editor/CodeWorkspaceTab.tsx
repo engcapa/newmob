@@ -14834,22 +14834,18 @@ export function CodeWorkspaceTab({
               currentGroups: currentUi.editorGroups,
               openFiles: openFilesRef.current,
               mruFileKeys: mruFileKeysRef.current,
+              baseLayoutRevision: tabPolicyRevision,
+              currentLayoutRevision: tabPolicyRevision,
               confirmDirtyClose: async (dirtyKeys) => {
                 const names = dirtyKeys.map((k) => openFilesRef.current[k]?.title ?? k).join(", ");
                 return window.confirm(`The following files have unsaved changes:\n${names}\n\nApply tab limit policy and discard changes?`);
               },
               onEvictClosedFile: (evictedKey) => {
-                // If not open in any other group, clean from openFiles
-                const stillOpen = Object.values(currentUi.editorGroups).some(
-                  (g) => g.openOrder.includes(evictedKey),
-                );
-                if (!stillOpen) {
-                  setOpenFiles((prev) => {
-                    const next = { ...prev };
-                    delete next[evictedKey];
-                    return next;
-                  });
-                }
+                setOpenFiles((prev) => {
+                  const next = { ...prev };
+                  delete next[evictedKey];
+                  return next;
+                });
               },
               commitAtomicUpdate: ({ nextGroups, policy }) => {
                 useCodeWorkspaceStore.getState().patchInstance(workspaceInstanceId, { editorGroups: nextGroups as typeof currentUi.editorGroups });

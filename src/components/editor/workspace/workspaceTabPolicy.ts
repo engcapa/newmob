@@ -617,10 +617,15 @@ export async function applyWorkspaceTabPolicyTransaction(params: {
     };
   }
 
-  // Purge closed files via lifecycle if requested
+  // Purge closed files via lifecycle only when unreferenced in post-commit nextGroups
   if (params.onEvictClosedFile) {
+    const allRemainingKeys = new Set(
+      Object.values(nextGroups).flatMap((g) => g.openOrder)
+    );
     for (const evictedKey of execution.allEvictedKeys) {
-      await params.onEvictClosedFile(evictedKey);
+      if (!allRemainingKeys.has(evictedKey)) {
+        await params.onEvictClosedFile(evictedKey);
+      }
     }
   }
 
