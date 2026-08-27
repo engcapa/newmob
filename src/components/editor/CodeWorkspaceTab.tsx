@@ -7975,12 +7975,21 @@ export function CodeWorkspaceTab({
       assertSemanticCurrent();
       let semanticEditApplied = false;
       let semanticCommandRevision: number | null = null;
-      const result = await executeCodeAction(executableAction, {
-        applyEdit: async (edit) => {
-          let plan: RefactorPlanV3 | undefined;
-          const isRefactorAction =
-            executableAction.kind?.startsWith("refactor") ||
-            executableAction.title.toLowerCase().includes("refactor");
+      const fileDescriptor = lspDescriptorForFile(file);
+      const result = await executeCodeAction(
+        executableAction,
+        {
+          languageId: fileDescriptor?.languageId ?? "java",
+          resolveAction: async (act) => {
+            if (!fileDescriptor || !act.raw) return null;
+            const res = await lspCodeActionResolve(fileDescriptor, act.raw);
+            return res.action;
+          },
+          applyEdit: async (edit) => {
+            let plan: RefactorPlanV3 | undefined;
+            const isRefactorAction =
+              executableAction.kind?.startsWith("refactor") ||
+              executableAction.title.toLowerCase().includes("refactor");
           if (isRefactorAction) {
             const kindStr = executableAction.kind ?? "";
             const refactorKind = kindStr.includes("extract")
@@ -8102,6 +8111,14 @@ export function CodeWorkspaceTab({
           providerCommandQueueRef.current = pending.then(() => undefined, () => undefined);
           return pending;
         },
+      }, () => {
+        if (
+          semanticToken
+          && !workspaceSemanticIndexBuildIsCurrent(semanticIndex.current(), semanticToken)
+        ) {
+          return { valid: false, reason: "Refactor result became stale because the workspace changed" };
+        }
+        return { valid: true };
       });
       if (result.status === "executed-command") {
         markProviderSuppressionApplied(action, file);
