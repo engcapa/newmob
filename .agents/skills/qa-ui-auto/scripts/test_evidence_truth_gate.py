@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Unit tests for Evidence Truth Gate (U0 §8.22.1).
+"""Unit tests for Evidence Truth Gate (X0 §8.23.1).
 
 Verifies evidence_validate.py and evidence_rollup.py behavior against:
-- Valid v3 entries with subject fingerprint and production owner
-- Negative test cases: empty dir, all stale, product source mismatch, test plan mismatch,
-  artifact missing/bad hash/secret leak, owner non-existent/test-only, provider layer missing
-  request/response, native layer missing effect, idea layer missing compare, claim exceeding
-  computed maximum, modified manifest check failure, rollup unverified without entries.
+- Valid v4 entries with strict identity, subject fingerprint and production owner
+- Negative test cases: dirty source, commit mismatch, empty dir, all stale, product source mismatch,
+  test plan mismatch, stale bundle, artifact escaping root / missing / bad hash / secret leak,
+  owner non-existent / test-only, provider layer missing request/response, native layer missing effect,
+  idea layer missing compare, claim exceeding computed maximum, modified manifest check failure,
+  rollup aborting on invalid entry, rollup unverified without entries.
 """
 from __future__ import annotations
 
@@ -52,15 +53,17 @@ class EvidenceTruthGateTests(unittest.TestCase):
         self.res_file.write_text('{"result":[]}', encoding="utf-8")
         self.res_hash = sha256_of_file(self.res_file)
 
-        self.sample_v3 = {
-            "schemaVersion": 3,
+        self.sample_v4 = {
+            "schemaVersion": 4,
             "capabilityId": "W3-intention",
             "languageId": "java",
             "subject": {
                 "appCommit": "a" * 40,
-                "testedSourceFingerprint": self.source_fp,
+                "recordedAtCommit": "a" * 40,
+                "sourceTreeHash": self.source_fp,
+                "sourceDirty": False,
                 "bundleHash": "b" * 64,
-                "testPlanFingerprint": self.plan_fp,
+                "testPlanHash": self.plan_fp,
             },
             "recordedAtCommit": "a" * 40,
             "owner": {
@@ -103,8 +106,8 @@ class EvidenceTruthGateTests(unittest.TestCase):
         entry_file.write_text(yaml.safe_dump(data), encoding="utf-8")
         return entry_file
 
-    def test_valid_v3_entry_passes(self):
-        entry_file = self._write_entry(self.sample_v3)
+    def test_valid_v4_entry_passes(self):
+        entry_file = self._write_entry(self.sample_v4)
         res = validate_entry(
             entry_file,
             self.schema,
@@ -124,7 +127,7 @@ class EvidenceTruthGateTests(unittest.TestCase):
 
     def test_negative_all_stale_entries_fail_current_check(self):
         # Legacy v2 entry is stale
-        v2_entry = copy.deepcopy(self.sample_v3)
+        v2_entry = copy.deepcopy(self.sample_v4)
         v2_entry["schemaVersion"] = 2
         v2_entry.pop("subject")
         v2_entry.pop("recordedAtCommit")
@@ -135,44 +138,84 @@ class EvidenceTruthGateTests(unittest.TestCase):
         code = validate_main(["--check-current", str(stale_file)])
         self.assertEqual(code, 1)
 
-    def test_head_change_with_same_source_fingerprint_remains_valid(self):
-        entry_file = self._write_entry(self.sample_v3)
+    def test_negative_commit_mismatch_fails(self):
+        entry_file = self._write_entry(self.sample_v4)
         res = validate_entry(
             entry_file,
             self.schema,
             check_current=True,
             current_source_fp=self.source_fp,
             current_test_plan_fp=self.plan_fp,
-            current_head="f" * 40,  # different HEAD commit, but same source fingerprint
+            current_head="f" * 40,  # different HEAD commit
         )
-        self.assertEqual(res.status, EntryStatus.VALID_CURRENT)
+        self.assertEqual(res.status, EntryStatus.STALE_SOURCE)
+        self.assertEqual(res.reason_code, "COMMIT_MISMATCH")
+
+    def test_negative_source_dirty_fails(self):
+        dirty_entry = copy.deepcopy(self.sample_v4)
+        dirty_entry["subject"]["sourceDirty"] = True
+        entry_file = self._write_entry(dirty_entry)
+        res = validate_entry(
+            entry_file,
+            self.schema,
+            check_current=True,
+            current_source_fp=self.source_fp,
+            current_test_plan_fp=self.plan_fp,
+            current_head="a" * 40,
+        )
+        self.assertEqual(res.status, EntryStatus.INVALID)
+        self.assertEqual(res.reason_code, "DIRTY_SOURCE")
+
+    def test_negative_stale_bundle_fails(self):
+        entry_file = self._write_entry(self.sample_v4)
+        res = validate_entry(
+            entry_file,
+            self.schema,
+            check_current=True,
+            current_source_fp=self.source_fp,
+            current_test_plan_fp=self.plan_fp,
+            current_head="a" * 40,
+            expected_bundle_hash="c" * 64,
+        )
+        self.assertEqual(res.status, EntryStatus.STALE_BUNDLE)
+        self.assertEqual(res.reason_code, "STALE_BUNDLE")
+
+    def test_negative_artifact_outside_root_fails(self):
+        bad = copy.deepcopy(self.sample_v4)
+        bad["artifacts"][0]["path"] = "qa-ui-auto-report/evidence/req.json"
+        entry_file = self._write_entry(bad)
+        res = validate_entry(entry_file, self.schema, check_current=False)
+        self.assertEqual(res.status, EntryStatus.INVALID)
+        self.assertEqual(res.reason_code, "ARTIFACT_OUTSIDE_ROOT")
 
     def test_negative_product_source_change_becomes_stale_source(self):
-        entry_file = self._write_entry(self.sample_v3)
+        entry_file = self._write_entry(self.sample_v4)
         res = validate_entry(
             entry_file,
             self.schema,
             check_current=True,
             current_source_fp="diff_source_" + "0" * 52,
             current_test_plan_fp=self.plan_fp,
+            current_head="a" * 40,
         )
         self.assertEqual(res.status, EntryStatus.STALE_SOURCE)
         self.assertEqual(res.reason_code, "STALE_SOURCE_FINGERPRINT")
 
     def test_negative_test_plan_change_becomes_stale_test_plan(self):
-        entry_file = self._write_entry(self.sample_v3)
+        entry_file = self._write_entry(self.sample_v4)
         res = validate_entry(
             entry_file,
             self.schema,
             check_current=True,
             current_source_fp=self.source_fp,
             current_test_plan_fp="diff_plan_" + "0" * 54,
+            current_head="a" * 40,
         )
         self.assertEqual(res.status, EntryStatus.STALE_TEST_PLAN)
         self.assertEqual(res.reason_code, "STALE_TEST_PLAN")
 
     def test_negative_owner_path_not_found_fails(self):
-        bad = copy.deepcopy(self.sample_v3)
+        bad = copy.deepcopy(self.sample_v4)
         bad["owner"]["paths"] = ["non_existent_file.tsx"]
         entry_file = self._write_entry(bad)
         res = validate_entry(entry_file, self.schema, check_current=False)
@@ -180,7 +223,7 @@ class EvidenceTruthGateTests(unittest.TestCase):
         self.assertEqual(res.reason_code, "INVALID_OWNER_PATHS")
 
     def test_negative_owner_path_only_test_fails(self):
-        bad = copy.deepcopy(self.sample_v3)
+        bad = copy.deepcopy(self.sample_v4)
         bad["owner"]["paths"] = ["src/components/editor/CodeWorkspaceTab.test.tsx"]
         entry_file = self._write_entry(bad)
         res = validate_entry(entry_file, self.schema, check_current=False)
@@ -188,7 +231,7 @@ class EvidenceTruthGateTests(unittest.TestCase):
         self.assertEqual(res.reason_code, "OWNER_PATH_NOT_PRODUCTION")
 
     def test_negative_artifact_missing_fails(self):
-        bad = copy.deepcopy(self.sample_v3)
+        bad = copy.deepcopy(self.sample_v4)
         bad["artifacts"] = [{
             "kind": "request",
             "path": str(self.temp_path / "missing.json"),
@@ -201,7 +244,7 @@ class EvidenceTruthGateTests(unittest.TestCase):
         self.assertEqual(res.reason_code, "ARTIFACT_MISSING")
 
     def test_negative_artifact_hash_mismatch_fails(self):
-        bad = copy.deepcopy(self.sample_v3)
+        bad = copy.deepcopy(self.sample_v4)
         bad["artifacts"][0]["sha256"] = "f" * 64
         entry_file = self._write_entry(bad)
         res = validate_entry(entry_file, self.schema, check_current=False)
@@ -211,7 +254,7 @@ class EvidenceTruthGateTests(unittest.TestCase):
     def test_negative_secret_leak_fails(self):
         leak_file = self.temp_path / "leak.txt"
         leak_file.write_text("Error in /home/zhyhang/project/file.java", encoding="utf-8")
-        bad = copy.deepcopy(self.sample_v3)
+        bad = copy.deepcopy(self.sample_v4)
         bad["artifacts"].append({
             "kind": "log",
             "path": str(leak_file),
@@ -224,15 +267,15 @@ class EvidenceTruthGateTests(unittest.TestCase):
         self.assertEqual(res.reason_code, "SECRET_LEAK")
 
     def test_negative_provider_layer_missing_artifacts_fails(self):
-        bad = copy.deepcopy(self.sample_v3)
-        bad["artifacts"] = []  # Provider layer declared, but no request/response
+        bad = copy.deepcopy(self.sample_v4)
+        bad["artifacts"] = []
         entry_file = self._write_entry(bad)
         res = validate_entry(entry_file, self.schema, check_current=False)
         self.assertEqual(res.status, EntryStatus.INVALID)
         self.assertEqual(res.reason_code, "PROVIDER_LAYER_MISSING_ARTIFACTS")
 
     def test_negative_idea_layer_missing_compare_fails(self):
-        bad = copy.deepcopy(self.sample_v3)
+        bad = copy.deepcopy(self.sample_v4)
         bad["evidenceLayers"] = ["idea-compare"]
         bad["artifacts"] = [bad["artifacts"][0]]  # only 1 artifact
         entry_file = self._write_entry(bad)
@@ -241,11 +284,11 @@ class EvidenceTruthGateTests(unittest.TestCase):
         self.assertEqual(res.reason_code, "IDEA_COMPARE_MISSING_ARTIFACTS")
 
     def test_negative_claim_exceeds_maximum_fails(self):
-        bad = copy.deepcopy(self.sample_v3)
-        bad["evidenceLayers"] = ["unit"]  # only unit layer -> max claim is L1
+        bad = copy.deepcopy(self.sample_v4)
+        bad["evidenceLayers"] = ["unit"]
         bad["artifacts"] = []
         bad["provider"] = None
-        bad["maximumClaim"] = "L2"  # L2 exceeds L1
+        bad["maximumClaim"] = "L2"
         entry_file = self._write_entry(bad)
         res = validate_entry(entry_file, self.schema, check_current=False)
         self.assertEqual(res.status, EntryStatus.INVALID)

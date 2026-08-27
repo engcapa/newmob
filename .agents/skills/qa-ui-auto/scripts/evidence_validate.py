@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Evidence Entry Validator (U0 §8.22.1).
+"""Evidence Entry Validator (X0 §8.23.1).
 
-Validates EditorEvidenceEntry entries against schema (v2/v3), artifact hashes,
-production owner paths, layer semantics, and source/plan fingerprints.
+Validates EditorEvidenceEntry entries against schema (v2/v3/v4), artifact hashes,
+path confinement, production owner paths, layer semantics, and source/plan fingerprints.
 
 Usage:
-    python evidence_validate.py [--check-current] [--allow-history-only] [entry_paths...]
+    python evidence_validate.py [--check-current] [--allow-history-only] [--release-channel CHANNEL] [entry_paths...]
 """
 from __future__ import annotations
 
@@ -24,8 +24,9 @@ import yaml
 
 ROOT = Path.cwd()
 SCHEMA_FILE = ROOT / "qa-ui-auto-tests" / "evidence-manifest.schema.json"
+RELEASE_PLAN_FILE = ROOT / "qa-ui-auto-tests" / "release-evidence-plan.json"
+FEATURE_LIST_FILE = ROOT / "qa-ui-auto-tests" / "feature-list.md"
 NATIVE_EVIDENCE_DIR = ROOT / "qa-ui-auto-tests" / "native" / "evidence"
-REPORT_EVIDENCE_DIR = ROOT / "qa-ui-auto-report" / "evidence"
 
 SOURCE_GLOBS = [
     "src",
@@ -61,6 +62,15 @@ def get_current_head() -> str:
         return ""
 
 
+def is_source_dirty() -> bool:
+    try:
+        cmd = ["git", "status", "--porcelain", "--"] + SOURCE_GLOBS
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
+        return len(out) > 0
+    except Exception:
+        return False
+
+
 def get_tested_source_fingerprint() -> str:
     cmd = ["git", "ls-files", "-s", "--"] + SOURCE_GLOBS
     try:
@@ -72,12 +82,23 @@ def get_tested_source_fingerprint() -> str:
 
 
 def get_test_plan_fingerprint() -> str:
-    try:
-        schema_bytes = SCHEMA_FILE.read_bytes()
-        plan_bytes = (",".join(sorted(SOURCE_GLOBS)) + "\n").encode("utf-8") + schema_bytes
-        return hashlib.sha256(plan_bytes).hexdigest()
-    except Exception:
-        return ""
+    h = hashlib.sha256()
+    # 1. Schema & plan files
+    for p in [SCHEMA_FILE, RELEASE_PLAN_FILE, FEATURE_LIST_FILE]:
+        if p.exists():
+            h.update(p.read_bytes())
+    # 2. Key scripts
+    script_dir = ROOT / ".agents" / "skills" / "qa-ui-auto" / "scripts"
+    for s in ["evidence_validate.py", "evidence_rollup.py", "qa_ui_auto/audit.py"]:
+        sp = script_dir / s
+        if sp.exists():
+            h.update(sp.read_bytes())
+    # 3. All YAML cases in deterministic order
+    cases_dir = ROOT / "qa-ui-auto-tests" / "cases"
+    if cases_dir.exists():
+        for case in sorted(cases_dir.glob("*.testcase.yaml")):
+            h.update(case.read_bytes())
+    return h.hexdigest()
 
 
 def sha256_of_file(path: Path) -> str:
@@ -86,6 +107,29 @@ def sha256_of_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def is_path_confined(art_path_str: str) -> bool:
+    if ".." in art_path_str:
+        return False
+    if "qa-ui-auto-report" in art_path_str:
+        return False
+    if art_path_str.startswith("/"):
+        p = Path(art_path_str).resolve()
+    else:
+        p = (ROOT / art_path_str).resolve()
+
+    try:
+        p.relative_to(ROOT)
+        return True
+    except ValueError:
+        pass
+
+    try:
+        p.relative_to(Path("/tmp"))
+        return True
+    except ValueError:
+        return False
 
 
 class ValidationResult:
@@ -113,6 +157,15 @@ def load_schema() -> dict[str, Any]:
     return json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
 
 
+def load_release_plan() -> dict[str, Any] | None:
+    if RELEASE_PLAN_FILE.exists():
+        try:
+            return json.loads(RELEASE_PLAN_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
 def is_production_path(p: str) -> bool:
     normalized = p.replace("\\", "/")
     if normalized.startswith("src-tauri/src/") and not normalized.endswith(".test.rs") and "/tests/" not in normalized:
@@ -129,6 +182,7 @@ def validate_entry(
     current_source_fp: str = "",
     current_test_plan_fp: str = "",
     current_head: str = "",
+    expected_bundle_hash: str = "",
 ) -> ValidationResult:
     try:
         data = yaml.safe_load(entry_path.read_text(encoding="utf-8"))
@@ -148,7 +202,7 @@ def validate_entry(
             entry_path,
             EntryStatus.STALE_TEST_PLAN,
             "LEGACY_SCHEMA_V1",
-            ["Legacy v1 schema requires migration to EditorEvidenceEntryV3"],
+            ["Legacy v1 schema requires migration to EditorEvidenceEntryV4"],
         )
 
     # Validate against JSON schema
@@ -164,16 +218,16 @@ def validate_entry(
         )
 
     version = data.get("schemaVersion")
-    if version == 2:
+    if version == 2 or version == 3:
         return ValidationResult(
             entry_path,
             EntryStatus.STALE_TEST_PLAN,
-            "LEGACY_SCHEMA_V2",
-            ["Legacy v2 schema lacks subject fingerprint and owner; requires migration to v3"],
+            f"LEGACY_SCHEMA_V{version}",
+            [f"Legacy v{version} schema requires migration to v4"],
             data=data,
         )
 
-    if version != 3:
+    if version != 4:
         return ValidationResult(
             entry_path,
             EntryStatus.INVALID,
@@ -181,7 +235,7 @@ def validate_entry(
             [f"Unsupported schemaVersion: {version}"],
         )
 
-    # Owner validation (v3)
+    # Owner validation (v4)
     owner = data.get("owner", {})
     paths = owner.get("paths", [])
     if not paths:
@@ -224,10 +278,20 @@ def validate_entry(
             data=data,
         )
 
-    # Artifacts validation
+    # Artifacts validation & Path confinement
     artifacts = data.get("artifacts", [])
     for art in artifacts:
-        art_path = Path(art["path"])
+        art_path_str = art.get("path", "")
+        if not is_path_confined(art_path_str):
+            return ValidationResult(
+                entry_path,
+                EntryStatus.INVALID,
+                "ARTIFACT_OUTSIDE_ROOT",
+                [f"Artifact path escapes committed roots or points to ignored directory: {art_path_str}"],
+                data=data,
+            )
+
+        art_path = Path(art_path_str)
         if not art_path.is_absolute():
             art_path = ROOT / art_path
         if not art_path.exists():
@@ -235,7 +299,7 @@ def validate_entry(
                 entry_path,
                 EntryStatus.INVALID,
                 "ARTIFACT_MISSING",
-                [f"Artifact does not exist: {art['path']}"],
+                [f"Artifact does not exist: {art_path_str}"],
                 data=data,
             )
         if not art_path.is_file():
@@ -243,7 +307,7 @@ def validate_entry(
                 entry_path,
                 EntryStatus.INVALID,
                 "ARTIFACT_NOT_REGULAR_FILE",
-                [f"Artifact is not a regular file: {art['path']}"],
+                [f"Artifact is not a regular file: {art_path_str}"],
                 data=data,
             )
         actual_hash = sha256_of_file(art_path)
@@ -252,7 +316,7 @@ def validate_entry(
                 entry_path,
                 EntryStatus.INVALID,
                 "ARTIFACT_HASH_MISMATCH",
-                [f"Artifact SHA-256 mismatch for {art['path']}: expected {art.get('sha256')}, got {actual_hash}"],
+                [f"Artifact SHA-256 mismatch for {art_path_str}: expected {art.get('sha256')}, got {actual_hash}"],
                 data=data,
             )
         # Scan for leaked secrets or local paths
@@ -263,7 +327,7 @@ def validate_entry(
                     entry_path,
                     EntryStatus.INVALID,
                     "SECRET_LEAK",
-                    [f"Artifact contains unredacted local paths or credentials: {art['path']}"],
+                    [f"Artifact contains unredacted local paths or credentials: {art_path_str}"],
                     data=data,
                 )
         except Exception:
@@ -333,10 +397,42 @@ def validate_entry(
 
     # Subject & Staleness check
     subject = data.get("subject", {})
-    source_fp = subject.get("testedSourceFingerprint", "")
-    plan_fp = subject.get("testPlanFingerprint", "")
+    app_commit = subject.get("appCommit", "")
+    rec_commit = data.get("recordedAtCommit", "")
+    source_fp = subject.get("sourceTreeHash") or subject.get("testedSourceFingerprint", "")
+    plan_fp = subject.get("testPlanHash") or subject.get("testPlanFingerprint", "")
+    bundle_hash = subject.get("bundleHash", "")
 
     if check_current:
+        # 1. Commit matching
+        if current_head and app_commit != current_head:
+            return ValidationResult(
+                entry_path,
+                EntryStatus.STALE_SOURCE,
+                "COMMIT_MISMATCH",
+                [f"Entry appCommit {app_commit[:12]} does not match current HEAD {current_head[:12]}"],
+                data=data,
+            )
+        if rec_commit != app_commit:
+            return ValidationResult(
+                entry_path,
+                EntryStatus.INVALID,
+                "COMMIT_MISMATCH",
+                [f"Entry recordedAtCommit {rec_commit[:12]} does not match appCommit {app_commit[:12]}"],
+                data=data,
+            )
+
+        # 2. Source dirty check
+        if subject.get("sourceDirty", False):
+            return ValidationResult(
+                entry_path,
+                EntryStatus.INVALID,
+                "DIRTY_SOURCE",
+                ["Entry declares sourceDirty: true"],
+                data=data,
+            )
+
+        # 3. Test plan fingerprint
         if current_test_plan_fp and plan_fp != current_test_plan_fp:
             return ValidationResult(
                 entry_path,
@@ -345,6 +441,8 @@ def validate_entry(
                 [f"Entry testPlanFingerprint {plan_fp[:12]} does not match current {current_test_plan_fp[:12]}"],
                 data=data,
             )
+
+        # 4. Source fingerprint
         if current_source_fp and source_fp != current_source_fp:
             return ValidationResult(
                 entry_path,
@@ -353,6 +451,17 @@ def validate_entry(
                 [f"Entry testedSourceFingerprint {source_fp[:12]} does not match current {current_source_fp[:12]}"],
                 data=data,
             )
+
+        # 5. Bundle hash check
+        if expected_bundle_hash and bundle_hash != expected_bundle_hash:
+            return ValidationResult(
+                entry_path,
+                EntryStatus.STALE_BUNDLE,
+                "STALE_BUNDLE",
+                [f"Entry bundleHash {bundle_hash[:12]} does not match expected bundle {expected_bundle_hash[:12]}"],
+                data=data,
+            )
+
         return ValidationResult(entry_path, EntryStatus.VALID_CURRENT, None, data=data)
 
     return ValidationResult(entry_path, EntryStatus.VALID_HISTORY, None, data=data)
@@ -370,8 +479,6 @@ def scan_entries(paths: list[str] | None = None) -> list[Path]:
     else:
         if NATIVE_EVIDENCE_DIR.exists():
             scan_paths.extend(NATIVE_EVIDENCE_DIR.rglob("*.entry.yaml"))
-        if REPORT_EVIDENCE_DIR.exists():
-            scan_paths.extend(REPORT_EVIDENCE_DIR.rglob("*.entry.yaml"))
     return sorted(set(scan_paths))
 
 
@@ -380,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check-current", action="store_true", help="Enforce that current valid entries exist and no current entries are invalid or stale")
     ap.add_argument("--check-head", action="store_true", help="Alias for --check-current")
     ap.add_argument("--allow-history-only", action="store_true", help="Allow zero current entries without erroring")
+    ap.add_argument("--release-channel", default="linux-daily-editor", help="Release channel to check from release-evidence-plan.json")
     ap.add_argument("paths", nargs="*", help="Entry paths or directories to scan")
     args = ap.parse_args(argv)
 
@@ -442,3 +550,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

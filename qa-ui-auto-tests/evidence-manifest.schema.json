@@ -2,8 +2,104 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://taomni.local/qa-ui-auto/evidence-manifest.schema.json",
   "title": "EditorEvidenceEntry",
-  "description": "Native gate evidence entry (§8.21.1 / §8.22.1). Supports v2 (legacy) and v3 (with subject fingerprinting and production owner).",
+  "description": "Native gate evidence entry (§8.21.1 / §8.23.1). Supports v4 (with strict identity verification and matrix validation), v3, and v2 (legacy history).",
   "oneOf": [
+    {
+      "title": "EditorEvidenceEntryV4",
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "capabilityId",
+        "languageId",
+        "subject",
+        "recordedAtCommit",
+        "owner",
+        "environment",
+        "provider",
+        "evidenceLayers",
+        "result",
+        "command",
+        "artifacts",
+        "knownGaps",
+        "maximumClaim",
+        "collectedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "type": "integer", "const": 4 },
+        "capabilityId": { "type": "string", "minLength": 1 },
+        "languageId": { "type": ["string", "null"] },
+        "subject": {
+          "type": "object",
+          "required": [
+            "appCommit",
+            "recordedAtCommit",
+            "sourceTreeHash",
+            "sourceDirty",
+            "bundleHash",
+            "testPlanHash"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "appCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "recordedAtCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "sourceTreeHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "sourceDirty": { "type": "boolean" },
+            "bundleHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "testPlanHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        "recordedAtCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "owner": {
+          "type": "object",
+          "required": ["featureId", "paths"],
+          "additionalProperties": false,
+          "properties": {
+            "featureId": { "type": "string", "minLength": 1 },
+            "paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            }
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "provider": {
+          "$ref": "#/$defs/provider"
+        },
+        "evidenceLayers": {
+          "$ref": "#/$defs/evidenceLayers"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "command": { "type": "string" },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        },
+        "claimKeys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "performanceMeasurement": {
+          "type": "object",
+          "properties": {
+            "typingP95Ms": { "type": "number" },
+            "localActionP95Ms": { "type": "number" },
+            "rawSamples": { "type": "array", "items": { "type": "number" } },
+            "status": { "type": "string", "enum": ["passed", "failed"] }
+          }
+        },
+        "knownGaps": { "type": "array", "items": { "type": "string" } },
+        "maximumClaim": {
+          "$ref": "#/$defs/maximumClaim"
+        },
+        "notes": { "type": "string" },
+        "collectedAt": { "type": "string" }
+      }
+    },
     {
       "title": "EditorEvidenceEntryV3",
       "type": "object",

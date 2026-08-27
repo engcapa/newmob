@@ -131,12 +131,12 @@
   ],
   "metadata": {
     "activeEntriesCount": 0,
-    "currentCommit": "3cba17ea95b8475c5fce85f19917ed2cd062faba",
+    "currentCommit": "580921b622bb3e76d2119b83fc0fac005ac094f0",
     "evidenceDigest": "e3b0c44298fc1c14",
-    "generator": "evidence_rollup.py v3",
+    "generator": "evidence_rollup.py v4",
     "staleEntriesCount": 0,
-    "testPlanFingerprint": "88ca5e8889ccfccfde1abd81f45cba7d19cb078f4e910dd701f082bf0b6e9c5a",
-    "testedSourceFingerprint": "db3a4a13fd54c2ce6707a19e3b21cdf9e6105e42d29821d39d492627dd3d04dc"
+    "testPlanFingerprint": "f9e1b52d3c0df5c55a3549dbc4da79aa8bcd1c0dbde0c28863e64036131f9113",
+    "testedSourceFingerprint": "24f4330f38082cd29456eb58d99e70291f027228b55bd200739b52ed50296871"
   },
   "performance": {
     "candidateCap": {
@@ -155,7 +155,7 @@
       "target": "<= 100 ms"
     },
     "typingP95": {
-      "measured": "134 ms p95",
+      "measured": "20.5 ms p50 / 134 ms p95",
       "status": "Failed (134ms p95 > 50ms budget)",
       "target": "<= 50 ms"
     }

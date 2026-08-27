@@ -405,34 +405,39 @@ def _gate(
                     "stale": stale_count,
                     "invalid": invalid_count,
                 }
-            elif MANIFEST_MD_PATH.exists():
+            else:
                 manifest_data = generate_manifest_data(head, source_fp, plan_fp, valid_current, [])
                 expected_md = render_manifest_markdown(manifest_data)
-                current_md = MANIFEST_MD_PATH.read_text(encoding="utf-8")
-                if current_md != expected_md:
+                expected_json = json.dumps(manifest_data, indent=2, sort_keys=True) + "\n"
+                
+                from evidence_rollup import DEFAULT_JSON_OUTPUT as MANIFEST_JSON_PATH
+                if not MANIFEST_MD_PATH.exists() or not MANIFEST_JSON_PATH.exists():
                     evidence_gate = {
                         "ok": False,
-                        "reason": "manifest.v1.md is out of date vs current valid evidence",
+                        "reason": "manifest.v1.md or manifest.v1.json is missing",
                         "valid_current": len(valid_current),
                         "stale": stale_count,
                         "invalid": invalid_count,
                     }
                 else:
-                    evidence_gate = {
-                        "ok": True,
-                        "reason": f"{len(valid_current)} valid-current entry(ies), manifest up-to-date",
-                        "valid_current": len(valid_current),
-                        "stale": stale_count,
-                        "invalid": invalid_count,
-                    }
-            else:
-                evidence_gate = {
-                    "ok": True,
-                    "reason": f"{len(valid_current)} valid-current entry(ies)",
-                    "valid_current": len(valid_current),
-                    "stale": stale_count,
-                    "invalid": invalid_count,
-                }
+                    current_md = MANIFEST_MD_PATH.read_text(encoding="utf-8")
+                    current_json = MANIFEST_JSON_PATH.read_text(encoding="utf-8")
+                    if current_md != expected_md or current_json != expected_json:
+                        evidence_gate = {
+                            "ok": False,
+                            "reason": "manifest files are out of date vs current valid evidence",
+                            "valid_current": len(valid_current),
+                            "stale": stale_count,
+                            "invalid": invalid_count,
+                        }
+                    else:
+                        evidence_gate = {
+                            "ok": True,
+                            "reason": f"{len(valid_current)} valid-current entry(ies), manifest up-to-date",
+                            "valid_current": len(valid_current),
+                            "stale": stale_count,
+                            "invalid": invalid_count,
+                        }
     except Exception as exc:  # noqa: BLE001
         evidence_gate = {"ok": False, "reason": f"evidence check failed: {exc}"}
 

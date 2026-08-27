@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": 1,
+  "releaseChannels": {
+    "linux-daily-editor": {
+      "platform": "linux",
+      "requiredCapabilities": [
+        "W1-caret-movement",
+        "W1-virtual-space",
+        "W2-clipboard-session",
+        "W2-tab-policy",
+        "W3-save-pipeline",
+        "W3-basic-completion",
+        "W3-quick-fix",
+        "W4-navigation",
+        "W5-project-structure"
+      ],
+      "requiredEvidenceLayers": ["unit", "browser"],
+      "performanceBudget": {
+        "typingP95Ms": 50,
+        "localActionP95Ms": 100
+      }
+    }
+  }
+}
