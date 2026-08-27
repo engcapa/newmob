@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { ChevronRight, Home, HardDrive } from "lucide-react";
 import { useT } from "../../lib/i18n";
 
@@ -22,10 +22,18 @@ export function PathBreadcrumb({
   const t = useT();
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(path);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!editing) setEditValue(path);
   }, [path, editing]);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
 
   const isDrivesRoot = path === "\\\\";
   const isWindows = detectWindows ?? (path.includes("\\") || isDrivesRoot);
@@ -60,14 +68,16 @@ export function PathBreadcrumb({
 
   const handleEnter = () => {
     setEditing(false);
-    if (editValue && editValue !== path) {
-      onSubmit?.(editValue);
+    const cleaned = editValue.trim().replace(/^['"]|['"]$/g, "");
+    if (cleaned && cleaned !== path) {
+      onSubmit?.(cleaned);
     }
   };
 
   if (editing) {
     return (
       <input
+        ref={inputRef}
         data-testid={testId}
         aria-label={testId}
         autoFocus

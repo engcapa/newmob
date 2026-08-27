@@ -43,6 +43,7 @@ import {
   TerminalImeInputGuard,
 } from "../../lib/terminalImeGuard";
 import { shouldSuppressMacImeKeydown, clearStaleKeyDownSeen, clearStaleKeyDownSeenIfActive } from "../../lib/terminal/macImeKeydown";
+import { isEditableTarget, isTerminalFocused } from "../../lib/terminal/keyboardGuards";
 import {
   readFiles as clipboardReadFiles,
   readText as clipboardReadText,
@@ -1716,6 +1717,9 @@ export function TerminalPanel({
   const effectiveReadOnly = readOnly || inputLocked;
 
   const handleShortcutKey = useCallback((event: KeyboardEvent): boolean => {
+    if (isEditableTarget(event.target, document.activeElement)) {
+      return true;
+    }
     if (event.key === "F11") {
       event.preventDefault();
       setFullscreen((v) => !v);
@@ -3264,6 +3268,14 @@ export function TerminalPanel({
     if (!activeForShortcuts) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      if (isEditableTarget(event.target, activeEl)) {
+        return;
+      }
+      if (!isTerminalFocused(panelRef.current, activeEl)) {
+        return;
+      }
+
       if (handleShortcutKey(event) === false) {
         event.stopPropagation();
         event.stopImmediatePropagation();
