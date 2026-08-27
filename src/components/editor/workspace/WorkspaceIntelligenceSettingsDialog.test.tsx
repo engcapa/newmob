@@ -46,6 +46,19 @@ describe("WorkspaceIntelligenceSettingsDialog", () => {
     fireEvent.change(screen.getByTestId("workspace-completion-doc-delay"), {
       target: { value: "500" },
     });
+    fireEvent.change(screen.getByTestId("workspace-completion-case-matching"), {
+      target: { value: "all" },
+    });
+    fireEvent.change(screen.getByTestId("workspace-completion-sort-mode"), {
+      target: { value: "alphabetical" },
+    });
+    fireEvent.click(screen.getByTestId("workspace-completion-auto-insert-single"));
+    fireEvent.change(screen.getByTestId("workspace-completion-excluded-symbols"), {
+      target: { value: "java.awt.*, com.sun.*" },
+    });
+    fireEvent.change(screen.getByTestId("workspace-completion-prioritized-symbols"), {
+      target: { value: "java.util.*" },
+    });
 
     fireEvent.click(screen.getByTestId("workspace-intelligence-settings-apply"));
 
@@ -67,6 +80,16 @@ describe("WorkspaceIntelligenceSettingsDialog", () => {
         maxItems: 100,
         showDocumentation: false,
         documentationDelayMs: 500,
+        caseMatching: "all",
+        sortMode: "alphabetical",
+        autoInsertSingle: true,
+        excludedSymbols: [
+          { pattern: "java.awt.*", scope: "project" },
+          { pattern: "com.sun.*", scope: "project" },
+        ],
+        prioritizedSymbols: [
+          { pattern: "java.util.*", scope: "project" },
+        ],
       },
     }));
     expect(onClose).toHaveBeenCalledOnce();
@@ -96,6 +119,11 @@ describe("WorkspaceIntelligenceSettingsDialog", () => {
             maxItems: 120,
             showDocumentation: false,
             documentationDelayMs: 600,
+            caseMatching: "first-letter",
+            sortMode: "provider-relevance",
+            autoInsertSingle: false,
+            excludedSymbols: [],
+            prioritizedSymbols: [],
           },
         }}
         onApply={onApply}

@@ -12,6 +12,14 @@ export interface WorkspaceQuickDocPreferences {
   defaultTarget: QuickDocDefaultTarget;
 }
 
+export type CompletionCaseMatching = "first-letter" | "all" | "none";
+export type CompletionSortMode = "provider-relevance" | "alphabetical";
+
+export interface SymbolPatternRule {
+  pattern: string;
+  scope: "project" | "global";
+}
+
 export interface WorkspaceCompletionPreferences {
   autoTrigger: boolean;
   triggerDelayMs: number;
@@ -19,6 +27,23 @@ export interface WorkspaceCompletionPreferences {
   maxItems: number;
   showDocumentation: boolean;
   documentationDelayMs: number;
+  caseMatching: CompletionCaseMatching;
+  sortMode: CompletionSortMode;
+  autoInsertSingle: boolean;
+  excludedSymbols: readonly SymbolPatternRule[];
+  prioritizedSymbols: readonly SymbolPatternRule[];
+}
+
+export interface BasicCompletionPolicyV2 {
+  autoPopup: boolean;
+  delayMs: number;
+  caseMatching: CompletionCaseMatching;
+  sortMode: CompletionSortMode;
+  autoInsertSingle: boolean;
+  excludedSymbols: readonly SymbolPatternRule[];
+  prioritizedSymbols: readonly SymbolPatternRule[];
+  maxVisibleItems: number;
+  documentation: { enabled: boolean; delayMs: number };
 }
 
 export interface WorkspaceIntelligencePreferences {
@@ -39,6 +64,11 @@ export const DEFAULT_WORKSPACE_COMPLETION_PREFERENCES: WorkspaceCompletionPrefer
   maxItems: 50,
   showDocumentation: true,
   documentationDelayMs: 250,
+  caseMatching: "first-letter",
+  sortMode: "provider-relevance",
+  autoInsertSingle: false,
+  excludedSymbols: [],
+  prioritizedSymbols: [],
 };
 
 export const DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES: WorkspaceIntelligencePreferences = {
@@ -129,6 +159,42 @@ export function normalizeWorkspaceIntelligencePreferences(
         value?.completion?.documentationDelayMs,
         DEFAULT_WORKSPACE_COMPLETION_PREFERENCES.documentationDelayMs,
       ),
+      caseMatching: (value?.completion?.caseMatching === "all" || value?.completion?.caseMatching === "none")
+        ? value.completion.caseMatching
+        : "first-letter",
+      sortMode: value?.completion?.sortMode === "alphabetical"
+        ? "alphabetical"
+        : "provider-relevance",
+      autoInsertSingle: value?.completion?.autoInsertSingle === true,
+      excludedSymbols: Array.isArray(value?.completion?.excludedSymbols)
+        ? value.completion.excludedSymbols
+            .filter((s): s is SymbolPatternRule => typeof s?.pattern === "string" && s.pattern.trim().length > 0)
+            .map((s) => ({ pattern: s.pattern.trim(), scope: s.scope === "project" ? "project" : "global" }))
+        : [],
+      prioritizedSymbols: Array.isArray(value?.completion?.prioritizedSymbols)
+        ? value.completion.prioritizedSymbols
+            .filter((s): s is SymbolPatternRule => typeof s?.pattern === "string" && s.pattern.trim().length > 0)
+            .map((s) => ({ pattern: s.pattern.trim(), scope: s.scope === "project" ? "project" : "global" }))
+        : [],
+    },
+  };
+}
+
+export function toBasicCompletionPolicyV2(
+  prefs?: Partial<WorkspaceCompletionPreferences> | null,
+): BasicCompletionPolicyV2 {
+  return {
+    autoPopup: prefs?.autoTrigger !== false,
+    delayMs: prefs?.triggerDelayMs ?? 50,
+    caseMatching: (prefs?.caseMatching === "all" || prefs?.caseMatching === "none") ? prefs.caseMatching : "first-letter",
+    sortMode: prefs?.sortMode === "alphabetical" ? "alphabetical" : "provider-relevance",
+    autoInsertSingle: prefs?.autoInsertSingle === true,
+    excludedSymbols: prefs?.excludedSymbols ?? [],
+    prioritizedSymbols: prefs?.prioritizedSymbols ?? [],
+    maxVisibleItems: prefs?.maxItems ?? 50,
+    documentation: {
+      enabled: prefs?.showDocumentation !== false,
+      delayMs: prefs?.documentationDelayMs ?? 250,
     },
   };
 }

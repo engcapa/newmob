@@ -17,7 +17,14 @@ import type {
 } from "../../../lib/editor/lsp";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import { isInsideStringOrComment } from "./syntaxContext";
-import type { WorkspaceCompletionPreferences } from "./intelligencePreferences";
+import {
+  type BasicCompletionPolicyV2,
+  type CompletionCaseMatching,
+  type CompletionSortMode,
+  type SymbolPatternRule,
+  type WorkspaceCompletionPreferences,
+  toBasicCompletionPolicyV2,
+} from "./intelligencePreferences";
 
 /**
  * Mandatory request identity for every production completion request
@@ -42,7 +49,9 @@ export type CompletionAcceptanceDiagnostic =
   | "truncated"
   | "invalid-additional-edits"
   | "additional-edit-unavailable"
-  | "identity-mismatch";
+  | "identity-mismatch"
+  | "excluded-symbol-blocked"
+  | "auto-inserted-single";
 
 export interface LspCompletionHooks {
   /** Live file/session identity; null means "no provable identity". */
@@ -73,6 +82,7 @@ export interface LspCompletionHooks {
    */
   onResolveGate?: (request: CompletionResolveGateRequest) => void;
   controller?: LspCompletionController;
+  getView?: () => EditorView | null;
 }
 
 /**
@@ -546,12 +556,21 @@ export class LspCompletionController {
       maxItems: 50,
       showDocumentation: true,
       documentationDelayMs: 250,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
       ...initialPreferences,
     };
   }
 
   getPreferences(): WorkspaceCompletionPreferences {
     return { ...this.preferences };
+  }
+
+  getPolicy(): BasicCompletionPolicyV2 {
+    return toBasicCompletionPolicyV2(this.preferences);
   }
 
   setPreferences(next: Partial<WorkspaceCompletionPreferences>): void {
@@ -582,6 +601,98 @@ export class LspCompletionController {
   shouldShowDocumentation(): boolean {
     return this.preferences.showDocumentation;
   }
+
+  getCaseMatching(): CompletionCaseMatching {
+    return this.preferences.caseMatching;
+  }
+
+  getSortMode(): CompletionSortMode {
+    return this.preferences.sortMode;
+  }
+
+  getAutoInsertSingle(): boolean {
+    return this.preferences.autoInsertSingle;
+  }
+
+  getExcludedSymbols(): readonly SymbolPatternRule[] {
+    return this.preferences.excludedSymbols;
+  }
+
+  getPrioritizedSymbols(): readonly SymbolPatternRule[] {
+    return this.preferences.prioritizedSymbols;
+  }
+}
+
+/**
+ * §8.21.3 V2-E: Symbol identity extraction for exclusion and prioritization.
+ * Uses provider item's FQN/detail/data; never relies solely on unqualified label.
+ */
+export function symbolIdentityFromItem(item: LspCompletionItem): {
+  fqn: string | null;
+  detail: string | null;
+  label: string;
+  hasPackageIdentity: boolean;
+} {
+  const rawObj = item.raw && typeof item.raw === "object" ? (item.raw as Record<string, unknown>) : null;
+  const rawData = rawObj?.data && typeof rawObj.data === "object" ? (rawObj.data as Record<string, unknown>) : null;
+  let fqn = (typeof rawData?.fqn === "string" ? rawData.fqn : null)
+    ?? (typeof rawData?.symbol === "string" ? rawData.symbol : null);
+  const detail = item.detail;
+  if (!fqn && detail && detail.includes(".")) {
+    const match = detail.match(/([a-zA-Z0-9_$]+(?:\.[a-zA-Z0-9_$]+)+)/);
+    if (match) {
+      fqn = match[1];
+    }
+  }
+  const hasPackageIdentity = !!fqn || (!!detail && detail.includes("."));
+  return { fqn, detail, label: item.label, hasPackageIdentity };
+}
+
+export function matchesSymbolPattern(
+  identity: { fqn: string | null; detail: string | null; label: string; hasPackageIdentity: boolean },
+  patterns: readonly { pattern: string }[],
+): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  // Identity insufficient: do NOT match on label alone (preventing false exclusion of same-named types)
+  if (!identity.hasPackageIdentity) return false;
+  const target = identity.fqn ?? identity.detail ?? "";
+  return patterns.some((p) => {
+    const pat = p.pattern.trim();
+    if (!pat) return false;
+    if (pat.endsWith(".*")) {
+      const prefix = pat.slice(0, -2);
+      return target === prefix || target.startsWith(`${prefix}.`);
+    }
+    if (pat.endsWith("*")) {
+      const prefix = pat.slice(0, -1);
+      return target.startsWith(prefix);
+    }
+    return target === pat || target.endsWith(`.${pat}`);
+  });
+}
+
+export function matchesCaseRule(
+  typed: string,
+  label: string,
+  mode: CompletionCaseMatching,
+): boolean {
+  if (!typed || !label) return true;
+  if (mode === "none") return true;
+  if (mode === "all") {
+    return label.startsWith(typed);
+  }
+  if (mode === "first-letter") {
+    const typedFirst = typed[0];
+    const labelFirst = label[0];
+    const isTypedUpper = typedFirst >= "A" && typedFirst <= "Z";
+    const isTypedLower = typedFirst >= "a" && typedFirst <= "z";
+    const isLabelUpper = labelFirst >= "A" && labelFirst <= "Z";
+    const isLabelLower = labelFirst >= "a" && labelFirst <= "z";
+    if (isTypedUpper && isLabelLower) return false;
+    if (isTypedLower && isLabelUpper) return false;
+    return true;
+  }
+  return true;
 }
 
 export function mergeCompletionTriggers(server: readonly string[] | null | undefined): string[] {
@@ -985,6 +1096,7 @@ function commitLspCompletion(
   token: CompletionRequestToken,
   isStillCurrent: (token: CompletionRequestToken) => boolean,
   reportDiagnostic: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
+  excludedSymbols?: readonly SymbolPatternRule[],
 ): boolean {
   if (!isStillCurrent(token)) {
     reportDiagnostic?.("identity-mismatch", "accept");
@@ -1000,6 +1112,25 @@ function commitLspCompletion(
   ) {
     reportDiagnostic?.("invalid-additional-edits", "primary-range");
     return false;
+  }
+
+  // §8.21.3 V2-E: Excluded symbol pattern check on item and additional import edits
+  if (excludedSymbols && excludedSymbols.length > 0) {
+    const identity = symbolIdentityFromItem(item);
+    if (matchesSymbolPattern(identity, excludedSymbols)) {
+      reportDiagnostic?.("excluded-symbol-blocked", "item-excluded");
+      return false;
+    }
+    const additionalEdits = item.additionalTextEdits ?? [];
+    for (const edit of additionalEdits) {
+      for (const pat of excludedSymbols) {
+        const cleanPat = pat.pattern.replace(/\*$/, "").trim();
+        if (cleanPat && edit.newText.includes(cleanPat)) {
+          reportDiagnostic?.("excluded-symbol-blocked", "auto-import-excluded");
+          return false;
+        }
+      }
+    }
   }
 
   let replaceFrom = from;
@@ -1092,9 +1223,10 @@ function applyLspCompletion(
   getDocumentRevision: (() => number) | undefined,
   reportDiagnostic: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
   onResolveGate?: ((request: CompletionResolveGateRequest) => void) | undefined,
+  excludedSymbols?: readonly SymbolPatternRule[],
 ): void {
   if (item.additionalTextEdits?.length || !resolve) {
-    commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
+    commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic, excludedSymbols);
     return;
   }
 
@@ -1131,6 +1263,7 @@ function applyLspCompletion(
       token,
       isStillCurrent,
       reportDiagnostic,
+      excludedSymbols,
     );
   };
   const retryResolve = async (): Promise<"committed" | "unavailable"> => {
@@ -1167,6 +1300,7 @@ function applyLspCompletion(
       token,
       isStillCurrent,
       reportDiagnostic,
+      excludedSymbols,
     );
     return committed ? "committed" : "unavailable";
   };
@@ -1241,6 +1375,7 @@ function applyLspCompletion(
         token,
         isStillCurrent,
         reportDiagnostic,
+        excludedSymbols,
       );
     })
     .catch(() => {
@@ -1456,18 +1591,50 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     // The server response is already relevance ordered. Mapping more entries
     // than the popup can consume only allocates closures/documentation helpers
     // on the renderer thread, which is especially visible for jdtls lists.
-    const maxItemsLimit = hooks.controller?.getMaxItems() ?? MAX_COMPLETION_OPTIONS;
+    const policy = hooks.controller?.getPolicy?.() ?? {
+      autoPopup: true,
+      delayMs: 50,
+      caseMatching: "none" as const,
+      sortMode: "provider-relevance" as const,
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
+      maxVisibleItems: MAX_COMPLETION_OPTIONS,
+      documentation: { enabled: true, delayMs: 250 },
+    };
+    const maxItemsLimit = policy.maxVisibleItems ?? MAX_COMPLETION_OPTIONS;
     const maxItemsToProcess = Math.min(rawItems.length, maxItemsLimit);
     for (let i = 0; i < maxItemsToProcess; i += 1) {
       const item = rawItems[i];
       if (!item) continue;
+
+      const identity = symbolIdentityFromItem(item);
+      // §8.21.3 V2-E: Excluded symbols matching on provider item FQN/detail/data
+      if (matchesSymbolPattern(identity, policy.excludedSymbols)) {
+        continue;
+      }
+
       const filterText = item.filterText?.trim() ? item.filterText : null;
       const label = filterText ?? item.label;
-      const boost = boostFromTypedPrefix(typed, label, item.sortText);
+
+      // §8.21.3 V2-E: Case matching filter
+      if (typed && !matchesCaseRule(typed, label, policy.caseMatching)) {
+        continue;
+      }
+
+      // §8.21.3 V2-E: Prioritized symbols boost and provenance
+      const isPrioritized = matchesSymbolPattern(identity, policy.prioritizedSymbols);
+      let boost = boostFromTypedPrefix(typed, label, item.sortText);
+      if (isPrioritized) {
+        boost = (boost ?? 0) + 500;
+      }
+
       const displayLabel = filterText && filterText !== item.label ? item.label : undefined;
       const truncatedDetail = result.truncated && i === 0
         ? `${item.detail ?? ""}${item.detail ? " · " : ""}list truncated — keep typing to refine`.trim()
-        : item.detail ?? undefined;
+        : isPrioritized
+          ? `${item.detail ?? ""}${item.detail ? " · " : ""}(prioritized)`.trim()
+          : item.detail ?? undefined;
       let resolvedItemPromise: Promise<LspCompletionItem | null> | null = null;
       const resolveItem: CompletionItemResolver | undefined = hooks.resolve
         ? () => {
@@ -1487,7 +1654,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             );
           }
         : undefined;
-      const showDoc = hooks.controller?.shouldShowDocumentation() ?? true;
+      const showDoc = policy.documentation.enabled;
       mapped.push({
         label,
         displayLabel,
@@ -1510,11 +1677,17 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             hooks.getDocumentRevision,
             hooks.reportDiagnostic,
             hooks.onResolveGate,
+            policy.excludedSymbols,
           ),
       });
       mappedItems.push(item);
     }
     if (context.aborted) return null;
+
+    // §8.21.3 V2-E: Client-side explicit alphabetical sorting vs provider relevance
+    if (policy.sortMode === "alphabetical") {
+      mapped.sort((a, b) => a.label.localeCompare(b.label));
+    }
 
     // Prefer textEdit start when every item shares the same replace range so
     // CM's client-side filtering aligns with the server's replace span.
@@ -1528,6 +1701,41 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       && item.textEdit.range.end.character === firstEdit.range.end.character
     ))) {
       from = offsetFromLspPosition(context.state.doc, firstEdit.range.start);
+    }
+
+    // §8.21.3 V2-E: autoInsertSingle executes in single transaction when conditions pass
+    if (
+      policy.autoInsertSingle
+      && mapped.length === 1
+      && !result.isIncomplete
+      && !result.truncated
+      && isStillCurrent(token)
+      && !hooks.onResolveGate
+    ) {
+      const targetView = hooks.getView?.();
+      if (targetView) {
+        const singleItem = mappedItems[0];
+        const isSnippet = singleItem.insertTextFormat === 2;
+        const rawText = singleItem.textEdit?.newText ?? singleItem.insertText ?? singleItem.label;
+        const parsedSnippet = isSnippet ? parseLspSnippet(rawText) : null;
+        const hasAmbiguousChoices = parsedSnippet && parsedSnippet.placeholders.some((p) => (p.choices?.length ?? 0) > 1);
+        if (!hasAmbiguousChoices) {
+          hooks.reportDiagnostic?.("auto-inserted-single");
+          const applied = commitLspCompletion(
+            targetView,
+            singleItem,
+            from,
+            context.pos,
+            token,
+            isStillCurrent,
+            hooks.reportDiagnostic,
+            policy.excludedSymbols,
+          );
+          if (applied) {
+            return null;
+          }
+        }
+      }
     }
 
     // Keep server order for the head of the list, then cap for popup cost.

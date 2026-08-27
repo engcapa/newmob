@@ -63,4 +63,30 @@ describe("§8.20.7 W6-E WorkspaceLspSessionManager & LspCompletionController", (
     expect(controller.getMaxItems()).toBe(200);
     expect(controller.getDocumentationDelayMs()).toBe(0);
   });
+
+  it("§8.21.3 V2-E: configures BasicCompletionPolicyV2 caseMatching, sortMode, exclusions, and autoInsertSingle", () => {
+    const manager = new WorkspaceLspSessionManager();
+    const controller = manager.getCompletionController();
+
+    manager.setCompletionPreferences({
+      caseMatching: "all",
+      sortMode: "alphabetical",
+      autoInsertSingle: true,
+      excludedSymbols: [{ pattern: "java.awt.*", scope: "project" }],
+      prioritizedSymbols: [{ pattern: "java.util.*", scope: "global" }],
+    });
+
+    expect(controller.getCaseMatching()).toBe("all");
+    expect(controller.getSortMode()).toBe("alphabetical");
+    expect(controller.getAutoInsertSingle()).toBe(true);
+    expect(controller.getExcludedSymbols()).toEqual([{ pattern: "java.awt.*", scope: "project" }]);
+    expect(controller.getPrioritizedSymbols()).toEqual([{ pattern: "java.util.*", scope: "global" }]);
+
+    const policy = controller.getPolicy();
+    expect(policy.caseMatching).toBe("all");
+    expect(policy.sortMode).toBe("alphabetical");
+    expect(policy.autoInsertSingle).toBe(true);
+    expect(policy.excludedSymbols).toEqual([{ pattern: "java.awt.*", scope: "project" }]);
+    expect(policy.prioritizedSymbols).toEqual([{ pattern: "java.util.*", scope: "global" }]);
+  });
 });

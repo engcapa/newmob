@@ -1361,6 +1361,44 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const readOnlyCompartment = useRef(new Compartment());
   const wrappingCompartment = useRef(new Compartment());
   const appearanceCompartment = useRef(new Compartment());
+  const completionCompartment = useRef(new Compartment());
+  const presentResolveGateRef = useRef<((request: CompletionResolveGateRequest) => void) | null>(null);
+
+  const buildAutocompletionExtension = useCallback(() => {
+    const policy = completionController?.getPolicy();
+    const autoPopup = policy?.autoPopup ?? true;
+    const delayMs = policy?.delayMs ?? 100;
+    const maxVisibleItems = policy?.maxVisibleItems ?? 100;
+    const docDelayMs = policy?.documentation?.delayMs ?? hoverDocumentationDelayMs ?? 75;
+
+    return autocompletion({
+      activateOnTyping: autoPopup,
+      activateOnTypingDelay: delayMs,
+      defaultKeymap: true,
+      icons: true,
+      maxRenderedOptions: maxVisibleItems,
+      interactionDelay: docDelayMs,
+      optionClass: (completion) => (
+        completion.type ? `cm-completion-type-${completion.type}` : ""
+      ),
+      override: [
+        createLiveTemplateCompletionSource(() => pathRef.current),
+        createLspCompletionSource({
+          identity: () => getCompletionIdentityRef.current(),
+          fetch: (position, trigger, token, invocation) =>
+            onCompleteRef.current?.(position, trigger, token, invocation) ?? Promise.resolve(null),
+          resolve: (raw, token) =>
+            onCompleteResolveRef.current?.(raw, token) ?? Promise.resolve(null),
+          triggerCharacters: () => completionTriggersRef.current,
+          getDocumentRevision: () => getCompletionIdentityRef.current()?.documentRevision ?? -1,
+          reportDiagnostic: (kind, detail) => onCompletionDiagnosticRef.current(kind, detail),
+          onResolveGate: (request) => presentResolveGateRef.current?.(request),
+          controller: completionControllerRef.current,
+          getView: () => viewRef.current,
+        }),
+      ],
+    });
+  }, [completionController, hoverDocumentationDelayMs]);
   const lastParameterInfoNonceRef = useRef(parameterInfoRequestNonce);
   const requestParameterInfoRef = useRef<(() => boolean) | null>(null);
   const activeHoverResizeSessionRef = useRef<WindowResizeSession | null>(null);
@@ -1585,6 +1623,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         },
       });
     };
+    presentResolveGateRef.current = presentResolveGate;
     const clearPendingSelectionEmit = () => {
       if (selectionEmitTimerRef.current === null) return;
       window.clearTimeout(selectionEmitTimerRef.current);
@@ -1753,40 +1792,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),
-        autocompletion({
-          // Closer to IDEA: short settle while typing; trigger chars fire
-          // immediately via the updateListener below.
-          activateOnTyping: true,
-          activateOnTypingDelay: 100,
-          // Prefer the first server-ranked item (sortText / boost) when open.
-          defaultKeymap: true,
-          icons: true,
-          // Large jdtls/ra lists stay scrollable without freezing the UI thread.
-          maxRenderedOptions: 100,
-          // Delay documentation side-panel slightly so arrowing through the
-          // list does not thrash completionItem/resolve.
-          interactionDelay: 75,
-          optionClass: (completion) => (
-            completion.type ? `cm-completion-type-${completion.type}` : ""
-          ),
-          override: [
-            // Local IDEA-style live/postfix templates (sout, psvm, fori, …).
-            // Ranked above most LSP items via boost so Tab expands them first.
-            createLiveTemplateCompletionSource(() => pathRef.current),
-            createLspCompletionSource({
-              identity: () => getCompletionIdentityRef.current(),
-              fetch: (position, trigger, token, invocation) =>
-                onCompleteRef.current?.(position, trigger, token, invocation) ?? Promise.resolve(null),
-              resolve: (raw, token) =>
-                onCompleteResolveRef.current?.(raw, token) ?? Promise.resolve(null),
-              triggerCharacters: () => completionTriggersRef.current,
-              getDocumentRevision: () => getCompletionIdentityRef.current()?.documentRevision ?? -1,
-              reportDiagnostic: (kind, detail) => onCompletionDiagnosticRef.current(kind, detail),
-              onResolveGate: (request) => presentResolveGate(request),
-              controller: completionControllerRef.current,
-            }),
-          ],
-        }),
+        completionCompartment.current.of(buildAutocompletionExtension()),
         // IDEA: typing `.` / `:` (or server trigger chars) opens the popup
         // immediately instead of waiting for activateOnTypingDelay.
         EditorView.updateListener.of((update) => {
@@ -2381,6 +2387,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       )),
     });
   }, [buildDebugChrome, debugBreakpoints, debugCurrentLine, debugEvaluate, debugInlineValues]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: completionCompartment.current.reconfigure(buildAutocompletionExtension()),
+    });
+  }, [buildAutocompletionExtension]);
 
   useEffect(() => {
     const view = viewRef.current;

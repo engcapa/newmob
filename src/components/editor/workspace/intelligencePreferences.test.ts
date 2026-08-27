@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   inlayHintsEnabledForLanguage,
   readWorkspaceIntelligencePreferences,
+  toBasicCompletionPolicyV2,
   writeWorkspaceIntelligencePreferences,
 } from "./intelligencePreferences";
 
@@ -46,6 +47,11 @@ describe("workspace intelligence preferences", () => {
         maxItems: 80,
         showDocumentation: false,
         documentationDelayMs: 400,
+        caseMatching: "first-letter",
+        sortMode: "provider-relevance",
+        autoInsertSingle: false,
+        excludedSymbols: [],
+        prioritizedSymbols: [],
       },
     });
     const restored = readWorkspaceIntelligencePreferences("ws");
@@ -72,6 +78,11 @@ describe("workspace intelligence preferences", () => {
       maxItems: 80,
       showDocumentation: false,
       documentationDelayMs: 400,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
     });
   });
 
@@ -100,6 +111,11 @@ describe("workspace intelligence preferences", () => {
       maxItems: 50,
       showDocumentation: true,
       documentationDelayMs: 250,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
     });
   });
 
@@ -123,6 +139,30 @@ describe("workspace intelligence preferences", () => {
       maxItems: 200,
       showDocumentation: false,
       documentationDelayMs: 0,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
+    });
+  });
+
+  it("§8.21.3 V2-E: maps to BasicCompletionPolicyV2 with custom rules", () => {
+    const prefs = readWorkspaceIntelligencePreferences("default-policy");
+    const policy = toBasicCompletionPolicyV2(prefs.completion);
+    expect(policy).toEqual({
+      autoPopup: true,
+      delayMs: 50,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
+      maxVisibleItems: 50,
+      documentation: {
+        enabled: true,
+        delayMs: 250,
+      },
     });
   });
 });
