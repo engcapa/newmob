@@ -369,6 +369,10 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       expect(keys).toContain("Enter");
       expect(keys).toContain("Tab");
       expect(keys).toContain("Escape");
+      expect(keys).toContain("PageUp");
+      expect(keys).toContain("PageDown");
+      expect(keys).toContain("Shift-PageUp");
+      expect(keys).toContain("Shift-PageDown");
 
       expect(VirtualSpaceController.keymap).toBe(virtualSpaceKeymap);
     });

@@ -458,6 +458,8 @@ export const virtualSelectUp = (view: EditorView) => virtualVerticalMoveCommand(
 export const virtualSelectDown = (view: EditorView) => virtualVerticalMoveCommand(view, "down", true);
 export const virtualPageUp = (view: EditorView) => virtualVerticalMoveCommand(view, "pageUp", false);
 export const virtualPageDown = (view: EditorView) => virtualVerticalMoveCommand(view, "pageDown", false);
+export const virtualSelectPageUp = (view: EditorView) => virtualVerticalMoveCommand(view, "pageUp", true);
+export const virtualSelectPageDown = (view: EditorView) => virtualVerticalMoveCommand(view, "pageDown", true);
 
 export function virtualMoveLeftCommand(view: EditorView, extend: boolean): boolean {
   if (view.composing) return false;
@@ -646,10 +648,24 @@ export const virtualSpaceKeymap = [
     },
   },
   {
+    key: "Shift-PageUp",
+    run: (view: EditorView) => {
+      const pol = view.state.facet(editorVirtualSpacePolicy);
+      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageUp", true) : false;
+    },
+  },
+  {
     key: "PageDown",
     run: (view: EditorView) => {
       const pol = view.state.facet(editorVirtualSpacePolicy);
       return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageDown", false) : false;
+    },
+  },
+  {
+    key: "Shift-PageDown",
+    run: (view: EditorView) => {
+      const pol = view.state.facet(editorVirtualSpacePolicy);
+      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageDown", true) : false;
     },
   },
   { key: "ArrowLeft", run: (view: EditorView) => virtualMoveLeftCommand(view, false) },
