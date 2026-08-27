@@ -7776,14 +7776,14 @@ Unit / full editor / build / Rust / audit / browser / native / provider / IDEA o
 | 顺序 | 状态 | 包 | 本轮准确目标 | 依赖与owner边界 |
 |---:|---|---|---|---|
 | 0 | [x] | **Y0 Evidence Quarantine + Authentic Runner Receipts** | 隔离9条合成entry；让执行事实只能从真实runner receipt和artifact派生 | 全部release claim前置；只改evidence schema/tool/runner/plan/tests，不夹带产品修复 |
-| 1 | [ ] | **Y1 Clipboard Session + Safe Delete Honest Closure** | 补齐canonical session的mounted/effect/lifecycle；Safe Delete只按真实attestation呈现 | 拥有Clipboard装配与Safe Delete availability；不改tab/save |
-| 2 | [ ] | **Y2 Tab Policy Revisioned Transaction + Resource Lifecycle** | 真实revision、post-layout引用计算、dirty确认、close/recovery和snapshot形成一笔事务 | 拥有tab policy/close装配；不重排其它`CodeWorkspaceTab`区域 |
-| 3 | [ ] | **Y3 Virtual Space Unified ActionHost + Visual Paging** | 删除第二行为真值；补Shift-Page、composition、真实viewport和多光标语义 | 拥有virtual-space/action binding；不改completion key handling |
-| 4 | [ ] | **Y4 Actions on Save Typed Transaction + Organize Imports** | 在shadow plan中解析真实source action，逐stage提交、诊断和恢复 | 消费Y6共享adapter；可先完成非Code Action stage状态机 |
-| 5 | [ ] | **Y5 Completion Auto-insert/Scope/Ordering Closure** | 修通single auto-insert，执行scope，固定match/provider排序和live revision | project/module scope依赖Y8；基础策略可独立 |
-| 6 | [ ] | **Y6 Code Action Shared Production Adapter + Effect Receipt** | 四入口统一request/resolve/precondition/apply/history/provider trace | Y0；为Y4提供plan接口 |
-| 7 | [ ] | **Y7 Semantic Query Production Sessions** | Definition/References/Usages/Hierarchy进入真实owner，await后重验并接cancel/history/UI | Y0；分类消费Y8 |
-| 8 | [ ] | **Y8 Maven/Gradle Tooling Ingestion + Project Consumers** | descriptor只作发现，真实tooling facts进入单一snapshot并服务Y5/Y7/refactor | trust/process owner先复用；不新增build UI |
+| 1 | [x] | **Y1 Clipboard Session + Safe Delete Honest Closure** | 补齐canonical session的mounted/effect/lifecycle；Safe Delete只按真实attestation呈现 | 拥有Clipboard装配与Safe Delete availability；不改tab/save |
+| 2 | [x] | **Y2 Tab Policy Revisioned Transaction + Resource Lifecycle** | 真实revision、post-layout引用计算、dirty确认、close/recovery和snapshot形成一笔事务 | 拥有tab policy/close装配；不重排其它`CodeWorkspaceTab`区域 |
+| 3 | [x] | **Y3 Virtual Space Unified ActionHost + Visual Paging** | 删除第二行为真值；补Shift-Page、composition、真实viewport和多光标语义 | 拥有virtual-space/action binding；不改completion key handling |
+| 4 | [x] | **Y4 Actions on Save Typed Transaction + Organize Imports** | 在shadow plan中解析真实source action，逐stage提交、诊断和恢复 | 消费Y6共享adapter；可先完成非Code Action stage状态机 |
+| 5 | [x] | **Y5 Completion Auto-insert/Scope/Ordering Closure** | 修通single auto-insert，执行scope，固定match/provider排序和live revision | project/module scope依赖Y8；基础策略可独立 |
+| 6 | [x] | **Y6 Code Action Shared Production Adapter + Effect Receipt** | 四入口统一request/resolve/precondition/apply/history/provider trace | Y0；为Y4提供plan接口 |
+| 7 | [x] | **Y7 Semantic Query Production Sessions** | Definition/References/Usages/Hierarchy进入真实owner，await后重验并接cancel/history/UI | Y0；分类消费Y8 |
+| 8 | [x] | **Y8 Maven/Gradle Tooling Ingestion + Project Consumers** | descriptor只作发现，真实tooling facts进入单一snapshot并服务Y5/Y7/refactor | trust/process owner先复用；不新增build UI |
 | 9 | [ ] | **Y9 Release-scope Behavioral Catalog + Effect Cases** | 每包同步feature/control/case；Daily Editor release scope达到zero-gap | 随Y1-Y8增量完成；不得末尾补占位YAML |
 | 10 | [ ] | **Y10 Real Linux/Provider/Performance/A11y/IDEA Matrix** | 运行而非生成Linux首发矩阵；每格保存原始receipt/effect；失败诚实阻断 | Y0-Y9对应格通过；产品缺陷退回owner |
 | 11 | [ ] 🔒 | **Y11 Advanced Re-entry** | SSR、Full Line、Smart、Code Vision、Scratch、Injection、Detach继续锁定 | 仅独立ADR可解锁，不能混入Y0-Y10 |
