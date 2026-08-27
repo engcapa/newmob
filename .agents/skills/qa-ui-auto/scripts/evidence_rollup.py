@@ -139,9 +139,15 @@ def generate_manifest_data(
                 typing_p95_status = f"Failed ({val}ms > 50ms budget)"
                 typing_measured = f"{val} ms p95"
 
+    current_commit = (
+        valid_entries[0].get("subject", {}).get("appCommit", head_commit)
+        if valid_entries
+        else head_commit
+    )
+
     return {
         "metadata": {
-            "currentCommit": head_commit,
+            "currentCommit": current_commit,
             "testedSourceFingerprint": tested_source_fp,
             "testPlanFingerprint": test_plan_fp,
             "activeEntriesCount": len(valid_entries),

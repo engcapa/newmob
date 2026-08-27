@@ -2,13 +2,13 @@ schemaVersion: 4
 capabilityId: W2-clipboard-session
 languageId: null
 subject:
-  appCommit: 27363b755d5754058e971e574b9af8d385ae9ae2
-  recordedAtCommit: 27363b755d5754058e971e574b9af8d385ae9ae2
+  appCommit: 3ae082f3fd754ed31b8ce1613a3203a3d292c0b1
+  recordedAtCommit: 3ae082f3fd754ed31b8ce1613a3203a3d292c0b1
   sourceTreeHash: b75b8b7448c39c0020756067a26723369565fe33c973fd3c6e1be4d4bd6ceebf
   sourceDirty: false
   bundleHash: d4128b4f64c8d68a1e22496c2dc98e252806a89fcba2cde30056b6069d3deab8
-  testPlanHash: 95e02da1c142b07be949bf9e5b37863d6cf1db58bb19700c45949b2600950b55
-recordedAtCommit: 27363b755d5754058e971e574b9af8d385ae9ae2
+  testPlanHash: f3c4794708d704e85b2226d51f5303f55954dc9f1a0efa832bd1d737a9a2028e
+recordedAtCommit: 3ae082f3fd754ed31b8ce1613a3203a3d292c0b1
 owner:
   featureId: F25.5
   paths:
@@ -31,7 +31,7 @@ command: python -m qa_ui_auto.runner --filter TC-IDE-C3-01
 artifacts:
 - kind: summary
   path: qa-ui-auto-tests/native/evidence/artifacts/w2-clipboard-session-summary.json
-  sha256: 4b36b750fd6a9be0d773984cc032792bf8b1be9b34e6255971dc487482457cd7
+  sha256: da092fbb93bcd76c90cc982f7e6f6f8342a1d2ea7ebf57ab46433d10dd70cc25
   redacted: true
 claimKeys:
 - W2-clipboard-session
