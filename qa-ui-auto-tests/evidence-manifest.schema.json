@@ -96,6 +96,10 @@
         "maximumClaim": {
           "$ref": "#/$defs/maximumClaim"
         },
+        "evidencePurpose": {
+          "type": "string",
+          "enum": ["release", "synthetic", "test-fixture"]
+        },
         "notes": { "type": "string" },
         "collectedAt": { "type": "string" }
       }

@@ -250,6 +250,17 @@ def validate_entry(
             [f"Unsupported schemaVersion: {version}"],
         )
 
+    # Synthetic evidence check
+    if data.get("evidencePurpose") == "synthetic" or "synthetic-fixtures" in str(entry_path):
+        if check_current:
+            return ValidationResult(
+                entry_path,
+                EntryStatus.INVALID,
+                "SYNTHETIC_EVIDENCE_NOT_ALLOWED",
+                ["Synthetic fixture entries cannot be used as valid-current release evidence"],
+                data=data,
+            )
+
     # Owner validation (v4)
     owner = data.get("owner", {})
     paths = owner.get("paths", [])
@@ -438,6 +449,14 @@ def validate_entry(
             )
 
         # 2. Source dirty check
+        if is_source_dirty():
+            return ValidationResult(
+                entry_path,
+                EntryStatus.INVALID,
+                "DIRTY_SOURCE",
+                ["Product source working tree has uncommitted modifications"],
+                data=data,
+            )
         if subject.get("sourceDirty", False):
             return ValidationResult(
                 entry_path,

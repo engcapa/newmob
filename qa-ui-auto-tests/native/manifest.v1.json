@@ -59,39 +59,39 @@
       "status": "unverified"
     },
     {
-      "claim": "L2",
-      "layers": "browser, unit",
-      "owners": "`workspaceVirtualSpace.ts`",
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
       "package": "W1: Reference Information V3",
-      "status": "Active"
+      "status": "unverified"
     },
     {
-      "claim": "L2",
-      "layers": "browser, unit",
-      "owners": "`workspaceClipboardSession.ts`, `workspaceTabPolicy.ts`",
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
       "package": "W2: Project Analysis & Lifecycle",
-      "status": "Active"
+      "status": "unverified"
     },
     {
-      "claim": "L2",
-      "layers": "browser, unit",
-      "owners": "`codeActionExecution.ts`, `lspCompletion.ts`, `saveNormalizationPipeline.ts`",
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
       "package": "W3: Inspection & Intention Contract",
-      "status": "Active"
+      "status": "unverified"
     },
     {
-      "claim": "L2",
-      "layers": "browser, unit",
-      "owners": "`workspaceSemanticQueryHost.ts`",
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
       "package": "W4: Navigation & Usages Session",
-      "status": "Active"
+      "status": "unverified"
     },
     {
-      "claim": "L2",
-      "layers": "browser, unit",
-      "owners": "`projectStructureModel.ts`",
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
       "package": "W5: Refactor & Conflict Gate",
-      "status": "Active"
+      "status": "unverified"
     },
     {
       "claim": "unverified",
@@ -130,9 +130,9 @@
     }
   ],
   "metadata": {
-    "activeEntriesCount": 9,
-    "currentCommit": "3ae082f3fd754ed31b8ce1613a3203a3d292c0b1",
-    "evidenceDigest": "c9c27abd512a8ef0",
+    "activeEntriesCount": 0,
+    "currentCommit": "a83706438dc1ac4b621dd4f24c2aca1885d9c87e",
+    "evidenceDigest": "e3b0c44298fc1c14",
     "generator": "evidence_rollup.py v4",
     "staleEntriesCount": 0,
     "testPlanFingerprint": "f3c4794708d704e85b2226d51f5303f55954dc9f1a0efa832bd1d737a9a2028e",
@@ -155,8 +155,8 @@
       "target": "<= 100 ms"
     },
     "typingP95": {
-      "measured": "32.5 ms p95",
-      "status": "Meets target (32.5ms <= 50ms)",
+      "measured": "20.5 ms p50 / 134 ms p95",
+      "status": "Failed (134ms p95 > 50ms budget)",
       "target": "<= 50 ms"
     }
   }

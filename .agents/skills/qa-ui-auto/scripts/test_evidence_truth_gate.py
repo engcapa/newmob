@@ -317,6 +317,36 @@ class EvidenceTruthGateTests(unittest.TestCase):
 
         self.assertIn("Failed (134ms p95 > 50ms budget)", md)
 
+    def test_negative_synthetic_purpose_quarantine(self):
+        synth = copy.deepcopy(self.sample_v4)
+        synth["evidencePurpose"] = "synthetic"
+        entry_file = self._write_entry(synth)
+        res = validate_entry(
+            entry_file,
+            self.schema,
+            check_current=True,
+            current_source_fp=self.source_fp,
+            current_test_plan_fp=self.plan_fp,
+            current_head="a" * 40,
+        )
+        self.assertEqual(res.status, EntryStatus.INVALID)
+        self.assertEqual(res.reason_code, "SYNTHETIC_EVIDENCE_NOT_ALLOWED")
+
+    def test_negative_worktree_dirty_fails_current(self):
+        entry_file = self._write_entry(self.sample_v4)
+        import unittest.mock as mock
+        with mock.patch("evidence_validate.is_source_dirty", return_value=True):
+            res = validate_entry(
+                entry_file,
+                self.schema,
+                check_current=True,
+                current_source_fp=self.source_fp,
+                current_test_plan_fp=self.plan_fp,
+                current_head="a" * 40,
+            )
+            self.assertEqual(res.status, EntryStatus.INVALID)
+            self.assertEqual(res.reason_code, "DIRTY_SOURCE")
+
 
 if __name__ == "__main__":
     unittest.main()
