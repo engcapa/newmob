@@ -5,7 +5,7 @@ import {
   buildRefactorPlan,
   refactorApplyGate,
   verifyExclusionSafety,
-  type RefactorPlanV3,
+  type RefactorPlanV4,
 } from "./refactorPlan";
 
 const dummyLocation: LspLocation = {
@@ -25,17 +25,19 @@ const dummyEvidence = buildCapabilityEvidence({
   complete: false,
 });
 
-describe("refactorApplyGate §8.20.6", () => {
+describe("refactorApplyGate §8.20.6 & §8.21.2 V1", () => {
   it("blocks outright when error-severity conflicts exist", () => {
-    const plan: RefactorPlanV3 = {
+    const plan: RefactorPlanV4 = {
       actionId: "action-1",
       kind: "rename",
       evidence: dummyEvidence,
-      completeness: "provider-complete",
+      completeness: { value: "complete", source: "provider-asserted", proof: null },
       conflicts: [
-        { severity: "error", message: "Naming collision with existing class 'B'", location: dummyLocation },
+        { severity: "error", message: "Naming collision with existing class 'B'", location: dummyLocation, source: "reported" },
       ],
       operations: [],
+      documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+      requiredOperationIndexes: [],
       affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
       excludableGroups: [],
     };
@@ -47,15 +49,17 @@ describe("refactorApplyGate §8.20.6", () => {
   });
 
   it("requires explicit user confirmation when only warning conflicts exist", () => {
-    const plan: RefactorPlanV3 = {
+    const plan: RefactorPlanV4 = {
       actionId: "action-2",
       kind: "rename",
       evidence: dummyEvidence,
-      completeness: "provider-complete",
+      completeness: { value: "complete", source: "provider-asserted", proof: null },
       conflicts: [
-        { severity: "warning", message: "Overload might become ambiguous", location: dummyLocation },
+        { severity: "warning", message: "Overload might become ambiguous", location: dummyLocation, source: "reported" },
       ],
       operations: [],
+      documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+      requiredOperationIndexes: [],
       affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
       excludableGroups: [],
     };
@@ -67,44 +71,77 @@ describe("refactorApplyGate §8.20.6", () => {
   });
 
   it("hard blocks Safe Delete when completeness is provider-partial", () => {
-    const plan: RefactorPlanV3 = {
+    const plan: RefactorPlanV4 = {
       actionId: "action-3",
       kind: "safe-delete",
       evidence: dummyEvidence,
-      completeness: "provider-partial",
+      completeness: { value: "partial", source: "protocol-bounded", proof: null },
       conflicts: [],
       operations: [],
+      documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+      requiredOperationIndexes: [],
       affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
       excludableGroups: [],
     };
     const decision = refactorApplyGate(plan);
     expect(decision.allowed).toBe(false);
-    expect(decision.reason).toContain("Safe Delete requires provider-complete references");
+    expect(decision.reason).toContain("Language provider does not attest complete Safe Delete coverage");
   });
 
   it("hard blocks Safe Delete when completeness is unknown", () => {
-    const plan: RefactorPlanV3 = {
+    const plan: RefactorPlanV4 = {
       actionId: "action-4",
       kind: "safe-delete",
       evidence: dummyEvidence,
-      completeness: "unknown",
+      completeness: { value: "unknown", source: "unknown", proof: null },
       conflicts: [],
       operations: [],
+      documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+      requiredOperationIndexes: [],
       affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
       excludableGroups: [],
     };
     const decision = refactorApplyGate(plan);
     expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("Language provider does not attest complete Safe Delete coverage");
   });
 
-  it("allows Safe Delete when completeness is provider-complete", () => {
-    const plan: RefactorPlanV3 = {
+  it("hard blocks Safe Delete when completeness is only client-observed bounded", () => {
+    const plan: RefactorPlanV4 = {
+      actionId: "action-5b",
+      kind: "safe-delete",
+      evidence: dummyEvidence,
+      completeness: {
+        value: "complete",
+        source: "client-observed-bounded",
+        proof: "all references resolved within workspace roots",
+      },
+      conflicts: [],
+      operations: [],
+      documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+      requiredOperationIndexes: [],
+      affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
+      excludableGroups: [],
+    };
+    const decision = refactorApplyGate(plan);
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("Language provider does not attest complete Safe Delete coverage");
+  });
+
+  it("allows Safe Delete only when completeness is provider-asserted complete with proof", () => {
+    const plan: RefactorPlanV4 = {
       actionId: "action-5",
       kind: "safe-delete",
       evidence: dummyEvidence,
-      completeness: "provider-complete",
+      completeness: {
+        value: "complete",
+        source: "provider-asserted",
+        proof: "jdtls dedicated safe delete command verified",
+      },
       conflicts: [],
       operations: [],
+      documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+      requiredOperationIndexes: [],
       affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
       excludableGroups: [],
     };
@@ -114,13 +151,18 @@ describe("refactorApplyGate §8.20.6", () => {
   });
 
   it("hard blocks when any affected URI belongs to a read-only library or external source", () => {
-    const plan: RefactorPlanV3 = {
+    const plan: RefactorPlanV4 = {
       actionId: "action-6",
       kind: "rename",
       evidence: dummyEvidence,
-      completeness: "provider-complete",
+      completeness: { value: "complete", source: "provider-asserted", proof: null },
       conflicts: [],
       operations: [],
+      documents: [
+        { uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" },
+        { uri: "jar:file:///root/.m2/repository/dep.jar!/Dep.class", canonicalPath: null, expectedDocumentRevision: null, expectedDiskHash: null, owner: "library" },
+      ],
+      requiredOperationIndexes: [],
       affectedUris: [
         { uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" },
         { uri: "jar:file:///root/.m2/repository/dep.jar!/Dep.class", revision: null, owner: "library" },
@@ -133,13 +175,15 @@ describe("refactorApplyGate §8.20.6", () => {
   });
 
   it("requires preview when completeness is partial", () => {
-    const plan: RefactorPlanV3 = {
+    const plan: RefactorPlanV4 = {
       actionId: "action-7",
       kind: "rename",
       evidence: dummyEvidence,
-      completeness: "provider-partial",
+      completeness: { value: "partial", source: "protocol-bounded", proof: null },
       conflicts: [],
       operations: [],
+      documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+      requiredOperationIndexes: [],
       affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
       excludableGroups: [],
     };
@@ -149,7 +193,7 @@ describe("refactorApplyGate §8.20.6", () => {
   });
 });
 
-describe("buildRefactorPlan & verifyExclusionSafety §8.20.6", () => {
+describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => {
   const sampleEdit: LspWorkspaceEdit = {
     documentEdits: [
       {
@@ -183,9 +227,47 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6", () => {
     expect(plan.affectedUris).toHaveLength(2);
     expect(plan.affectedUris[0].owner).toBe("workspace");
     expect(plan.affectedUris[1].owner).toBe("workspace");
+    expect(plan.documents).toHaveLength(2);
     expect(plan.excludableGroups).toHaveLength(2);
     expect(plan.excludableGroups[0].required).toBe(true);
     expect(plan.excludableGroups[1].required).toBe(false);
+  });
+
+  it("maps document revisions and hashes per URI instead of using first open file", () => {
+    const multiFileEdit: LspWorkspaceEdit = {
+      documentEdits: [
+        {
+          uri: "file:///workspace/src/A.java",
+          path: "/workspace/src/A.java",
+          edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } }, newText: "A2" }],
+        },
+        {
+          uri: "file:///workspace/src/B.java",
+          path: "/workspace/src/B.java",
+          edits: [{ range: { start: { line: 2, character: 0 }, end: { line: 2, character: 1 } }, newText: "B2" }],
+        },
+      ],
+    };
+
+    const plan = buildRefactorPlan({
+      actionId: "plan-revisions",
+      kind: "rename",
+      evidence: dummyEvidence,
+      edit: multiFileEdit,
+      roots: [{ path: "/workspace" }],
+      openFiles: {
+        "file:///workspace/src/A.java": { documentRevision: 10, diskHash: "hash-a" },
+        "file:///workspace/src/B.java": { documentRevision: 20, diskHash: "hash-b" },
+      },
+    });
+
+    expect(plan.documents).toHaveLength(2);
+    const docA = plan.documents.find((d) => d.uri === "file:///workspace/src/A.java");
+    const docB = plan.documents.find((d) => d.uri === "file:///workspace/src/B.java");
+    expect(docA?.expectedDocumentRevision).toBe(10);
+    expect(docA?.expectedDiskHash).toBe("hash-a");
+    expect(docB?.expectedDocumentRevision).toBe(20);
+    expect(docB?.expectedDiskHash).toBe("hash-b");
   });
 
   it("flags library file modification as conflict in buildRefactorPlan", () => {

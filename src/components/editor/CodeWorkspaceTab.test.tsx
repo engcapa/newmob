@@ -4414,7 +4414,7 @@ describe("CodeWorkspaceTab", () => {
     expect(screen.queryByTestId("file-encoding-dialog")).toBeNull();
   });
 
-  it("applies Safe Delete across files as one undoable workspace transaction", async () => {
+  it("blocks Safe Delete when provider does not attest complete coverage and performs 0 disk writes", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
       workspaceId: "ws-safe-delete",
@@ -4529,33 +4529,11 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.keyDown(content!, { key: "Delete", code: "Delete", altKey: true });
 
     await waitFor(() => expect(lspMocks.lspPrepareRename).toHaveBeenCalled());
-    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
-      "/repo/app",
-      "src/main.ts",
-      "const  = 42;",
-      expect.any(String),
-      "UTF-8",
-      false,
-    ));
-    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
-      "/repo/app",
-      "src/use.ts",
-      "use();",
-      "hash-src/use.ts",
-      "UTF-8",
-      false,
-    ));
-    await waitFor(() => expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.enabled)
-      .toBe(true));
-    expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.title)
-      .toBe("Undo Safe delete symbol");
-    expect(disk.get("src/main.ts")).toBe("const  = 42;");
-    expect(disk.get("src/use.ts")).toBe("use();");
-
-    await act(async () => {
-      registrationRef.current?.execute("workspace.undoWorkspaceEdit");
+    await waitFor(() => {
+      expect(screen.getByText(/Language provider does not attest complete Safe Delete coverage/)).toBeInTheDocument();
     });
-    await waitFor(() => expect(disk.get("src/main.ts")).toBe("const answer = 42;"));
+    expect(workspaceMocks.workspaceWriteFileEncoded).not.toHaveBeenCalled();
+    expect(disk.get("src/main.ts")).toBe("const answer = 42;");
     expect(disk.get("src/use.ts")).toBe("use(answer);");
   });
 

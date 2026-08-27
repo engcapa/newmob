@@ -6561,7 +6561,7 @@ Unit / mounted / Rust / QA audit / browser / native / provider / IDEA compare
 | 顺序 | 状态 | 包 | 目标 | 依赖 |
 |---:|---|---|---|---|
 | 0 | [x] | **V0 Regression + Evidence Truth Gate（v4.72 as-built：169/169 editor vitest 全绿，evidence pipeline 机器可校验）** | 恢复全绿回归；让entry/schema/manifest/claim成为机器可验证单一事实 | 无，首包 |
-| 1 | [ ] | **V1 Destructive Refactor Safety** | 撤销Safe Delete假complete，修revision/conflict/exclusion真值，产出真实Rename证据 | V0 schema可并行，合并先于其它semantic edit |
+| 1 | [x] | **V1 Destructive Refactor Safety（v4.73 as-built：Safe Delete disabled，RefactorPlanV4 来源审计，多文件准确 revision 映射）** | 撤销Safe Delete假complete，修revision/conflict/exclusion真值，产出真实Rename证据 | V0 schema可并行，合并先于其它semantic edit |
 | 2 | [ ] | **V2 Editor Policy Production Closure** | 分A-E收口Clipboard、Tab、Virtual Space、Code Style、Completion真实consumer | V0；A-E独立提交 |
 | 3 | [ ] | **V3 Provider Code Action / Intention Recovery** | 定位jdt.ls codeAction挂起，恢复或诚实封闭quick-fix工作流 | V0、W2/W3 |
 | 4 | [ ] | **V4 Java Navigation / Usages / Hierarchy Evidence** | 把W4客户端会话升级为真实provider请求、取消、restart、结果证据 | V0、W2/W4 |

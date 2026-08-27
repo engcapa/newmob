@@ -7947,8 +7947,11 @@ export function CodeWorkspaceTab({
               evidence,
               edit,
               roots: rootsRef.current,
-              openFiles: openFilesRef.current,
-              completeness: "provider-partial",
+              completeness: {
+                value: "partial",
+                source: "protocol-bounded",
+                proof: "provider code action edit",
+              },
             });
             const gate = refactorApplyGate(plan);
             if (!gate.allowed) {
@@ -11237,8 +11240,11 @@ export function CodeWorkspaceTab({
         edit: renamed.edit,
         roots: rootsRef.current,
         openFiles: openFilesRef.current,
-        completeness: "provider-partial",
-        requiredOperationIndexes: [0],
+        completeness: {
+          value: "partial",
+          source: "protocol-bounded",
+          proof: "provider rename response; AST completeness not guaranteed",
+        },
       });
       const gate = refactorApplyGate(plan);
       if (!gate.allowed) {
@@ -11453,7 +11459,13 @@ export function CodeWorkspaceTab({
         edit: deletion.edit,
         roots: rootsRef.current,
         openFiles: openFilesRef.current,
-        completeness: deletion.complete ? "provider-complete" : "provider-partial",
+        completeness: {
+          value: deletion.complete ? "complete" : "partial",
+          source: "client-observed-bounded",
+          proof: deletion.complete
+            ? "client-observed references within workspace roots"
+            : "references could not be completely resolved",
+        },
       });
       const gate = refactorApplyGate(plan);
       if (!gate.allowed) {

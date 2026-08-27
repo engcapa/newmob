@@ -128,11 +128,13 @@ describe("RefactoringPreviewDialog", () => {
         startedAt: 0,
         completedAt: 0,
       },
-      completeness: "provider-partial" as const,
+      completeness: { value: "partial" as const, source: "protocol-bounded" as const, proof: null },
       conflicts: [
-        { severity: "warning" as const, message: "Possible naming ambiguity", location: null },
+        { severity: "warning" as const, message: "Possible naming ambiguity", location: null, source: "reported" as const },
       ],
       operations: [],
+      documents: [],
+      requiredOperationIndexes: [],
       affectedUris: [],
       excludableGroups: [],
     };
@@ -177,11 +179,13 @@ describe("RefactoringPreviewDialog", () => {
         startedAt: 0,
         completedAt: 0,
       },
-      completeness: "provider-complete" as const,
+      completeness: { value: "complete" as const, source: "provider-asserted" as const, proof: null },
       conflicts: [
-        { severity: "error" as const, message: "Target symbol already declared in file", location: null },
+        { severity: "error" as const, message: "Target symbol already declared in file", location: null, source: "reported" as const },
       ],
       operations: [],
+      documents: [],
+      requiredOperationIndexes: [],
       affectedUris: [],
       excludableGroups: [],
     };

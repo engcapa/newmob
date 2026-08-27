@@ -7,7 +7,7 @@
 
 | Attribute | Value |
 |---|---|
-| Current Git Commit | `ebbb882b3f4246d8ec20764aa0219dadfb7c5321` |
+| Current Git Commit | `fa908a7d15777b2159cbe84ca2acc25bcfa81dbf` |
 | Active Entries (HEAD) | 0 |
 | Historical / Stale Entries | 4 |
 | Rollup Generator | `evidence_rollup.py` v2 |

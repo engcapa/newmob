@@ -154,24 +154,34 @@ export function RefactoringPreviewDialog({
               <h2 id="refactoring-preview-dialog-title" className="text-[14px] font-semibold">
                 {title}
               </h2>
-              {plan && (
-                <span
-                  data-testid="refactoring-preview-completeness"
-                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                    plan.completeness === "provider-complete"
-                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                      : plan.completeness === "provider-partial"
-                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                      : "bg-[var(--taomni-code-active-line-bg)] text-[var(--taomni-code-muted)] border border-[var(--taomni-code-border)]"
-                  }`}
-                >
-                  {plan.completeness === "provider-complete"
-                    ? "Provider Complete"
-                    : plan.completeness === "provider-partial"
-                    ? "Provider Partial"
-                    : "Completeness Unknown"}
-                </span>
-              )}
+              {plan && (() => {
+                const compVal: string = typeof plan.completeness === "object" && plan.completeness !== null
+                  ? (plan.completeness as any).value
+                  : String(plan.completeness);
+                const isComplete = compVal === "complete" || compVal === "provider-complete";
+                const isPartial = compVal === "partial" || compVal === "provider-partial";
+                const source = typeof plan.completeness === "object" && plan.completeness !== null ? plan.completeness.source : null;
+
+                return (
+                  <span
+                    data-testid="refactoring-preview-completeness"
+                    title={source ? `Completeness source: ${source}` : undefined}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                      isComplete
+                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                        : isPartial
+                        ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                        : "bg-[var(--taomni-code-active-line-bg)] text-[var(--taomni-code-muted)] border border-[var(--taomni-code-border)]"
+                    }`}
+                  >
+                    {isComplete
+                      ? "Provider Complete"
+                      : isPartial
+                      ? "Provider Partial"
+                      : "Completeness Unknown"}
+                  </span>
+                );
+              })()}
             </div>
             <p className="text-[11px] text-[var(--taomni-code-muted)] mt-0.5">
               {preview.affectedFileCount} file(s) affected · {includedCount} of {totalUsages} change(s) selected
@@ -220,6 +230,14 @@ export function RefactoringPreviewDialog({
                 ))}
               </ul>
             </div>
+          </div>
+        )}
+        {errorConflicts.length === 0 && warningConflicts.length === 0 && plan && (
+          <div
+            data-testid="refactoring-preview-conflict-status"
+            className="mx-4 mt-2 flex items-center gap-1.5 px-1 text-[11px] text-[var(--taomni-code-muted)]"
+          >
+            <span>Conflict analysis unavailable from provider</span>
           </div>
         )}
 
