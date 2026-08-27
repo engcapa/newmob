@@ -245,4 +245,30 @@ describe("§8.19.5 clipboard history ring", () => {
     expect(handle.getSnapshot().history).toHaveLength(2);
     handle.release();
   });
+
+  it("§8.25.2 Z1 supports idempotent consumer detachment, subscriptions, and clean lifecycle", async () => {
+    const handle = acquireClipboardStore("ws-z1-test");
+    const notifications: number[] = [];
+    const unsubscribe = handle.subscribe((snap) => {
+      notifications.push(snap.revision);
+    });
+
+    const detachA = handle.attachConsumer("consumer-a");
+    const detachA2 = handle.attachConsumer("consumer-a"); // duplicate attach with same consumer id
+    expect(handle.getSnapshot().consumerCount).toBe(1);
+
+    writeText(handle, "payload-z1");
+    expect(notifications.length).toBeGreaterThan(0);
+
+    // Detach A once
+    detachA();
+    expect(handle.getSnapshot().consumerCount).toBe(0);
+
+    // Detaching second time is a safe no-op
+    detachA2();
+    expect(handle.getSnapshot().consumerCount).toBe(0);
+
+    unsubscribe();
+    handle.release();
+  });
 });

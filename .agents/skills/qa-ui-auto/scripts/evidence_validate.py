@@ -87,32 +87,65 @@ def is_source_dirty() -> bool:
 
 
 def get_tested_source_fingerprint() -> str:
-    cmd = ["git", "ls-files", "-s", "--"] + SOURCE_GLOBS
+    cmd = ["git", "ls-files", "--"] + SOURCE_GLOBS
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
-        lines = sorted(out.strip().splitlines())
-        return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+        files = sorted(out.strip().splitlines())
+        h = hashlib.sha256()
+        for rel_path in files:
+            p = ROOT / rel_path
+            if not p.exists():
+                continue
+            h.update(rel_path.encode("utf-8"))
+            if p.is_symlink():
+                h.update(b"symlink:")
+                h.update(str(p.readlink()).encode("utf-8"))
+            elif p.is_file():
+                h.update(b"file:")
+                with p.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(chunk)
+        return h.hexdigest()
     except Exception:
         return ""
 
 
 def get_test_plan_fingerprint() -> str:
     h = hashlib.sha256()
-    # 1. Schema & plan files
-    for p in [SCHEMA_FILE, RELEASE_PLAN_FILE, FEATURE_LIST_FILE]:
+    # 1. Schema & plan & baseline files
+    for p in [
+        SCHEMA_FILE,
+        RELEASE_PLAN_FILE,
+        FEATURE_LIST_FILE,
+        ROOT / "qa-ui-auto-tests" / "coverage-baseline.json",
+        ROOT / "qa-ui-auto-tests" / "testid-catalog.json",
+    ]:
         if p.exists():
+            h.update(p.relative_to(ROOT).as_posix().encode("utf-8"))
             h.update(p.read_bytes())
-    # 2. Key scripts
+
+    # 2. Key scripts recursively
     script_dir = ROOT / ".agents" / "skills" / "qa-ui-auto" / "scripts"
-    for s in ["evidence_validate.py", "evidence_rollup.py", "qa_ui_auto/audit.py"]:
-        sp = script_dir / s
-        if sp.exists():
+    if script_dir.exists():
+        for sp in sorted(script_dir.rglob("*.py")):
+            h.update(sp.relative_to(ROOT).as_posix().encode("utf-8"))
             h.update(sp.read_bytes())
-    # 3. All YAML cases in deterministic order
+
+    # 3. All YAML cases in deterministic recursive order
     cases_dir = ROOT / "qa-ui-auto-tests" / "cases"
     if cases_dir.exists():
-        for case in sorted(cases_dir.glob("*.testcase.yaml")):
+        for case in sorted(cases_dir.rglob("*.yaml")):
+            h.update(case.relative_to(ROOT).as_posix().encode("utf-8"))
             h.update(case.read_bytes())
+
+    # 4. Native runbooks
+    runbooks_dir = ROOT / "qa-ui-auto-tests" / "native" / "runbooks"
+    if runbooks_dir.exists():
+        for rb in sorted(runbooks_dir.rglob("*")):
+            if rb.is_file():
+                h.update(rb.relative_to(ROOT).as_posix().encode("utf-8"))
+                h.update(rb.read_bytes())
+
     return h.hexdigest()
 
 

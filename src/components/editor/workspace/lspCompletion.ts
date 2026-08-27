@@ -1833,10 +1833,22 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         const parsedSnippet = isSnippet ? parseLspSnippet(rawText) : null;
         const hasAmbiguousChoices = parsedSnippet && parsedSnippet.placeholders.some((p) => (p.choices?.length ?? 0) > 1);
         if (!hasAmbiguousChoices) {
+          let itemToCommit = singleItem;
+          if (hooks.resolve) {
+            try {
+              const resolved = await hooks.resolve(singleItem, token);
+              if (resolved) {
+                itemToCommit = resolved;
+              }
+            } catch {
+              // resolve failed or timed out
+            }
+          }
+          if (!isStillCurrent(token)) return null;
           hooks.reportDiagnostic?.("auto-inserted-single");
           const applied = commitLspCompletion(
             targetView,
-            singleItem,
+            itemToCommit,
             from,
             context.pos,
             token,

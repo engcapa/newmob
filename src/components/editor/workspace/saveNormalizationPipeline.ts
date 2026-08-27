@@ -32,6 +32,8 @@ export interface SaveStageReport {
   status: SaveStageStatus;
   error?: string;
   reason?: string;
+  beforeHash?: string;
+  afterHash?: string;
 }
 
 export interface SaveNormalizationOptions {
@@ -126,6 +128,15 @@ export function normalizeLineEndings(
 /**
  * Run the save normalization pipeline in strict sequence.
  */
+function textDigest(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 export async function runSaveNormalizationPipeline(
   options: SaveNormalizationOptions,
 ): Promise<SaveNormalizationResult> {
@@ -174,14 +185,15 @@ export async function runSaveNormalizationPipeline(
     : false;
 
   // Stage 1: format
+  const formatBeforeHash = textDigest(currentText);
   if (!formatEnabled) {
-    stages.push({ stage: "format", status: "disabled", reason: "format-disabled" });
+    stages.push({ stage: "format", status: "disabled", reason: "format-disabled", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
   } else if (pathIsExcluded) {
-    stages.push({ stage: "format", status: "disabled", reason: "path-excluded" });
+    stages.push({ stage: "format", status: "disabled", reason: "path-excluded", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
   } else if (markerOff) {
-    stages.push({ stage: "format", status: "disabled", reason: "formatter-marker-off" });
+    stages.push({ stage: "format", status: "disabled", reason: "formatter-marker-off", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
   } else if (!formatFn) {
-    stages.push({ stage: "format", status: "unavailable", reason: "no-provider" });
+    stages.push({ stage: "format", status: "unavailable", reason: "no-provider", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
   } else {
     try {
       const formattedResult = await formatFn(currentText);
@@ -198,20 +210,20 @@ export async function runSaveNormalizationPipeline(
               eolNormalized: false,
               cancelledDueToEdit: true,
               diagnostics: ["Formatter cancelled because buffer was modified concurrently."],
-              stages: [{ stage: "format", status: "failed", error: "concurrent edit" }],
+              stages: [{ stage: "format", status: "failed", error: "concurrent edit", beforeHash: formatBeforeHash, afterHash: formatBeforeHash }],
             };
           }
         }
         currentText = formattedResult;
         formatted = true;
-        stages.push({ stage: "format", status: "executed" });
+        stages.push({ stage: "format", status: "executed", beforeHash: formatBeforeHash, afterHash: textDigest(currentText) });
       } else {
-        stages.push({ stage: "format", status: "unavailable" });
+        stages.push({ stage: "format", status: "unavailable", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       diagnostics.push(`Format on save failed: ${msg}`);
-      stages.push({ stage: "format", status: "failed", error: msg });
+      stages.push({ stage: "format", status: "failed", error: msg, beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
       stopEffectful = true;
     }
   }
@@ -221,16 +233,19 @@ export async function runSaveNormalizationPipeline(
     ? options.savePolicy.organizeImports.enabled
     : (options.organizeImportsOnSave ?? false);
 
+  const organizeBeforeHash = textDigest(currentText);
   if (stopEffectful) {
     stages.push({
       stage: "organize-imports",
       status: "skipped-prior-failure",
       error: "Skipped due to prior format failure",
+      beforeHash: organizeBeforeHash,
+      afterHash: organizeBeforeHash,
     });
   } else if (!organizeImportsEnabled) {
-    stages.push({ stage: "organize-imports", status: "disabled" });
+    stages.push({ stage: "organize-imports", status: "disabled", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
   } else if (!options.organizeImportsFn) {
-    stages.push({ stage: "organize-imports", status: "unavailable", reason: "no-provider" });
+    stages.push({ stage: "organize-imports", status: "unavailable", reason: "no-provider", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
   } else {
     try {
       const organizedResult = await options.organizeImportsFn(currentText);
@@ -247,26 +262,27 @@ export async function runSaveNormalizationPipeline(
               eolNormalized: false,
               cancelledDueToEdit: true,
               diagnostics: ["Organize imports cancelled because buffer was modified concurrently."],
-              stages: [...stages, { stage: "organize-imports", status: "failed", error: "concurrent edit" }],
+              stages: [...stages, { stage: "organize-imports", status: "failed", error: "concurrent edit", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash }],
             };
           }
         }
         currentText = organizedResult;
         importsOrganized = true;
-        stages.push({ stage: "organize-imports", status: "executed" });
+        stages.push({ stage: "organize-imports", status: "executed", beforeHash: organizeBeforeHash, afterHash: textDigest(currentText) });
       } else {
-        stages.push({ stage: "organize-imports", status: "unavailable" });
+        stages.push({ stage: "organize-imports", status: "unavailable", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       diagnostics.push(`Organize imports on save failed: ${msg}`);
-      stages.push({ stage: "organize-imports", status: "failed", error: msg });
+      stages.push({ stage: "organize-imports", status: "failed", error: msg, beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
     }
   }
 
   // Stage 3: normalization
+  const normBeforeHash = textDigest(currentText);
 
-  // Stage 2: Trim trailing whitespace
+  // Trim trailing whitespace
   if (codeStyle.trimTrailingWhitespace) {
     const trimmed = trimTrailingWhitespace(currentText, eolChar);
     if (trimmed !== currentText) {
@@ -275,7 +291,7 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
-  // Stage 3: Insert final newline
+  // Insert final newline
   if (codeStyle.insertFinalNewline !== undefined) {
     const adjusted = adjustFinalNewline(currentText, codeStyle.insertFinalNewline, eolChar);
     if (adjusted !== currentText) {
@@ -284,14 +300,21 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
-  // Stage 4: End of Line normalization
+  // Normalise line endings (CRLF vs LF vs CR)
   if (codeStyle.endOfLine) {
-    const normalized = normalizeLineEndings(currentText, codeStyle.endOfLine);
-    if (normalized !== currentText) {
-      currentText = normalized;
+    const eolFixed = normalizeLineEndings(currentText, codeStyle.endOfLine);
+    if (eolFixed !== currentText) {
+      currentText = eolFixed;
       eolNormalized = true;
     }
   }
+
+  stages.push({
+    stage: "normalization",
+    status: "executed",
+    beforeHash: normBeforeHash,
+    afterHash: textDigest(currentText),
+  });
 
   let resolvedCharset = codeStyle.charset;
   let resolvedBom: boolean | undefined = undefined;
@@ -355,11 +378,6 @@ export async function runSaveNormalizationPipeline(
       resolvedCharset = charset.toUpperCase();
     }
   }
-
-  stages.push({
-    stage: "normalization",
-    status: "executed",
-  });
 
   // Final race condition check
   if (getLatestBufferText) {

@@ -271,6 +271,9 @@ export class WorkspaceClipboardStore {
 const storesByWorkspace = new Map<string, WorkspaceClipboardStore>();
 const refcountsByWorkspace = new Map<string, number>();
 const storeRevisionsByWorkspace = new Map<string, number>();
+const consumersByWorkspace = new Map<string, Set<string>>();
+const listenersByWorkspace = new Map<string, Set<(snapshot: WorkspaceClipboardSnapshot) => void>>();
+const permissionGenerationsByWorkspace = new Map<string, number>();
 
 export interface WorkspaceClipboardSnapshot {
   revision: number;
@@ -278,12 +281,15 @@ export interface WorkspaceClipboardSnapshot {
   exclusion: ClipboardHistoryExclusion;
   isHistoryEnabled: boolean;
   limits: { maxItems: number; maxTotalBytes: number };
+  consumerCount: number;
+  permissionGeneration: number;
 }
 
 export interface WorkspaceClipboardHandle {
   readonly workspaceId: string;
   attachConsumer(consumerId?: string): () => void;
   getSnapshot(): WorkspaceClipboardSnapshot;
+  subscribe(listener: (snapshot: WorkspaceClipboardSnapshot) => void): () => void;
   write(input: Parameters<WorkspaceClipboardStore["write"]>[0]): EditorClipboardSession;
   read(): EditorClipboardSession | null;
   clear(reason?: ClipboardClearReason): void;
@@ -310,12 +316,42 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
     store = new WorkspaceClipboardStore();
     storesByWorkspace.set(workspaceInstanceId, store);
     storeRevisionsByWorkspace.set(workspaceInstanceId, 0);
+    consumersByWorkspace.set(workspaceInstanceId, new Set());
+    listenersByWorkspace.set(workspaceInstanceId, new Set());
+    permissionGenerationsByWorkspace.set(workspaceInstanceId, 1);
   }
   refcountsByWorkspace.set(workspaceInstanceId, (refcountsByWorkspace.get(workspaceInstanceId) ?? 0) + 1);
+
+  const getSnapshot = (): WorkspaceClipboardSnapshot => {
+    const current = storesByWorkspace.get(workspaceInstanceId) ?? store!;
+    return {
+      revision: storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0,
+      history: current.historyEntries(),
+      exclusion: current.historyExclusion(),
+      isHistoryEnabled: current.isHistoryEnabled(),
+      limits: current.historyLimits(),
+      consumerCount: consumersByWorkspace.get(workspaceInstanceId)?.size ?? 0,
+      permissionGeneration: permissionGenerationsByWorkspace.get(workspaceInstanceId) ?? 1,
+    };
+  };
+
+  const notify = () => {
+    const listeners = listenersByWorkspace.get(workspaceInstanceId);
+    if (!listeners || listeners.size === 0) return;
+    const snap = getSnapshot();
+    for (const listener of listeners) {
+      try {
+        listener(snap);
+      } catch {
+        // ignore subscriber errors
+      }
+    }
+  };
 
   const bump = () => {
     const next = (storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0) + 1;
     storeRevisionsByWorkspace.set(workspaceInstanceId, next);
+    notify();
   };
 
   const live = (): WorkspaceClipboardStore => {
@@ -325,17 +361,43 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
 
   const handle: WorkspaceClipboardHandle = {
     workspaceId: workspaceInstanceId,
-    attachConsumer(_consumerId?: string) {
+    attachConsumer(consumerId?: string) {
+      const id = consumerId || `anon-${Math.random().toString(36).slice(2, 9)}`;
+      let consumers = consumersByWorkspace.get(workspaceInstanceId);
+      if (!consumers) {
+        consumers = new Set();
+        consumersByWorkspace.set(workspaceInstanceId, consumers);
+      }
+      if (consumers.has(id)) {
+        return () => {
+          if (consumers?.has(id)) {
+            consumers.delete(id);
+            handle.release();
+            notify();
+          }
+        };
+      }
+      consumers.add(id);
       refcountsByWorkspace.set(workspaceInstanceId, (refcountsByWorkspace.get(workspaceInstanceId) ?? 0) + 1);
-      return () => handle.release();
+      notify();
+      return () => {
+        if (consumers?.has(id)) {
+          consumers.delete(id);
+          handle.release();
+          notify();
+        }
+      };
     },
-    getSnapshot() {
-      return {
-        revision: storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0,
-        history: live().historyEntries(),
-        exclusion: live().historyExclusion(),
-        isHistoryEnabled: live().isHistoryEnabled(),
-        limits: live().historyLimits(),
+    getSnapshot,
+    subscribe(listener) {
+      let listeners = listenersByWorkspace.get(workspaceInstanceId);
+      if (!listeners) {
+        listeners = new Set();
+        listenersByWorkspace.set(workspaceInstanceId, listeners);
+      }
+      listeners.add(listener);
+      return () => {
+        listeners?.delete(listener);
       };
     },
     write: (input) => {
@@ -362,17 +424,22 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
         refcountsByWorkspace.delete(workspaceInstanceId);
         storesByWorkspace.delete(workspaceInstanceId);
         storeRevisionsByWorkspace.delete(workspaceInstanceId);
+        consumersByWorkspace.delete(workspaceInstanceId);
+        listenersByWorkspace.delete(workspaceInstanceId);
+        permissionGenerationsByWorkspace.delete(workspaceInstanceId);
         store!.clear("workspace-close");
       });
     },
     historyEntries: () => live().historyEntries(),
     pasteFromHistory(index) {
-      bump();
       return live().pasteFromHistory(index);
     },
     removeHistoryEntry: (index) => {
-      bump();
-      return live().removeHistoryEntry(index);
+      const removed = live().removeHistoryEntry(index);
+      if (removed) {
+        bump();
+      }
+      return removed;
     },
     clearHistory: () => {
       bump();
@@ -411,4 +478,8 @@ export function clipboardStoreForWorkspace(workspaceId: string): WorkspaceClipbo
 export function resetWorkspaceClipboardStores(): void {
   storesByWorkspace.clear();
   refcountsByWorkspace.clear();
+  storeRevisionsByWorkspace.clear();
+  consumersByWorkspace.clear();
+  listenersByWorkspace.clear();
+  permissionGenerationsByWorkspace.clear();
 }

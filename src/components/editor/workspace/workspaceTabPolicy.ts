@@ -617,30 +617,36 @@ export async function applyWorkspaceTabPolicyTransaction(params: {
     };
   }
 
+  const uniqueEvictedKeys = Array.from(new Set(execution.allEvictedKeys));
+
+  // Single atomic store commit
+  params.commitAtomicUpdate({
+    nextGroups,
+    evictedKeys: uniqueEvictedKeys,
+    policy: execution.policy,
+  });
+
   // Purge closed files via lifecycle only when unreferenced in post-commit nextGroups
   if (params.onEvictClosedFile) {
     const allRemainingKeys = new Set(
       Object.values(nextGroups).flatMap((g) => g.openOrder)
     );
-    for (const evictedKey of execution.allEvictedKeys) {
+    for (const evictedKey of uniqueEvictedKeys) {
       if (!allRemainingKeys.has(evictedKey)) {
-        await params.onEvictClosedFile(evictedKey);
+        try {
+          await params.onEvictClosedFile(evictedKey);
+        } catch {
+          // preserve recovery log / handle gracefully
+        }
       }
     }
   }
-
-  // Single atomic store commit
-  params.commitAtomicUpdate({
-    nextGroups,
-    evictedKeys: execution.allEvictedKeys,
-    policy: execution.policy,
-  });
 
   return {
     status: "applied",
     policy: execution.policy,
     evictedKeysByGroup: execution.evictionsByGroup,
-    allEvictedKeys: execution.allEvictedKeys,
+    allEvictedKeys: uniqueEvictedKeys,
     message: execution.message,
   };
 }

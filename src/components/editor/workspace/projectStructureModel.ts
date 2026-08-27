@@ -68,7 +68,7 @@ export function buildProjectStructureSnapshotV2(
   }
   if (buildExcludes.length > 0) {
     facts["excludedRoots.build"] = {
-      source: inputs.source ?? "maven-model",
+      source: inputs.source ?? "descriptor-only",
       freshness: now,
     };
   }
@@ -91,7 +91,7 @@ export function buildProjectStructureSnapshotV2(
       sourceSets.push({ kind: "generated", roots: [...mod.generatedRoots].sort() });
     }
 
-    const modSource = mod.buildSystem === "gradle" ? "gradle-model" : "maven-model";
+    const modSource = inputs.source ?? (mod.buildSystem === "gradle" ? "gradle-model" : mod.buildSystem === "maven" ? "maven-model" : "descriptor-only");
     facts[`module.${mod.id}`] = { source: modSource, freshness: now };
 
     return {

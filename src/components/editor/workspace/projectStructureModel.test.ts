@@ -51,6 +51,7 @@ describe("§8.21.6 V5 projectStructureModel", () => {
   it("builds ProjectStructureSnapshotV2 with provenance facts and completeness", () => {
     const snapshot = buildProjectStructureSnapshotV2({
       generation: 3,
+      source: "maven-model",
       modules: [sampleModule1, sampleModule2],
       userExcludedRoots: ["/workspace/.git"],
       buildExcludedRoots: ["/workspace/core/target", "/workspace/app/target"],

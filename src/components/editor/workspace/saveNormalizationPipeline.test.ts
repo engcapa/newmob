@@ -207,11 +207,13 @@ describe("saveNormalizationPipeline", () => {
     expect(result.formatted).toBe(true);
     expect(result.importsOrganized).toBe(true);
     expect(result.whitespaceTrimmed).toBe(true);
-    expect(result.stages).toEqual([
+    expect(result.stages.map((s) => ({ stage: s.stage, status: s.status }))).toEqual([
       { stage: "format", status: "executed" },
       { stage: "organize-imports", status: "executed" },
       { stage: "normalization", status: "executed" },
     ]);
+    expect(result.stages[0].beforeHash).toBeDefined();
+    expect(result.stages[0].afterHash).toBeDefined();
     expect(result.text).toBe("import A;\n/* formatted */\nconst x = 1;\n");
   });
 
