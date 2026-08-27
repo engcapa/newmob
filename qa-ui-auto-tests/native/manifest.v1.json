@@ -1,0 +1,163 @@
+{
+  "g0Matrix": [
+    {
+      "item": "locked / permission / hash conflict",
+      "linux": "unknown",
+      "macos": "platform-unverified",
+      "note": "Unverified (no valid-current evidence)",
+      "windows": "platform-unverified"
+    },
+    {
+      "item": "atomic replace fault points",
+      "linux": "unknown",
+      "macos": "platform-unverified",
+      "note": "Unverified (no valid-current evidence)",
+      "windows": "platform-unverified"
+    },
+    {
+      "item": "external watcher",
+      "linux": "unknown",
+      "macos": "platform-unverified",
+      "note": "Unverified (no valid-current evidence)",
+      "windows": "platform-unverified"
+    },
+    {
+      "item": "encoding / EOL / BOM",
+      "linux": "unknown",
+      "macos": "platform-unverified",
+      "note": "Unverified (no valid-current evidence)",
+      "windows": "platform-unverified"
+    },
+    {
+      "item": "save close / unmount",
+      "linux": "unknown",
+      "macos": "platform-unverified",
+      "note": "Unverified (no valid-current evidence)",
+      "windows": "platform-unverified"
+    },
+    {
+      "item": "WorkspaceEdit partial / resume / undo",
+      "linux": "unknown",
+      "macos": "platform-unverified",
+      "note": "Unverified (no valid-current evidence)",
+      "windows": "platform-unverified"
+    },
+    {
+      "item": "symlink / case / path normalization",
+      "linux": "unknown",
+      "macos": "platform-unverified",
+      "note": "Unverified (no valid-current evidence)",
+      "windows": "platform-unverified"
+    }
+  ],
+  "g1Packages": [
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W0: Shell Stability & Shortcut Claims",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W1: Reference Information V3",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W2: Project Analysis & Lifecycle",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W3: Inspection & Intention Contract",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W4: Navigation & Usages Session",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W5: Refactor & Conflict Gate",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W6-A: Clipboard Policy",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W6-B: Tab Policy V3",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W6-C: Virtual Space & Region Folding",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W6-D: Code Style & Save Pipeline",
+      "status": "unverified"
+    },
+    {
+      "claim": "unverified",
+      "layers": "none",
+      "owners": "unverified (no valid-current evidence)",
+      "package": "W6-E: Completion Preferences",
+      "status": "unverified"
+    }
+  ],
+  "metadata": {
+    "activeEntriesCount": 0,
+    "currentCommit": "3cba17ea95b8475c5fce85f19917ed2cd062faba",
+    "evidenceDigest": "e3b0c44298fc1c14",
+    "generator": "evidence_rollup.py v3",
+    "staleEntriesCount": 0,
+    "testPlanFingerprint": "88ca5e8889ccfccfde1abd81f45cba7d19cb078f4e910dd701f082bf0b6e9c5a",
+    "testedSourceFingerprint": "db3a4a13fd54c2ce6707a19e3b21cdf9e6105e42d29821d39d492627dd3d04dc"
+  },
+  "performance": {
+    "candidateCap": {
+      "measured": "200 items capped",
+      "status": "Enforced",
+      "target": "<= 200 items"
+    },
+    "completion": {
+      "measured": "120 ms debounce / 25 ms IPC",
+      "status": "Monitored",
+      "target": "Record & gate"
+    },
+    "localAction": {
+      "measured": "14 ms p95",
+      "status": "Meets target (14ms)",
+      "target": "<= 100 ms"
+    },
+    "typingP95": {
+      "measured": "134 ms p95",
+      "status": "Failed (134ms p95 > 50ms budget)",
+      "target": "<= 50 ms"
+    }
+  }
+}

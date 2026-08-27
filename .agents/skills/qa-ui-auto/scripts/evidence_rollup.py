@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Evidence Manifest Rollup Generator (V0 §8.21.1).
+"""Evidence Manifest Rollup Generator (U0 §8.22.1).
 
-Deterministically generates qa-ui-auto-tests/native/manifest.v1.md from validated
-evidence entries under qa-ui-auto-report/evidence/ for the current git HEAD.
+Deterministically generates qa-ui-auto-tests/native/manifest.v1.md and manifest.v1.json
+from validator-verified valid-current evidence entries.
+Deletes all hardcoded Passed/L1/L2 claims; unbacked items remain 'unknown'.
 
 Usage:
     python evidence_rollup.py [--check] [--output qa-ui-auto-tests/native/manifest.v1.md]
@@ -12,68 +13,158 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
+from evidence_validate import (
+    EntryStatus,
+    get_current_head,
+    get_test_plan_fingerprint,
+    get_tested_source_fingerprint,
+    load_schema,
+    scan_entries,
+    validate_entry,
+)
 
 ROOT = Path.cwd()
-SCHEMA_FILE = ROOT / "qa-ui-auto-tests" / "evidence-manifest.schema.json"
-EVIDENCE_DIR = ROOT / "qa-ui-auto-report" / "evidence"
-DEFAULT_OUTPUT = ROOT / "qa-ui-auto-tests" / "native" / "manifest.v1.md"
+DEFAULT_MD_OUTPUT = ROOT / "qa-ui-auto-tests" / "native" / "manifest.v1.md"
+DEFAULT_JSON_OUTPUT = ROOT / "qa-ui-auto-tests" / "native" / "manifest.v1.json"
 
+G0_ITEMS = [
+    ("locked / permission / hash conflict", "g0-locked-conflict"),
+    ("atomic replace fault points", "g0-atomic-replace"),
+    ("external watcher", "g0-watcher"),
+    ("encoding / EOL / BOM", "g0-encoding-bom"),
+    ("save close / unmount", "g0-save-close"),
+    ("WorkspaceEdit partial / resume / undo", "g0-workspace-edit-undo"),
+    ("symlink / case / path normalization", "g0-path-normalization"),
+]
 
-def get_git_head() -> str:
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-    except Exception:
-        return "unknown"
-
-
-def get_tracked_files() -> set[str]:
-    try:
-        out = subprocess.run(
-            ["git", "ls-files"], capture_output=True, text=True, check=True
-        ).stdout
-        return set(out.splitlines())
-    except Exception:
-        return set()
+G1_PACKAGES = [
+    ("W0: Shell Stability & Shortcut Claims", "W0"),
+    ("W1: Reference Information V3", "W1"),
+    ("W2: Project Analysis & Lifecycle", "W2"),
+    ("W3: Inspection & Intention Contract", "W3"),
+    ("W4: Navigation & Usages Session", "W4"),
+    ("W5: Refactor & Conflict Gate", "W5"),
+    ("W6-A: Clipboard Policy", "W6-A"),
+    ("W6-B: Tab Policy V3", "W6-B"),
+    ("W6-C: Virtual Space & Region Folding", "W6-C"),
+    ("W6-D: Code Style & Save Pipeline", "W6-D"),
+    ("W6-E: Completion Preferences", "W6-E"),
+]
 
 
 def sha256_of_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def generate_manifest_content(
+def generate_manifest_data(
     head_commit: str,
-    entries: list[dict[str, Any]],
+    tested_source_fp: str,
+    test_plan_fp: str,
+    valid_entries: list[dict[str, Any]],
     stale_entries: list[dict[str, Any]],
-    tracked_files: set[str],
-) -> str:
+) -> dict[str, Any]:
     entry_hashes = []
-    for e in entries:
+    for e in valid_entries:
         raw = json.dumps(e, sort_keys=True).encode("utf-8")
         entry_hashes.append(f"{e.get('capabilityId', 'unknown')}:{sha256_of_bytes(raw)[:12]}")
 
-    lines: list[str] = [
-        "# Native Gate Manifest — §8.20.8 / §8.21 V0 Release Rollup",
+    evidence_digest = sha256_of_bytes(",".join(sorted(entry_hashes)).encode("utf-8"))[:16]
+
+    g0_matrix = []
+    for title, cap_key in G0_ITEMS:
+        # Check if valid entries provide evidence for cap_key
+        matching = [e for e in valid_entries if cap_key in e.get("capabilityId", "").lower()]
+        linux_status = "unknown"
+        win_status = "platform-unverified"
+        mac_status = "platform-unverified"
+        note = "Unverified (no valid-current evidence)"
+        if matching:
+            for m in matching:
+                p = m.get("environment", {}).get("platform")
+                res = m.get("result", "unknown")
+                if p == "linux":
+                    linux_status = res
+                elif p == "windows":
+                    win_status = res
+                elif p == "macos":
+                    mac_status = res
+            note = f"Verified by {len(matching)} current entry(ies)"
+        g0_matrix.append({
+            "item": title,
+            "linux": linux_status,
+            "windows": win_status,
+            "macos": mac_status,
+            "note": note,
+        })
+
+    g1_packages = []
+    for title, pkg_key in G1_PACKAGES:
+        matching = [e for e in valid_entries if e.get("capabilityId", "").startswith(pkg_key)]
+        if matching:
+            owners = sorted({p for m in matching for p in m.get("owner", {}).get("paths", [])})
+            layers = sorted({l for m in matching for l in m.get("evidenceLayers", [])})
+            max_claim = max((m.get("maximumClaim", "L0") for m in matching), key=lambda c: ["L0", "L1", "L2", "L3"].index(c))
+            status = "Active"
+            owners_str = ", ".join(f"`{Path(o).name}`" for o in owners)
+            layers_str = ", ".join(layers)
+        else:
+            owners_str = "unverified (no valid-current evidence)"
+            layers_str = "none"
+            max_claim = "unverified"
+            status = "unverified"
+
+        g1_packages.append({
+            "package": title,
+            "owners": owners_str,
+            "layers": layers_str,
+            "claim": max_claim,
+            "status": status,
+        })
+
+    return {
+        "metadata": {
+            "currentCommit": head_commit,
+            "testedSourceFingerprint": tested_source_fp,
+            "testPlanFingerprint": test_plan_fp,
+            "activeEntriesCount": len(valid_entries),
+            "staleEntriesCount": len(stale_entries),
+            "generator": "evidence_rollup.py v3",
+            "evidenceDigest": evidence_digest,
+        },
+        "g0Matrix": g0_matrix,
+        "g1Packages": g1_packages,
+        "performance": {
+            "typingP95": {"target": "<= 50 ms", "measured": "134 ms p95", "status": "Failed (134ms p95 > 50ms budget)"},
+            "localAction": {"target": "<= 100 ms", "measured": "14 ms p95", "status": "Meets target (14ms)"},
+            "completion": {"target": "Record & gate", "measured": "120 ms debounce / 25 ms IPC", "status": "Monitored"},
+            "candidateCap": {"target": "<= 200 items", "measured": "200 items capped", "status": "Enforced"},
+        },
+    }
+
+
+def render_markdown(data: dict[str, Any]) -> str:
+    meta = data["metadata"]
+    lines = [
+        "# Native Gate Manifest — §8.22 U0 Release Rollup",
         "",
-        "> Deterministically generated by `evidence_rollup.py` (§8.21.1).",
+        "> Deterministically generated by `evidence_rollup.py` (§8.22.1).",
         "> Any manual modification will be rejected by CI (`--check`).",
         "",
         "## 1. Rollup Metadata",
         "",
         "| Attribute | Value |",
         "|---|---|",
-        f"| Current Git Commit | `{head_commit}` |",
-        f"| Active Entries (HEAD) | {len(entries)} |",
-        f"| Historical / Stale Entries | {len(stale_entries)} |",
-        f"| Rollup Generator | `evidence_rollup.py` v2 |",
-        f"| Evidence Digest | `{sha256_of_bytes(','.join(sorted(entry_hashes)).encode('utf-8'))[:16]}` |",
+        f"| Current Git Commit | `{meta['currentCommit']}` |",
+        f"| Tested Source Fingerprint | `{meta['testedSourceFingerprint'][:16]}` |",
+        f"| Test Plan Fingerprint | `{meta['testPlanFingerprint'][:16]}` |",
+        f"| Active Entries (valid-current) | {meta['activeEntriesCount']} |",
+        f"| Historical / Stale Entries | {meta['staleEntriesCount']} |",
+        f"| Rollup Generator | `{meta['generator']}` |",
+        f"| Evidence Digest | `{meta['evidenceDigest']}` |",
         "",
         "---",
         "",
@@ -81,41 +172,23 @@ def generate_manifest_content(
         "",
         "| Item | Linux (Native / Unit) | Windows | macOS | Verification Status |",
         "|---|---|---|---|---|",
-        "| locked / permission / hash conflict | **Passed** (Rust unit + IPC error) | platform-unverified | platform-unverified | Verified via Rust lib tests |",
-        "| atomic replace fault points | **Passed** (Rust fault harness) | platform-unverified | platform-unverified | Verified via temp-file atomicity |",
-        "| external watcher | **Passed** | platform-unverified | platform-unverified | Verified via watcher reload |",
-        "| encoding / EOL / BOM | **Passed** (Byte-exact) | platform-unverified | platform-unverified | Verified in `writeDiskByteCorrectness.test.ts` |",
-        "| save close / unmount | **Passed** (Abort transaction) | platform-unverified | platform-unverified | Verified via buffer cleanup |",
-        "| WorkspaceEdit partial / resume / undo | **Passed** (Single undo) | platform-unverified | platform-unverified | Verified via single-transaction boundary |",
-        "| symlink / case / path normalization | **Passed** | platform-unverified | platform-unverified | Verified via canonical path checks |",
+    ]
+
+    for g0 in data["g0Matrix"]:
+        lines.append(f"| {g0['item']} | **{g0['linux']}** | {g0['windows']} | {g0['macos']} | {g0['note']} |")
+
+    lines.extend([
         "",
         "---",
         "",
-        "## 3. G1 Capability Packages Rollup (V0–V2 Baseline)",
+        "## 3. G1 Capability Packages Rollup",
         "",
         "| Package | Verified Owner Files | Evidence Layers | Claim Level | Status |",
         "|---|---|---|---|---|",
-    ]
+    ])
 
-    # Pre-defined capabilities with verified existing owner files
-    pkg_specs = [
-        ("W0: Shell Stability & Shortcut Claims", ["src/components/editor/workspace/useWorkspaceTreeData.ts", "src/layouts/MainLayout.tsx", "src/components/editor/workspace/workspaceActionHost.ts"], "unit, mounted, browser", "L2 (Linux)", "Active"),
-        ("W1: Reference Information V3", ["src/components/editor/workspace/referenceInfoSession.ts", "src/components/editor/workspace/QuickDocPopup.tsx"], "unit, mounted", "L2", "Active"),
-        ("W2: Project Analysis & Lifecycle", ["src/components/editor/workspace/workspaceJavaProjectAnalysis.ts"], "unit, mounted", "L2", "Active"),
-        ("W3: Inspection & Intention Contract", ["src/components/editor/workspace/workspaceInspectionProfile.ts", "src/components/editor/workspace/WorkspaceInspectionSettingsDialog.tsx"], "unit, mounted", "L2", "Active"),
-        ("W4: Navigation & Usages Session", ["src/components/editor/workspace/workspaceUsagesSession.ts", "src/components/editor/workspace/workspaceHierarchySession.ts"], "unit, mounted", "L1-L2 (Session)", "Active (Provider unverified)"),
-        ("W5: Refactor & Conflict Gate", ["src/components/editor/workspace/workspaceRefactorSession.ts", "src/components/editor/workspace/WorkspaceRefactorPreviewModal.tsx"], "unit, mounted", "L1", "Active (Safe Delete disabled)"),
-        ("W6-A: Clipboard Policy", ["src/components/editor/workspace/WorkspaceClipboardSettingsDialog.tsx"], "unit, mounted", "L2", "Active"),
-        ("W6-B: Tab Policy V3", ["src/components/editor/workspace/WorkspaceTabPolicySettingsDialog.tsx", "src/components/editor/workspace/EditorGroup.tsx"], "unit, mounted", "L1-L2", "Active"),
-        ("W6-C: Virtual Space & Region Folding", ["src/components/editor/workspace/workspaceVirtualSpace.ts"], "unit", "L1", "Active (Consumer pending)"),
-        ("W6-D: Code Style & Save Pipeline", ["src/components/editor/workspace/workspaceCodeStyleScheme.ts", "src/components/editor/workspace/saveNormalizationPipeline.ts"], "unit, mounted", "L1-L2", "Active (Save pipeline verified)"),
-        ("W6-E: Completion Preferences", ["src/components/editor/workspace/intelligencePreferences.ts", "src/components/editor/workspace/workspaceLspSessionManager.ts"], "unit, mounted", "L2", "Active (Live sync verified)"),
-    ]
-
-    for title, owners, layers, claim, status in pkg_specs:
-        verified_owners = [f"`{Path(o).name}`" for o in owners if o in tracked_files]
-        owners_str = ", ".join(verified_owners) if verified_owners else "verified in repo"
-        lines.append(f"| **{title}** | {owners_str} | `{layers}` | **{claim}** | {status} |")
+    for g1 in data["g1Packages"]:
+        lines.append(f"| **{g1['package']}** | {g1['owners']} | `{g1['layers']}` | **{g1['claim']}** | {g1['status']} |")
 
     lines.extend([
         "",
@@ -125,18 +198,18 @@ def generate_manifest_content(
         "",
         "| Metric | Target p95 | Baseline (Browser) | Native Linux Baseline | Native Win / macOS | Status |",
         "|---|---|---|---|---|---|",
-        "| Normal key-to-paint | <= 50 ms | 20.5 ms p50 / 134 ms p95 | platform-unverified | platform-unverified | Finding logged (134ms p95) |",
-        "| Local action chord | <= 100 ms | 14 ms p95 | platform-unverified | platform-unverified | Meets target (14ms) |",
-        "| Completion debounce & IPC | Record & gate | 120 ms debounce / 25 ms IPC | platform-unverified | platform-unverified | Monitored |",
-        "| 10k candidates cap | <= 200 items | 200 items capped | platform-unverified | platform-unverified | Enforced |",
+        f"| Normal key-to-paint | <= 50 ms | 20.5 ms p50 / 134 ms p95 | platform-unverified | platform-unverified | **{data['performance']['typingP95']['status']}** |",
+        f"| Local action chord | <= 100 ms | 14 ms p95 | platform-unverified | platform-unverified | {data['performance']['localAction']['status']} |",
+        f"| Completion debounce & IPC | Record & gate | 120 ms debounce / 25 ms IPC | platform-unverified | platform-unverified | {data['performance']['completion']['status']} |",
+        f"| 10k candidates cap | <= 200 items | 200 items capped | platform-unverified | platform-unverified | {data['performance']['candidateCap']['status']} |",
         "",
         "---",
         "",
         "## 5. Release Gate Sign-off & Maximum Claim Rules",
         "",
-        "1. **Platform Matrix**: All claims strictly scoped to **Linux x86_64**. Windows and macOS remain `platform-unverified` until native execution evidence is committed.",
-        "2. **Evidence Trust DoD**: Validated via `evidence_validate.py` and `evidence_rollup.py` (§8.21.1 V0).",
-        "3. **Claim Upper Bounds**: Unit/mounted $\\le$ L1; browser/native $\\le$ L2; L3 strictly requires dual-sided `idea-compare` artifacts.",
+        "1. **Fail-Closed Rule**: If active entries count is 0 or any performance budget is failed, release gate is **RED**.",
+        "2. **Platform Matrix**: All claims strictly scoped per platform; no cross-platform inference.",
+        "3. **Claim Upper Bounds**: Unit/mounted <= L1; browser/native <= L2; L3 strictly requires dual-sided `idea-compare` artifacts.",
         "",
     ])
 
@@ -146,45 +219,62 @@ def generate_manifest_content(
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="evidence_rollup")
     ap.add_argument("--check", action="store_true", help="Check that manifest matches generated output")
-    ap.add_argument("--output", default=str(DEFAULT_OUTPUT), help="Output path for manifest markdown")
+    ap.add_argument("--output-md", default=str(DEFAULT_MD_OUTPUT), help="Output path for manifest markdown")
+    ap.add_argument("--output-json", default=str(DEFAULT_JSON_OUTPUT), help="Output path for manifest json")
     args = ap.parse_args(argv)
 
-    head = get_git_head()
-    tracked = get_tracked_files()
+    schema = load_schema()
+    head = get_current_head()
+    source_fp = get_tested_source_fingerprint()
+    plan_fp = get_test_plan_fingerprint()
 
-    current_entries: list[dict[str, Any]] = []
+    # Step 1: Scan and validate entries via validator
+    scan_paths = scan_entries()
+    valid_entries: list[dict[str, Any]] = []
     stale_entries: list[dict[str, Any]] = []
 
-    if EVIDENCE_DIR.exists():
-        for path in EVIDENCE_DIR.rglob("*.entry.yaml"):
-            try:
-                data = yaml.safe_load(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    entry_commit = data.get("app", {}).get("commit") or data.get("commit")
-                    if entry_commit == head:
-                        current_entries.append(data)
-                    else:
-                        stale_entries.append(data)
-            except Exception:
-                pass
+    for p in scan_paths:
+        res = validate_entry(
+            p,
+            schema,
+            check_current=True,
+            current_source_fp=source_fp,
+            current_test_plan_fp=plan_fp,
+            current_head=head,
+        )
+        if res.status == EntryStatus.VALID_CURRENT and res.data:
+            valid_entries.append(res.data)
+        elif res.status in (EntryStatus.STALE_SOURCE, EntryStatus.STALE_TEST_PLAN, EntryStatus.STALE_BUNDLE):
+            if res.data:
+                stale_entries.append(res.data)
 
-    content = generate_manifest_content(head, current_entries, stale_entries, tracked)
-    out_path = Path(args.output)
+    # Step 2: Generate data and markdown
+    manifest_data = generate_manifest_data(head, source_fp, plan_fp, valid_entries, stale_entries)
+    rendered_md = render_markdown(manifest_data)
+    rendered_json = json.dumps(manifest_data, indent=2, sort_keys=True) + "\n"
+
+    md_output_path = Path(args.output_md)
+    json_output_path = Path(args.output_json)
 
     if args.check:
-        if not out_path.exists():
-            print(f"ERROR: Manifest file does not exist at {out_path}")
+        if not md_output_path.exists():
+            print(f"ERROR: {md_output_path} does not exist for --check.")
             return 1
-        existing = out_path.read_text(encoding="utf-8")
-        if existing.strip() != content.strip():
-            print("ERROR: Manifest is out of date. Run 'python evidence_rollup.py' to regenerate.")
+        existing_md = md_output_path.read_text(encoding="utf-8")
+        if existing_md != rendered_md:
+            print(f"ERROR: {md_output_path} is out of date vs generated content.")
             return 1
-        print("OK: Manifest is up to date.")
+        if json_output_path.exists():
+            existing_json = json_output_path.read_text(encoding="utf-8")
+            if existing_json != rendered_json:
+                print(f"ERROR: {json_output_path} is out of date vs generated content.")
+                return 1
+        print("Manifest check passed: manifest matches generated rollup.")
         return 0
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(content, encoding="utf-8")
-    print(f"Wrote {out_path}")
+    md_output_path.write_text(rendered_md, encoding="utf-8")
+    json_output_path.write_text(rendered_json, encoding="utf-8")
+    print(f"Wrote {md_output_path} and {json_output_path}")
     return 0
 
 
