@@ -496,6 +496,7 @@ export async function applyWorkspaceTabPolicyTransaction(params: {
   currentPolicy?: WorkspaceTabPolicyV3;
   baseLayoutRevision?: number;
   currentLayoutRevision?: number;
+  getLiveLayoutRevision?: () => number;
   currentGroups: Record<string, {
     openOrder: readonly string[];
     pinnedKeys: readonly string[];
@@ -587,6 +588,22 @@ export async function applyWorkspaceTabPolicyTransaction(params: {
         evictedKeysByGroup: {},
         allEvictedKeys: [],
         message: "Tab policy application cancelled: dirty tabs preserved",
+      };
+    }
+    // Re-check layout revision after async user confirmation prompt (§8.26.3 AA2)
+    if (
+      params.getLiveLayoutRevision &&
+      params.baseLayoutRevision != null &&
+      params.getLiveLayoutRevision() !== params.baseLayoutRevision
+    ) {
+      const { policy } = migrateWorkspaceTabPolicy(params.nextPolicyRaw);
+      return {
+        status: "stale",
+        reason: "layout-revision-changed",
+        policy,
+        evictedKeysByGroup: {},
+        allEvictedKeys: [],
+        message: "Layout changed concurrently during confirmation; tab policy application aborted",
       };
     }
   }

@@ -1,0 +1,28 @@
+id: TC-142
+title: Mail appearance settings preview and theme customization
+covers: [F6.3, F-MAIL-4]
+tags: [mail, appearance, theme, smoke, p2]
+modes: [browser]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: '[data-testid="session-new"]'
+  - wait_for: '[data-testid="session-editor"]'
+  - click: '[data-testid="session-proto-mail"]'
+  - fill: {selector: 'input[aria-label="IMAP server"]', value: imap.example.test}
+  - fill: {selector: 'input[aria-label="Mail email or username"]', value: qa@example.test}
+  - fill: {selector: 'input[aria-label="Mail password or app password token"]', value: secret}
+  - click: '[data-testid="session-section-appearance"]'
+  - wait_for: '[data-testid="mail-appearance-settings"]'
+  - assert_visible: '[data-testid="mail-appearance-preview"]'
+  - click: '[data-testid="mail-theme-select"]'
+  - wait_for: '[data-testid^="mail-theme-option-"]'
+  - click: '[data-testid^="mail-theme-option-"]'
+  - fill:
+      selector: 'input[aria-label="Mail background hex"]'
+      value: '#1e1e1e'
+  - fill:
+      selector: 'input[aria-label="Mail foreground hex"]'
+      value: '#f0f0f0'
+  - click: '[data-testid="session-save"]'
+  - wait_for: '[data-testid="session-tree-item"]'

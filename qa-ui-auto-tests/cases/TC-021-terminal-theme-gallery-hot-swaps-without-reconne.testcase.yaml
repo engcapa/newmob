@@ -1,6 +1,6 @@
 id: TC-021
 title: Terminal theme preview picker hot-swaps without reconnecting
-covers: [F5.2]
+covers: [F5.1, F5.2]
 tags: [appearance, legacy-imported, p1, terminal, theme]
 modes: [browser]
 fixtures: [reset_db]

@@ -407,6 +407,43 @@ export async function runSaveNormalizationPipeline(
 }
 
 /**
+ * Pure helper to apply LSP text edits to an in-memory string without live buffer mutations (§8.26.5 AA4).
+ */
+export function applyLspTextEditsToString(
+  text: string,
+  edits: readonly { range: { start: { line: number; character: number }; end: { line: number; character: number } }; newText: string }[],
+): string {
+  if (!edits || edits.length === 0) return text;
+  const lines = text.split("\n");
+  const getOffset = (pos: { line: number; character: number }): number => {
+    let offset = 0;
+    const targetLine = Math.min(pos.line, lines.length);
+    for (let i = 0; i < targetLine; i++) {
+      offset += lines[i].length + 1; // +1 for '\n'
+    }
+    if (pos.line < lines.length) {
+      offset += Math.min(pos.character, lines[pos.line].length);
+    }
+    return Math.min(offset, text.length);
+  };
+
+  const offsetEdits = edits.map((e) => ({
+    start: getOffset(e.range.start),
+    end: getOffset(e.range.end),
+    newText: e.newText,
+  }));
+
+  // Sort descending by offset to apply from bottom-to-top
+  offsetEdits.sort((a, b) => b.start - a.start || b.end - a.end);
+
+  let result = text;
+  for (const edit of offsetEdits) {
+    result = result.slice(0, edit.start) + edit.newText + result.slice(edit.end);
+  }
+  return result;
+}
+
+/**
  * §8.22.6 U2-D: Actions on Save Pipeline coordinator.
  */
 export const WorkspaceSavePipeline = {
@@ -414,4 +451,5 @@ export const WorkspaceSavePipeline = {
   trimTrailingWhitespace,
   adjustFinalNewline,
   normalizeLineEndings,
+  applyLspTextEditsToString,
 };

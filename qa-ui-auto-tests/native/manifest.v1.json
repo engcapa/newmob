@@ -135,8 +135,8 @@
     "generator": "evidence_rollup.py v4",
     "sourceCommit": "none",
     "staleEntriesCount": 0,
-    "testPlanFingerprint": "866df020b9e03e4eec7b60186a47757bbaed1a6bd94e00b519b6201f3b179aae",
-    "testedSourceFingerprint": "593d217595125c78a9a1c1497abf52ab09b963d3b5eb7981d51479ec726bf372"
+    "testPlanFingerprint": "144d602027c943a3bddb00f35e019a404212da7bb8f80e707e58d994f844a215",
+    "testedSourceFingerprint": "53d77f1e3ce288ded8f3b96d93faca8577908ded66a2ce2bc4050d767edbc066"
   },
   "performance": {
     "candidateCap": {

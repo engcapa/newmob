@@ -77,7 +77,7 @@ import type {
 } from "../../../lib/editor/lsp";
 import type { ParameterPopupView } from "./referenceInfoSession";
 import { languageForPath } from "../../git/diffLanguage";
-import { acquireClipboardStore, clipboardStoreForWorkspace, type WorkspaceClipboardHandle } from "./workspaceClipboardSession";
+import { useWorkspaceClipboardSession, type WorkspaceClipboardHandle } from "./workspaceClipboardSession";
 import { createWorkspaceSearchPanel, WORKSPACE_SEARCH_STYLE } from "./editorSearchPanel";
 import {
   activeLspSnippetChoices,
@@ -181,6 +181,8 @@ interface CodeMirrorHostProps {
    * clipboard session and paste reads it across every split view.
    */
   clipboardWorkspaceId?: string;
+  /** Root workspace clipboard handle (§8.26.2 AA1) */
+  clipboardHandle?: WorkspaceClipboardHandle | null;
   /** Surfaced when a clipboard operation degraded (system clipboard failed). */
   onClipboardUnavailable?: (message: string) => void;
   diagnostics: LspDiagnostic[];
@@ -329,9 +331,7 @@ type ClipboardStoreLike = Pick<WorkspaceClipboardHandle, "write" | "read" | "pas
 function workspaceStoreFor(
   context: { workspaceId: string | null; handle: WorkspaceClipboardHandle | null } | undefined,
 ): ClipboardStoreLike | null {
-  if (!context) return null;
-  if (context.handle) return context.handle;
-  return context.workspaceId ? clipboardStoreForWorkspace(context.workspaceId) : null;
+  return context?.handle ?? null;
 }
 
 function rememberEditorClipboardPayload(
@@ -1290,6 +1290,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onDefinition,
   onReferences,
   clipboardWorkspaceId,
+  clipboardHandle,
   onClipboardUnavailable,
   onComplete,
   onCompleteResolve,
@@ -2060,28 +2061,31 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     };
   }, []);
 
-  // §8.17.6/§8.18.4: clipboard helpers read the owning workspace handle +
-  // unavailable callback through this registry so copy/paste works across
-  // split views. The handle is refcounted; release clears the slot when the
-  // last view of the workspace unmounts.
+  const contextClipboardHandle = useWorkspaceClipboardSession();
+  const effectiveClipboardHandle = clipboardHandle ?? contextClipboardHandle;
+
+  // §8.17.6/§8.18.4/§8.26.2 AA1: clipboard helpers read the owning workspace
+  // handle + unavailable callback through this registry so copy/paste works
+  // across split views. The host attaches as a consumer with a lease.
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    const handle = clipboardWorkspaceId ? acquireClipboardStore(clipboardWorkspaceId) : null;
+    const consumerId = `cm-${fileKey || Math.random().toString(36).slice(2, 9)}`;
+    const detach = effectiveClipboardHandle?.attachConsumer(consumerId);
     clipboardContextByView.set(view, {
-      workspaceId: clipboardWorkspaceId ?? null,
+      workspaceId: effectiveClipboardHandle?.workspaceId ?? clipboardWorkspaceId ?? null,
       onUnavailable: (message) => onClipboardUnavailableRef.current(message),
-      handle,
+      handle: effectiveClipboardHandle ?? null,
     });
     return () => {
-      handle?.release();
+      detach?.();
       clipboardContextByView.set(view, {
         workspaceId: null,
         onUnavailable: () => {},
         handle: null,
       });
     };
-  }, [clipboardWorkspaceId]);
+  }, [effectiveClipboardHandle, clipboardWorkspaceId, fileKey]);
 
   useEffect(() => {
     const view = viewRef.current;

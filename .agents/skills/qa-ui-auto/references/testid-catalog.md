@@ -809,6 +809,10 @@
 - `[data-testid="session-proto-clickhouse"]` — interactive [optional] — F6.3.proto-clickhouse
 - `[data-testid="session-proto-redis"]` — interactive [optional] — F6.3.proto-redis
 - `[data-testid="session-proto-hbaseshell"]` — interactive [optional] — F6.3.proto-hbaseshell
+- `[data-testid="session-proto-mail"]` — interactive [optional] — F6.3.proto-mail
+- `input[aria-label="IMAP server"]` — interactive [optional] — F6.3.mail-imap-server
+- `input[aria-label="Mail email or username"]` — interactive [optional] — F6.3.mail-email-user
+- `input[aria-label="Mail password or app password token"]` — interactive [optional] — F6.3.mail-password
 - `[data-testid="session-host"]` — interactive — F6.3.host
 - `[data-testid="session-user"]` — interactive — F6.3.user
 - `[data-testid="session-port"]` — interactive — F6.3.port

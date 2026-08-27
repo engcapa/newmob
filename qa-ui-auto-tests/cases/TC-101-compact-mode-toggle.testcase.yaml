@@ -5,7 +5,7 @@ description: |
   surviving title-bar surface (F1.8): the unified app menu opens from
   app-main-menu, shows top-level entries, dismisses with Escape, and the
   shell renders identically after a reload.
-covers: [F1.8]
+covers: [F1.4, F1.8]
 tags: [smoke, p1, main, window]
 modes: [browser]
 fixtures: [reset_db]

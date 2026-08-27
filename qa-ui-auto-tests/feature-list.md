@@ -104,7 +104,7 @@ controls:
 
 <!-- feature
 id: F1.4
-status: todo
+status: backend-only
 area: main/window
 components: []
 files: []
@@ -988,7 +988,7 @@ controls:
 
 <!-- feature
 id: F5.1
-status: done
+status: backend-only
 area: terminal/appearance
 files:
   - src/lib/systemFonts.ts
@@ -1319,6 +1319,22 @@ controls:
     selector: '[data-testid="session-proto-hbaseshell"]'
     kind: interactive
     optional: true        # HBase session type — form body owned by F-DB-3
+  - id: proto-mail
+    selector: '[data-testid="session-proto-mail"]'
+    kind: interactive
+    optional: true
+  - id: mail-imap-server
+    selector: 'input[aria-label="IMAP server"]'
+    kind: interactive
+    optional: true
+  - id: mail-email-user
+    selector: 'input[aria-label="Mail email or username"]'
+    kind: interactive
+    optional: true
+  - id: mail-password
+    selector: 'input[aria-label="Mail password or app password token"]'
+    kind: interactive
+    optional: true
   # Top-level connection fields (visible when SSH/SFTP/VNC/RDP)
   - id: host
     selector: '[data-testid="session-host"]'

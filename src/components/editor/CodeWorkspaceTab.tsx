@@ -308,7 +308,6 @@ import { copyReferenceCandidates } from "./workspace/workspaceCopyReference";
 import { ClipboardHistoryPopup } from "./workspace/ClipboardHistoryPopup";
 import {
   acquireClipboardStore,
-  clipboardStoreForWorkspace,
   type EditorClipboardSession,
 } from "./workspace/workspaceClipboardSession";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
@@ -965,6 +964,24 @@ export function CodeWorkspaceTab({
   const tabPolicyRef = useRef(tabPolicy);
   tabPolicyRef.current = tabPolicy;
   const [tabPolicyRevision, setTabPolicyRevision] = useState(0);
+  // §8.26.3 AA2: Monotonic layout revision and base revision for tab policy transactions
+  const [layoutRevision, setLayoutRevision] = useState(0);
+  const layoutRevisionRef = useRef(layoutRevision);
+  layoutRevisionRef.current = layoutRevision;
+  const [baseLayoutRevision, setBaseLayoutRevision] = useState(0);
+
+  const openTabPolicySettings = useCallback(() => {
+    setBaseLayoutRevision(layoutRevisionRef.current);
+    setTabPolicySettingsOpen(true);
+  }, []);
+
+  // §8.26.2 AA1: Root workspace clipboard session handle
+  const clipboardHandle = useMemo(() => acquireClipboardStore(workspaceInstanceId), [workspaceInstanceId]);
+  useEffect(() => {
+    return () => {
+      clipboardHandle.release();
+    };
+  }, [clipboardHandle]);
   // §8.19.9 R8-D1: code style schemes — production store with persistence;
   // the active scheme layers into effective-style resolution BELOW EditorConfig.
   const [codeStyleSchemes, setCodeStyleSchemes] = useState<CodeStyleSchemeStoreState>(
@@ -2104,16 +2121,12 @@ export function CodeWorkspaceTab({
 
   useEffect(() => {
     editorAppearanceProfileRef.current = editorAppearanceProfile;
-    const handle = acquireClipboardStore(workspaceInstanceId);
-    handle.setHistoryEnabled(editorAppearanceProfile.clipboard.historyEnabled);
-    handle.setHistoryLimits(
+    clipboardHandle.setHistoryEnabled(editorAppearanceProfile.clipboard.historyEnabled);
+    clipboardHandle.setHistoryLimits(
       editorAppearanceProfile.clipboard.historyMaxItems,
       editorAppearanceProfile.clipboard.historyMaxTotalBytes,
     );
-    return () => {
-      handle.release();
-    };
-  }, [editorAppearanceProfile, workspaceInstanceId]);
+  }, [editorAppearanceProfile, clipboardHandle]);
 
   useEffect(() => {
     const result = readEditorAppearanceProfileWithDiagnostics(
@@ -4895,22 +4908,36 @@ export function CodeWorkspaceTab({
             }
           },
           organizeImportsOnSave: effectiveSavePolicy.organizeImports.enabled,
-          organizeImportsFn: async () => {
+          organizeImportsFn: async (shadowText) => {
             try {
+              const textToProcess = shadowText ?? file.text ?? "";
               const wholeFileRange: LspRange = {
                 start: { line: 0, character: 0 },
-                end: { line: (file.text ?? "").split("\n").length, character: 0 },
+                end: { line: textToProcess.split("\n").length, character: 0 },
               };
-              const { actions, semanticToken } = await requestCodeActions(
-                file,
+              const { actions } = await requestCodeActions(
+                { ...file, text: textToProcess },
                 wholeFileRange,
                 [],
                 ["source.organizeImports"],
               );
               if (actions.length > 0) {
-                const res = await runCodeAction(actions[0], file, semanticToken);
-                if (res && res.ok) {
-                  return openFilesRef.current[key]?.text ?? null;
+                const action = actions[0];
+                let edit = action.edit;
+                if (!edit && action.command) {
+                  const descriptor = lspDescriptorForFile(file);
+                  if (descriptor) {
+                    const resolved = await lspCodeActionResolve(descriptor, action).catch(() => null);
+                    if (resolved?.action?.edit) {
+                      edit = resolved.action.edit;
+                    }
+                  }
+                }
+                if (edit && edit.documentEdits && edit.documentEdits.length > 0) {
+                  const edits = edit.documentEdits[0].edits;
+                  if (edits && edits.length > 0) {
+                    return applyLspTextEditsToString(textToProcess, edits);
+                  }
                 }
               }
             } catch (err) {
@@ -9044,7 +9071,7 @@ export function CodeWorkspaceTab({
       title: "Editor Tab Policy Settings",
       category: "View",
       keywords: ["tab", "policy", "limit", "pinned", "preview", "order", "activate"],
-      run: () => setTabPolicySettingsOpen(true),
+      run: () => openTabPolicySettings(),
     },
     {
       id: "workspace.editor.copy",
@@ -9123,7 +9150,7 @@ export function CodeWorkspaceTab({
       when: (context) => context.focus === "editor" && !!context.hasActiveFile
         && !context.readOnly,
       run: () => {
-        const store = clipboardStoreForWorkspace(workspaceInstanceId);
+        const store = clipboardHandle;
         if (!store.isHistoryEnabled() || store.historyEntries().length === 0) {
           setStatusMessage("Clipboard history is empty or disabled");
           return true;
@@ -11777,20 +11804,35 @@ export function CodeWorkspaceTab({
           providerGeneration: lspSessionGeneration(),
           workspaceRoots: rootsRef.current.map((root) => root.path),
         });
-        // §8.20.5 W4: includeDeclaration now comes from the scope selection.
-        const result = await lspReferences(descriptor, position, selection.includeDeclaration);
-        updateLspStatusForFile(live, result.status);
+        // §8.20.5 W4 / §8.26.8 AA7: execute via SemanticQueryHost with cancellation and generation guard
+        const queryRes = await semanticQueryHostRef.current.execute<LspLocation>(
+          "references",
+          identity.uri,
+          position,
+          (_signal) => lspReferences(descriptor, position, selection.includeDeclaration).then((res) => {
+            updateLspStatusForFile(live, res.status);
+            return res.locations;
+          }),
+          {
+            generation: live.documentRevision ?? 0,
+            getLiveGeneration: () => live.documentRevision ?? 0,
+          },
+        );
+        if (queryRes.status === "cancelled" || queryRes.status === "stale") {
+          return;
+        }
+        const locations: readonly LspLocation[] = queryRes.items ?? [];
         const completion = semanticIndex.finishQuery(buildToken, {
           kind: "references",
-          resultCount: result.locations.length,
+          resultCount: locations.length,
         });
-        if (!completion.accepted) {
+        if (!completion.accepted || queryRes.status === "error") {
           if (referencesRequestSequenceRef.current === requestId) {
             setReferencesResult({
               loading: false,
               origin: live.subtitle,
               locations: [],
-              error: "References result became stale because the workspace changed",
+              error: queryRes.error || "References result became stale because the workspace changed",
               semanticGeneration: null,
               semanticRevision: null,
             });
@@ -11818,7 +11860,7 @@ export function CodeWorkspaceTab({
             revision: live.documentRevision ?? 0,
             scope: "project",
           },
-          locations: result.locations,
+          locations,
           isLibraryUri: libraryUriClassifierForRoots(rootsRef.current, relativePathWithinRoot),
         }) ?? null;
         const scopedLocations = (snapshot?.envelope.results ?? []).map(({ role: _role, ...location }) => location);
@@ -11833,7 +11875,7 @@ export function CodeWorkspaceTab({
           symbolName,
           identity,
         });
-        setStatusMessage(`${scopedLocations.length} reference${scopedLocations.length === 1 ? "" : "s"} found${scopedLocations.length !== result.locations.length ? ` (${result.locations.length} unscoped)` : ""}`);
+        setStatusMessage(`${scopedLocations.length} reference${scopedLocations.length === 1 ? "" : "s"} found${scopedLocations.length !== locations.length ? ` (${locations.length} unscoped)` : ""}`);
       } catch (err) {
         semanticIndex.failBuild(buildToken, errorMessage(err));
         if (referencesRequestSequenceRef.current !== requestId) return;
@@ -14900,7 +14942,7 @@ export function CodeWorkspaceTab({
             setStatusMessage("Saved workspace editor appearance settings");
           }}
           onClearClipboardHistory={() => {
-            clipboardStoreForWorkspace(workspaceInstanceId).clearHistory();
+            clipboardHandle.clearHistory();
             setClipboardHistoryEntries([]);
             setStatusMessage("Cleared clipboard history for current workspace session");
           }}
@@ -14926,8 +14968,9 @@ export function CodeWorkspaceTab({
               currentGroups: currentUi.editorGroups,
               openFiles: openFilesRef.current,
               mruFileKeys: mruFileKeysRef.current,
-              baseLayoutRevision: tabPolicyRevision,
-              currentLayoutRevision: tabPolicyRevision,
+              baseLayoutRevision: baseLayoutRevision,
+              currentLayoutRevision: layoutRevisionRef.current,
+              getLiveLayoutRevision: () => layoutRevisionRef.current,
               confirmDirtyClose: async (dirtyKeys) => {
                 const names = dirtyKeys.map((k) => openFilesRef.current[k]?.title ?? k).join(", ");
                 return window.confirm(`The following files have unsaved changes:\n${names}\n\nApply tab limit policy and discard changes?`);
@@ -14944,6 +14987,7 @@ export function CodeWorkspaceTab({
                 setTabPolicy(policy);
                 tabPolicyRef.current = policy;
                 setTabPolicyRevision((r) => r + 1);
+                setLayoutRevision((r) => r + 1);
 
                 const persistableGroups = Object.fromEntries(
                   (Object.entries(nextGroups) as Array<[EditorGroupId, typeof currentUi.editorGroups.primary]>)
@@ -15042,11 +15086,11 @@ export function CodeWorkspaceTab({
           executeActiveEditorCommand("pasteFromHistory", { historyIndex: index });
         }}
         onDelete={(index) => {
-          clipboardStoreForWorkspace(workspaceInstanceId).removeHistoryEntry(index);
-          setClipboardHistoryEntries([...clipboardStoreForWorkspace(workspaceInstanceId).historyEntries()]);
+          clipboardHandle.removeHistoryEntry(index);
+          setClipboardHistoryEntries([...clipboardHandle.historyEntries()]);
         }}
         onClear={() => {
-          clipboardStoreForWorkspace(workspaceInstanceId).clearHistory();
+          clipboardHandle.clearHistory();
           setClipboardHistoryEntries([]);
         }}
         onClose={() => setClipboardHistoryOpen(false)}

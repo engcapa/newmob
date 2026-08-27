@@ -8,8 +8,8 @@
 | Attribute | Value |
 |---|---|
 | Subject Source Commit | `none` |
-| Tested Source Fingerprint | `593d217595125c78` |
-| Test Plan Fingerprint | `866df020b9e03e4e` |
+| Tested Source Fingerprint | `53d77f1e3ce288de` |
+| Test Plan Fingerprint | `144d602027c943a3` |
 | Active Entries (valid-current) | 0 |
 | Historical / Stale Entries | 0 |
 | Rollup Generator | `evidence_rollup.py v4` |

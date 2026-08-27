@@ -1,3 +1,4 @@
+import { createContext, useContext } from "react";
 import type { ClipboardSourceEol } from "./workspaceEditorCommands";
 
 /**
@@ -303,6 +304,12 @@ export interface WorkspaceClipboardHandle {
   setHistoryLimits(maxItems: number, maxTotalBytes: number): void;
   historyLimits(): { maxItems: number; maxTotalBytes: number };
   historyExclusion(): ClipboardHistoryExclusion;
+}
+
+export const WorkspaceClipboardSessionContext = createContext<WorkspaceClipboardHandle | null>(null);
+
+export function useWorkspaceClipboardSession(): WorkspaceClipboardHandle | null {
+  return useContext(WorkspaceClipboardSessionContext);
 }
 
 /**
