@@ -434,9 +434,13 @@ function pasteSystemClipboard(view: EditorView): boolean {
               rectangular: session.rectangular,
             });
             context?.onUnavailable(
-              "System clipboard unavailable — pasted the last in-workspace copy instead",
+              "System clipboard access denied — pasted from in-workspace session slot instead",
             );
             view.focus();
+          } else {
+            context?.onUnavailable(
+              "System clipboard access denied and no in-workspace clipboard session available",
+            );
           }
         }
         return;
@@ -452,7 +456,7 @@ function pasteSystemClipboard(view: EditorView): boolean {
 }
 
 /**
- * §8.19.5 Plain Paste: internal rectangular/segment metadata is deliberately
+ * §8.19.5 / §8.21.3 Plain Paste: internal rectangular/segment metadata is deliberately
  * dropped — the system (or in-workspace fallback) text inserts as ONE plain
  * string per caret in a single dispatch, so one undo restores everything.
  */
@@ -466,7 +470,9 @@ function pasteAsPlainText(view: EditorView): boolean {
       const session = workspaceStoreFor(context)?.read() ?? null;
       const text = result.ok ? result.text : session?.plainText ?? "";
       if (!text) {
-        context?.onUnavailable("Nothing to paste");
+        context?.onUnavailable(
+          result.ok ? "Nothing to paste" : "System clipboard access denied and no in-workspace clipboard session available",
+        );
         return;
       }
       // Ascending per-caret replacement of the same full text; no segments,
@@ -479,7 +485,7 @@ function pasteAsPlainText(view: EditorView): boolean {
       });
       if (!result.ok && session) {
         context?.onUnavailable(
-          "System clipboard unavailable — pasted the last in-workspace copy as plain text",
+          "System clipboard access denied — pasted from in-workspace session slot as plain text",
         );
       }
       view.focus();

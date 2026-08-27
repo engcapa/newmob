@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RotateCcw, X } from "lucide-react";
 import {
   cloneEditorAppearanceProfile,
@@ -36,6 +36,7 @@ export function WorkspaceEditorAppearanceSettingsDialog({
   const [draft, setDraft] = useState(() => cloneEditorAppearanceProfile(profile));
   const [softWrapPatterns, setSoftWrapPatterns] = useState(() => listText(profile.softWrap.patterns));
   const [breadcrumbLanguages, setBreadcrumbLanguages] = useState(() => listText(profile.breadcrumbs.languages));
+  const clearButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -322,6 +323,12 @@ export function WorkspaceEditorAppearanceSettingsDialog({
 
           <section aria-labelledby="workspace-editor-appearance-clipboard-heading" className="space-y-3 border-t border-[var(--taomni-code-border)] pt-4">
             <h3 id="workspace-editor-appearance-clipboard-heading" className="font-medium">Clipboard History</h3>
+            <p
+              data-testid="workspace-editor-appearance-clipboard-scope-note"
+              className="text-[11px] text-[var(--taomni-code-muted)]"
+            >
+              Policy settings persist per-workspace; clipboard content is stored in-memory for the current session only and is never written to disk or local storage.
+            </p>
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -370,14 +377,22 @@ export function WorkspaceEditorAppearanceSettingsDialog({
                 <span className="text-[var(--taomni-code-muted)]">bytes</span>
               </span>
             </label>
+            <div
+              data-testid="workspace-editor-appearance-clipboard-notice"
+              className="text-[11px] text-[var(--taomni-code-muted)]"
+            >
+              Oversized items (&gt;256KB) and sensitive secrets bypass the history ring and remain in the active paste slot only.
+            </div>
             {onClearClipboardHistory && (
               <div className="pt-1">
                 <button
+                  ref={clearButtonRef}
                   type="button"
                   data-testid="workspace-editor-appearance-clipboard-clear"
                   onClick={() => {
                     if (window.confirm("Clear clipboard history for current workspace session?")) {
                       onClearClipboardHistory();
+                      clearButtonRef.current?.focus();
                     }
                   }}
                   className="rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-3 py-1 hover:bg-[var(--taomni-code-active-line-bg)]"

@@ -302,7 +302,11 @@ import {
 import { filterGenerateCodeActions } from "./workspace/workspaceSemanticEditing";
 import { copyReferenceCandidates } from "./workspace/workspaceCopyReference";
 import { ClipboardHistoryPopup } from "./workspace/ClipboardHistoryPopup";
-import { clipboardStoreForWorkspace, type EditorClipboardSession } from "./workspace/workspaceClipboardSession";
+import {
+  acquireClipboardStore,
+  clipboardStoreForWorkspace,
+  type EditorClipboardSession,
+} from "./workspace/workspaceClipboardSession";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
@@ -2092,12 +2096,15 @@ export function CodeWorkspaceTab({
 
   useEffect(() => {
     editorAppearanceProfileRef.current = editorAppearanceProfile;
-    const store = clipboardStoreForWorkspace(workspaceInstanceId);
-    store.setHistoryEnabled(editorAppearanceProfile.clipboard.historyEnabled);
-    store.setHistoryLimits(
+    const handle = acquireClipboardStore(workspaceInstanceId);
+    handle.setHistoryEnabled(editorAppearanceProfile.clipboard.historyEnabled);
+    handle.setHistoryLimits(
       editorAppearanceProfile.clipboard.historyMaxItems,
       editorAppearanceProfile.clipboard.historyMaxTotalBytes,
     );
+    return () => {
+      handle.release();
+    };
   }, [editorAppearanceProfile, workspaceInstanceId]);
 
   useEffect(() => {

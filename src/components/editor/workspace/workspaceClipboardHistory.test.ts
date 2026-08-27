@@ -117,4 +117,29 @@ describe("§8.19.5 clipboard history ring", () => {
     expect(other.historyEntries()).toHaveLength(0);
     expect(other.read()?.plainText).toBe("a");
   });
+
+  it("shrinks history immediately when limit is lowered below current length", () => {
+    const handle = acquireClipboardStore("ws-shrink");
+    for (let i = 0; i < 10; i++) writeText(handle, `item-${i}`);
+    expect(handle.historyEntries()).toHaveLength(10);
+    handle.setHistoryLimits(3, 1024 * 1024);
+    expect(handle.historyEntries()).toHaveLength(3);
+    expect(handle.historyEntries().map((e) => e.plainText)).toEqual(["item-9", "item-8", "item-7"]);
+  });
+
+  it("guarantees persistence isolation: localStorage never contains clipboard payload", () => {
+    const wsId = "ws-no-storage-leak";
+    const handle = acquireClipboardStore(wsId);
+    const secretText = "ultra-secret-token-payload-xyz123";
+    writeText(handle, secretText);
+
+    // Assert that nowhere in localStorage is the clipboard payload stored
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key) {
+        const val = localStorage.getItem(key);
+        expect(val).not.toContain(secretText);
+      }
+    }
+  });
 });
