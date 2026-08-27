@@ -8,7 +8,7 @@
 | Attribute | Value |
 |---|---|
 | Subject Source Commit | `none` |
-| Tested Source Fingerprint | `2604a3952fd0c19d` |
+| Tested Source Fingerprint | `593d217595125c78` |
 | Test Plan Fingerprint | `866df020b9e03e4e` |
 | Active Entries (valid-current) | 0 |
 | Historical / Stale Entries | 0 |
