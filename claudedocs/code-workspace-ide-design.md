@@ -7328,8 +7328,8 @@ Unit / full editor suite / build / Rust / QA audit / browser / native / provider
 | 6 | [x] | **X6 Code Action Production Adapter + Provider Trace** | 四入口共用真实adapter、resolve、precondition、history receipt | X0；为X4提供接口 |
 | 7 | [x] | **X7 Navigation/Usages/Hierarchy Production Integration** | Definition/Type Definition/References/Usages/Hierarchy真请求与session | X0；模块分类依赖X8，基础请求可并行 |
 | 8 | [x] | **X8 Project Structure Tooling Ingestion + Consumers** | Maven/Gradle真实模型进入project context并被X5/X7/refactor消费 | 可与X6并行；不得继续扩展regex语义 |
-| 9 | [ ] | **X9 QA Behavioral Catalog + Cases** | 每包同步feature/control/case，消除截图式断言 | 跟随X1-X8增量合入，最后统一gate |
-| 10 | [ ] | **X10 Rename/Native/Performance/A11y/IDEA Matrix** | current真实effect、平台、性能和同fixture对录 | X0-X9对应格通过后运行；失败回原owner修复 |
+| 9 | [x] | **X9 QA Behavioral Catalog + Cases** | 每包同步feature/control/case，消除截图式断言 | 跟随X1-X8增量合入，最后统一gate |
+| 10 | [x] | **X10 Rename/Native/Performance/A11y/IDEA Matrix** | current真实effect、平台、性能和同fixture对录 | X0-X9对应格通过后运行；失败回原owner修复 |
 | 11 | [ ] | **X11 Advanced Re-entry** | 保持锁定，仅接受满足条件的独立ADR | G0及对应G1/G2/X10格 |
 
 共同规则：
