@@ -37,8 +37,8 @@ export class WorkspaceSemanticQueryHost {
    */
   async execute<TItem>(
     kind: SemanticQueryKind,
-    uri: string,
-    position: LspPosition,
+    _uri: string,
+    _position: LspPosition,
     fetcher: (signal: AbortSignal) => Promise<TItem[] | null>,
   ): Promise<SemanticQueryResult<TItem>> {
     const startTime = Date.now();

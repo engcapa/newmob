@@ -311,6 +311,19 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       expect(view.state.doc.toString()).toBe("const answer = 42;");
     });
 
+    it("handles Delete in virtual space without mutating preceding text", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "const answer = 42;",
+          extensions: [virtualSpaceOverflowField, POLICY],
+        }),
+      });
+
+      setVirtualHead(view, 18, 5, false);
+      expect(virtualDeleteCommand(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("const answer = 42;");
+    });
+
     it("pads line with trailing spaces and newline on virtual Enter", () => {
       const view = new EditorView({
         state: EditorState.create({

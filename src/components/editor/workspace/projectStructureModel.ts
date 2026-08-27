@@ -184,7 +184,9 @@ export function inferProjectStructureFromBuildFiles(
         sourceRoots: [`${parentDir}/src`],
         testRoots: [`${parentDir}/tests`],
         generatedRoots: [],
-        buildSystem: "custom",
+        excludedRoots: [`${parentDir}/target`],
+        dependencyFingerprint: "",
+        buildSystem: "plain",
       });
       buildExcludes.push(`${parentDir}/target`);
       facts[`descriptor.${desc.path}`] = { source: "user-config", freshness: now };
@@ -200,7 +202,9 @@ export function inferProjectStructureFromBuildFiles(
           sourceRoots: [`${parentDir}/src`],
           testRoots: [`${parentDir}/test`, `${parentDir}/__tests__`],
           generatedRoots: [],
-          buildSystem: "custom",
+          excludedRoots: [`${parentDir}/node_modules`, `${parentDir}/dist`],
+          dependencyFingerprint: "",
+          buildSystem: "plain",
         });
         buildExcludes.push(`${parentDir}/node_modules`, `${parentDir}/dist`);
         facts[`descriptor.${desc.path}`] = { source: "user-config", freshness: now };
@@ -216,6 +220,8 @@ export function inferProjectStructureFromBuildFiles(
         sourceRoots: [`${parentDir}/src/main/java`],
         testRoots: [`${parentDir}/src/test/java`],
         generatedRoots: [`${parentDir}/target/generated-sources`],
+        excludedRoots: [`${parentDir}/target`],
+        dependencyFingerprint: "",
         buildSystem: "maven",
       });
       buildExcludes.push(`${parentDir}/target`);
@@ -228,6 +234,8 @@ export function inferProjectStructureFromBuildFiles(
         sourceRoots: [`${parentDir}/src/main/java`, `${parentDir}/src/main/kotlin`],
         testRoots: [`${parentDir}/src/test/java`],
         generatedRoots: [`${parentDir}/build/generated`],
+        excludedRoots: [`${parentDir}/build`, `${parentDir}/.gradle`],
+        dependencyFingerprint: "",
         buildSystem: "gradle",
       });
       buildExcludes.push(`${parentDir}/build`, `${parentDir}/.gradle`);

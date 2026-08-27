@@ -18,7 +18,7 @@ export interface CodeActionExecutionHooks {
 
 export interface ActionExecutionTelemetryEntry {
   title: string;
-  kind?: string;
+  kind?: string | null;
   durationMs: number;
   status: CodeActionExecutionResult["status"];
   editFileCount: number;

@@ -202,7 +202,6 @@ import {
 } from "./workspace/workspaceRecovery";
 import {
   applyWorkspaceTabPolicyTransaction,
-  computeWorkspaceTabPolicyApplication,
   enforceTabPolicy,
   pushClosedTab,
   buildReopenTreeRoute,
@@ -14813,7 +14812,7 @@ export function CodeWorkspaceTab({
               openFiles: openFilesRef.current,
               mruFileKeys: mruFileKeysRef.current,
               commitAtomicUpdate: ({ nextGroups, policy }) => {
-                useCodeWorkspaceStore.getState().updateEditorGroups(workspaceInstanceId, () => nextGroups as typeof currentUi.editorGroups);
+                useCodeWorkspaceStore.getState().patchInstance(workspaceInstanceId, { editorGroups: nextGroups as typeof currentUi.editorGroups });
                 setTabPolicy(policy);
                 tabPolicyRef.current = policy;
                 setTabPolicyRevision((r) => r + 1);

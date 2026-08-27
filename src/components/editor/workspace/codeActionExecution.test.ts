@@ -105,7 +105,7 @@ describe("executeCodeAction", () => {
       const resolvedAction = action({
         title: "Add import 'java.util.Map'",
         kind: "quickfix.import",
-        edit: { documentEdits: [{ uri: "file:///repo/App.java", edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "import java.util.Map;\n" }] }], operations: [] },
+        edit: { documentEdits: [{ uri: "file:///repo/App.java", path: "/repo/App.java", edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "import java.util.Map;\n" }] }], operations: [] },
       });
 
       const resolveAction = vi.fn(async () => resolvedAction);

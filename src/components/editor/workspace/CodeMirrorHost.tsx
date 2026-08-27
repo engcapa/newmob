@@ -149,7 +149,6 @@ import {
 import { observeSyntaxFacts, treeRevisionField } from "./workspaceSyntaxFacts";
 import {
   desiredVisualColumnField,
-  editorVirtualSpacePolicy,
   virtualSpaceClickHandler,
   virtualSpaceKeymap,
   virtualSpaceOverflowField,

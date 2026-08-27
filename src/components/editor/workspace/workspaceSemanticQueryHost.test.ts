@@ -1,8 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   WorkspaceSemanticQueryHost,
   MAX_SEMANTIC_QUERY_ITEMS,
-  type SemanticQueryKind,
 } from "./workspaceSemanticQueryHost";
 
 describe("§8.22.9 U4 WorkspaceSemanticQueryHost", () => {
