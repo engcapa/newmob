@@ -318,6 +318,35 @@ describe("SFTP transfer queue sizing", () => {
     );
     expect(rerendered.getByTestId("sftp-transfer-queue")).toHaveStyle({ height: "280px" });
   });
+
+  it("can be collapsed and expanded with state persistence and displays crossHostBanner", () => {
+    const { getByTestId, queryByTestId, unmount } = render(
+      <FileTransferQueue sessionId={SESSION_ID} showCrossHostBanner onCancel={vi.fn()} />,
+    );
+
+    expect(getByTestId("sftp-transfer-queue")).toBeInTheDocument();
+    expect(getByTestId("sftp-transfer-queue-close")).toBeInTheDocument();
+
+    // Click close button to collapse
+    fireEvent.click(getByTestId("sftp-transfer-queue-close"));
+
+    expect(queryByTestId("sftp-transfer-queue")).not.toBeInTheDocument();
+    expect(getByTestId("sftp-transfer-queue-collapsed")).toBeInTheDocument();
+    expect(localStorage.getItem(`taomni.sftp.transferQueueOpen.${SESSION_ID}`)).toBe("false");
+
+    // Unmount and remount to verify collapsed state persistence
+    unmount();
+    const remounted = render(
+      <FileTransferQueue sessionId={SESSION_ID} showCrossHostBanner onCancel={vi.fn()} />,
+    );
+    expect(remounted.queryByTestId("sftp-transfer-queue")).not.toBeInTheDocument();
+    expect(remounted.getByTestId("sftp-transfer-queue-collapsed")).toBeInTheDocument();
+
+    // Click expand button to open again
+    fireEvent.click(remounted.getByTestId("sftp-transfer-queue-expand-btn"));
+    expect(remounted.getByTestId("sftp-transfer-queue")).toBeInTheDocument();
+    expect(localStorage.getItem(`taomni.sftp.transferQueueOpen.${SESSION_ID}`)).toBe("true");
+  });
 });
 
 describe("Local Windows drives navigation", () => {

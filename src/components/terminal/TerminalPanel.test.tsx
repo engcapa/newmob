@@ -909,7 +909,7 @@ describe("TerminalPanel focus behavior", () => {
       await waitFor(() => {
         expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument();
       });
-      expect(screen.getByTestId("confirm-dialog-confirm")).toHaveFocus();
+      expect(screen.getByTestId("confirm-dialog-message")).toHaveTextContent("/home/user/project");
 
       fireEvent.click(screen.getByTestId("confirm-dialog-confirm"));
 

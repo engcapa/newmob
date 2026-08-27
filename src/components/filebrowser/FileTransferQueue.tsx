@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Trash2, X, Eraser, Pause, Play, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { Trash2, X, Eraser, Pause, Play, RotateCw, ChevronDown, ChevronUp, ArrowLeftRight } from "lucide-react";
 import { useTransferStore } from "../../stores/transferStore";
 import { formatBytes, formatRate, formatEta, type TransferState } from "../../lib/sftp";
 import { useT } from "../../lib/i18n";
@@ -11,9 +11,11 @@ interface FileTransferQueueProps {
   onResume?: (transferId: string) => void;
   onRetry?: (transferId: string) => void;
   compact?: boolean;
+  showCrossHostBanner?: boolean;
 }
 
 const STORAGE_KEY_PREFIX = "taomni.sftp.transferQueueHeight.";
+const OPEN_STORAGE_KEY_PREFIX = "taomni.sftp.transferQueueOpen.";
 const DEFAULT_HEIGHT = 220;
 const DEFAULT_COMPACT_HEIGHT = 140;
 const MIN_HEIGHT = 104;
@@ -29,6 +31,10 @@ function clampHeight(value: number, compact?: boolean): number {
 
 function heightStorageKey(sessionId?: string): string {
   return `${STORAGE_KEY_PREFIX}${sessionId ?? "all"}`;
+}
+
+function openStorageKey(sessionId?: string): string {
+  return `${OPEN_STORAGE_KEY_PREFIX}${sessionId ?? "all"}`;
 }
 
 function loadHeight(sessionId: string | undefined, compact: boolean | undefined): number {
@@ -51,6 +57,24 @@ function saveHeight(sessionId: string | undefined, value: number): void {
   }
 }
 
+function loadOpen(sessionId?: string): boolean {
+  try {
+    const raw = window.localStorage.getItem(openStorageKey(sessionId));
+    if (raw === null) return true;
+    return raw === "true";
+  } catch {
+    return true;
+  }
+}
+
+function saveOpen(sessionId: string | undefined, open: boolean): void {
+  try {
+    window.localStorage.setItem(openStorageKey(sessionId), String(open));
+  } catch {
+    /* noop */
+  }
+}
+
 export function FileTransferQueue({
   sessionId,
   onCancel,
@@ -58,16 +82,27 @@ export function FileTransferQueue({
   onResume,
   onRetry,
   compact,
+  showCrossHostBanner,
 }: FileTransferQueueProps) {
   const t = useT();
   const items = useTransferStore((s) => s.items);
   const remove = useTransferStore((s) => s.remove);
   const clearCompleted = useTransferStore((s) => s.clearCompleted);
   const [height, setHeight] = useState(() => loadHeight(sessionId, compact));
+  const [isOpen, setIsOpen] = useState(() => loadOpen(sessionId));
 
   useEffect(() => {
     setHeight(loadHeight(sessionId, compact));
+    setIsOpen(loadOpen(sessionId));
   }, [compact, sessionId]);
+
+  const toggleOpen = useCallback(() => {
+    setIsOpen((prev) => {
+      const next = !prev;
+      saveOpen(sessionId, next);
+      return next;
+    });
+  }, [sessionId]);
 
   const updateHeight = useCallback(
     (nextHeight: number) => {
@@ -125,35 +160,132 @@ export function FileTransferQueue({
   }, [remove]);
 
   const filtered = sessionId ? items.filter((it) => it.sessionId === sessionId) : items;
+  const activeCount = filtered.filter((it) => it.state === "running" || it.state === "queued").length;
+  const hasActive = activeCount > 0;
+
+  const prevCountRef = useRef(filtered.length);
+  useEffect(() => {
+    if (filtered.length > prevCountRef.current) {
+      const hasNewInFlight = filtered.some((it) => it.state === "running" || it.state === "queued");
+      if (hasNewInFlight && !isOpen) {
+        setIsOpen(true);
+        saveOpen(sessionId, true);
+      }
+    }
+    prevCountRef.current = filtered.length;
+  }, [filtered, isOpen, sessionId]);
+
+  if (!isOpen) {
+    return (
+      <div
+        data-testid="sftp-transfer-queue-collapsed"
+        className="h-6 border-t px-2 flex items-center gap-2 text-[11px] cursor-pointer hover:bg-[var(--taomni-hover)] select-none shrink-0 transition-colors"
+        style={{ borderColor: "var(--taomni-divider)", background: "var(--taomni-quick-bg)" }}
+        onClick={toggleOpen}
+        title={t("fileBrowser.transferExpand")}
+      >
+        <ChevronUp className="w-3.5 h-3.5 text-[var(--taomni-text-muted)]" />
+        <span className="font-semibold">{t("fileBrowser.transferTitle")}</span>
+        <span className="text-[var(--taomni-text-muted)] text-[10px] px-1.5 py-0.5 rounded bg-[var(--taomni-hover)]">
+          {filtered.length}
+        </span>
+        {hasActive && (
+          <span className="text-emerald-500 text-[10px] flex items-center gap-1 font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            {t("fileBrowser.transferActive", { count: activeCount })}
+          </span>
+        )}
+        <div className="flex-1" />
+        <button
+          type="button"
+          data-testid="sftp-transfer-queue-expand-btn"
+          className="px-1.5 py-0.5 text-[10px] text-[var(--taomni-accent)] hover:underline rounded"
+          title={t("fileBrowser.transferExpand")}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleOpen();
+          }}
+        >
+          {t("fileBrowser.transferExpand")}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div
       data-testid="sftp-transfer-queue"
-      className="border-t flex flex-col shrink-0"
+      className="border-t flex flex-col shrink-0 relative"
       style={{ borderColor: "var(--taomni-divider)", background: "var(--taomni-panel-bg)", height }}
     >
       <div
         data-testid="sftp-transfer-queue-resize-handle"
-        className="h-1 cursor-row-resize bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] transition-colors"
+        className="h-1.5 -mt-0.5 cursor-row-resize bg-[var(--taomni-divider)]/40 hover:bg-[var(--taomni-accent)] active:bg-[var(--taomni-accent)] transition-colors relative z-10 flex items-center justify-center group select-none"
         onPointerDown={startResize}
-      />
-      <div className="h-5 px-2 flex items-center text-[11px] font-semibold gap-2"
-        style={{ borderBottom: "1px solid var(--taomni-divider)", background: "var(--taomni-quick-bg)" }}>
+      >
+        <div className="w-8 h-0.5 rounded-full bg-transparent group-hover:bg-white/50 transition-colors" />
+      </div>
+
+      {showCrossHostBanner && (
+        <div
+          className="text-[11px] px-2 py-1 border-b shrink-0 flex items-center gap-2"
+          style={{
+            borderColor: "var(--taomni-divider)",
+            background: "var(--taomni-quick-bg)",
+            color: "var(--taomni-text-muted)",
+          }}
+        >
+          <ArrowLeftRight className="w-3 h-3" />
+          <span className="truncate">
+            {t("fileBrowser.crossHostBanner")}
+          </span>
+          <button
+            type="button"
+            disabled
+            className="ml-auto px-1.5 py-0.5 rounded text-[10px] opacity-50 cursor-not-allowed"
+            style={{ border: "1px solid var(--taomni-divider)" }}
+            title={t("fileBrowser.crossHostPickPeerTitle")}
+          >
+            {t("fileBrowser.crossHostPickPeer")}
+          </button>
+        </div>
+      )}
+
+      <div
+        className="h-6 px-2 flex items-center text-[11px] font-semibold gap-2 shrink-0 select-none"
+        style={{ borderBottom: "1px solid var(--taomni-divider)", background: "var(--taomni-quick-bg)" }}
+      >
         <span>{t("fileBrowser.transferTitle")}</span>
-        <span className="text-[var(--taomni-text-muted)]">{filtered.length}</span>
+        <span className="text-[var(--taomni-text-muted)] text-[10px] px-1.5 py-0.5 rounded bg-[var(--taomni-hover)]">
+          {filtered.length}
+        </span>
+        {hasActive && (
+          <span className="text-emerald-500 text-[10px] flex items-center gap-1 font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            {t("fileBrowser.transferActive", { count: activeCount })}
+          </span>
+        )}
         <div className="flex-1" />
         <button
           type="button"
-          className="px-1 py-0.5 hover:bg-[var(--taomni-hover)] rounded inline-flex items-center gap-1"
+          className="px-1.5 py-0.5 hover:bg-[var(--taomni-hover)] rounded inline-flex items-center gap-1 text-[10px]"
           title={t("fileBrowser.transferClearTitle")}
           onClick={clearCompleted}
         >
           <Eraser className="w-3 h-3" /> {t("fileBrowser.transferClear")}
         </button>
+        <button
+          type="button"
+          data-testid="sftp-transfer-queue-close"
+          className="px-1 py-0.5 hover:bg-[var(--taomni-hover)] rounded inline-flex items-center text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)]"
+          title={t("fileBrowser.transferClose")}
+          onClick={toggleOpen}
+        >
+          <ChevronDown className="w-3.5 h-3.5" />
+        </button>
       </div>
-      <div
-        className="overflow-auto text-[11px] flex-1 min-h-0"
-      >
+
+      <div className="overflow-auto text-[11px] flex-1 min-h-0">
         {filtered.length === 0 && (
           <div className="px-2 py-2 text-[var(--taomni-text-muted)]">
             {t("fileBrowser.transferEmptyText")}

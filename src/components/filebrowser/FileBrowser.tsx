@@ -12,7 +12,6 @@ import {
   Columns,
   Maximize2,
   X,
-  ArrowLeftRight,
   Map,
 } from "lucide-react";
 import { FilePanel, isPreviewable } from "./FilePanel";
@@ -1024,33 +1023,9 @@ export function FileBrowser(props: FileBrowserProps) {
           </Panel>
         </PanelGroup>
       </div>
-      {/* Future: cross-host transfer (between two remote SFTP sessions).
-          Disabled placeholder so the layout stays stable when the feature
-          ships. */}
-      <div
-        className="text-[11px] px-2 py-1 border-t shrink-0 flex items-center gap-2"
-        style={{
-          borderColor: "var(--taomni-divider)",
-          background: "var(--taomni-quick-bg)",
-          color: "var(--taomni-text-muted)",
-        }}
-      >
-        <ArrowLeftRight className="w-3 h-3" />
-        <span className="truncate">
-          {t("fileBrowser.crossHostBanner")}
-        </span>
-        <button
-          type="button"
-          disabled
-          className="ml-auto px-1.5 py-0.5 rounded text-[10px] opacity-50 cursor-not-allowed"
-          style={{ border: "1px solid var(--taomni-divider)" }}
-          title={t("fileBrowser.crossHostPickPeerTitle")}
-        >
-          {t("fileBrowser.crossHostPickPeer")}
-        </button>
-      </div>
       <FileTransferQueue
         sessionId={props.sessionId}
+        showCrossHostBanner
         onCancel={(id) => void controller.cancelTransfer(id)}
         onPause={(id) => void controller.pauseTransfer(id)}
         onResume={(id) => void controller.resumeTransfer(id)}
