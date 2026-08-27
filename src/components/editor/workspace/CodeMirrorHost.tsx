@@ -2336,6 +2336,17 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   }, [buildAutocompletionExtension]);
 
   useEffect(() => {
+    if (!completionController) return;
+    return completionController.subscribe(() => {
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({
+        effects: completionCompartment.current.reconfigure(buildAutocompletionExtension()),
+      });
+    });
+  }, [completionController, buildAutocompletionExtension]);
+
+  useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
     if (lastDocumentTextRef.current === doc) return;

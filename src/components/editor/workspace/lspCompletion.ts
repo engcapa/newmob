@@ -545,8 +545,17 @@ export const DEFAULT_COMPLETION_TRIGGERS = [".", ":"];
  */
 export const MAX_COMPLETION_OPTIONS = 200;
 
+export interface CompletionPolicySnapshot {
+  revision: number;
+  policy: BasicCompletionPolicyV2;
+  preferences: WorkspaceCompletionPreferences;
+  provenance: Record<string, string>;
+}
+
 export class LspCompletionController {
-  private preferences: WorkspaceCompletionPreferences;
+  protected preferences: WorkspaceCompletionPreferences;
+  protected revision = 1;
+  protected listeners = new Set<(snapshot: CompletionPolicySnapshot) => void>();
 
   constructor(initialPreferences?: Partial<WorkspaceCompletionPreferences>) {
     this.preferences = {
@@ -565,6 +574,10 @@ export class LspCompletionController {
     };
   }
 
+  getRevision(): number {
+    return this.revision;
+  }
+
   getPreferences(): WorkspaceCompletionPreferences {
     return { ...this.preferences };
   }
@@ -573,11 +586,41 @@ export class LspCompletionController {
     return toBasicCompletionPolicyV2(this.preferences);
   }
 
+  getSnapshot(): CompletionPolicySnapshot {
+    return {
+      revision: this.revision,
+      policy: this.getPolicy(),
+      preferences: this.getPreferences(),
+      provenance: { source: "workspace-preferences" },
+    };
+  }
+
+  subscribe(listener: (snapshot: CompletionPolicySnapshot) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
   setPreferences(next: Partial<WorkspaceCompletionPreferences>): void {
+    this.update(next);
+  }
+
+  update(next: Partial<WorkspaceCompletionPreferences>): CompletionPolicySnapshot {
     this.preferences = {
       ...this.preferences,
       ...next,
     };
+    this.revision += 1;
+    const snap = this.getSnapshot();
+    for (const listener of this.listeners) {
+      try {
+        listener(snap);
+      } catch {
+        // Safe listener dispatch
+      }
+    }
+    return snap;
   }
 
   shouldAutoTrigger(prefixLength: number, explicit: boolean): boolean {
@@ -624,9 +667,10 @@ export class LspCompletionController {
 }
 
 /**
- * §8.22.7 U2-E: Canonical Workspace Completion Policy Controller.
+ * §8.23.6 X5: Canonical Workspace Completion Policy Controller with immutable snapshots,
+ * monotonic revisions, and active subscriptions.
  */
-export const WorkspaceCompletionPolicyController = LspCompletionController;
+export class WorkspaceCompletionPolicyController extends LspCompletionController {}
 
 export type CompletionMatchTier =
   | 1 // Exact match
@@ -685,6 +729,8 @@ export function compareCompletionCandidates(
   if (matchA.tier !== matchB.tier) {
     return matchA.tier - matchB.tier;
   }
+
+  // Preserve provider order within the same match tier
   return 0;
 }
 

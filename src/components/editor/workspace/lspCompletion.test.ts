@@ -1294,5 +1294,33 @@ describe("§8.21.3 V2-E BasicCompletionPolicyV2", () => {
       expect(controller.shouldAutoTrigger(2, false)).toBe(true);
       expect(controller.getSortMode()).toBe("alphabetical");
     });
+
+    it("§8.23.6 X5 WorkspaceCompletionPolicyController advances revision and notifies subscribers on update", () => {
+      const controller = new WorkspaceCompletionPolicyController({
+        minPrefixLength: 1,
+      });
+
+      expect(controller.getRevision()).toBe(1);
+      const snap1 = controller.getSnapshot();
+      expect(snap1.revision).toBe(1);
+      expect(snap1.preferences.minPrefixLength).toBe(1);
+
+      const receivedSnapshots: any[] = [];
+      const unsub = controller.subscribe((snap) => {
+        receivedSnapshots.push(snap);
+      });
+
+      const snap2 = controller.update({ minPrefixLength: 3, maxItems: 100 });
+      expect(snap2.revision).toBe(2);
+      expect(snap2.preferences.minPrefixLength).toBe(3);
+      expect(snap2.preferences.maxItems).toBe(100);
+      expect(receivedSnapshots).toHaveLength(1);
+      expect(receivedSnapshots[0].revision).toBe(2);
+
+      unsub();
+      controller.update({ minPrefixLength: 4 });
+      expect(controller.getRevision()).toBe(3);
+      expect(receivedSnapshots).toHaveLength(1); // No new events after unsub
+    });
   });
 });
