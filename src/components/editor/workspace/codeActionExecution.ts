@@ -5,6 +5,7 @@ export type CodeActionExecutionResult =
   | { status: "applied-edit"; outcomes: WorkspaceEditApplyOutcome[] }
   | { status: "executed-command"; outcomes: WorkspaceEditApplyOutcome[] }
   | { status: "edit-failed"; outcomes: WorkspaceEditApplyOutcome[] }
+  | { status: "stale-precondition"; reason: string; outcomes: [] }
   | { status: "empty"; outcomes: [] };
 
 export interface CodeActionExecutionHooks {
@@ -15,7 +16,15 @@ export interface CodeActionExecutionHooks {
 export async function executeCodeAction(
   action: LspCodeAction,
   hooks: CodeActionExecutionHooks,
+  precondition?: () => { valid: true } | { valid: false; reason: string },
 ): Promise<CodeActionExecutionResult> {
+  if (precondition) {
+    const check = precondition();
+    if (!check.valid) {
+      return { status: "stale-precondition", reason: check.reason, outcomes: [] };
+    }
+  }
+
   let outcomes: WorkspaceEditApplyOutcome[] = [];
 
   let effectiveEdit = action.edit;

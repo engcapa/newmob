@@ -21,6 +21,7 @@ export interface IntentionCandidateV2 {
   /** True when the server deferred the payload behind data (resolve needed). */
   resolveRequired: boolean;
   evidence: CapabilityEvidenceV3 | null;
+  isStale?: boolean;
 }
 
 export interface IntentionSessionContext {
@@ -34,9 +35,10 @@ export interface IntentionSessionContext {
 
 export type IntentionResolveState =
   | { status: "idle" }
-  | { status: "resolving" }
+  | { status: "resolving"; requestId?: string }
   | { status: "resolved" }
-  | { status: "failed"; message: string; retryable: true };
+  | { status: "failed"; message: string; retryable: true; requestId?: string }
+  | { status: "stale"; reason: string };
 
 export interface IntentionSnapshot {
   context: IntentionSessionContext;
@@ -178,8 +180,8 @@ export class IntentionSession {
     return this.snapshot?.resolveStates[id] ?? { status: "idle" };
   }
 
-  markResolving(id: string): void {
-    this.replaceResolveState(id, { status: "resolving" });
+  markResolving(id: string, requestId?: string): void {
+    this.replaceResolveState(id, { status: "resolving", requestId });
   }
 
   markResolved(id: string): void {
@@ -187,8 +189,21 @@ export class IntentionSession {
   }
 
   /** Timeout/failed keeps the candidate list intact and stays retryable. */
-  markFailed(id: string, message: string): void {
-    this.replaceResolveState(id, { status: "failed", message, retryable: true });
+  markFailed(id: string, message: string, requestId?: string): void {
+    this.replaceResolveState(id, { status: "failed", message, retryable: true, requestId });
+  }
+
+  markTimeout(id: string, requestId: string): void {
+    this.replaceResolveState(id, {
+      status: "failed",
+      message: "Provider resolve timed out (request cancelled)",
+      retryable: true,
+      requestId,
+    });
+  }
+
+  markStale(id: string, reason: string): void {
+    this.replaceResolveState(id, { status: "stale", reason });
   }
 
   close(): void {
@@ -207,4 +222,32 @@ export class IntentionSession {
       resolveStates: { ...this.snapshot.resolveStates, [id]: next },
     };
   }
+}
+
+/**
+ * §8.21.4 V3: Verifies session context against current live document,
+ * provider generation, and project fingerprint before applying an intention.
+ */
+export function verifyIntentionPreconditions(
+  context: IntentionSessionContext,
+  current: {
+    documentRevision: number;
+    providerGeneration: number;
+    projectFingerprint: string;
+  },
+): { valid: true } | { valid: false; reason: "revision-changed" | "generation-changed" | "fingerprint-changed" } {
+  if (current.documentRevision !== context.documentRevision) {
+    return { valid: false, reason: "revision-changed" };
+  }
+  if (current.providerGeneration !== context.providerGeneration) {
+    return { valid: false, reason: "generation-changed" };
+  }
+  if (
+    context.projectFingerprint
+    && current.projectFingerprint
+    && current.projectFingerprint !== context.projectFingerprint
+  ) {
+    return { valid: false, reason: "fingerprint-changed" };
+  }
+  return { valid: true };
 }
