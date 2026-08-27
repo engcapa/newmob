@@ -1817,14 +1817,13 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       from = offsetFromLspPosition(context.state.doc, firstEdit.range.start);
     }
 
-    // §8.21.3 V2-E: autoInsertSingle executes in single transaction when conditions pass
+    // §8.24.6 Y5: autoInsertSingle executes in single transaction when conditions pass
     if (
       policy.autoInsertSingle
       && mapped.length === 1
       && !result.isIncomplete
       && !result.truncated
       && isStillCurrent(token)
-      && !hooks.onResolveGate
     ) {
       const targetView = hooks.getView?.();
       if (targetView) {
@@ -1844,6 +1843,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             isStillCurrent,
             hooks.reportDiagnostic,
             policy.excludedSymbols,
+            hooks.onResolveGate,
           );
           if (applied) {
             return null;
