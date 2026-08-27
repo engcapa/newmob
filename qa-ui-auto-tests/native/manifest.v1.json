@@ -131,12 +131,12 @@
   ],
   "metadata": {
     "activeEntriesCount": 0,
-    "currentCommit": "6b362b50b76c4b2545fb0fd453322315c0b9aa5d",
+    "currentCommit": "de8e6789096b9891848cd59f2bbd93168482ae80",
     "evidenceDigest": "e3b0c44298fc1c14",
     "generator": "evidence_rollup.py v4",
     "staleEntriesCount": 0,
     "testPlanFingerprint": "62990a01febe23a15ea15ad75976ef7b090e3ab635a67ad88f499fcbaee837df",
-    "testedSourceFingerprint": "284855d89dcdb6a51c9624f9c9df7a24899e7faaa4fdd95944d522a4c4acd165"
+    "testedSourceFingerprint": "091bb1497eca0ea416e5711093961e91f1c77668f59313f0512ee5b6d4adf74e"
   },
   "performance": {
     "candidateCap": {
