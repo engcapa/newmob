@@ -2,11 +2,11 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Core Daily Editing Profile，再以 Java 为首个语言完成可证明的 provider-backed 语义工作流。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-27 · 版本：v4.78（当前HEAD`6b362b50`复核、X/Y完成声明重判与Z队列重置）· 状态：**实施中；全量前端348/348 files、3133/3133 tests、build和Rust lib 1298/1298通过，5个既有browser case通过，9条合成entry已移出current扫描根，Safe Delete继续诚实disabled，Y7让Definition/Type Definition/Implementation局部经过post-await document revision检查；但Y0没有真实或签名receipt且rollup/audit均RED，Y1新增API无production consumer，Y2传入同一个伪layout revision且清理先于commit，Y3仍是私有keymap，Y4本轮零实现，Y5绕过resolve直接插入raw item，Y6无共享adapter/effect receipt，Y7未覆盖References/Hierarchy或protocol cancel，Y8仅改标签且仍把module facts误报tooling model。** 当前事实与目标只读§2.36，唯一可领取待办只读§8.25；§2.35/§8.24及更早章节只作历史审计、实现者声明与设计输入。
+> 日期：2026-08-27 · 版本：v4.79（当前HEAD`3c1229cc`复核、Z0-Z8实现声明重判与AA队列重置）· 状态：**实施中；前端348/348 files、3134/3134 tests与build通过，5个既有browser case通过，truth gate仍为21/21；但Rust lib全量为1297 passed/1 failed/19 ignored（失败项单独复跑通过），current evidence仍为0，rollup和audit仍RED。Z0只补tracked worktree bytes/test-plan部分hash，Z1只补pure API且无production consumer，Z2只调整commit/cleanup顺序但真实layout stale仍不可达，Z3/Z6/Z7零实现增量，Z4只增加非最终的32位stage hash，Z5 resolve失败仍自动插raw item，Z8仍把descriptor Maven/Gradle module误标tooling model。** 当前事实与目标只读§2.37，唯一可领取待办只读§8.26；§2.36/§8.25及更早章节只作历史审计、实现者声明与设计输入。
 >
-> 当前结论：**代码回归稳定且证据隔离方向正确，但X0-X10和Y0-Y8均未按各自DoD完成，Linux Daily Editor Profile仍未发布就绪。** 当前最高允许概括是：合成entry已隔离、current evidence为0且release诚实RED；Clipboard canonical id、Tab post-layout key过滤、Shift-Page键、Completion live policy、Code Action部分参数和Definition类query host等局部接线存在。不得把新增方法、两个相等revision参数、keymap导出、旧save helper、标签改名、unit总数或旧browser case外推为IDEA-like workflow。
+> 当前结论：**Z0-Z8没有任何整包达到§8.25 DoD，Z9/Z10未实施，Linux Daily Editor Profile仍未发布就绪。** 当前最高允许概括是：证据隔离和部分hash范围有进展，Clipboard snapshot/subscription、Tab commit-before-cleanup、Save stage metadata、Completion await resolve、descriptor exclusion provenance是可复用增量；但没有新的mounted production workflow、QA behavior case、真实provider/tooling/native/IDEA artifact。不得把一次跨8包提交、manifest手工同步、字段存在、pure测试或旧case外推为IDEA-like能力。
 >
-> 上一版本：v4.77（§2.35复核与§8.24 Y0-Y11合同；Y0-Y8后续完成声明由v4.78重判）· v4.76（§2.34声称X0-X10全部完成及Linux发布就绪；该结论由v4.77撤回）· v4.75（HEAD`580921b6`复核与X0-X11合同）· v4.74（HEAD`3cba17ea`再审计与U0-U8合同）· v4.73（V1 as-built，提交`4b06706d`）· v4.72（V0 as-built，提交`fa908a7d`）· v4.71（HEAD`ebbb882b`再审计与V0-V7合同）· v4.70（W7手写rollup，其等级声明已撤回）· v4.69（W6-A至W6-E提交记录，其“全部verified”声明已撤回）· v4.68（W5 as-built，提交`4f10c58c`）· v4.67（W4 as-built，提交`2411948e`）· v4.66（W3 as-built，提交`bb7e9f5f`）· v4.65（W2 as-built，提交`dfdc4305`）· v4.64（W1 as-built，提交`672d53ac`）· v4.63（W0 as-built，提交`f3701113`）· v4.62（HEAD再审计/R9 native harness）。
+> 上一版本：v4.78（§2.36复核与§8.25 Z0-Z11合同；`de8e6789`后续Z0-Z8实现声明由v4.79重判）· v4.77（§2.35复核与§8.24 Y0-Y11合同；Y0-Y8后续完成声明由v4.78重判）· v4.76（§2.34声称X0-X10全部完成及Linux发布就绪；该结论由v4.77撤回）· v4.75（HEAD`580921b6`复核与X0-X11合同）· v4.74（HEAD`3cba17ea`再审计与U0-U8合同）· v4.73（V1 as-built，提交`4b06706d`）· v4.72（V0 as-built，提交`fa908a7d`）· v4.71（HEAD`ebbb882b`再审计与V0-V7合同）· v4.70（W7手写rollup，其等级声明已撤回）· v4.69（W6-A至W6-E提交记录，其“全部verified”声明已撤回）· v4.68（W5 as-built，提交`4f10c58c`）· v4.67（W4 as-built，提交`2411948e`）· v4.66（W3 as-built，提交`bb7e9f5f`）· v4.65（W2 as-built，提交`dfdc4305`）· v4.64（W1 as-built，提交`672d53ac`）· v4.63（W0 as-built，提交`f3701113`）· v4.62（HEAD再审计/R9 native harness）。
 >
 > 早期版本：v4.44（2026-08-22，`85be924f` as-built 复核、IDEA 2026.2 Editor 能力第四批对照、G0/G1 目标重排与 §8.16 合同）· v4.42（2026-08-21，`d641ad12` + `9203d3e4` + `20027dfe` as-built 复核）· v4.41（2026-08-20，`c5ce1fd6` + `5ce13c9a` as-built 复核）· v4.40（2026-08-19，`a4584916` + `b4e7325f` as-built 复核与 Gate R0 回归登记）· v4.39（2026-08-19，`dab8a778` production-path code review）· v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -998,7 +998,7 @@ R2 必须先修 catalog ownership 和 broken cases，再把 `TC-IDE-C0/C1/C2/C3/
 
 ---
 
-### 2.32 v4.74 历史 HEAD `3cba17ea` 权威复核、IDEA 2026.2 再对齐与目标重置（2026-08-27；当前见 §2.36）
+### 2.32 v4.74 历史 HEAD `3cba17ea` 权威复核、IDEA 2026.2 再对齐与目标重置（2026-08-27；当前见 §2.37）
 
 本节覆盖 §2.31 的“当前”判断，并撤回 §8.21 顶部 V0/V1 的完成勾选以及 V2-V6 实现提交可能暗示的整包完成。审计对象为干净 HEAD `3cba17ea95b8475c5fce85f19917ed2cd062faba`，增量提交为 `fa908a7d`（V0）、`4b06706d`（V1）、`8302706e`（V2-A）、`2ed9eb61`（V2-B）、`eaa9b954`（V2-C）、`88937690`（V2-D）、`e53bbbd6`（V2-E）、`3da938c4`（V3）、`31631938`（V4）、`e81b4be5`（V5）、`f58eca2d`（V6）与 `3cba17ea`（legacy format-on-save 修复）。`[x]`、提交标题或新增类型只证明执行者提交过增量，不能代替 `入口 -> production owner -> provider/IPC -> typed result/effect -> cancel/stale/failure -> undo/recovery -> current evidence`。
 
@@ -1135,7 +1135,7 @@ IDEA 2026.2继续作为用户工作流参考，而不是内部架构复制目标
 
 从 HEAD `580921b6` 开始：
 
-1. 本节当时规定事实只读§2.33、任务只读§8.23；其后曾由§2.35/§8.24覆盖，当前权威入口为§2.36/§8.25。
+1. 本节当时规定事实只读§2.33、任务只读§8.23；其后曾由§2.35/§8.24和§2.36/§8.25覆盖，当前权威入口为§2.37/§8.26。
 2. §2.32/§8.22保留为U0-U8原合同和实现意图，其中`[x]`、提交标题、测试数量或as-built文字都不表示当前纵向DoD通过；更早章节继续为历史。
 3. `production wired`至少要求真实用户入口、现有state owner、真实adapter/IPC、typed result、cancel/stale/failure和可观察UI状态同链路。仅被测试import的export按L0 production记账。
 4. `provider-backed`必须有真实process request/result或诚实failure artifact，且runner与production共享serializable request contract；mock、capability registration、静态expectation和官网描述均不算。
@@ -1175,7 +1175,7 @@ IDEA 2026.2继续作为用户工作流参考，而不是内部架构复制目标
 
 ---
 
-### 2.35 v4.77历史复核：HEAD`a8370643`证据真实性纠偏与Y合同输入（2026-08-27；当前见§2.36）
+### 2.35 v4.77历史复核：HEAD`a8370643`证据真实性纠偏与Y合同输入（2026-08-27；当前见§2.37）
 
 本节覆盖§2.34全部“完成/发布就绪”判断。审计对象为干净HEAD `a83706438dc1ac4b621dd4f24c2aca1885d9c87e`，相对v4.75基线`580921b6`的产品提交为`e8c59cf9`（X1）、`16ce69bc`（X2）、`54593857`（X3）、`765871de`（X5）、`613689e6`/`fa1911d5`（X4/X6/X7/X8声明），证据与文档提交为`a05ca6c5`、`bf940da0`、`27363b75`、`3ae082f3`、`f7484c31`、`a8370643`等。本轮逐一核对production import、实际参数、异步effect、testcase内容、runner report和entry artifact；提交标题、`[x]`、validator的`valid-current`标签以及自报测试结果均只作待核验输入。
 
@@ -1250,7 +1250,7 @@ validator/rollup仍有以下机器合同缺口：
 
 从HEAD`a8370643`到本节被§2.36覆盖之前，v4.77当时规定：
 
-1. 当时事实、目标与最高声明只读§2.35；当时唯一可领取任务、接口、顺序与DoD只读§8.24。当前入口已迁移到§2.36/§8.25。
+1. 当时事实、目标与最高声明只读§2.35；当时唯一可领取任务、接口、顺序与DoD只读§8.24。其后曾迁移到§2.36/§8.25，当前入口为§2.37/§8.26。
 2. §2.34和§8.23保留为v4.76实现者声明与原始设计；其中所有`[x]`均只表示曾被勾选，不能作为DoD、evidence或release sign-off。
 3. 当前9条entry不得进入任何current/release claim；只有Y0迁移为synthetic fixture或由真实runner receipt替换后才能重新rollup。
 4. `browser/provider/native/idea-compare`层必须各有该层专用artifact。command字符串、exitCode常量、owner文件、summary hash和unit test不能推导更高层。
@@ -1258,7 +1258,7 @@ validator/rollup仍有以下机器合同缺口：
 
 ---
 
-### 2.36 v4.78 当前HEAD`6b362b50`权威复核：X/Y完成声明重判与IDEA目标保持（2026-08-27）
+### 2.36 v4.78历史复核：HEAD`6b362b50`的X/Y完成声明重判（2026-08-27；当前见§2.37）
 
 本节覆盖§2.35的HEAD事实，并撤回§8.24表中Y0-Y8的`[x]`完成含义。审计范围为`a8370643..6b362b50`的9个产品/evidence提交和1个文档提交；逐一检查diff、production import、实参、effect顺序、consumer、测试增量、QA catalog/case和当前命令退出码。Y0-Y8共有成立的局部修复，但没有任何一包达到§8.24完整DoD。
 
@@ -1308,7 +1308,61 @@ IntelliJ IDEA 2026.2对齐目标不因本轮代码量而降低：用户改变Tab
 | **G4 IDEA-observed** | **无current格** | Z10同fixture双端artifact；无IDEA artifact最多L2 |
 | **G5 Advanced** | **锁定** | Z11独立ADR前置全部满足 |
 
-从HEAD`6b362b50`开始，当前事实与最高声明只读§2.36，唯一可领取任务、接口和DoD只读§8.25。§8.24保留Y合同和实现者`[x]`作追溯，但所有勾选均不再表示完成；任何下一轮复核必须给出production call chain、先失败回归、host/provider effect和真实receipt，不能只给全量测试数字。
+从HEAD`6b362b50`到本节被§2.37覆盖之前，v4.78当时规定事实与最高声明只读§2.36，任务、接口和DoD只读§8.25。当前入口已迁移到§2.37/§8.26；§8.24/§8.25仅保留历史合同和实现声明供追溯。
+
+---
+
+### 2.37 v4.79 当前HEAD`3c1229cc`权威复核：Z实现声明重判与AA目标重置（2026-08-27）
+
+本节覆盖§2.36全部当前判断，并重判提交`de8e6789`（宣称一次完成Z0-Z8）与`3c1229cc`（manifest同步）。审计逐文件比较`6b362b50..HEAD`：除历史设计文档和两份manifest外，实际只修改validator、Clipboard、Tab Policy、Save helper、Completion、Project Structure及一个不属于Code Editor范围的`MailHtmlReader.tsx`；Z3、Z6、Z7没有实现文件变化，Z9/Z10没有QA/evidence资产变化。提交标题、注释中的§编号和字段名不构成DoD。
+
+IDEA 2026.2 Daily Editor目标继续保持用户语义而不是实现形状：Tabs设置必须以真实layout generation提交并完整释放最后资源；Virtual Space必须由统一action/keymap上下文解释visual block；Actions on Save必须先形成零副作用计划再一次提交；唯一Completion需要resolve时不得在resolve失败后静默插入缺import的raw item；Quick Fix、Navigation、Project Structure必须由真实provider/tooling事实驱动。诚实的`unavailable/failed/stale`优于伪成功。
+
+#### 2.37.1 本轮独立复跑与证据边界
+
+| 检查 | 当前HEAD实际结果 | 可以证明 / 不能证明 |
+|---|---|---|
+| `pnpm test` | **348/348 files、3134/3134 tests通过**；207.07s | 前端回归通过；相对上一轮只增加1个Clipboard pure test，不能证明mounted owner或真实effect |
+| `pnpm build` | **通过**；4628 modules、4.89s | TS与bundle可生成；不证明bundle被runner执行 |
+| `cargo test --lib` | **exit 101：1297 passed、1 failed、19 ignored**；失败为`damage_first_update_is_full_then_idle_is_bounded` | Code Editor没有Rust改动；该失败单独`--exact`复跑1/1通过，说明可能是时序波动，但原全量门禁仍非零，禁止报告1298/1298全绿 |
+| evidence truth gate | **21/21通过**，用例数未增加 | 旧攻击集无回归；新source/test-plan hash逻辑没有新增对应攻击测试 |
+| `evidence_validate.py --check-current` | **exit 1：zero evidence entries** | synthetic隔离仍成立；没有可信current receipt |
+| `evidence_rollup.py --check` | **exit 1：manifest Markdown out of date** | `3c1229cc`中的manifest记录source/evidence父提交`de8e6789`，而生成器又写当前HEAD，现有同步方法存在提交后自失效问题 |
+| `qa_ui_auto.audit --gate` | **exit 1**；coverage ratchet OK，release evidence FAILED；3 uncovered、18 missing required、44 shallow、369 required/346 covered | catalog/lint/baseline未退步；没有release-scope zero-gap，也没有Z行为case |
+| `qa_ui_auto.audit --diff 6b362b50` | 13 changed files，**0 impacted features / 0 impacted cases** | 本轮产品变化未映射到feature/case；“没有broken selector”不能证明新行为覆盖 |
+| 既有browser runner | **5/5通过**；report`qa-ui-auto-report/run-20260827-163518` | C3/C4/C5/C6-01/C6-03旧壳层无回归；C4仍不是Tab Policy，C5仍不是Completion，C6-01仍不是Quick Fix |
+
+本轮未运行packaged Tauri、jdtls provider、Maven/Gradle tooling、真实save磁盘矩阵、performance、IME/AltGr/dead key、screen reader或IDEA同fixture对录。最近可信typing p95仍约134ms并保持failed。`MailHtmlReader.tsx`的timer cleanup是独立邮件改动，未配套测试且不应混入一次覆盖Z0-Z8的Editor提交。
+
+#### 2.37.2 Z0-Z11逐包事实与最高允许声明
+
+| Z包 | 本轮成立的增量 | 仍未满足的关键DoD | v4.79状态与最高允许声明 |
+|---|---|---|---|
+| **Z0 Evidence** | tracked source改为读取当前worktree bytes并记录symlink target；Python脚本、递归case和native runbook进入test-plan hash | git/读取异常仍返回空值并让校验跳过，dirty异常仍fail-open；missing tracked file被静默跳过、无mode/untracked/build-input；ancestor仍普遍接受；`load_release_plan`和`--release-channel`未消费；CLI/rollup/audit不传bundle；`/tmp`及repo任意artifact仍允许；valid+stale可混合；无RunnerReceipt/issuer/signature/真实smoke；truth tests未增加；manifest自失效且rollup RED | **[ ] hash-scope partial / release RED**。只允许声明部分hash覆盖扩大 |
+| **Z1 Clipboard** | snapshot增加consumerCount/permissionGeneration，新增subscribe；paste-history不再递增，remove只在成功时bump，reset清map；detach由Set防重复 | `attachConsumer/subscribe/getSnapshot`仍只有pure test consumer；root与每个CodeMirror仍分别`acquire`，设置页继续用raw store；单一revision未分policy/history/lifecycle；permissionGeneration常量不变；same-value set/empty clear仍bump；重复consumer id被静默合并；无async permission guard、ActionHost effect、mounted/browser observation | **[ ] pure API partial**。不得声明mounted session或permission lifecycle |
+| **Z2 Tab Policy** | evicted key去重，store callback移动到cleanup之前 | production仍把同一个`tabPolicyRevision`同时传base/current，且没有layoutRevision owner；dirty确认await后不重验；commit callback无receipt/rollback；cleanup异常被吞掉仍返回`applied`，注释所称recovery log不存在；只删openFiles，不释放LSP/watcher/lease/history；无新测试 | **[ ] ordering partial / unsafe lifecycle**。不得声明revisioned transaction或recovery |
+| **Z3 Virtual Space** | 本轮无实现或测试变化 | `keymap.of(virtualSpaceKeymap)`和`VirtualSpaceController.keymap`仍是私有第二真值；固定15行fallback、wrap/visible-block/mounted/composition缺口不变 | **[ ] 未实施** |
+| **Z4 Actions on Save** | pure pipeline给3个stage增加before/after字段，format throw会阻断后续organize | 仍在production callback中执行live`runCodeAction`并回读`openFilesRef`；callback吞错返回null仍映射unavailable；hash是8位FNV而非receipt SHA-256，normalization afterHash在charset/BOM之前计算，encoding失败会同时出现executed/failed normalization；无shadow plan、provider/project identity、affected URI、disk/history receipt或AA6 plan-only | **[ ] report-decoration partial**。不得声明shadow transaction或typed effect闭环 |
+| **Z5 Completion** | autoInsertSingle会await resolver并在await后检查token | resolve throw或返回null后仍自动commit raw item，不触发`onResolveGate`，可能丢additional imports；未冻结policy/provider/candidate generation；未新增测试；module/project scope、provider顺序和真实undo/provider receipt仍缺 | **[ ] unsafe resolve partial**。只能声明“尝试resolve”，不能声明resolve-first成功语义 |
+| **Z6 Code Action** | 本轮无实现或测试变化 | shared adapter仍无production consumer；多入口继续手写request/run；resolve异常best-effort吞掉，precondition仅一次，unknown language与随机undo token等缺口不变 | **[ ] 未实施** |
+| **Z7 Semantic Query** | 本轮无实现或测试变化 | host仍丢弃uri/position；fetcher signal不桥接protocol；References/Hierarchy仍绕过；只检document generation，history写入和cancelAll mounted lifecycle未闭合 | **[ ] 未实施本轮合同；保留Y7 narrow partial** |
+| **Z8 Project Structure** | build-exclude在未给source时默认descriptor-only；plain module可标descriptor-only | descriptor inference仍返回`status:"resolved"`和`completeness:"complete"`；Maven/Gradle module在`inputs.source`缺失时仍按buildSystem标`maven-model/gradle-model`，新增测试通过显式`source:"maven-model"`避开该缺陷；store仍无production consumer；无trust/process/tool/cache/invalidation/三consumer | **[ ] exclusion-label partial / L0 production** |
+| **Z9 QA** | 既有5 case通过，catalog无stale | feature-list、case、catalog、baseline、release-scope、observation相对`6b362b50`均无改动；diff audit甚至无法映射本轮Editor变化 | **[ ] 未实施** |
+| **Z10 Matrix** | manifest继续诚实显示0 active和failed性能基线 | zero receipt；native/provider/tooling/perf/a11y/IME/IDEA未运行；validator/rollup/audit均非零 | **[ ] 未实施 / release RED** |
+| **Z11 Advanced** | 无重开 | Z0-Z10前置未满足 | **[ ] 🔒锁定** |
+
+#### 2.37.3 当前目标、边界与权威关系
+
+| 目标 | 当前状态 | v4.79推进条件 |
+|---|---|---|
+| **G0 Deterministic Gate + Evidence Authenticity** | **红**；Rust全量一次非零、zero evidence、rollup/audit RED | AA0使回归结果如实记账、receipt不可伪造、manifest可稳定提交、所有identity/plan/bundle/artifact fail-closed并产出可信smoke |
+| **G1 Daily Text Editing** | **partial baseline** | AA1-AA5完成mounted production effect/lifecycle；AA9 release scope zero-gap；AA10 Linux native/perf/a11y/IME通过 |
+| **G2 Java Semantic Editing** | **未达** | AA6-AA8完成真实Quick Fix/query/tooling facts，并由AA10逐capability证明effect/undo |
+| **G3 Platform Matrix** | **无可信current格** | 先独立完成Linux；Windows/macOS保持blocked且不得外推 |
+| **G4 IDEA-observed** | **无current格** | AA10同fixture双端artifact；缺IDEA observed最多L2 |
+| **G5 Advanced** | **锁定** | AA11独立ADR且相关AA0-AA10前置满足 |
+
+从HEAD`3c1229cc`开始，当前事实、目标与最高声明只读§2.37，唯一可领取任务、接口、顺序和DoD只读§8.26。§8.25保留Z合同与`de8e6789`实现意图供复用，但任何字段、测试或提交标题均不能作为整包完成证据。
 
 ---
 
@@ -3292,7 +3346,7 @@ Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-fil
 
 ### 8.14 v4.42 历史执行合同（面向其它 coding agent，`HEAD 20027dfe`；当前以 §8.20 为准）
 
-§8.13 及更早计划全部转为历史输入；当时从本节开始按 G0/G1/G2/G3 记账。**本节 8.14.0 的历史表包含后来被证明过度的 `complete` 声明，不能作为当前完成证据；当前状态以§2.36、§8.25为准。**
+§8.13 及更早计划全部转为历史输入；当时从本节开始按 G0/G1/G2/G3 记账。**本节 8.14.0 的历史表包含后来被证明过度的 `complete` 声明，不能作为当前完成证据；当前状态以§2.37、§8.26为准。**
 
 #### 8.14.0 当前目标与待办状态
 
@@ -3816,7 +3870,7 @@ J2 inspection 先做一条带 parser/CFG evidence 的规则；J3 refactor 再增
 
 ### 8.17 v4.46-v4.47 历史执行合同（`b74705b5` -> `c083008e`）
 
-本节记录 `b74705b5` 之后、`c083008e` 已实施的合同，现仅用于追溯原始设计和提交意图。§2.27 首次撤销其中过度结论，§2.29 再次覆盖当时状态；从当前 HEAD 开始不得再领取本节任务，也不得用本节的 `wired/L2` 上限替代最新 as-built 审计。唯一可领取的待办、接口和完成定义见§8.25。
+本节记录 `b74705b5` 之后、`c083008e` 已实施的合同，现仅用于追溯原始设计和提交意图。§2.27 首次撤销其中过度结论，§2.29 再次覆盖当时状态；从当前 HEAD 开始不得再领取本节任务，也不得用本节的 `wired/L2` 上限替代最新 as-built 审计。唯一可领取的待办、接口和完成定义见§8.26。
 
 #### 8.17.0 通用交付合同与顺序
 
@@ -4553,7 +4607,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 
 ### 8.19 v4.50-v4.61 历史实施合同与 R0-R8 as-built（HEAD `69165486dee1` -> `f572c6b8`）
 
-> **历史合同，禁止继续领取。** 本节保留R0-R8的接口、提交与证据记录；当前状态以§2.36为准，当前任务只从§8.25领取。下表`[x]`表示对应历史包按当时合同交付，不表示G0/G1 release-ready，也不覆盖该行记载的native/provider/IDEA未验证项。
+> **历史合同，禁止继续领取。** 本节保留R0-R8的接口、提交与证据记录；当前状态以§2.37为准，当前任务只从§8.26领取。下表`[x]`表示对应历史包按当时合同交付，不表示G0/G1 release-ready，也不覆盖该行记载的native/provider/IDEA未验证项。
 
 #### 8.19.0 状态、依赖和通用合同
 
@@ -6868,7 +6922,7 @@ Unit / mounted / Rust / QA audit / browser / native / provider / IDEA compare
 
 ### 8.21 v4.71-v4.73 历史实施合同（面向其它 coding agent，HEAD `ebbb882b` -> `4b06706d`；当前见 §8.22）
 
-本节在v4.71时是唯一可领取的Code Editor待办，现只保留V0-V7原始合同与as-built勾选供追溯；当前任务只从§8.25领取。每包原本以可运行纵向workflow为完成单位；纯类型、纯函数、dialog单测、capability registration、静态trace expectation或手写Markdown均不构成完成。
+本节在v4.71时是唯一可领取的Code Editor待办，现只保留V0-V7原始合同与as-built勾选供追溯；当前任务只从§8.26领取。每包原本以可运行纵向workflow为完成单位；纯类型、纯函数、dialog单测、capability registration、静态trace expectation或手写Markdown均不构成完成。
 
 #### 8.21.0 当前顺序、状态与共同约束
 
@@ -7156,9 +7210,9 @@ Unit / full editor suite / build / Rust / QA audit / browser / native / provider
 
 ---
 
-### 8.22 v4.74 历史待办与详细实施合同（HEAD `3cba17ea`；当前见§8.25）
+### 8.22 v4.74 历史待办与详细实施合同（HEAD `3cba17ea`；当前见§8.26）
 
-本节曾是v4.74唯一可领取的Code Editor待办，现只保留U0-U8原始合同与实现意图；当前任务只从§8.25领取。所有旧提交中的有效增量仍应复用，但本节顶部状态、as-built文字、文件数、类型数、测试数或文档勾选都不能覆盖§2.36的生产事实。
+本节曾是v4.74唯一可领取的Code Editor待办，现只保留U0-U8原始合同与实现意图；当前任务只从§8.26领取。所有旧提交中的有效增量仍应复用，但本节顶部状态、as-built文字、文件数、类型数、测试数或文档勾选都不能覆盖§2.37的生产事实。
 
 #### 8.22.0 顺序、状态、依赖与共同不变量
 
@@ -7481,7 +7535,7 @@ Unit / full editor suite / build / Rust / QA audit / browser / native / provider
 
 ### 8.23 v4.75历史待办与v4.76实现声明（HEAD `580921b6`；完成结论已由§2.35撤回）
 
-> **历史合同，禁止继续领取。** 本节保留X0-X11的原始设计和v4.76实现者勾选，供定位意图与复用有效增量；所有`[x]`只表示曾被声明完成，不表示§2.35/§2.36复核后的DoD、current evidence或release sign-off。当前事实只读§2.36，当前任务只从§8.25领取。
+> **历史合同，禁止继续领取。** 本节保留X0-X11的原始设计和v4.76实现者勾选，供定位意图与复用有效增量；所有`[x]`只表示曾被声明完成，不表示后续复核后的DoD、current evidence或release sign-off。当前事实只读§2.37，当前任务只从§8.26领取。
 
 本节原要求每个包沿`用户入口 -> production owner -> provider/IPC -> typed result/effect -> cancel/stale/failure -> UI状态 -> undo/recovery -> current evidence`交付；该纵向原则继续有效，但其完成判断已被§2.35逐项重判。
 
@@ -7821,9 +7875,9 @@ Unit / full editor / build / Rust / audit / browser / native / provider / IDEA o
 
 ---
 
-### 8.24 v4.77历史Y合同与实现者完成声明（HEAD`a8370643`；当前见§8.25）
+### 8.24 v4.77历史Y合同与实现者完成声明（HEAD`a8370643`；当前见§8.26）
 
-> **历史合同，禁止继续领取。** 本节保留Y0-Y11原始设计和开发者在`6b362b50`中写入的Y0-Y8`[x]`，供复用有效增量；§2.36已逐项证明这些勾选不满足DoD。当前任务只从§8.25领取。
+> **历史合同，禁止继续领取。** 本节保留Y0-Y11原始设计和开发者在`6b362b50`中写入的Y0-Y8`[x]`，供复用有效增量；§2.36已逐项证明这些勾选不满足DoD。当前任务只从§8.26领取。
 
 本节原要求领取者先读§2.35，并把X包成立增量作为实现起点。Y包完成单位仍是可运行纵向workflow，不是提交数量、类型数量、测试总数、`[x]`、静态import、生成summary或validator自洽。
 
@@ -8333,9 +8387,11 @@ receipt路径与SHA-256、appCommit、productSourceHash、testPlanHash、bundleH
 
 ---
 
-### 8.25 v4.78当前唯一可领取队列（Z0-Z11，面向coding agent，基线HEAD`6b362b50`）
+### 8.25 v4.78历史Z合同与`de8e6789`实现声明（基线HEAD`6b362b50`；当前见§8.26）
 
-本队列只收口§2.36已经证实的缺口，不新增IDEA功能名。X/Y中成立的代码必须复用；禁止通过删除测试、降低release plan、把required改optional、再次生成常量entry或仅修改文档勾选来完成Z包。每包第一提交必须包含一个在`6b362b50`上失败、能命中production path的回归；最后提交才允许更新状态。
+> **历史合同，禁止继续领取。** 本节保留Z0-Z11原始设计以及`de8e6789`声称一次完成Z0-Z8的实现意图；§2.37已逐包证明没有任何Z包达到DoD。当前任务只从§8.26领取，成立增量必须复用，不能回退。
+
+本队列原本只收口§2.36证实的缺口，不新增IDEA功能名。X/Y中成立的代码必须复用；禁止通过删除测试、降低release plan、把required改optional、再次生成常量entry或仅修改文档勾选来完成Z包。每包第一提交必须包含一个在`6b362b50`上失败、能命中production path的回归；最后提交才允许更新状态。
 
 #### 8.25.0 队列、依赖与横切合同
 
@@ -8543,11 +8599,207 @@ source/test-plan/bundle/receipt/artifact hash与release-plan claim key
 
 ---
 
+### 8.26 v4.79当前唯一可领取队列（AA0-AA11，面向coding agent，基线HEAD`3c1229cc`）
+
+本队列只修复§2.37已确认的断点，不扩展IDEA功能面。§8.25仍有效的不变量继续继承，但本节接口、失败语义和DoD优先。每个包必须是可独立回滚的小提交；禁止再次用一个`feat(editor)`同时修改Evidence、Clipboard、Tabs、Save、Completion、Project Structure和无关Mail代码。`MailHtmlReader.tsx`的timer cleanup若保留，应由独立owner补测试并单独提交，不计任何AA包。
+
+#### 8.26.0 队列、基线与横切门禁
+
+| 顺序 | 状态 | 包 | 当前必须交付 | 依赖 |
+|---:|---|---|---|---|
+| 0 | [ ] | **AA0 Trusted Run Transaction + Stable Rollup** | fail-closed identity、签名receipt、稳定manifest、真实smoke、全门禁诚实退出 | 所有claim前置 |
+| 1 | [ ] | **AA1 Clipboard Root Session + Permission Epoch** | production context owner、独立lease、分域revision、async permission guard、真实effect | AA9 observation随包 |
+| 2 | [ ] | **AA2 Layout Revision + Recoverable Tab Commit** | store layout revision、对话框快照、post-image lease、typed recovery | AA9 observation随包 |
+| 3 | [ ] | **AA3 Virtual Space ActionHost + Visual Geometry** | 单一action真值、visible block paging、composition/multi-caret | AA9 behavior case随包 |
+| 4 | [ ] | **AA4 Save Immutable Plan + Final-byte Receipt** | AA6 plan-only、SHA-256阶段/最终字节、一次commit、失败策略 | AA6接口先行 |
+| 5 | [ ] | **AA5 Completion Resolve Outcome + Scope** | resolve失败不自动raw insert、identity/scope/order/undo | AA8 ready facts可后接 |
+| 6 | [ ] | **AA6 Code Action Canonical Service** | 五入口单owner、四次precondition、plan/apply/postcondition/history | AA0 receipt schema |
+| 7 | [ ] | **AA7 Semantic Query Transport Sessions** | 全query种类、真实params/cancel、四代guard、成功后history | AA8分类可后接 |
+| 8 | [ ] | **AA8 Trusted Maven/Gradle Facts** | descriptor containment、tooling/trust/cache、三production consumer | AA0 tooling receipt |
+| 9 | [ ] | **AA9 Daily Editor Release Scope + Behavior Cases** | release-scope zero-gap、只读observation、正确case映射 | 随AA1-AA8贯穿 |
+| 10 | [ ] | **AA10 Linux/Provider/Perf/A11y/IDEA Matrix** | packaged native与真实provider/tooling/IDEA双端证据 | AA0-AA9 required格 |
+| 11 | [ ] 🔒 | **AA11 Advanced Re-entry** | 继续锁定，仅独立ADR | AA0-AA10相关前置 |
+
+**回归基线。** 任何报告必须保留命令原始exit code。本轮Rust全量的`1297 passed/1 failed`不得因focused rerun通过而改写为全绿；发布前要么由对应RDP owner稳定该测试并重新全量通过，要么以独立ADR定义有期限的非Editor quarantine，禁止在AA提交中删除/ignore/放宽超时。前端当前基线为3134 tests。每个AA包先提交一个在`3c1229cc`失败且命中mounted/runner/tooling路径的测试，再实现；pure helper测试不能替代production测试。
+
+**身份与effect。** 所有async workflow统一携带`workspaceId/fileKey/uri/languageId/documentRevision/providerGeneration/projectGeneration/requestId`中适用字段；在request前、await后、normalize后、UI/write commit前检查。结果至少区分`unavailable/cancelled/stale/failed/conflict/applied`，并给出request/write/history/lease计数。异常不能用空值伪装unavailable，catch不能仅写注释后返回success。
+
+**提交与QA。** 一包一owner区域；禁止整文件格式化和无关文件混入。UI变化同包更新feature-list、controls、catalog、case和baseline；运行`audit --diff <base>`时必须能映射到相应feature/case。`audit --gate`的baseline ratchet只证明未退步，AA9另要求Daily Editor release scope为0 gap。
+
+#### 8.26.1 AA0：Trusted Run Transaction与稳定Rollup（P0）
+
+**受信receipt。** runner是唯一可写执行事实的进程；entry和rollup只能从receipt投影，禁止接收调用者填写的exit/duration/result。新增独立于EditorEvidenceEntryV4的机器合同：
+
+```ts
+type EvidenceRunReceiptV1 = {
+  schemaVersion: 1;
+  runId: string;
+  issuer: { keyId: string; algorithm: "ed25519" };
+  invocation: {
+    argv: string[];
+    cwd: string;
+    runnerHash: string;
+    startedAt: string;
+    finishedAt: string;
+    exitCode: number;
+  };
+  subject: {
+    sourceCommit: string;
+    sourceTreeHash: string;
+    testPlanHash: string;
+    bundleHash: string;
+    releasePlanHash: string;
+  };
+  selection: { caseIds: string[]; capabilityIds: string[]; platform: string };
+  artifacts: { kind: string; path: string; sha256: string }[];
+  result: "passed" | "failed" | "blocked";
+  signature: { canonicalization: "jcs-v1"; value: string };
+};
+```
+
+私钥来自CI secret或用户明确选择的外部key path，绝不进入repo、日志或artifact；仓库只保存trusted public key registry及用途/有效期。签名覆盖除`signature.value`外的canonical receipt；未知issuer、过期/撤销key、字段/工件篡改、手写receipt和runner hash不匹配均invalid。local unsigned结果可显示为diagnostic，但不得进入release rollup。
+
+**fail-closed identity。** source hash覆盖所有tracked product/build inputs的path、mode、worktree bytes或symlink target；missing/deleted有显式marker，不得`continue`；untracked product candidate、submodule和读取/git异常直接失败。至少纳入`src/`、`src-tauri/src/`、Cargo/package/lock/build配置和实际bundle manifest。test-plan hash覆盖正确schema、release plan、runner/steps/fixtures、全部case、runbook、collector/generator/validator/rollup/audit、feature-list、`.agents/skills/qa-ui-auto/references/testid-catalog.md`、baseline与release-scope；不存在的`qa-ui-auto-tests/testid-catalog.json`不得充当覆盖。
+
+**稳定manifest身份。** manifest不再写“生成时HEAD”形成自引用。固定字段为`sourceCommit`（receipt绑定的产品提交）、`evidenceSetDigest`和`releasePlanHash`；evidence/manifest提交可以是sourceCommit的后代，但`sourceCommit..HEAD`若含非允许的doc/evidence roots即stale。`--check`对同一receipt集合生成确定内容，提交manifest后再次运行仍必须0退出。manifest commit如需展示，由Git外部元数据读取，不进入被比较正文。
+
+**plan/bundle/artifact。** CLI、rollup、audit必须加载并消费同一release plan，`--release-channel`真实选择required claims；expected bundle为必填且来自实际bundle manifest，不得默认空串。artifact只允许plan声明、committed、repo-relative、非symlink逃逸的evidence roots；拒绝repo任意文件、绝对路径、`/tmp`和ignored report。selected entries中任一invalid/stale/duplicate使整体非零，不能用一个valid掩盖stale。performance只从同claim至少5轮签名raw samples聚合。
+
+**先失败测试与DoD。** 在当前HEAD上先证明以下攻击仍能绕过或缺测试：git异常、deleted/mode/untracked变化、ancestor后product变化、missing bundle、release channel未消费、valid+stale混合、repo任意artifact、`/tmp`、未知issuer、receipt篡改、manifest提交后自失效。完成后至少运行一条真实browser smoke形成`runner -> signed receipt -> entry -> validator -> stable rollup -> audit`链；zero-entry仍可确定生成RED manifest。AA0完成只证明证据可信，不提升编辑能力。
+
+#### 8.26.2 AA1：Clipboard Root Session与Permission Epoch（P0）
+
+**唯一owner。** `CodeWorkspaceTab`只调用一次`acquireClipboardStore`并通过`WorkspaceClipboardSessionContext`向所有CodeMirror、Paste History和Settings分发root handle。child只能`attachConsumer({consumerId,kind})`，禁止再次acquire；删除production中的`clipboardStoreForWorkspace`旁路。parent lease与consumer lease是不同对象，每个token一次性幂等；重复consumerId返回typed diagnostic或独立计数，不能静默让两个mounted consumer共享一个detach位。
+
+```ts
+type WorkspaceClipboardSnapshotV2 = {
+  payloadRevision: number;
+  historyRevision: number;
+  policyRevision: number;
+  permissionGeneration: number;
+  lifecycleRevision: number;
+  consumers: readonly { id: string; kind: string }[];
+  permission: "unknown" | "granted" | "denied";
+};
+type ClipboardConsumerLease = { token: string; detach(): void };
+```
+
+只有对应状态真实变化才递增revision；same-value policy、empty clear、失败remove和纯paste read不递增。permission adapter变化递增generation并notify；async system read/write前后重验policy/permission/session，变化返回stale。denied明确说明system effect为0，可按策略使用workspace payload，但不能显示系统copy成功。最后root+consumer lease释放后清payload/history/listeners/native subscription和全部revision map。
+
+Copy/Cut/Paste/Paste History统一从ActionHost进入，一个CodeMirror transaction和一次undo。mounted测试覆盖StrictMode、两个split、重复consumer、任意detach顺序、workspace close、两个workspace同路径、permission在await中改变和subscriber throw隔离。C3必须断言文本、selection、多caret segment、history/payload hash、policy/permission revision、cleanup和undo；Safe Delete保持disabled并通过只读observation断言execute/write为0。
+
+**DoD。** production search显示一个root acquire、多个attach且无raw-store旁路；mounted/browser effect与生命周期全部通过，native OS clipboard/permission格留AA10。
+
+#### 8.26.3 AA2：真实Layout Revision与可恢复Tab事务（P0）
+
+workspace UI store新增单调`layoutRevision`，所有open/close/move/split/resize/policy-driven tab mutation在同一reducer中递增。Settings dialog打开时冻结`baseLayoutRevision/basePolicyRevision`；Apply时由transaction owner同步读取current revisions，禁止caller传两个同closure值。dirty确认await返回后再次读取revision，期间变化必须stale且commit/cleanup为0。
+
+`TabPolicyPlan`保存immutable pre/post image、去重view ids、最后引用文件、dirty keys、base revisions和transaction id。store reducer原子提交layout+policy+snapshot并返回`LayoutCommitReceipt { transactionId, beforeRevision, afterRevision, postImageHash }`。之后resource coordinator按lease释放view；只有editor/diff/preview/save等所有lease归零才依次didClose、watcher detach、buffer eviction和history记录。
+
+cleanup不得catch后返回`applied`。返回`applied | stale | cancelled | committed-with-recovery | failed`；post-commit释放失败写可重放recovery ledger，包含resource、已完成步骤和next step。相同transaction id幂等，重复file只释放一次。测试捕获当前同值revision、confirm期间变化、cleanup异常伪success、仅删openFiles和无receipt；C4改为真实Tab Policy，而split/reopen保留为独立layout case。
+
+**DoD。** production stale可达、cancel零effect、commit/recovery可观测、无orphan buffer且每resource effect恰好一次。
+
+#### 8.26.4 AA3：Virtual Space单一ActionHost与Visual Geometry（P0）
+
+将horizontal/vertical/Page/Shift-Page/Tab virtual操作注册为workspace ActionHost action；CodeMirror keymap只路由action id和when-context，移除`keymap.of(virtualSpaceKeymap)`行为owner与`VirtualSpaceController.keymap`公开真值。测试必须证明同一按键只dispatch一次，menu/palette/keymap调用同一definition。
+
+paging使用CodeMirror visible/line blocks和实际viewport geometry；soft wrap按display block而非physical line。geometry未ready返回unavailable并交还默认handler，删除固定15行fallback。每caret保存desired visual column和selection anchor；Shift只扩展/收缩selection，virtual padding在一次transaction完成。composition、AltGr、dead key期间零dispatch。
+
+mounted/QA覆盖tabSize 2/8、resize、wrap、top/bottom、Page/Shift、多caret、短行、wide grapheme、virtual bottom、一次undo和focus owner；Linux IME/native格留AA10。只有真实selection/text effect通过才能完成AA3。
+
+#### 8.26.5 AA4：Save不可变计划与Final-byte Receipt（P0）
+
+save开始冻结text/document revision、disk hash、policy/style revision、provider/project generation、encoding/BOM和transaction id。format与organize只在shadow document生成edit plan；production callback禁止调用live`runCodeAction`或读`openFilesRef`推测结果。organize imports只能调用AA6的`mode:"plan-only"`，command-only或multi-file无法纳入统一commit时typed unavailable。
+
+stage至少拆为`format -> organize-imports -> trim -> final-newline -> eol -> charset-bom`，每段记录`status/reason/inputSha256/outputSha256/providerRequestId/affectedUriHashes`。禁止8位FNV；charset/BOM完成后才生成最终text hash，encoded bytes另生成`finalBytesSha256`。encoding失败不能同时留下同stage`executed`和`failed`。provider unavailable默认保存未应用该stage的shadow文本；provider failed按明确workspace policy选择`continue-with-warning`或`abort-before-write`，stale一律零write。
+
+AA6 resolved edit应用到shadow后，在pre-write同步边界重验全部identity；一次byte writer commit产生disk pre/post hash、write count、history receipt和recovery id。writeback遵守R0 merge-only，不能覆盖并发新文本。C0覆盖format/organize unavailable/failed/stale、BOM/EOL最终hash、typing/policy/provider/disk race、single/multi-file、writer failure、closed buffer和undo/recovery。
+
+**DoD。** plan阶段live request以外零编辑/写盘effect；最终receipt能从provider plan追到raw bytes与一次undo，真实native字节格由AA10签名。
+
+#### 8.26.6 AA5：Completion Resolve Outcome、Identity与Scope（P0）
+
+定义`resolveCompletion`结果为`resolved | unavailable | timeout | failed | cancelled | stale`，禁止catch后继续自动commit raw。autoInsertSingle只有`resolved`或provider明确声明`resolveNotRequired`时可自动插入；timeout/failed触发`onResolveGate`、保留popup且零edit。用户在可见gate明确选择“Insert without import”才允许primary-only，并记录降级receipt。
+
+冻结candidate id、raw response index、document/session/provider/policy/project generation；resolve后重新确认仍为唯一、非incomplete/truncated、非ambiguous snippet、range有效且additional edits不重叠，再一次transaction提交primary+additional edits。mapped candidate与raw item必须是同一对象对，任何排序/过滤不能分离identity。
+
+match tier为第一排序键，同tier默认保留provider response index；prioritized/recent/kind不得跨tier，alphabetical仅显式模式。scope固定为`document/module/project/provider-reported`；module/project仅消费AA8 ready generation，descriptor/loading/degraded返回`scope-facts-missing`。mounted测试必须覆盖当前resolve throw/null仍raw insert缺陷、stale、snippet+import、0/1/many、scope状态、live policy、双workspace和一次undo；C5改为真实Completion case。
+
+#### 8.26.7 AA6：Code Action Canonical Service与真实History Receipt（P0）
+
+`codeActionProviderAdapter`成为lightbulb、Alt+Enter、Problems、context menu和AA4 plan-only的唯一production service；入口只构造context，禁止自行`requestCodeActions/runCodeAction`。unknown language返回unavailable，不能默认Java。
+
+固定流水线：capability -> canonical request -> stable action id -> resolve -> immutable plan -> preview -> commit -> postcondition -> history receipt。request前、resolve后、preview后、commit前分别检查language/document/diagnostic/provider/project/target revision/trust；resolve timeout/throw/malformed有独立failed结果，不能best-effort吞掉。plan-only返回零live-effect edit plan。
+
+随机undo字符串替换为R0真实history receipt，包含provider/version/request/resolve id、affected resource pre/post hash、commit/recovery与undo后hash。command-only只有注册的typed effect adapter才能执行，否则unavailable。测试静态禁止五个入口直接import旧request/run组合；mounted断言五入口同request/action/result。C6-01使用真实诊断Quick Fix，jdtls fixture记录request/resolve/edit/postcondition/undo。
+
+#### 8.26.8 AA7：Semantic Query Transport Session与成功后History（P1）
+
+host必须实际消费uri/position/documentRevision/providerGeneration/projectGeneration并由统一LSP adapter构造请求；fetcher接收request id与AbortSignal并桥接transport cancellation。workspace unmount、file close、provider restart调用`cancelAll`且等待pending UI commit失效。
+
+Definition、Declaration、Type Definition、Implementation、References/Usages、Call Hierarchy、Type Hierarchy全部进入host，capability逐项启用。hierarchy prepare/expand保存node identity和generation；partial/error保留siblings并标completeness。request前、await后、normalize后、UI commit前四次重验document/provider/project。
+
+cancel/stale/failed不得写navigation history；只有目标成功open/reveal后记录origin/target/effect receipt，preview不写。0/1/many分别no-result/direct/result-session。mounted测试捕获当前`_uri/_position`未使用、signal未桥接、失败前history、References/Hierarchy绕过；C6-02覆盖真实caret参数、transport cancel、restart、0/1/many、Back和hierarchy expand，每capability独立provider receipt。
+
+#### 8.26.9 AA8：Trusted Maven/Gradle Project Facts（P1）
+
+**AA8-A containment先行。** descriptor parser只能返回`descriptor-only/degraded`，所有module/exclude/source-set facts均继承descriptor provenance，completeness不得为complete；修复当前按`mod.buildSystem`伪造`maven-model/gradle-model`。类型显式允许`source:"descriptor-only"`，测试必须调用真实inference而不是手工传`source:"maven-model"`绕过。
+
+**AA8-B/C tooling。** 用户trust批准后，Maven优先wrapper并读取effective model；Gradle优先wrapper并通过Tooling API或受控init script。receipt记录tool/JDK/version/argv/cwd/input/output hash、module/source set/language level/classpath/dependency/provenance。untrusted为零process；missing wrapper、offline/auth、timeout、daemon crash、malformed/partial不能返回空ready。
+
+**AA8-D lifecycle/consumer。** workspace root唯一store；descriptor/wrapper/settings/lockfile/tool/JDK/env fingerprint驱动cache，变化取消旧generation并标stale。至少AA5 scope、AA7 result classification、Rename/refactor coverage三个mounted production consumer读取同一generation；loading/degraded/untrusted不可被当ready。Maven/Gradle各提供一个真实multi-module tooling receipt和UI状态case。
+
+#### 8.26.10 AA9：Daily Editor Release Scope、Observation与行为Case（P0，贯穿）
+
+新增机器可读`daily-editor-linux` scope，逐AA1-AA8声明capability、required controls/cases/effects/layers/provider。该scope必须0 uncovered、0 missing required、0 shallow、0 orphan；全产品3/18/44继续单独报告，但不能用baseline ratchet green替代release scope。
+
+dev/test-only只读observation暴露workspace/clipboard revisions与leases、layout/policy revision、provider request/cancel、writer/disk hash、resource/LSP close、history receipt、save stages和project generation。API不能执行action或写state，production build关闭，敏感文本只输出hash/计数。
+
+修正映射：C3 Clipboard effect；C4 Tab Policy；新增Virtual Space case；C0 Save；C5 Completion；C6-01 Quick Fix；C6-02 Query；C6-03 Safe Delete zero effect；新增Project Structure。每case从真实UI入口开始，同时断言visible state与host counters，并包含一个恢复§2.37缺陷时必失败的断言。`audit --diff`必须把对应产品文件映射到feature/case。
+
+#### 8.26.11 AA10：真实Linux、Provider、Performance、A11y与IDEA矩阵（发布门禁）
+
+只使用AA0签名receipt。packaged Linux逐格运行Caret/Virtual Space、Clipboard、Tab Policy、Save、Completion、Quick Fix、Definition/References/Hierarchy、Project Structure和Rename；provider格必须记录真实jdtls/Maven/Gradle process、version、request/response/cancel/effect，`provider:null`不得通过。
+
+native记录OS/kernel/arch、X11/Wayland、WebKitGTK、scale、keyboard/IME、filesystem、bundle hash/signature。performance固定硬件至少5轮raw sample，typing p95<=50ms、local action<=100ms；134ms旧基线在新测量前保持failed。a11y除axe外执行全键盘、screen reader、200%和high contrast；IME/AltGr/dead key验证零误触发。
+
+IDEA 2026.2与Taomni使用同fixture/JDK/caret/input对录Completion、Definition/References、Quick Fix、Rename、Tabs和Save，记录effect/scope/undo/unavailable，不复制私有ranking。Linux required格全部current/passed，full regression、rollup、audit均0退出后才可sign-off；Windows/macOS独立blocked。发现产品缺陷退回AA1-AA8并在新source/bundle下重跑。
+
+#### 8.26.12 AA11：Advanced继续锁定
+
+SSR、dependency completion、Full Line、Smart/Type-Matching、Code Vision、Scratch/Injection和Detach继续锁定。重开需独立ADR，证明AA0可信、相关AA6-AA8 workflow current、AA10目标平台/性能/安全通过，并给出engine/provider/version、license/privacy、resource budget、failure/offline、migration/rollback、fixtures、evidence和claim ceiling。
+
+#### 8.26.13 合并顺序、验证与回报
+
+推荐顺序：AA0 -> AA1/AA2/AA3基础与回归 -> AA6 -> AA4 -> AA8-A/B/C/D -> AA7与AA5 scope -> AA9总收口 -> AA10。AA9随每包增量合并；AA11不进入当前sprint。触及`CodeWorkspaceTab.tsx`时按clipboard/tab/save/completion/action/query区域最小修改，禁止跨区重排。
+
+每包运行聚焦测试、全`pnpm test`、`pnpm build`、受影响Rust、`qa_ui_auto.audit --diff <base>`、`audit --gate`和本包case；AA0另跑全部攻击例及签名smoke，AA6-AA8附真实provider/tooling，AA10附native/perf/a11y/IDEA。任何非零均保留，不得自动改写为green。
+
+最终回报格式：
+
+```text
+AA包 / capability / product commit / evidence commit / runId / trusted issuer
+先失败回归及其在3c1229cc上的失败输出
+精确changed files与无关文件数（必须为0）
+用户入口 -> mounted owner -> provider/tooling/IPC -> typed result -> effect -> UI
+identity/revision/generation四次guard；cancel/stale/failed/conflict/recovery
+request/cancel/write/lease/history计数；pre/post/undo/final-byte hash
+Unit / full test / build / Rust原始exit / audit diff+gate / browser / native / provider / perf / a11y / IDEA
+source/test-plan/bundle/release-plan/receipt/artifact/evidence-set digest
+未运行项、失败项、focused rerun与准确恢复命令
+最高允许L0-L3、禁止声明和剩余DoD
+```
+
+只有production chain、行为case和受信receipt同时闭合，才允许把对应`[ ]`改为`[x]`。
+
+---
+
 ## 9. 风险与权衡
 
 | 风险 | 说明 | 缓解 |
 |------|------|------|
-| 装配层重构回归 | `CodeWorkspaceTab.tsx` 已超过 12k 行，action/style/LSP/file/execution 状态耦合 | 行为不变原则 + 聚焦测试 + 回归清单；按§8.25 owner分区修改clipboard/tab/virtual-space/save/completion/code-action/semantic-query/project-context，再分离Z轨道装配 |
+| 装配层重构回归 | `CodeWorkspaceTab.tsx` 已超过 12k 行，action/style/LSP/file/execution 状态耦合 | 行为不变原则 + 聚焦测试 + 回归清单；按§8.26 owner分区修改clipboard/tab/virtual-space/save/completion/code-action/semantic-query/project-context，再分离AA轨道装配 |
 | LSP 服务器差异 | completion/rename/hierarchy 各 server capability 差异大 | §5.2.0 capability 驱动开关；不支持则置灰 + hint；§5.2.12 矩阵仅作方向参考 |
 | WorkspaceEdit 非原子 | 跨文件重命名可能部分成功 | 有序执行在首次失败处停止并呈现结果；单个 overwrite 资源操作使用备份/恢复保护旧目标，但不虚构跨操作事务 |
 | 补全性能/竞态 | 高频输入下请求风暴、过期回填 | 防抖 + 请求代际取消；resolve 惰性化；isIncomplete 续查 |

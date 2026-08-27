@@ -123,3 +123,6 @@ qa-ui-auto-tests/controls-drafts/
 
 # testing
 output
+
+# turbo-agent
+.turbo-agent

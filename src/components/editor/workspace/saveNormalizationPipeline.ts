@@ -18,6 +18,7 @@ import {
   isPathExcluded,
   containsDisabledFormatterMarker,
 } from "./workspaceCodeStyleScheme";
+import { sha256Hex } from "./projectAnalysisModel";
 
 export type SaveStageKind = "format" | "organize-imports" | "normalization";
 export type SaveStageStatus =
@@ -128,15 +129,6 @@ export function normalizeLineEndings(
 /**
  * Run the save normalization pipeline in strict sequence.
  */
-function textDigest(text: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
 export async function runSaveNormalizationPipeline(
   options: SaveNormalizationOptions,
 ): Promise<SaveNormalizationResult> {
@@ -185,7 +177,7 @@ export async function runSaveNormalizationPipeline(
     : false;
 
   // Stage 1: format
-  const formatBeforeHash = textDigest(currentText);
+  const formatBeforeHash = sha256Hex(currentText);
   if (!formatEnabled) {
     stages.push({ stage: "format", status: "disabled", reason: "format-disabled", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
   } else if (pathIsExcluded) {
@@ -216,7 +208,7 @@ export async function runSaveNormalizationPipeline(
         }
         currentText = formattedResult;
         formatted = true;
-        stages.push({ stage: "format", status: "executed", beforeHash: formatBeforeHash, afterHash: textDigest(currentText) });
+        stages.push({ stage: "format", status: "executed", beforeHash: formatBeforeHash, afterHash: sha256Hex(currentText) });
       } else {
         stages.push({ stage: "format", status: "unavailable", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
       }
@@ -233,7 +225,7 @@ export async function runSaveNormalizationPipeline(
     ? options.savePolicy.organizeImports.enabled
     : (options.organizeImportsOnSave ?? false);
 
-  const organizeBeforeHash = textDigest(currentText);
+  const organizeBeforeHash = sha256Hex(currentText);
   if (stopEffectful) {
     stages.push({
       stage: "organize-imports",
@@ -268,7 +260,7 @@ export async function runSaveNormalizationPipeline(
         }
         currentText = organizedResult;
         importsOrganized = true;
-        stages.push({ stage: "organize-imports", status: "executed", beforeHash: organizeBeforeHash, afterHash: textDigest(currentText) });
+        stages.push({ stage: "organize-imports", status: "executed", beforeHash: organizeBeforeHash, afterHash: sha256Hex(currentText) });
       } else {
         stages.push({ stage: "organize-imports", status: "unavailable", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
       }
@@ -280,7 +272,7 @@ export async function runSaveNormalizationPipeline(
   }
 
   // Stage 3: normalization
-  const normBeforeHash = textDigest(currentText);
+  const normBeforeHash = sha256Hex(currentText);
 
   // Trim trailing whitespace
   if (codeStyle.trimTrailingWhitespace) {
@@ -308,13 +300,6 @@ export async function runSaveNormalizationPipeline(
       eolNormalized = true;
     }
   }
-
-  stages.push({
-    stage: "normalization",
-    status: "executed",
-    beforeHash: normBeforeHash,
-    afterHash: textDigest(currentText),
-  });
 
   let resolvedCharset = codeStyle.charset;
   let resolvedBom: boolean | undefined = undefined;
@@ -351,7 +336,7 @@ export async function runSaveNormalizationPipeline(
             cancelledDueToEdit: false,
             encodingError: true,
             diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds Latin-1 range (cannot be represented in Latin-1).`],
-            stages: [...stages, { stage: "normalization", status: "failed", error: "Latin-1 encoding error" }],
+            stages: [...stages, { stage: "normalization", status: "failed", error: "Latin-1 encoding error", beforeHash: normBeforeHash, afterHash: normBeforeHash }],
           };
         }
       }
@@ -370,7 +355,7 @@ export async function runSaveNormalizationPipeline(
             cancelledDueToEdit: false,
             encodingError: true,
             diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds ASCII range (cannot be represented in US-ASCII).`],
-            stages: [...stages, { stage: "normalization", status: "failed", error: "US-ASCII encoding error" }],
+            stages: [...stages, { stage: "normalization", status: "failed", error: "US-ASCII encoding error", beforeHash: normBeforeHash, afterHash: normBeforeHash }],
           };
         }
       }
@@ -378,6 +363,13 @@ export async function runSaveNormalizationPipeline(
       resolvedCharset = charset.toUpperCase();
     }
   }
+
+  stages.push({
+    stage: "normalization",
+    status: "executed",
+    beforeHash: normBeforeHash,
+    afterHash: sha256Hex(currentText),
+  });
 
   // Final race condition check
   if (getLatestBufferText) {

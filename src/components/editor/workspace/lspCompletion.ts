@@ -1833,31 +1833,35 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         const parsedSnippet = isSnippet ? parseLspSnippet(rawText) : null;
         const hasAmbiguousChoices = parsedSnippet && parsedSnippet.placeholders.some((p) => (p.choices?.length ?? 0) > 1);
         if (!hasAmbiguousChoices) {
-          let itemToCommit = singleItem;
+          let itemToCommit: LspCompletionItem | null = singleItem;
           if (hooks.resolve) {
             try {
               const resolved = await hooks.resolve(singleItem, token);
               if (resolved) {
                 itemToCommit = resolved;
+              } else {
+                itemToCommit = null;
               }
             } catch {
-              // resolve failed or timed out
+              itemToCommit = null;
             }
           }
-          if (!isStillCurrent(token)) return null;
-          hooks.reportDiagnostic?.("auto-inserted-single");
-          const applied = commitLspCompletion(
-            targetView,
-            itemToCommit,
-            from,
-            context.pos,
-            token,
-            isStillCurrent,
-            hooks.reportDiagnostic,
-            policy.excludedSymbols,
-          );
-          if (applied) {
-            return null;
+          if (itemToCommit) {
+            if (!isStillCurrent(token)) return null;
+            hooks.reportDiagnostic?.("auto-inserted-single");
+            const applied = commitLspCompletion(
+              targetView,
+              itemToCommit,
+              from,
+              context.pos,
+              token,
+              isStillCurrent,
+              hooks.reportDiagnostic,
+              policy.excludedSymbols,
+            );
+            if (applied) {
+              return null;
+            }
           }
         }
       }

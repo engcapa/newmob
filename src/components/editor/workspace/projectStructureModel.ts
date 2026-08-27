@@ -91,7 +91,7 @@ export function buildProjectStructureSnapshotV2(
       sourceSets.push({ kind: "generated", roots: [...mod.generatedRoots].sort() });
     }
 
-    const modSource = inputs.source ?? (mod.buildSystem === "gradle" ? "gradle-model" : mod.buildSystem === "maven" ? "maven-model" : "descriptor-only");
+    const modSource = inputs.source ?? "descriptor-only";
     facts[`module.${mod.id}`] = { source: modSource, freshness: now };
 
     return {
@@ -111,9 +111,13 @@ export function buildProjectStructureSnapshotV2(
   let completenessLevel: "complete" | "partial" | "unknown" = "complete";
   if (rawModules.length === 0) {
     completenessLevel = "unknown";
-  } else if (rawModules.some((m) => m.sourceRoots.length === 0)) {
+  } else if (inputs.source === "descriptor-only" || !inputs.source || rawModules.some((m) => m.sourceRoots.length === 0)) {
     completenessLevel = "partial";
-    missing.push("some modules lack resolved source roots");
+    if (rawModules.some((m) => m.sourceRoots.length === 0)) {
+      missing.push("some modules lack resolved source roots");
+    } else {
+      missing.push("static descriptor inference only");
+    }
   }
 
   const digestInput = [
@@ -156,7 +160,7 @@ export interface BuildDescriptorInput {
 export function inferProjectStructureFromBuildFiles(
   descriptors: readonly BuildDescriptorInput[],
   generation: number = 1,
-): { snapshot: ProjectStructureSnapshotV2 | null; status: "resolved" | "unresolved"; diagnostics: string[] } {
+): { snapshot: ProjectStructureSnapshotV2 | null; status: "descriptor-only" | "unresolved"; diagnostics: string[] } {
   if (descriptors.length === 0) {
     return {
       snapshot: null,
@@ -253,6 +257,7 @@ export function inferProjectStructureFromBuildFiles(
 
   const snapshot = buildProjectStructureSnapshotV2({
     generation,
+    source: "descriptor-only",
     modules,
     buildExcludedRoots: buildExcludes,
     dependenciesByModule: depsByModule,
@@ -263,13 +268,13 @@ export function inferProjectStructureFromBuildFiles(
       ...snapshot,
       facts: { ...snapshot.facts, ...facts },
     },
-    status: "resolved",
+    status: "descriptor-only",
     diagnostics: [],
   };
 }
 
 export interface WorkspaceProjectStructureState {
-  status: "idle" | "loading" | "resolved" | "unresolved" | "error";
+  status: "idle" | "loading" | "resolved" | "unresolved" | "descriptor-only" | "error";
   snapshot: ProjectStructureSnapshotV2 | null;
   diagnostics: readonly string[];
   generation: number;

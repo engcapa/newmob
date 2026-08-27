@@ -139,15 +139,15 @@ def generate_manifest_data(
                 typing_p95_status = f"Failed ({val}ms > 50ms budget)"
                 typing_measured = f"{val} ms p95"
 
-    current_commit = (
-        valid_entries[0].get("subject", {}).get("appCommit", head_commit)
+    source_commit = (
+        valid_entries[0].get("subject", {}).get("appCommit", "none")
         if valid_entries
-        else head_commit
+        else "none"
     )
 
     return {
         "metadata": {
-            "currentCommit": current_commit,
+            "sourceCommit": source_commit,
             "testedSourceFingerprint": tested_source_fp,
             "testPlanFingerprint": test_plan_fp,
             "activeEntriesCount": len(valid_entries),
@@ -178,7 +178,7 @@ def render_markdown(data: dict[str, Any]) -> str:
         "",
         "| Attribute | Value |",
         "|---|---|",
-        f"| Current Git Commit | `{meta['currentCommit']}` |",
+        f"| Subject Source Commit | `{meta['sourceCommit']}` |",
         f"| Tested Source Fingerprint | `{meta['testedSourceFingerprint'][:16]}` |",
         f"| Test Plan Fingerprint | `{meta['testPlanFingerprint'][:16]}` |",
         f"| Active Entries (valid-current) | {meta['activeEntriesCount']} |",

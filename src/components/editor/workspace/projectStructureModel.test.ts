@@ -153,7 +153,7 @@ describe("§8.21.6 V5 projectStructureModel", () => {
       ];
 
       const result = inferProjectStructureFromBuildFiles(descriptors);
-      expect(result.status).toBe("resolved");
+      expect(result.status).toBe("descriptor-only");
       expect(result.snapshot).not.toBeNull();
       expect(result.snapshot?.modules).toHaveLength(3);
 
@@ -186,7 +186,7 @@ describe("§8.21.6 V5 projectStructureModel", () => {
         },
       ]);
 
-      expect(state1.status).toBe("resolved");
+      expect(state1.status).toBe("descriptor-only");
       expect(state1.generation).toBe(1);
       expect(state1.snapshot?.modules[0].id).toBe("cargo:taomni-cli");
       expect(state1.lastRefreshed).not.toBeNull();
