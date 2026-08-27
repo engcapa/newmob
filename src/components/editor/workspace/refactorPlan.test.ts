@@ -5,6 +5,7 @@ import {
   buildRefactorPlan,
   refactorApplyGate,
   verifyExclusionSafety,
+  evaluateDestructiveRefactorAvailability,
   type RefactorPlanV4,
 } from "./refactorPlan";
 
@@ -309,5 +310,56 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => 
     const unsafeExclusion = verifyExclusionSafety(plan, new Set([0]));
     expect(unsafeExclusion.safe).toBe(false);
     expect(unsafeExclusion.reason).toContain("cannot be excluded");
+  });
+
+  describe("§8.22.2 U1 evaluateDestructiveRefactorAvailability", () => {
+    it("returns disabled when no attestation is provided", () => {
+      const avail = evaluateDestructiveRefactorAvailability(null);
+      expect(avail.state).toBe("disabled");
+      if (avail.state === "disabled") {
+        expect(avail.reasonCode).toBe("provider-no-safe-delete-attestation");
+        expect(avail.message).toContain("does not attest complete Safe Delete coverage");
+      }
+    });
+
+    it("returns disabled when attestation coverage is partial or missing proof id", () => {
+      const partialAvail = evaluateDestructiveRefactorAvailability({
+        providerId: "jdtls",
+        providerVersion: "1.61.0",
+        projectFingerprint: "fp",
+        capability: "safe-delete",
+        coverage: "provider-partial" as any,
+        supportedSymbolKinds: ["class"],
+        proof: { kind: "provider-command", id: "cmd" },
+      });
+      expect(partialAvail.state).toBe("disabled");
+
+      const noProofAvail = evaluateDestructiveRefactorAvailability({
+        providerId: "jdtls",
+        providerVersion: "1.61.0",
+        projectFingerprint: "fp",
+        capability: "safe-delete",
+        coverage: "provider-complete",
+        supportedSymbolKinds: ["class"],
+        proof: { kind: "provider-command", id: "" },
+      });
+      expect(noProofAvail.state).toBe("disabled");
+    });
+
+    it("returns enabled when provider provides complete attestation with proof", () => {
+      const avail = evaluateDestructiveRefactorAvailability({
+        providerId: "jdtls",
+        providerVersion: "1.61.0",
+        projectFingerprint: "fp",
+        capability: "safe-delete",
+        coverage: "provider-complete",
+        supportedSymbolKinds: ["class", "method"],
+        proof: { kind: "provider-command", id: "java.action.safeDelete" },
+      });
+      expect(avail.state).toBe("enabled");
+      if (avail.state === "enabled") {
+        expect(avail.attestation.proof.id).toBe("java.action.safeDelete");
+      }
+    });
   });
 });

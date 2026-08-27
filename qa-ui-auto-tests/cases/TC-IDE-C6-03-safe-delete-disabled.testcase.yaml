@@ -1,9 +1,10 @@
 id: TC-IDE-C6-03
 title: "Safe Delete disabled without dedicated provider coverage"
 description: |
-  §8.21.2 V1 refactor safety gate case. In the absence of a dedicated
+  §8.22.2 U1 refactor safety gate case. In the absence of a dedicated
   language provider attesting complete Safe Delete coverage, the action
-  must remain safely disabled and fail closed with zero disk writes.
+  must remain safely disabled before request time, display disabled
+  reason in UI, and fail closed with zero provider requests and zero disk writes.
 covers: [F25.5]
 tags: [code-workspace, ide-c6, safe-delete, refactor-safety, p1]
 modes: [browser]

@@ -2,6 +2,7 @@ import type {
   ActionCategory,
   ActionProvenance,
   ActionResult,
+  ActionState,
   WorkspaceActionContext,
   WorkspaceActionDefinition,
   WorkspaceFocus,
@@ -26,6 +27,8 @@ export interface WorkspaceCommand {
   keywords?: string[];
   provenance?: ActionProvenance;
   when?: (context: WorkspaceCommandContext) => boolean;
+  isEnabled?: (context: WorkspaceCommandContext) => boolean;
+  getState?: (context: WorkspaceCommandContext) => ActionState;
   run: (context: WorkspaceCommandContext) => void | boolean | Promise<void | boolean>;
 }
 

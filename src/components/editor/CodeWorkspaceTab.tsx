@@ -344,6 +344,7 @@ import { RefactoringPreviewDialog } from "./workspace/RefactoringPreviewDialog";
 import {
   buildRefactorPlan,
   refactorApplyGate,
+  evaluateDestructiveRefactorAvailability,
   type RefactorPlanV3,
 } from "./workspace/refactorPlan";
 import { KeymapCheatSheetDialog } from "./workspace/KeymapCheatSheetDialog";
@@ -9415,10 +9416,30 @@ export function CodeWorkspaceTab({
       title: "Safe Delete Symbol",
       category: "Refactor",
       keybinding: "Alt+Delete",
+      keybindings: ["Alt-Delete", "Alt-delete", "Alt+Delete"],
       keywords: ["refactor", "delete", "safe delete", "usages"],
       when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
-        && !activeFile.library
-        && (!activeCapabilities || (!!activeCapabilities.references && !!activeCapabilities.rename)),
+        && !activeFile.library,
+      getState: () => {
+        const availability = evaluateDestructiveRefactorAvailability(null);
+        if (availability.state === "disabled") {
+          return {
+            availability: "disabled",
+            disabledReason: availability.message,
+            source: "provider",
+            scope: "workspace",
+            freshness: "current",
+            completeness: "complete",
+          };
+        }
+        return {
+          availability: "available",
+          source: "provider",
+          scope: "workspace",
+          freshness: "current",
+          completeness: "complete",
+        };
+      },
       run: () => void safeDeleteSymbolRef.current(),
     },
     {
@@ -10624,14 +10645,18 @@ export function CodeWorkspaceTab({
         void closeFromTabSwitcherRef.current();
         return;
       }
-      // §8.19.2: dispatch through the typed V2 entry — IME composition,
-      // dead keys and AltGr are rejected before any binding match and never
-      // swallow characters; chord waits/conflicts are explicit results.
-      void actionsController.dispatchKeydownV2({
+      const dispatchResult = actionsController.dispatchKeydownV2({
         event,
         workspaceId: workspaceInstanceId,
         targetViewId: activeEditorCommandOwner()?.fileKey ?? null,
       });
+      if (
+        dispatchResult.kind === "rejected"
+        && dispatchResult.reason === "disabled"
+        && dispatchResult.disabledReason
+      ) {
+        setStatusMessage(dispatchResult.disabledReason);
+      }
     };
     // Modifier-release commit cannot be a keydown action; it stays a keyup
     // listener and commits on whichever platform modifier started the cycle.
@@ -11343,9 +11368,9 @@ export function CodeWorkspaceTab({
       setStatusMessage(`${file.title} is a read-only library source`);
       return;
     }
-    const caps = lspFilesRef.current[file.key]?.status?.capabilities;
-    if (caps && (!caps.references || !caps.rename)) {
-      setStatusMessage("Safe Delete requires references and rename support from the language server");
+    const availability = evaluateDestructiveRefactorAvailability(null);
+    if (availability.state === "disabled") {
+      setStatusMessage(availability.message);
       return;
     }
     const expectedRevision = semanticIndex.current().revision;

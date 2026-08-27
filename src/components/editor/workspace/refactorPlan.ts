@@ -23,6 +23,39 @@ export type RefactorKind =
   | "move"
   | "other";
 
+export interface SafeDeleteAttestationV1 {
+  providerId: string;
+  providerVersion: string;
+  projectFingerprint: string;
+  capability: "safe-delete";
+  coverage: "provider-complete";
+  supportedSymbolKinds: readonly string[];
+  proof: { kind: "provider-command" | "code-action-data"; id: string };
+}
+
+export type DestructiveRefactorAvailability =
+  | { state: "enabled"; attestation: SafeDeleteAttestationV1 }
+  | { state: "disabled"; reasonCode: "provider-no-safe-delete-attestation"; message: string };
+
+export function evaluateDestructiveRefactorAvailability(
+  attestation?: SafeDeleteAttestationV1 | null,
+): DestructiveRefactorAvailability {
+  if (
+    attestation &&
+    attestation.capability === "safe-delete" &&
+    attestation.coverage === "provider-complete" &&
+    attestation.proof &&
+    Boolean(attestation.proof.id)
+  ) {
+    return { state: "enabled", attestation };
+  }
+  return {
+    state: "disabled",
+    reasonCode: "provider-no-safe-delete-attestation",
+    message: "Language provider does not attest complete Safe Delete coverage",
+  };
+}
+
 export type RefactorCompleteness =
   | "provider-complete"
   | "provider-partial"

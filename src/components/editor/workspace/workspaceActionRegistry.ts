@@ -44,7 +44,8 @@ export type ActionDisabledReason =
   | "disposed"
   | "invalidCondition"
   | "userDisabled"
-  | "unsupported";
+  | "unsupported"
+  | (string & {});
 
 export interface ActionPlatformKeybindings {
   macos?: string;
@@ -219,6 +220,7 @@ export type ActionResultReason =
   | "aborted"
   | "busy"
   | "condition-not-met"
+  | "disabled"
   | "disposed"
   | "exception"
   | "stale-owner"

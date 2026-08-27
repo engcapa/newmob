@@ -4525,13 +4525,17 @@ describe("CodeWorkspaceTab", () => {
     await screen.findByTitle("app / src/main.ts");
     const content = rendered.container.querySelector<HTMLElement>(".cm-content");
     expect(content).not.toBeNull();
-    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
-    fireEvent.keyDown(content!, { key: "Delete", code: "Delete", altKey: true });
+    await waitFor(() => expect(registrationRef.current).not.toBeNull());
+    const safeDeleteCmd = registrationRef.current?.items.find((item) => item.id === "workspace.safeDeleteSymbol");
+    expect(safeDeleteCmd?.enabled).toBe(false);
+    expect(registrationRef.current?.execute("workspace.safeDeleteSymbol")).toBe(false);
 
-    await waitFor(() => expect(lspMocks.lspPrepareRename).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByText(/Language provider does not attest complete Safe Delete coverage/)).toBeInTheDocument();
-    });
+    const execResult = await registrationRef.current?.executeAction("workspace.safeDeleteSymbol");
+    expect(execResult?.kind).toBe("no-op");
+    expect(execResult?.message).toContain("Language provider does not attest complete Safe Delete coverage");
+    expect(lspMocks.lspPrepareRename).not.toHaveBeenCalled();
+    expect(lspMocks.lspReferences).not.toHaveBeenCalled();
+    expect(lspMocks.lspDefinition).not.toHaveBeenCalled();
     expect(workspaceMocks.workspaceWriteFileEncoded).not.toHaveBeenCalled();
     expect(disk.get("src/main.ts")).toBe("const answer = 42;");
     expect(disk.get("src/use.ts")).toBe("use(answer);");
