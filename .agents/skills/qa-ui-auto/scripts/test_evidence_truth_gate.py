@@ -336,16 +336,8 @@ class EvidenceTruthGateTests(unittest.TestCase):
         entry_file = self._write_entry(self.sample_v4)
         import unittest.mock as mock
         with mock.patch("evidence_validate.is_source_dirty", return_value=True):
-            res = validate_entry(
-                entry_file,
-                self.schema,
-                check_current=True,
-                current_source_fp=self.source_fp,
-                current_test_plan_fp=self.plan_fp,
-                current_head="a" * 40,
-            )
-            self.assertEqual(res.status, EntryStatus.INVALID)
-            self.assertEqual(res.reason_code, "DIRTY_SOURCE")
+            code = validate_main(["--check-current", str(entry_file)])
+            self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":

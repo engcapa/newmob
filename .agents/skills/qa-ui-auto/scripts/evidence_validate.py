@@ -449,14 +449,6 @@ def validate_entry(
             )
 
         # 2. Source dirty check
-        if is_source_dirty():
-            return ValidationResult(
-                entry_path,
-                EntryStatus.INVALID,
-                "DIRTY_SOURCE",
-                ["Product source working tree has uncommitted modifications"],
-                data=data,
-            )
         if subject.get("sourceDirty", False):
             return ValidationResult(
                 entry_path,
@@ -532,6 +524,11 @@ def main(argv: list[str] | None = None) -> int:
 
     check_current = args.check_current or args.check_head
     scan_paths = scan_entries(args.paths)
+
+    if check_current and not args.allow_history_only:
+        if is_source_dirty():
+            print("ERROR: --check-current failed: working tree has uncommitted product source modifications.")
+            return 1
 
     if not scan_paths:
         print("No evidence entries found.")

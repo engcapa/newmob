@@ -1843,7 +1843,6 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             isStillCurrent,
             hooks.reportDiagnostic,
             policy.excludedSymbols,
-            hooks.onResolveGate,
           );
           if (applied) {
             return null;
