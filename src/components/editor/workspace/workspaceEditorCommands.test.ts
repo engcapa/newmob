@@ -617,22 +617,23 @@ describe("N9.3/N14.4 region grammar strategy", () => {
     view.destroy();
   });
 
-  it("marks region folding as syntax-aware with parser and heuristic without parser", () => {
-    // Comment node present -> syntax-aware
+  it("marks region folding provenance as explicit-comment, language-syntax, or indent-fallback", () => {
+    // Comment node present -> explicit-comment
     const commentNode = { name: "LineComment" };
-    expect(regionFoldingProvenance(commentNode)).toBe("syntax-aware");
-    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(commentNode))).toBe("syntax-aware");
+    expect(regionFoldingProvenance(commentNode)).toBe("explicit-comment");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(commentNode))).toBe("explicit-comment");
 
-    // No parser / null / empty node -> Text marker folding (heuristic)
-    expect(regionFoldingProvenance(null)).toBe("heuristic");
-    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(null))).toBe(
-      "Text marker folding (heuristic)",
-    );
+    // Syntax block node present -> language-syntax
+    const syntaxNode = { name: "Block" };
+    expect(regionFoldingProvenance(syntaxNode)).toBe("language-syntax");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(syntaxNode))).toBe("language-syntax");
+
+    // Null / empty node / indent -> indent-fallback
+    expect(regionFoldingProvenance(null)).toBe("indent-fallback");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(null))).toBe("indent-fallback");
 
     const emptyNode = { name: "" };
-    expect(regionFoldingProvenance(emptyNode)).toBe("heuristic");
-    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(emptyNode))).toBe(
-      "Text marker folding (heuristic)",
-    );
+    expect(regionFoldingProvenance(emptyNode)).toBe("indent-fallback");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(emptyNode))).toBe("indent-fallback");
   });
 });

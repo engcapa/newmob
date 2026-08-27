@@ -11,9 +11,11 @@ import {
   virtualLineEndCommand,
   virtualMoveDown,
   virtualOverflowAt,
+  virtualSelectDown,
   virtualSpaceClickHandler,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
+  VIRTUAL_SPACE_KNOWN_GAPS,
 } from "./workspaceVirtualSpace";
 import { editorVirtualSpacePolicy } from "./workspaceEditorCommands";
 
@@ -207,5 +209,38 @@ describe("§8.19.5 virtual caret lifecycle", () => {
     const line2 = view.state.doc.line(3);
     expect(view.state.selection.main.head).toBe(line2.from + 11);
     expect(virtualOverflowAt(view.state, line2.from + 11)).toBe(0);
+  });
+
+  it("extends selection into virtual space with virtualSelectDown", () => {
+    const doc = "first line\nshort\nthird line here";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        extensions: [
+          EditorState.allowMultipleSelections.of(true),
+          virtualSpaceOverflowField,
+          desiredVisualColumnField,
+          POLICY,
+        ],
+      }),
+    });
+
+    // Start anchor at offset 0, cursor at offset 10 (end of line 1)
+    view.dispatch({ selection: EditorSelection.range(0, 10) });
+
+    // Select down into line 2 ("short" length 5 < 10)
+    expect(virtualSelectDown(view)).toBe(true);
+    // Selection anchor remains 0, head moves to line 2 EOL (offset 16) with virtual overflow 5
+    expect(view.state.selection.main.anchor).toBe(0);
+    expect(view.state.selection.main.head).toBe(16);
+    expect(virtualOverflowAt(view.state, 16)).toBe(5);
+  });
+
+  it("documents known gaps honestly in VIRTUAL_SPACE_KNOWN_GAPS", () => {
+    expect(VIRTUAL_SPACE_KNOWN_GAPS).toBeInstanceOf(Array);
+    const features = VIRTUAL_SPACE_KNOWN_GAPS.map((g) => g.feature);
+    expect(features).toContain("soft-wrap");
+    expect(features).toContain("rectangular-selection");
+    expect(features).toContain("indent-folding-fallback");
   });
 });

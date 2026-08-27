@@ -5,6 +5,7 @@ import { EditorSelection } from "@codemirror/state";
 import { undoDepth } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { CodeMirrorHost } from "./CodeMirrorHost";
+import { virtualSpaceOverflowField } from "./workspaceVirtualSpace";
 
 function renderEditor(
   doc: string,
@@ -668,5 +669,51 @@ describe("§8.19.8 semantic editing commands", () => {
     // Parserless language stays on the labelled Local/Heuristic path.
     expect(report.provenance).toMatchObject({ kind: "local-text" });
     expect(view()!.state.doc.toString().startsWith("foo();")).toBe(true);
+  });
+});
+
+describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", () => {
+  afterEach(() => cleanup());
+
+  it("consumes appearance.virtualSpace policy in production editor", async () => {
+    const rendered = renderEditor("first line\nsecond", vi.fn(), {
+      appearance: {
+        fontFamily: "monospace",
+        fontSizePx: 14,
+        lineHeight: 1.5,
+        ligatures: false,
+        colorSchemeId: "default",
+        highContrast: false,
+        virtualSpace: { afterLineEnd: true, atFileBottom: true },
+      },
+    });
+
+    const view = EditorView.findFromDOM(rendered.container.querySelector(".cm-editor")!);
+    expect(view).not.toBeNull();
+
+    // Place caret at line 1 EOL
+    view!.dispatch({ selection: { anchor: 10 } });
+    // Pressing End key moves into virtual space
+    fireEvent.keyDown(rendered.content, { key: "End" });
+    const overflow = view!.state.field(virtualSpaceOverflowField, false)?.get(10) ?? 0;
+    expect(overflow).toBeGreaterThan(0);
+  });
+
+  it("emits explicit-comment provenance for region markers on selection change", async () => {
+    const onFoldProvenanceChange = vi.fn();
+    const doc = "//region MyBlock\nconst x = 1;\n//endregion\n";
+    const rendered = renderEditor(doc, vi.fn(), {
+      path: "src/Test.ts",
+      onFoldProvenanceChange,
+    });
+
+    const view = EditorView.findFromDOM(rendered.container.querySelector(".cm-editor")!);
+    expect(view).not.toBeNull();
+
+    // Move caret to the region comment line
+    view!.dispatch({ selection: { anchor: 5 } });
+    await waitFor(() => {
+      expect(onFoldProvenanceChange).toHaveBeenCalledWith("explicit-comment");
+    });
   });
 });

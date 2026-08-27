@@ -77,6 +77,7 @@ import {
   type TabEvictionMeta,
   type WorkspaceTabPolicyV3,
 } from "./workspaceTabPolicy";
+import type { RegionFoldingProvenance } from "./workspaceEditorCommands";
 
 export type MarkdownViewMode = "edit" | "preview" | "split";
 
@@ -372,6 +373,8 @@ export function EditorGroup({
     atEnd: true,
   });
   useEffect(() => setGitDiffPeek(null), [activeKey]);
+  const [activeFoldProvenance, setActiveFoldProvenance] = useState<RegionFoldingProvenance | null>(null);
+  useEffect(() => setActiveFoldProvenance(null), [activeKey]);
   const tabEvictionMeta = useMemo(() => {
     const map = new Map<string, TabEvictionMeta>();
     for (const key of openOrder) {
@@ -680,6 +683,16 @@ export function EditorGroup({
                 data-testid="code-workspace-file-status"
                 className="min-h-7 shrink-0 flex items-center gap-2 px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] text-[length:var(--taomni-code-editor-ui-small-font-size)] text-[var(--taomni-code-text)]"
               >
+                {activeFoldProvenance && (
+                  <span
+                    data-testid="code-workspace-fold-provenance"
+                    data-provenance={activeFoldProvenance}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[10px] bg-[var(--taomni-code-active-line-bg)] text-[var(--taomni-code-muted)]"
+                    title={`Region fold source: ${activeFoldProvenance}`}
+                  >
+                    Region: {activeFoldProvenance}
+                  </span>
+                )}
                 <div className="ml-auto flex min-w-0 items-center gap-2">
                   <span className="shrink-0 text-[var(--taomni-code-muted)]">{formatBytes(activeFile.size)}</span>
                   {formatMtime(activeFile.mtime) && (
@@ -825,6 +838,7 @@ export function EditorGroup({
                         hoverDocumentationDelayMs={hoverDocumentationDelayMs}
                         parameterInfoRequestNonce={parameterInfoRequestNonce}
                         parameterInfoShowFullSignatures={parameterInfoShowFullSignatures}
+                        onFoldProvenanceChange={setActiveFoldProvenance}
                         codeStyle={activeCodeStyle}
                       />
                     </div>
@@ -898,6 +912,7 @@ export function EditorGroup({
                       hoverDocumentationDelayMs={hoverDocumentationDelayMs}
                       parameterInfoRequestNonce={parameterInfoRequestNonce}
                       parameterInfoShowFullSignatures={parameterInfoShowFullSignatures}
+                      onFoldProvenanceChange={setActiveFoldProvenance}
                       codeStyle={activeCodeStyle}
                     />
                   </div>

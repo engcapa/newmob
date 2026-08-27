@@ -5,7 +5,17 @@ import { EditorGroup } from "./EditorGroup";
 import type { OpenFileViewModel } from "./editorGroupTypes";
 
 vi.mock("./CodeMirrorHost", () => ({
-  CodeMirrorHost: () => <div data-testid="mock-code-mirror" />,
+  CodeMirrorHost: ({ onFoldProvenanceChange }: { onFoldProvenanceChange?: (p: string | null) => void }) => (
+    <div data-testid="mock-code-mirror">
+      <button
+        type="button"
+        data-testid="mock-trigger-fold-provenance"
+        onClick={() => onFoldProvenanceChange?.("explicit-comment")}
+      >
+        Trigger Fold
+      </button>
+    </div>
+  ),
 }));
 
 afterEach(cleanup);
@@ -423,5 +433,25 @@ describe("EditorGroup tabs", () => {
     expect(Array.from(mainTabs).map((el) => el.getAttribute("data-editor-tab-key"))).toEqual([
       "normal-one",
     ]);
+  });
+
+  it("displays region fold provenance badge in the file status bar when active", () => {
+    const f1 = file("sample");
+    render(
+      <EditorGroup
+        {...props({
+          openOrder: ["sample"],
+          openFiles: { sample: f1 },
+          activeKey: "sample",
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("code-workspace-fold-provenance")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("mock-trigger-fold-provenance"));
+    const badge = screen.getByTestId("code-workspace-fold-provenance");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute("data-provenance", "explicit-comment");
+    expect(badge).toHaveTextContent("Region: explicit-comment");
   });
 });

@@ -128,10 +128,12 @@ import {
   pasteEditorClipboardPayload,
   plainTextClipboardPayload,
   createRegionFoldService,
+  detectLineFoldProvenance,
   selectAllEditorOccurrences,
   selectNextEditorOccurrence,
   selectionHistoryField,
   type EditorClipboardPayload,
+  type RegionFoldingProvenance,
 } from "./workspaceEditorCommands";
 import {
   buildEditorHostActions,
@@ -146,11 +148,14 @@ import {
 } from "./workspaceSemanticEditing";
 import { observeSyntaxFacts, treeRevisionField } from "./workspaceSyntaxFacts";
 import {
+  desiredVisualColumnField,
+  editorVirtualSpacePolicy,
   virtualBackspaceCommand,
   virtualLineEndCommand,
   virtualSpaceClickHandler,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
+  virtualVerticalMoveCommand,
 } from "./workspaceVirtualSpace";
 import type { WorkspaceActionHost } from "./workspaceActionHost";
 
@@ -244,6 +249,7 @@ interface CodeMirrorHostProps {
   /** Controlled Parameter Info display state published by the session. */
   parameterPopup?: ParameterPopupView | null;
   onSelectionChange?: (selection: EditorSelectionRange) => void;
+  onFoldProvenanceChange?: (provenance: RegionFoldingProvenance | null) => void;
   onViewportChange?: (range: LspRange) => void;
   onExpandSelection?: (selection: EditorSelectionRange) => Promise<LspRange[] | null>;
   onLightbulb?: (line: number) => void;
@@ -1168,6 +1174,26 @@ function lspHoverExtension(
   return extension;
 }
 
+function foldHoverProvenanceTooltip(resolvePath: () => string | null | undefined): Extension {
+  return hoverTooltip((view, pos): Tooltip | null => {
+    const line = view.state.doc.lineAt(pos);
+    const provenance = detectLineFoldProvenance(view.state, line.number, resolvePath());
+    if (!provenance) return null;
+    return {
+      pos: line.from,
+      above: true,
+      create() {
+        const dom = document.createElement("div");
+        dom.className = "cm-fold-hover-tooltip px-2 py-1 text-[11px] rounded bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)] border border-[var(--taomni-code-border)] shadow-md";
+        dom.setAttribute("data-testid", "code-workspace-fold-hover-tooltip");
+        dom.setAttribute("data-fold-provenance", provenance);
+        dom.textContent = `Region fold source: ${provenance}`;
+        return { dom };
+      },
+    };
+  }, { hoverTime: 250 });
+}
+
 function sameCodeStyle(a?: EffectiveCodeStyle, b?: EffectiveCodeStyle): boolean {
   if (a === b) return true;
   return (a?.tabSize ?? 2) === (b?.tabSize ?? 2)
@@ -1277,6 +1303,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onParameterEscape,
   parameterPopup = null,
   onSelectionChange,
+  onFoldProvenanceChange,
   onViewportChange,
   onExpandSelection,
   onLightbulb,
@@ -1389,6 +1416,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const onParameterInvalidateRef = useRef(onParameterInvalidate);
   const onParameterEscapeRef = useRef(onParameterEscape);
   const onSelectionChangeRef = useRef(onSelectionChange);
+  const onFoldProvenanceChangeRef = useRef(onFoldProvenanceChange);
   const onViewportChangeRef = useRef(onViewportChange);
   const onExpandSelectionRef = useRef(onExpandSelection);
   const onLightbulbRef = useRef(onLightbulb);
@@ -1428,6 +1456,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onParameterInvalidateRef.current = onParameterInvalidate;
   onParameterEscapeRef.current = onParameterEscape;
   onSelectionChangeRef.current = onSelectionChange;
+  onFoldProvenanceChangeRef.current = onFoldProvenanceChange;
   onViewportChangeRef.current = onViewportChange;
   onExpandSelectionRef.current = onExpandSelection;
   onLightbulbRef.current = onLightbulb;
@@ -1487,33 +1516,41 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
 
   const emitSelection = (view: EditorView) => {
     const handler = onSelectionChangeRef.current;
-    if (!handler) return;
+    const foldHandler = onFoldProvenanceChangeRef.current;
+    if (!handler && !foldHandler) return;
     const main = view.state.selection.main;
     const from = Math.min(main.from, main.to);
     const to = Math.max(main.from, main.to);
     const previous = lastSelectionRef.current;
     if (previous?.from === from && previous.to === to) return;
     lastSelectionRef.current = { from, to };
-    let rect: EditorSelectionRange["rect"] = null;
-    if (!main.empty) {
-      const startCoords = view.coordsAtPos(from);
-      const endCoords = view.coordsAtPos(to);
-      if (startCoords && endCoords) {
-        rect = {
-          top: Math.min(startCoords.top, endCoords.top),
-          left: Math.min(startCoords.left, endCoords.left),
-          right: Math.max(startCoords.right, endCoords.right),
-          bottom: Math.max(startCoords.bottom, endCoords.bottom),
-        };
+    if (handler) {
+      let rect: EditorSelectionRange["rect"] = null;
+      if (!main.empty) {
+        const startCoords = view.coordsAtPos(from);
+        const endCoords = view.coordsAtPos(to);
+        if (startCoords && endCoords) {
+          rect = {
+            top: Math.min(startCoords.top, endCoords.top),
+            left: Math.min(startCoords.left, endCoords.left),
+            right: Math.max(startCoords.right, endCoords.right),
+            bottom: Math.max(startCoords.bottom, endCoords.bottom),
+          };
+        }
       }
+      handler({
+        start: lspPositionFromOffset(view.state.doc, from),
+        end: lspPositionFromOffset(view.state.doc, to),
+        empty: main.empty,
+        text: main.empty ? "" : view.state.doc.sliceString(from, to),
+        rect,
+      });
     }
-    handler({
-      start: lspPositionFromOffset(view.state.doc, from),
-      end: lspPositionFromOffset(view.state.doc, to),
-      empty: main.empty,
-      text: main.empty ? "" : view.state.doc.sliceString(from, to),
-      rect,
-    });
+    if (foldHandler) {
+      const line = view.state.doc.lineAt(from);
+      const provenance = detectLineFoldProvenance(view.state, line.number, pathRef.current);
+      foldHandler(provenance);
+    }
   };
 
   const emitViewport = (view: EditorView) => {
@@ -1631,6 +1668,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         foldGutter(),
         // Language-aware region grammar; unknown languages never fold.
         createRegionFoldService(() => pathRef.current),
+        foldHoverProvenanceTooltip(() => pathRef.current),
         highlightActiveLine(),
         highlightActiveLineGutter(),
         EditorState.allowMultipleSelections.of(true),
@@ -1647,13 +1685,67 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         history(),
         // §8.19.8 treeRevision source for semantic-edit evidence envelopes.
         treeRevisionField,
-        // §8.19.5 Virtual Space: overflow tracking, typing materialization
-        // and click-past-EOL. The keymap below only claims keys when a
-        // virtual caret is actually involved; everything else falls through.
+        // §8.19.5 / §8.21.3 Virtual Space: overflow tracking, typing materialization,
+        // vertical desired column preservation, and click-past-EOL.
         virtualSpaceOverflowField,
+        desiredVisualColumnField,
         virtualSpaceTypingHandler,
         virtualSpaceClickHandler,
         Prec.high(keymap.of([
+          {
+            key: "ArrowUp",
+            run: (view) => {
+              const pol = view.state.facet(editorVirtualSpacePolicy);
+              return (pol.afterLineEnd || pol.atFileBottom)
+                ? virtualVerticalMoveCommand(view, "up", false)
+                : false;
+            },
+          },
+          {
+            key: "ArrowDown",
+            run: (view) => {
+              const pol = view.state.facet(editorVirtualSpacePolicy);
+              return (pol.afterLineEnd || pol.atFileBottom)
+                ? virtualVerticalMoveCommand(view, "down", false)
+                : false;
+            },
+          },
+          {
+            key: "Shift-ArrowUp",
+            run: (view) => {
+              const pol = view.state.facet(editorVirtualSpacePolicy);
+              return (pol.afterLineEnd || pol.atFileBottom)
+                ? virtualVerticalMoveCommand(view, "up", true)
+                : false;
+            },
+          },
+          {
+            key: "Shift-ArrowDown",
+            run: (view) => {
+              const pol = view.state.facet(editorVirtualSpacePolicy);
+              return (pol.afterLineEnd || pol.atFileBottom)
+                ? virtualVerticalMoveCommand(view, "down", true)
+                : false;
+            },
+          },
+          {
+            key: "PageUp",
+            run: (view) => {
+              const pol = view.state.facet(editorVirtualSpacePolicy);
+              return (pol.afterLineEnd || pol.atFileBottom)
+                ? virtualVerticalMoveCommand(view, "pageUp", false)
+                : false;
+            },
+          },
+          {
+            key: "PageDown",
+            run: (view) => {
+              const pol = view.state.facet(editorVirtualSpacePolicy);
+              return (pol.afterLineEnd || pol.atFileBottom)
+                ? virtualVerticalMoveCommand(view, "pageDown", false)
+                : false;
+            },
+          },
           { key: "End", run: (view) => virtualLineEndCommand(view, false) },
           { key: "Shift-End", run: (view) => virtualLineEndCommand(view, true) },
           { key: "Backspace", run: (view) => virtualBackspaceCommand(view) },
