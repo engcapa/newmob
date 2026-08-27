@@ -8,13 +8,22 @@ import {
   measureVisualPositions,
   setVirtualHead,
   virtualBackspaceCommand,
+  virtualDeleteCommand,
+  virtualEnterCommand,
+  virtualEscapeCommand,
+  virtualHomeCommand,
   virtualLineEndCommand,
   virtualMoveDown,
+  virtualMoveLeftCommand,
+  virtualMoveRightCommand,
   virtualOverflowAt,
   virtualSelectDown,
   virtualSpaceClickHandler,
+  virtualSpaceKeymap,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
+  virtualTabCommand,
+  VirtualSpaceController,
   VIRTUAL_SPACE_KNOWN_GAPS,
 } from "./workspaceVirtualSpace";
 import { editorVirtualSpacePolicy } from "./workspaceEditorCommands";
@@ -242,5 +251,113 @@ describe("§8.19.5 virtual caret lifecycle", () => {
     expect(features).toContain("soft-wrap");
     expect(features).toContain("rectangular-selection");
     expect(features).toContain("indent-folding-fallback");
+  });
+
+  describe("§8.22.5 U2-C Virtual Space Keymap Closure", () => {
+    it("handles virtualMoveLeft and virtualMoveRight within virtual space", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "line",
+          extensions: [virtualSpaceOverflowField, POLICY],
+        }),
+      });
+
+      // Place cursor at line end (offset 4)
+      view.dispatch({ selection: EditorSelection.cursor(4) });
+
+      // Move right into virtual space
+      expect(virtualMoveRightCommand(view, false)).toBe(true);
+      expect(virtualOverflowAt(view.state, 4)).toBe(1);
+      expect(virtualMoveRightCommand(view, false)).toBe(true);
+      expect(virtualOverflowAt(view.state, 4)).toBe(2);
+
+      // Move left back towards real line end
+      expect(virtualMoveLeftCommand(view, false)).toBe(true);
+      expect(virtualOverflowAt(view.state, 4)).toBe(1);
+      expect(virtualMoveLeftCommand(view, false)).toBe(true);
+      expect(virtualOverflowAt(view.state, 4)).toBe(0);
+    });
+
+    it("clears virtual overflow on Home without dirtying document", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "  indented text",
+          extensions: [virtualSpaceOverflowField, POLICY],
+        }),
+      });
+
+      setVirtualHead(view, 15, 10, false);
+      expect(virtualOverflowAt(view.state, 15)).toBe(10);
+
+      expect(virtualHomeCommand(view)).toBe(true);
+      expect(virtualOverflowAt(view.state, view.state.selection.main.head)).toBe(0);
+      expect(view.state.selection.main.head).toBe(2); // Indent position
+      expect(view.state.doc.toString()).toBe("  indented text");
+    });
+
+    it("clears virtual overflow on Escape without modifying document", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "const answer = 42;",
+          extensions: [virtualSpaceOverflowField, POLICY],
+        }),
+      });
+
+      setVirtualHead(view, 18, 8, false);
+      expect(virtualOverflowAt(view.state, 18)).toBe(8);
+
+      expect(virtualEscapeCommand(view)).toBe(true);
+      expect(virtualOverflowAt(view.state, 18)).toBe(0);
+      expect(view.state.doc.toString()).toBe("const answer = 42;");
+    });
+
+    it("pads line with trailing spaces and newline on virtual Enter", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "hello",
+          extensions: [virtualSpaceOverflowField, POLICY],
+        }),
+      });
+
+      setVirtualHead(view, 5, 4, false);
+      expect(virtualEnterCommand(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("hello    \n");
+    });
+
+    it("snaps to next tab stop on virtual Tab", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "abc",
+          extensions: [virtualSpaceOverflowField, POLICY],
+        }),
+      });
+
+      view.dispatch({ selection: EditorSelection.cursor(3) });
+      expect(virtualTabCommand(view)).toBe(true);
+      // "abc" has length 3, tab stop is 4, so overflow becomes 1
+      expect(virtualOverflowAt(view.state, 3)).toBe(1);
+
+      // Second tab snaps from visual 4 to visual 8 (overflow +4 -> 5)
+      expect(virtualTabCommand(view)).toBe(true);
+      expect(virtualOverflowAt(view.state, 3)).toBe(5);
+    });
+
+    it("exports complete virtualSpaceKeymap and VirtualSpaceController", () => {
+      expect(virtualSpaceKeymap.length).toBeGreaterThanOrEqual(15);
+      const keys = virtualSpaceKeymap.map((b) => b.key);
+      expect(keys).toContain("ArrowUp");
+      expect(keys).toContain("ArrowDown");
+      expect(keys).toContain("ArrowLeft");
+      expect(keys).toContain("ArrowRight");
+      expect(keys).toContain("Home");
+      expect(keys).toContain("End");
+      expect(keys).toContain("Backspace");
+      expect(keys).toContain("Delete");
+      expect(keys).toContain("Enter");
+      expect(keys).toContain("Tab");
+      expect(keys).toContain("Escape");
+
+      expect(VirtualSpaceController.keymap).toBe(virtualSpaceKeymap);
+    });
   });
 });

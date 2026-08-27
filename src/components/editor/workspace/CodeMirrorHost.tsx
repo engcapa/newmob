@@ -150,12 +150,10 @@ import { observeSyntaxFacts, treeRevisionField } from "./workspaceSyntaxFacts";
 import {
   desiredVisualColumnField,
   editorVirtualSpacePolicy,
-  virtualBackspaceCommand,
-  virtualLineEndCommand,
   virtualSpaceClickHandler,
+  virtualSpaceKeymap,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
-  virtualVerticalMoveCommand,
 } from "./workspaceVirtualSpace";
 import type { WorkspaceActionHost } from "./workspaceActionHost";
 
@@ -1730,65 +1728,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         desiredVisualColumnField,
         virtualSpaceTypingHandler,
         virtualSpaceClickHandler,
-        Prec.high(keymap.of([
-          {
-            key: "ArrowUp",
-            run: (view) => {
-              const pol = view.state.facet(editorVirtualSpacePolicy);
-              return (pol.afterLineEnd || pol.atFileBottom)
-                ? virtualVerticalMoveCommand(view, "up", false)
-                : false;
-            },
-          },
-          {
-            key: "ArrowDown",
-            run: (view) => {
-              const pol = view.state.facet(editorVirtualSpacePolicy);
-              return (pol.afterLineEnd || pol.atFileBottom)
-                ? virtualVerticalMoveCommand(view, "down", false)
-                : false;
-            },
-          },
-          {
-            key: "Shift-ArrowUp",
-            run: (view) => {
-              const pol = view.state.facet(editorVirtualSpacePolicy);
-              return (pol.afterLineEnd || pol.atFileBottom)
-                ? virtualVerticalMoveCommand(view, "up", true)
-                : false;
-            },
-          },
-          {
-            key: "Shift-ArrowDown",
-            run: (view) => {
-              const pol = view.state.facet(editorVirtualSpacePolicy);
-              return (pol.afterLineEnd || pol.atFileBottom)
-                ? virtualVerticalMoveCommand(view, "down", true)
-                : false;
-            },
-          },
-          {
-            key: "PageUp",
-            run: (view) => {
-              const pol = view.state.facet(editorVirtualSpacePolicy);
-              return (pol.afterLineEnd || pol.atFileBottom)
-                ? virtualVerticalMoveCommand(view, "pageUp", false)
-                : false;
-            },
-          },
-          {
-            key: "PageDown",
-            run: (view) => {
-              const pol = view.state.facet(editorVirtualSpacePolicy);
-              return (pol.afterLineEnd || pol.atFileBottom)
-                ? virtualVerticalMoveCommand(view, "pageDown", false)
-                : false;
-            },
-          },
-          { key: "End", run: (view) => virtualLineEndCommand(view, false) },
-          { key: "Shift-End", run: (view) => virtualLineEndCommand(view, true) },
-          { key: "Backspace", run: (view) => virtualBackspaceCommand(view) },
-        ])),
+        Prec.high(keymap.of(virtualSpaceKeymap)),
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),

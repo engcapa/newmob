@@ -447,6 +447,223 @@ export const virtualSelectDown = (view: EditorView) => virtualVerticalMoveComman
 export const virtualPageUp = (view: EditorView) => virtualVerticalMoveCommand(view, "pageUp", false);
 export const virtualPageDown = (view: EditorView) => virtualVerticalMoveCommand(view, "pageDown", false);
 
+export function virtualMoveLeftCommand(view: EditorView, extend: boolean): boolean {
+  if (view.composing) return false;
+  const field = view.state.field(virtualSpaceOverflowField, false);
+  if (!field || field.size === 0) return false;
+  const state = view.state;
+  const next = new Map(field);
+  let changed = false;
+
+  const ranges = state.selection.ranges.map((range) => {
+    const overflow = next.get(range.head);
+    if (overflow == null || overflow <= 0) return range;
+    changed = true;
+    if (overflow - 1 <= 0) next.delete(range.head);
+    else next.set(range.head, overflow - 1);
+    if (!extend) return EditorSelection.cursor(range.head);
+    return range.anchor <= range.head
+      ? EditorSelection.range(range.anchor, range.head)
+      : EditorSelection.range(range.head, range.anchor);
+  });
+
+  if (!changed) return false;
+  view.dispatch({
+    selection: EditorSelection.create(ranges, state.selection.mainIndex),
+    effects: setVirtualOverflow.of(next),
+  });
+  return true;
+}
+
+export function virtualMoveRightCommand(view: EditorView, extend: boolean): boolean {
+  if (view.composing) return false;
+  const policy = view.state.facet(editorVirtualSpacePolicy);
+  if (!policy.afterLineEnd && !policy.atFileBottom) return false;
+  const state = view.state;
+  const previous = state.field(virtualSpaceOverflowField, false) ?? new Map<number, number>();
+  const allAtEnd = state.selection.ranges.every((range) => range.head >= state.doc.lineAt(range.head).to);
+  if (!allAtEnd) return false;
+
+  const next = new Map(previous);
+  let changed = false;
+
+  const ranges = state.selection.ranges.map((range) => {
+    const headLine = state.doc.lineAt(range.head);
+    const oldOverflow = previous.get(range.head) ?? 0;
+    const overflow = Math.min(oldOverflow + 1, MAX_OVERFLOW_COLUMNS);
+    next.set(headLine.to, overflow);
+    changed = true;
+    if (!extend) return EditorSelection.cursor(headLine.to);
+    return range.anchor <= range.head
+      ? EditorSelection.range(range.anchor, headLine.to)
+      : EditorSelection.range(headLine.to, range.anchor);
+  });
+
+  if (!changed) return false;
+  view.dispatch({
+    selection: EditorSelection.create(ranges, state.selection.mainIndex),
+    effects: setVirtualOverflow.of(next),
+  });
+  return true;
+}
+
+export function virtualHomeCommand(view: EditorView): boolean {
+  const field = view.state.field(virtualSpaceOverflowField, false);
+  if (!field || field.size === 0) return false;
+  const state = view.state;
+  const ranges = state.selection.ranges.map((range) => {
+    const line = state.doc.lineAt(range.head);
+    const match = /^\s*/.exec(line.text);
+    const indentCol = match ? match[0].length : 0;
+    const target = range.head === line.from + indentCol ? line.from : line.from + indentCol;
+    return EditorSelection.cursor(target);
+  });
+  view.dispatch({
+    selection: EditorSelection.create(ranges, state.selection.mainIndex),
+    effects: setVirtualOverflow.of(new Map()),
+    scrollIntoView: true,
+  });
+  return true;
+}
+
+export function virtualDeleteCommand(view: EditorView): boolean {
+  if (view.composing) return false;
+  const field = view.state.field(virtualSpaceOverflowField, false);
+  if (!field || field.size === 0) return false;
+  return true;
+}
+
+export function virtualEnterCommand(view: EditorView): boolean {
+  if (view.composing) return false;
+  const field = view.state.field(virtualSpaceOverflowField, false);
+  if (!field || field.size === 0) return false;
+  const state = view.state;
+  let anyPadding = false;
+  const result = state.changeByRange((range) => {
+    const padding = paddingForOverflow(field.get(range.head) ?? 0);
+    if (padding) anyPadding = true;
+    const insert = `${padding}\n`;
+    return {
+      changes: { from: range.from, to: range.to, insert },
+      range: EditorSelection.cursor(range.from + insert.length),
+    };
+  });
+  if (!anyPadding) return false;
+  view.dispatch(result);
+  return true;
+}
+
+export function virtualTabCommand(view: EditorView): boolean {
+  if (view.composing) return false;
+  const policy = view.state.facet(editorVirtualSpacePolicy);
+  if (!policy.afterLineEnd && !policy.atFileBottom) return false;
+  const field = view.state.field(virtualSpaceOverflowField, false);
+  const state = view.state;
+  const allAtEnd = state.selection.ranges.every((range) => range.head >= state.doc.lineAt(range.head).to);
+  if (!allAtEnd && (!field || field.size === 0)) return false;
+
+  const tabWidth = 4;
+  const next = new Map(field ?? new Map());
+  let changed = false;
+
+  const ranges = state.selection.ranges.map((range) => {
+    const line = state.doc.lineAt(range.head);
+    const curOverflow = field?.get(range.head) ?? 0;
+    const curVisual = visualColumnFor(line.text, line.length, tabWidth) + curOverflow;
+    const delta = tabWidth - (curVisual % tabWidth) || tabWidth;
+    const newOverflow = Math.min(curOverflow + delta, MAX_OVERFLOW_COLUMNS);
+    next.set(line.to, newOverflow);
+    changed = true;
+    return EditorSelection.cursor(line.to);
+  });
+
+  if (!changed) return false;
+  view.dispatch({
+    selection: EditorSelection.create(ranges, state.selection.mainIndex),
+    effects: setVirtualOverflow.of(next),
+  });
+  return true;
+}
+
+export function virtualEscapeCommand(view: EditorView): boolean {
+  const field = view.state.field(virtualSpaceOverflowField, false);
+  if (!field || field.size === 0) return false;
+  view.dispatch({
+    effects: setVirtualOverflow.of(new Map()),
+  });
+  return true;
+}
+
+/**
+ * §8.22.5 U2-C: Complete Virtual Space Keymap bundle.
+ */
+export const virtualSpaceKeymap = [
+  {
+    key: "ArrowUp",
+    run: (view: EditorView) => {
+      const pol = view.state.facet(editorVirtualSpacePolicy);
+      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "up", false) : false;
+    },
+  },
+  {
+    key: "ArrowDown",
+    run: (view: EditorView) => {
+      const pol = view.state.facet(editorVirtualSpacePolicy);
+      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "down", false) : false;
+    },
+  },
+  {
+    key: "Shift-ArrowUp",
+    run: (view: EditorView) => {
+      const pol = view.state.facet(editorVirtualSpacePolicy);
+      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "up", true) : false;
+    },
+  },
+  {
+    key: "Shift-ArrowDown",
+    run: (view: EditorView) => {
+      const pol = view.state.facet(editorVirtualSpacePolicy);
+      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "down", true) : false;
+    },
+  },
+  {
+    key: "PageUp",
+    run: (view: EditorView) => {
+      const pol = view.state.facet(editorVirtualSpacePolicy);
+      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageUp", false) : false;
+    },
+  },
+  {
+    key: "PageDown",
+    run: (view: EditorView) => {
+      const pol = view.state.facet(editorVirtualSpacePolicy);
+      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageDown", false) : false;
+    },
+  },
+  { key: "ArrowLeft", run: (view: EditorView) => virtualMoveLeftCommand(view, false) },
+  { key: "Shift-ArrowLeft", run: (view: EditorView) => virtualMoveLeftCommand(view, true) },
+  { key: "ArrowRight", run: (view: EditorView) => virtualMoveRightCommand(view, false) },
+  { key: "Shift-ArrowRight", run: (view: EditorView) => virtualMoveRightCommand(view, true) },
+  { key: "Home", run: virtualHomeCommand },
+  { key: "End", run: (view: EditorView) => virtualLineEndCommand(view, false) },
+  { key: "Shift-End", run: (view: EditorView) => virtualLineEndCommand(view, true) },
+  { key: "Backspace", run: virtualBackspaceCommand },
+  { key: "Delete", run: virtualDeleteCommand },
+  { key: "Enter", run: virtualEnterCommand },
+  { key: "Tab", run: virtualTabCommand },
+  { key: "Escape", run: virtualEscapeCommand },
+];
+
+export const VirtualSpaceController = {
+  measureVisualPositions,
+  virtualOverflowAt,
+  setVirtualHead,
+  keymap: virtualSpaceKeymap,
+  typingHandler: virtualSpaceTypingHandler,
+  clickHandler: virtualSpaceClickHandler,
+  paddingForOverflow,
+};
+
 /**
  * §8.21.3 V2-C Honest declaration of known gaps in virtual space and region folding:
  * - Soft-wrap conflict: Soft line wrapping breaks single physical lines into multiple visual lines.
