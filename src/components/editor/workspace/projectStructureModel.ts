@@ -46,7 +46,7 @@ export interface BuildProjectStructureInputs {
   buildExcludedRoots?: readonly string[];
   dependenciesByModule?: Record<string, readonly string[]>;
   classpathFingerprintsByModule?: Record<string, string>;
-  source?: "jdtls-command" | "maven-model" | "gradle-model" | "user-config";
+  source?: "jdtls-command" | "maven-model" | "gradle-model" | "user-config" | "descriptor-only";
 }
 
 /**
