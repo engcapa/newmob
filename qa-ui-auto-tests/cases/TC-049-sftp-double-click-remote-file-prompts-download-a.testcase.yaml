@@ -23,9 +23,9 @@ steps:
   - wait: 1
   - dblclick: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-dblclick.txt"'
   - wait: 1
-  - assert_visible: "text=\"Open remote file?\""
-  - assert_visible: "text=\"Download & open\""
-  - click: "text=\"Download only\""
+  - assert_visible: "[role=\"dialog\"][aria-modal=\"true\"]:has-text(\"Open remote file?\")"
+  - assert_visible: "[role=\"dialog\"][aria-modal=\"true\"]:has-text(\"Open remote file?\") >> text=\"Download & open\""
+  - click: "[role=\"dialog\"][aria-modal=\"true\"]:has-text(\"Open remote file?\") >> text=\"Download only\""
   - wait: 2
   - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-dblclick.txt"'
   - click: "[data-testid=\"sftp-remote-delete\"]"

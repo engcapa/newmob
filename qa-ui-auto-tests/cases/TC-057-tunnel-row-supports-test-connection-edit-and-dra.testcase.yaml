@@ -17,7 +17,7 @@ steps:
   - fill: {selector: 'input[placeholder="0"]', value: "19333"}
   - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
-  - wait_for: "text=\"qa-ui-auto-reorder-a\""
+  - wait_for: "[data-testid=\"tunnel-manager\"] >> text=\"qa-ui-auto-reorder-a\""
   - click: "[data-testid=\"tunnel-new\"]"
   - wait_for: "[data-testid=\"tunnel-editor\"]"
   - fill: {selector: "input[placeholder=\"e.g. postgres-replica\"]", value: qa-ui-auto-reorder-b}
@@ -27,10 +27,10 @@ steps:
   - fill: {selector: 'input[placeholder="0"]', value: "19334"}
   - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
-  - wait_for: "text=\"qa-ui-auto-reorder-b\""
-  - click: 'tr:has-text("qa-ui-auto-reorder-a") button[title="Move down"]'
+  - wait_for: "[data-testid=\"tunnel-manager\"] >> text=\"qa-ui-auto-reorder-b\""
+  - click: '[data-testid="tunnel-manager"] tr:has-text("qa-ui-auto-reorder-a") button[title="Move down"]'
   - wait: 1
-  - click: 'tr:has-text("qa-ui-auto-reorder-a") button[title="Test SSH connection"]'
+  - click: '[data-testid="tunnel-manager"] tr:has-text("qa-ui-auto-reorder-a") button[title="Test SSH connection"]'
   - wait: 2
   - seed_dialog: {confirm: true}
   - wait: 1

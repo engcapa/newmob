@@ -21,6 +21,7 @@ function clonePreferences(
     inlayHintLanguages: { ...preferences.inlayHintLanguages },
     parameterInfo: { ...preferences.parameterInfo },
     quickDoc: { ...preferences.quickDoc },
+    completion: { ...preferences.completion },
   };
 }
 
@@ -175,6 +176,227 @@ export function WorkspaceIntelligenceSettingsDialog({
                 }))}
               />
               <span>Show all overload signatures</span>
+            </label>
+          </section>
+
+          <section aria-labelledby="completion-settings-heading" className="space-y-3 border-t border-[var(--taomni-code-border)] pt-4">
+            <h3 id="completion-settings-heading" className="font-medium">Code Completion</h3>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                data-testid="workspace-completion-auto-trigger"
+                checked={draft.completion.autoTrigger}
+                onChange={(event) => setDraft((current) => ({
+                  ...current,
+                  completion: { ...current.completion, autoTrigger: event.target.checked },
+                }))}
+              />
+              <span>Auto-trigger code completion while typing</span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Auto-trigger delay</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  max={5_000}
+                  step={25}
+                  aria-label="Completion auto-trigger delay"
+                  data-testid="workspace-completion-trigger-delay"
+                  value={draft.completion.triggerDelayMs}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      triggerDelayMs: Number(event.target.value),
+                    },
+                  }))}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">ms</span>
+              </span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Minimum prefix length</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  step={1}
+                  aria-label="Completion minimum prefix length"
+                  data-testid="workspace-completion-min-prefix"
+                  value={draft.completion.minPrefixLength}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      minPrefixLength: Number(event.target.value),
+                    },
+                  }))}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">chars</span>
+              </span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Maximum items in popup</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  step={10}
+                  aria-label="Completion maximum items"
+                  data-testid="workspace-completion-max-items"
+                  value={draft.completion.maxItems}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      maxItems: Number(event.target.value),
+                    },
+                  }))}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">items</span>
+              </span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                data-testid="workspace-completion-show-doc"
+                checked={draft.completion.showDocumentation}
+                onChange={(event) => setDraft((current) => ({
+                  ...current,
+                  completion: {
+                    ...current.completion,
+                    showDocumentation: event.target.checked,
+                  },
+                }))}
+              />
+              <span>Show documentation beside completion item</span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Documentation popup delay</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  max={5_000}
+                  step={50}
+                  aria-label="Completion documentation delay"
+                  data-testid="workspace-completion-doc-delay"
+                  value={draft.completion.documentationDelayMs}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      documentationDelayMs: Number(event.target.value),
+                    },
+                  }))}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">ms</span>
+              </span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Match case</span>
+              <select
+                aria-label="Completion match case mode"
+                data-testid="workspace-completion-case-matching"
+                value={draft.completion.caseMatching ?? "first-letter"}
+                onChange={(event) => setDraft((current) => ({
+                  ...current,
+                  completion: {
+                    ...current.completion,
+                    caseMatching: event.target.value as "first-letter" | "all" | "none",
+                  },
+                }))}
+                className="h-7 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+              >
+                <option value="first-letter">First letter only</option>
+                <option value="all">All letters</option>
+                <option value="none">None (case-insensitive)</option>
+              </select>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Sorting</span>
+              <select
+                aria-label="Completion sort mode"
+                data-testid="workspace-completion-sort-mode"
+                value={draft.completion.sortMode ?? "provider-relevance"}
+                onChange={(event) => setDraft((current) => ({
+                  ...current,
+                  completion: {
+                    ...current.completion,
+                    sortMode: event.target.value as "provider-relevance" | "alphabetical",
+                  },
+                }))}
+                className="h-7 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+              >
+                <option value="provider-relevance">Provider relevance</option>
+                <option value="alphabetical">Alphabetical</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                data-testid="workspace-completion-auto-insert-single"
+                checked={draft.completion.autoInsertSingle ?? false}
+                onChange={(event) => setDraft((current) => ({
+                  ...current,
+                  completion: {
+                    ...current.completion,
+                    autoInsertSingle: event.target.checked,
+                  },
+                }))}
+              />
+              <span>Insert single completion suggestion automatically</span>
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Excluded symbols</span>
+              <input
+                type="text"
+                placeholder="e.g. java.awt.*, com.sun.*"
+                aria-label="Excluded symbols"
+                data-testid="workspace-completion-excluded-symbols"
+                value={(draft.completion.excludedSymbols ?? []).map((s) => s.pattern).join(", ")}
+                onChange={(event) => {
+                  const raw = event.target.value;
+                  const patterns = raw.split(",").map((p) => p.trim()).filter(Boolean);
+                  setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      excludedSymbols: patterns.map((p) => ({ pattern: p, scope: "project" })),
+                    },
+                  }));
+                }}
+                className="h-7 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+              />
+            </label>
+            <label className="grid grid-cols-[1fr_150px] items-center gap-3">
+              <span>Prioritized symbols</span>
+              <input
+                type="text"
+                placeholder="e.g. java.util.*"
+                aria-label="Prioritized symbols"
+                data-testid="workspace-completion-prioritized-symbols"
+                value={(draft.completion.prioritizedSymbols ?? []).map((s) => s.pattern).join(", ")}
+                onChange={(event) => {
+                  const raw = event.target.value;
+                  const patterns = raw.split(",").map((p) => p.trim()).filter(Boolean);
+                  setDraft((current) => ({
+                    ...current,
+                    completion: {
+                      ...current.completion,
+                      prioritizedSymbols: patterns.map((p) => ({ pattern: p, scope: "project" })),
+                    },
+                  }));
+                }}
+                className="h-7 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+              />
             </label>
           </section>
         </div>

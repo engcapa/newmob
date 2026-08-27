@@ -1,83 +1,63 @@
 id: TC-auto-F1-8
-title: Menu bar opens each top-level menu and dispatches Terminal commands
+title: Unified app menu exposes every section and dispatches commands
 description: |
-  Auto-generated focused coverage for F1.8 (MenuBar). Opens every functional
-  top-level menu (Terminal, Sessions, View, X server, Help), asserts its
-  items appear in the shared context-menu surface, and dismisses with
-  Escape. Then exercises one end-to-end command — Terminal → New local
-  terminal — and verifies a terminal pane mounts and the status bar
-  reflects the new tab. The MenuBar is mounted only outside compact mode,
-  so the case stays out of compact.
+  Rewritten for F1.8 after the per-menu MenuBar was removed: one unified
+  app menu opens from the ControlBar app-main-menu button and renders
+  top-level entries plus Sessions / View submenus on the shared
+  context-menu surface. Exercises New local terminal end-to-end and
+  verifies the status bar reflects the new tab.
 covers: [F1.8]
-tags: [auto-generated, smoke, p1, main, menu-bar, needs-review]
+tags: [auto-generated, smoke, p1, main, unified-menu, needs-review]
 modes: [browser]
 fixtures: [reset_db]
 timeout_sec: 60
 steps:
   - open: ${cfg.app.base_url}
-  - wait_for: '[data-testid="menu-bar"]'
-  - assert_visible: '[data-testid="menu-bar"]'
+  - wait_for: '[data-testid="app-main-menu"]'
+  - assert_visible: '[data-testid="app-main-menu"]'
 
-  # Terminal menu — items "New local terminal", "New remote session…", "Close active tab"
-  - click: '[data-testid="menu-terminal"]'
+  # Top-level entries of the unified app menu
+  - click: '[data-testid="app-main-menu"]'
   - wait_for: '[data-testid="context-menu"]'
-  - assert_visible: text="New local terminal"
-  - assert_visible: text="New remote session…"
-  - assert_visible: text="Close active tab"
+  - assert_visible: '[data-testid="context-menu-item-new-local-terminal"]'
+  - assert_visible: '[data-testid="context-menu"] >> text="New remote session…"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Close active tab"'
+  - assert_visible: '[data-testid="context-menu-item-xserver"]'
+  - assert_visible: '[data-testid="context-menu"] >> text="Settings"'
   - press: Escape
   - wait_for:
       selector: '[data-testid="context-menu"]'
       state: detached
       timeout_sec: 5
 
-  # Sessions menu — items "New session…", "Show sessions", "Reload sessions"
-  - click: '[data-testid="menu-sessions"]'
-  - wait_for: '[data-testid="context-menu"]'
-  - assert_visible: text="New session…"
-  - assert_visible: text="Show sessions"
-  - assert_visible: text="Reload sessions"
+  # Sessions submenu
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu"] >> text="Sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> text="New session…"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Show sessions"'
+  - assert_visible: '[data-testid="context-menu-item-reload-sessions"]'
   - press: Escape
   - wait_for:
       selector: '[data-testid="context-menu"]'
       state: detached
       timeout_sec: 5
 
-  # View menu — Toggle sidebar / Toggle compact mode / Split active terminal
-  - click: '[data-testid="menu-view"]'
-  - wait_for: '[data-testid="context-menu"]'
-  - assert_visible: text="Toggle sidebar"
-  - assert_visible: text="Toggle compact mode"
-  - assert_visible: text="Split active terminal"
+  # View submenu — sidebar toggle, quick connect, split
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu-item-view"]'
+  - assert_visible: '[data-testid="context-menu-item-toggle-quick-connect"]'
+  - assert_visible: '[data-testid="context-menu-item-toggle-ribbon"]'
+  - assert_visible: '[data-testid="context-menu"] >> text="Split active terminal"'
   - press: Escape
   - wait_for:
       selector: '[data-testid="context-menu"]'
       state: detached
       timeout_sec: 5
 
-  # X server menu — single toggle item
-  - click: '[data-testid="menu-bar"] button:has-text("X server")'
+  # End-to-end: New local terminal opens a terminal pane
+  - click: '[data-testid="app-main-menu"]'
   - wait_for: '[data-testid="context-menu"]'
-  - assert_visible: text="Toggle X server status"
-  - press: Escape
-  - wait_for:
-      selector: '[data-testid="context-menu"]'
-      state: detached
-      timeout_sec: 5
-
-  # Help menu — About Taomni
-  - click: '[data-testid="menu-help"]'
-  - wait_for: '[data-testid="context-menu"]'
-  - assert_visible: text="About Taomni"
-  - press: Escape
-  - wait_for:
-      selector: '[data-testid="context-menu"]'
-      state: detached
-      timeout_sec: 5
-
-  # End-to-end: Terminal → New local terminal opens a local terminal pane
-  - click: '[data-testid="menu-terminal"]'
-  - wait_for: '[data-testid="context-menu"]'
-  - click: text="New local terminal"
+  - click: '[data-testid="context-menu-item-new-local-terminal"]'
   - wait_for: '[data-testid="terminal-pane"]'
   - assert_text: {selector: '[data-testid="status-bar"]', contains: "1 terminals"}
-  - screenshot: F1.8-menu-bar.png
+  - screenshot: F1.8-unified-menu.png

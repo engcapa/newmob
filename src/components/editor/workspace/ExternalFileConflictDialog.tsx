@@ -41,12 +41,16 @@ export function ExternalFileConflictDialog({
   ));
   const primaryRef = useRef<HTMLButtonElement>(null);
 
+  const pathRef = useRef(path);
   useEffect(() => {
-    setMergeOpen(false);
-    setMergeText(diskText == null
-      ? localText
-      : initialExternalMergeText(baseText, localText, diskText));
-    window.setTimeout(() => primaryRef.current?.focus(), 0);
+    if (pathRef.current !== path) {
+      pathRef.current = path;
+      setMergeOpen(false);
+      setMergeText(diskText == null
+        ? localText
+        : initialExternalMergeText(baseText, localText, diskText));
+      window.setTimeout(() => primaryRef.current?.focus(), 0);
+    }
   }, [baseText, diskText, localText, path]);
 
   return (

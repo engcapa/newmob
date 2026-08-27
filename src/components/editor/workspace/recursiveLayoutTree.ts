@@ -30,6 +30,8 @@ export interface LayoutEditorGroupState {
   pinnedKeys: string[];
 }
 
+import { selectActivateOnClose, type AnyWorkspaceTabPolicy } from "./workspaceTabPolicy";
+
 export type LayoutMutationResult =
   | {
       kind: "changed";
@@ -1061,6 +1063,8 @@ export function atomicCloseTabInLeaf(
   activeGroupId: string,
   leafId: string,
   fileKey: string,
+  policy?: AnyWorkspaceTabPolicy,
+  lastUsedByKey?: ReadonlyMap<string, number>,
 ): LayoutMutationResult {
   const leaf = findLeafNode(tree, leafId);
   const group = groups[leafId];
@@ -1069,7 +1073,9 @@ export function atomicCloseTabInLeaf(
   }
 
   const nextOrder = group.openOrder.filter((k) => k !== fileKey);
-  const nextActive = group.activeKey === fileKey ? (nextOrder[0] ?? null) : group.activeKey;
+  const nextActive = policy
+    ? selectActivateOnClose(group.openOrder, fileKey, group.activeKey, lastUsedByKey ?? new Map(), policy)
+    : group.activeKey === fileKey ? (nextOrder[0] ?? null) : group.activeKey;
 
   const updateRecursive = (node: LayoutNode): LayoutNode => {
     if (node.type === "leaf") {

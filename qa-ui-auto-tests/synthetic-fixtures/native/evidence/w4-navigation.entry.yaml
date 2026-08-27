@@ -1,0 +1,51 @@
+schemaVersion: 4
+capabilityId: W4-navigation
+languageId: java
+subject:
+  appCommit: 3ae082f3fd754ed31b8ce1613a3203a3d292c0b1
+  recordedAtCommit: 3ae082f3fd754ed31b8ce1613a3203a3d292c0b1
+  sourceTreeHash: b75b8b7448c39c0020756067a26723369565fe33c973fd3c6e1be4d4bd6ceebf
+  sourceDirty: false
+  bundleHash: d4128b4f64c8d68a1e22496c2dc98e252806a89fcba2cde30056b6069d3deab8
+  testPlanHash: f3c4794708d704e85b2226d51f5303f55954dc9f1a0efa832bd1d737a9a2028e
+recordedAtCommit: 3ae082f3fd754ed31b8ce1613a3203a3d292c0b1
+owner:
+  featureId: F25.3
+  paths:
+  - src/components/editor/workspace/workspaceSemanticQueryHost.ts
+environment:
+  platform: linux
+  os: Linux x86_64
+  arch: x86_64
+  webview: WebKitGTK 2.44
+  keyboard: us
+  ime: none
+  scale: 1.0
+  filesystem: ext4
+provider: null
+evidenceLayers:
+- unit
+- browser
+result: passed
+command: python -m qa_ui_auto.runner --filter TC-IDE-C6-02
+artifacts:
+- kind: summary
+  path: qa-ui-auto-tests/native/evidence/artifacts/w4-navigation-summary.json
+  sha256: 1c6c4d532e355e372b38987a346414bff9e35ef10ab07a5cb3d460c15b688ea4
+  redacted: true
+claimKeys:
+- W4-navigation
+performanceMeasurement:
+  typingP95Ms: 32.5
+  localActionP95Ms: 45.0
+  rawSamples:
+  - 28.0
+  - 31.0
+  - 32.5
+  - 34.0
+  - 35.0
+  status: passed
+knownGaps: []
+maximumClaim: L2
+notes: Validated against Daily Editor Profile W4-navigation
+collectedAt: '2026-08-27T13:00:00Z'

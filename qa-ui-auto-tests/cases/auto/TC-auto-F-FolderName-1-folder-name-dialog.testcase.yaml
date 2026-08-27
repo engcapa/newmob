@@ -24,7 +24,7 @@ steps:
   - wait_for:
       selector: '[data-testid="folder-name-dialog"]'
       state: detached
-  - assert_visible: 'text="qa-ui-auto-foldername"'
+  - assert_visible: '[data-testid="session-tree"] >> text="qa-ui-auto-foldername"'
   # Re-open and cancel — dialog must close without creating anything.
   - right_click: {selector: '[data-testid="session-tree"]', position: {x: 16, y: 16}}
   - wait_for: '[data-testid="context-menu"]'

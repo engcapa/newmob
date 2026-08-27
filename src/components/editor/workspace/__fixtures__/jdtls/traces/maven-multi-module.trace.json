@@ -1,14 +1,16 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-multi-module",
-  "generatedAt": "2026-08-24T07:17:08.679Z",
+  "generatedAt": "2026-08-26T05:31:01.691Z",
   "sanitized": true,
   "toolchain": {
     "java": {
       "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
       "info": {
         "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
-        "major": 21
+        "major": 21,
+        "version": "21.0.4"
       }
     },
     "jdtls": {
@@ -35,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 3076,
+          "msTotal": 2156,
           "itemCount": 1,
           "isIncomplete": false,
           "satisfied": true,
@@ -44,7 +46,7 @@
         }
       ],
       "resolve": {
-        "ms": 581,
+        "ms": 328,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport com.example.core.CoreUtil;\n\n"
@@ -70,7 +72,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 194,
+          "msTotal": 135,
           "itemCount": 7,
           "isIncomplete": false,
           "satisfied": true,
@@ -83,5 +85,85 @@
       "notes": "IDEA shows both twins with their FQNs; user picks one, resolve imports exactly that one"
     }
   ],
-  "failures": []
+  "failures": [],
+  "providerChannels": {
+    "declaredTypeInfoChannel": false,
+    "declaredStaticDataChannel": false,
+    "topLevelCapabilityKeys": [
+      "callHierarchyProvider",
+      "codeActionProvider",
+      "codeLensProvider",
+      "declarationProvider",
+      "definitionProvider",
+      "documentFormattingProvider",
+      "documentHighlightProvider",
+      "documentOnTypeFormattingProvider",
+      "documentRangeFormattingProvider",
+      "documentSymbolProvider",
+      "executeCommandProvider",
+      "foldingRangeProvider",
+      "hoverProvider",
+      "implementationProvider",
+      "inlayHintProvider",
+      "referencesProvider",
+      "renameProvider",
+      "selectionRangeProvider",
+      "semanticTokensProvider",
+      "textDocumentSync",
+      "typeDefinitionProvider",
+      "typeHierarchyProvider",
+      "workspace",
+      "workspaceSymbolProvider"
+    ],
+    "signatureHelpProviderDeclaredStatically": false,
+    "hoverProviderDeclaredStatically": false,
+    "signatureHelpProvenByScenarios": false,
+    "hoverProvenByScenarios": false,
+    "dynamicRegistrations": []
+  },
+  "analysis": {
+    "serverInfo": {
+      "name": "JDT Language Server (Standard)",
+      "version": "1.61.0-SNAPSHOT"
+    },
+    "registeredCommands": [],
+    "javaProjects": [],
+    "classpathProbe": null,
+    "probeReason": "command-not-registered:java.project.list",
+    "buildFiles": [
+      {
+        "path": "${project}/app/pom.xml",
+        "sha256": "6f78ec021a65c7ce4b1e2a0e60e9cea25bdc3a17d01eba0041318c9d839c9377"
+      },
+      {
+        "path": "${project}/core/pom.xml",
+        "sha256": "87d05ad1e7d818f497f152fa58ec999102b474aab6d0ad840a7e1a5d1b33d4bf"
+      },
+      {
+        "path": "${project}/pom.xml",
+        "sha256": "6e6afcf390da0dc0da60d1058226be59d18c6612a7d31b0820317bc792627bb4"
+      }
+    ],
+    "importProgress": {
+      "events": 33,
+      "beginTokens": 10,
+      "titles": [
+        "Synchronizing projects",
+        "Building",
+        "Initialize Workspace",
+        "Detect installed JVMs",
+        "LookupJDKToolchainsJob",
+        "Reporting encoding changes.",
+        "Searching...",
+        "Validate documents"
+      ],
+      "anyWithPercentage": true
+    },
+    "diagnosticFlags": {
+      "incompleteOrMissingMentioned": false
+    }
+  },
+  "analysisTiming": {
+    "firstCompletionSatisfiedMs": 6030
+  }
 }

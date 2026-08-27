@@ -27,7 +27,7 @@ steps:
   - wait_for:
       selector: '[data-testid="folder-name-dialog"]'
       state: detached
-  - assert_visible: 'text="qa-ui-auto-confirm"'
+  - assert_visible: '[data-testid="session-tree"] >> text="qa-ui-auto-confirm"'
   # Right-click the folder, choose Delete folder, cancel the dialog.
   - right_click: '[data-testid="session-tree"] >> text="qa-ui-auto-confirm"'
   - wait_for: '[data-testid="context-menu"]'
@@ -38,7 +38,7 @@ steps:
   - wait_for:
       selector: '[data-testid="confirm-dialog"]'
       state: detached
-  - assert_visible: 'text="qa-ui-auto-confirm"'
+  - assert_visible: '[data-testid="session-tree"] >> text="qa-ui-auto-confirm"'
   # Reopen and confirm — folder must vanish.
   - right_click: '[data-testid="session-tree"] >> text="qa-ui-auto-confirm"'
   - wait_for: '[data-testid="context-menu"]'
@@ -46,7 +46,7 @@ steps:
   - wait_for: '[data-testid="confirm-dialog"]'
   - click: '[data-testid="confirm-dialog-confirm"]'
   - wait_for:
-      selector: 'text="qa-ui-auto-confirm"'
+      selector: '[data-testid="session-tree"] >> text="qa-ui-auto-confirm"'
       state: detached
       timeout_sec: 10
   - screenshot: confirm-dialog.png

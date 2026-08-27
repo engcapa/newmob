@@ -30,7 +30,7 @@ steps:
   - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
   - press: Enter
   - wait: 1
-  - assert_visible: "text=\"REMOTE\""
-  - assert_visible: "text=\"LOCAL\""
+  - assert_visible: "[data-testid=\"sftp-remote-pane\"] >> text=\"REMOTE\""
+  - assert_visible: "[data-testid=\"sftp-local-pane\"] >> text=\"LOCAL\""
   - assert_visible: "[data-testid=\"sftp-transfer-queue\"]"
   - screenshot: 011-standalone-sftp-session.png

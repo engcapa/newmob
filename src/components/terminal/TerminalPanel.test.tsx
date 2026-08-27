@@ -1992,4 +1992,118 @@ describe("TerminalPanel focus behavior", () => {
     expect(ipcMocks.readFileBytes).not.toHaveBeenCalled();
     expect(ipcMocks.readStreamOpen).not.toHaveBeenCalled();
   });
+
+  describe("focus & editable target guard for shortcuts", () => {
+    it("does not hijack macOS Cmd+V when focus is inside an editable input (e.g. SFTP address bar)", async () => {
+      const originalPlatform = window.navigator.platform;
+      const originalClipboard = window.navigator.clipboard;
+      const readText = vi.fn(async () => "https://example.com/pasted");
+      Object.defineProperty(window.navigator, "platform", {
+        configurable: true,
+        value: "MacIntel",
+      });
+      Object.defineProperty(window.navigator, "clipboard", {
+        configurable: true,
+        value: { readText },
+      });
+      const onSessionReady = vi.fn();
+
+      try {
+        render(
+          <div>
+            <TerminalPanel visible onSessionReady={onSessionReady} />
+            <input data-testid="sftp-address-input" defaultValue="/initial/path" />
+          </div>,
+        );
+
+        await waitFor(() => {
+          expect(onSessionReady).toHaveBeenCalledWith("terminal-session");
+        });
+
+        const input = screen.getByTestId("sftp-address-input");
+        input.focus();
+        expect(document.activeElement).toBe(input);
+
+        // Fire Cmd+V while focused on the input
+        fireEvent.keyDown(input, { key: "v", metaKey: true });
+
+        // Ensure writeTerminal was NOT called on the terminal session
+        expect(ipcMocks.writeTerminal).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(window.navigator, "platform", {
+          configurable: true,
+          value: originalPlatform,
+        });
+        Object.defineProperty(window.navigator, "clipboard", {
+          configurable: true,
+          value: originalClipboard,
+        });
+      }
+    });
+
+    it("does not hijack Linux/Windows Ctrl+Shift+V or Shift+Insert when focus is inside an editable input", async () => {
+      const onSessionReady = vi.fn();
+      const readText = vi.fn(async () => "/pasted/linux/path");
+      const originalClipboard = window.navigator.clipboard;
+      Object.defineProperty(window.navigator, "clipboard", {
+        configurable: true,
+        value: { readText },
+      });
+
+      try {
+        render(
+          <div>
+            <TerminalPanel visible onSessionReady={onSessionReady} />
+            <input data-testid="sftp-local-input" defaultValue="/initial/local" />
+          </div>,
+        );
+
+        await waitFor(() => {
+          expect(onSessionReady).toHaveBeenCalledWith("terminal-session");
+        });
+
+        const input = screen.getByTestId("sftp-local-input");
+        input.focus();
+        expect(document.activeElement).toBe(input);
+
+        // Fire Ctrl+Shift+V on Linux/Win
+        fireEvent.keyDown(input, { key: "v", ctrlKey: true, shiftKey: true });
+        expect(ipcMocks.writeTerminal).not.toHaveBeenCalled();
+
+        // Fire Shift+Insert
+        fireEvent.keyDown(input, { key: "Insert", shiftKey: true });
+        expect(ipcMocks.writeTerminal).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(window.navigator, "clipboard", {
+          configurable: true,
+          value: originalClipboard,
+        });
+      }
+    });
+
+    it("does not hijack shortcuts when focus is inside an external panel button/list (e.g. SFTP sidebar)", async () => {
+      const onSessionReady = vi.fn();
+      render(
+        <div>
+          <TerminalPanel visible onSessionReady={onSessionReady} />
+          <div data-testid="sftp-sidebar-mock">
+            <button data-testid="sftp-refresh-btn">Refresh</button>
+          </div>
+        </div>,
+      );
+
+      await waitFor(() => {
+        expect(onSessionReady).toHaveBeenCalledWith("terminal-session");
+      });
+
+      const btn = screen.getByTestId("sftp-refresh-btn");
+      btn.focus();
+      expect(document.activeElement).toBe(btn);
+
+      // Fire Shift+Insert or Ctrl+Shift+V while button is focused
+      fireEvent.keyDown(btn, { key: "Insert", shiftKey: true });
+      fireEvent.keyDown(btn, { key: "v", ctrlKey: true, shiftKey: true });
+      expect(ipcMocks.writeTerminal).not.toHaveBeenCalled();
+    });
+  });
 });

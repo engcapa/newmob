@@ -281,10 +281,30 @@ export function safeDeleteBlocked(evidence: RefactorEvidence): string | null {
   return null;
 }
 
+import {
+  refactorApplyGate as refactorApplyGateV3,
+  type RefactorPlanV3,
+} from "./refactorPlan";
+
+export type {
+  RefactorCompleteness,
+  RefactorConflictV3,
+  RefactorGateDecision,
+  RefactorKind,
+  RefactorPlanV3,
+  RefactorUriOwner,
+} from "./refactorPlan";
+export { buildRefactorPlan, verifyExclusionSafety } from "./refactorPlan";
+
 /** Error-severity conflicts forbid apply outright; warnings need user confirm. */
-export function refactorApplyGate(evidence: RefactorEvidence): { allowed: boolean; requiresConfirm: boolean; reason: string | null } {
-  const error = evidence.conflicts.find((conflict) => conflict.severity === "error");
+export function refactorApplyGate(
+  input: RefactorPlanV3 | RefactorEvidence,
+): { allowed: boolean; requiresConfirm: boolean; requiresPreview?: boolean; reason: string | null } {
+  if ("operations" in input) {
+    return refactorApplyGateV3(input);
+  }
+  const error = input.conflicts.find((conflict) => conflict.severity === "error");
   if (error) return { allowed: false, requiresConfirm: false, reason: error.message };
-  const warning = evidence.conflicts.find((conflict) => conflict.severity === "warning");
+  const warning = input.conflicts.find((conflict) => conflict.severity === "warning");
   return { allowed: true, requiresConfirm: !!warning, reason: warning?.message ?? null };
 }

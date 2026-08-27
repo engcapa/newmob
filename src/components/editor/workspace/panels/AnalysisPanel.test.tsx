@@ -99,7 +99,8 @@ describe("AnalysisPanel", () => {
       />,
     );
     expect(screen.getByText("TypeScript")).toBeInTheDocument();
-    expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("Ready · generation 0");
+    // §8.20.3 copy rule: freshness ledger reads as provider state, not index.
+    expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("Provider fresh · generation 0");
     expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("IntelliJ PSI/stub guarantees are not available yet");
     expect(screen.getByText("Semantic tokens received: 4")).toBeInTheDocument();
     expect(screen.getAllByText("typescript:taint").length).toBeGreaterThanOrEqual(1);
@@ -292,5 +293,74 @@ describe("AnalysisPanel", () => {
     );
 
     expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("Last query: symbols");
+  });
+
+  it("§8.20.3: renders the Project analysis facts and Provider-freshness copy", () => {
+    const onRefreshProjectAnalysis = vi.fn();
+    render(
+      <AnalysisPanel
+        files={[]}
+        status={null}
+        semanticTokenCount={0}
+        semanticIndex={{
+          ...createWorkspaceSemanticIndexSnapshot(),
+          status: "ready",
+          provider: "language-server",
+          staleReasons: [],
+        }}
+        projectAnalysis={{
+          schemaVersion: 1,
+          workspaceId: "ws",
+          generation: 4,
+          provider: { id: "jdtls", version: "1.61.0", processId: 777 },
+          phase: "degraded",
+          projectFingerprint: "a".repeat(64),
+          sdk: { homeHash: "b".repeat(64), version: "21.0.4", languageLevel: null },
+          modules: [{
+            id: "/repo/maven-single",
+            buildSystem: "maven",
+            root: "/repo/maven-single",
+            sourceRoots: [],
+            testRoots: [],
+            generatedRoots: [],
+            excludedRoots: [],
+            dependencyFingerprint: "c".repeat(64),
+          }],
+          progress: [{ token: "t1", title: "Importing Maven project", percentage: 55 }],
+          completeness: "partial",
+          diagnostics: ["lifecycle-only-provider-facts"],
+          startedAt: 1,
+          completedAt: 2,
+        }}
+        projectAnalysisProbing={false}
+        onRefreshProjectAnalysis={onRefreshProjectAnalysis}
+        profile={defaultInspectionProfile()}
+        onUpdateRule={vi.fn()}
+        onCreateBaseline={vi.fn()}
+        onClearBaseline={vi.fn()}
+        onRemoveBaselineEntry={vi.fn()}
+        onRemoveSuppression={vi.fn()}
+        onExportBaseline={vi.fn()}
+        onImportBaseline={vi.fn()}
+        onOpenLocation={vi.fn()}
+        onOpenDiagnostic={vi.fn()}
+      />,
+    );
+
+    // Phase + provider identity + honest degradation notes.
+    expect(screen.getByTestId("analysis-project-phase")).toHaveTextContent("Degraded");
+    expect(screen.getByTestId("analysis-project-provider")).toHaveTextContent("jdtls · 1.61.0 · pid 777");
+    expect(screen.getByTestId("analysis-project-completeness")).toHaveTextContent("partial");
+    expect(screen.getByTestId("analysis-project-modules")).toHaveTextContent("Modules: 1");
+    expect(screen.getByTestId("analysis-project-diagnostics")).toHaveTextContent("lifecycle-only-provider-facts");
+    expect(screen.getByTestId("analysis-project-progress")).toHaveTextContent("Importing Maven project (55%)");
+    expect(screen.getByTestId("analysis-project-fingerprint").getAttribute("title")).toContain("generation 4");
+
+    // §8.20.3 copy rule: freshness ledger must NOT read as an index.
+    expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("Provider fresh");
+    expect(screen.queryByText(/Semantic index snapshot/)).toBeNull();
+
+    fireEvent.click(screen.getByTestId("analysis-project-refresh"));
+    expect(onRefreshProjectAnalysis).toHaveBeenCalledTimes(1);
   });
 });

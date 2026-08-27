@@ -175,11 +175,11 @@ describe("ProblemsPanel", () => {
     );
     const problem = screen.getByRole("button", { name: /Broken expression/ });
     fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
-    fireEvent.click(screen.getByRole("button", { name: "Suppress for line" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide this diagnostic locally (line)" }));
     expect(onSuppress).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0], "line");
 
     fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
-    fireEvent.click(screen.getByRole("button", { name: "Suppress for file" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide this diagnostic locally (whole file)" }));
     expect(onSuppress).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0], "file");
 
     fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });

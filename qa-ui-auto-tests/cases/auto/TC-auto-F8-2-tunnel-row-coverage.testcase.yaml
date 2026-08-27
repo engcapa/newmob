@@ -39,7 +39,7 @@ steps:
   - fill: {selector: 'input[placeholder="22"]', value: '22'}
   - fill: {selector: 'input[placeholder="0"]', value: '19401'}
   - click: '[data-testid="tunnel-editor-save"]'
-  - wait_for: 'text="qa-row-coverage-a"'
+  - wait_for: '[data-testid="tunnel-manager"] >> text="qa-row-coverage-a"'
 
   # ── On the single existing row, exercise every settings-column testid.
   # Direct testid selectors disambiguate to the only match.
@@ -73,7 +73,7 @@ steps:
   - fill: {selector: 'input[placeholder="22"]', value: '22'}
   - fill: {selector: 'input[placeholder="0"]', value: '19402'}
   - click: '[data-testid="tunnel-editor-save"]'
-  - wait_for: 'text="qa-row-coverage-b"'
+  - wait_for: '[data-testid="tunnel-manager"] >> text="qa-row-coverage-b"'
   - assert_count: {selector: '[data-testid="tunnel-row"]', equal: 2}
 
   # Move up on the second row (B) → puts B in position 1
@@ -85,7 +85,7 @@ steps:
 
   # ── Clone produces a "(copy)" row, then delete it via row-delete
   - click: '[data-testid="tunnel-row-clone"]'
-  - wait_for: 'text="qa-row-coverage-a (copy)"'
+  - wait_for: '[data-testid="tunnel-manager"] >> text="qa-row-coverage-a (copy)"'
   - assert_count: {selector: '[data-testid="tunnel-row"]', equal: 3}
   - seed_dialog: {confirm: true}
   - click: '[data-testid="tunnel-row-delete"]'

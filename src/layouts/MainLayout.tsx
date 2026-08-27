@@ -35,6 +35,7 @@ import { GitPanel } from "../components/git/GitPanel";
 import { WorkspaceGitManager } from "../components/git/WorkspaceGitManager";
 import { CodeWorkspaceTab, type CodeWorkspaceGitManagerPayload } from "../components/editor/CodeWorkspaceTab";
 import type { WorkspaceCommandRegistration } from "../components/editor/workspace/workspaceCommands";
+import { resolveShellShortcutRoute } from "../components/editor/workspace/shellShortcutRouter";
 import { decideWorkspaceGitSync } from "../lib/workspaceGitManagerSync";
 import { MultiExecBar } from "../components/terminal/MultiExecBar";
 import { SessionEditor } from "../components/session/SessionEditor";
@@ -783,6 +784,12 @@ export function MainLayout() {
   const activeWorkspaceCommandRegistration = activeTabId
     ? workspaceCommandRegistrations[activeTabId] ?? null
     : null;
+  // W0: the window-capture shortcut handler reads claims through a ref so the
+  // listener identity stays stable while claims update per render.
+  const activeWorkspaceCommandRegistrationRef = useRef(activeWorkspaceCommandRegistration);
+  useEffect(() => {
+    activeWorkspaceCommandRegistrationRef.current = activeWorkspaceCommandRegistration;
+  }, [activeWorkspaceCommandRegistration]);
   // On macOS we render a native global menu bar instead of the in-app app menu.
   // The native menu lives at the top of the screen, matching standard macOS
   // apps; the in-bar menu button is hidden there.
@@ -3194,6 +3201,21 @@ export function MainLayout() {
       if (key !== "t" && key !== "n") return;
 
       if (key === "t") {
+        // W0 §8.20.1 root routing: the active workspace's reopen claim (via
+        // its command registration) outranks the shell's new-terminal owner.
+        const registration = activeWorkspaceCommandRegistrationRef.current;
+        const route = resolveShellShortcutRoute(registration?.shellShortcutClaims ?? []);
+        if (route.state === "dispatch") {
+          event.preventDefault();
+          event.stopPropagation();
+          void registration?.executeAction(route.actionId);
+          return;
+        }
+        if (route.state === "blocked") {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
         handleCommand("new-terminal");

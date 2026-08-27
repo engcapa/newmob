@@ -1,3 +1,4 @@
+import { createContext, useContext } from "react";
 import type { ClipboardSourceEol } from "./workspaceEditorCommands";
 
 /**
@@ -115,6 +116,14 @@ interface HistoryEntry {
   bytes: number;
 }
 
+export function detectSensitiveClipboardText(text: string): boolean {
+  if (!text || text.length < 8) return false;
+  if (/-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/i.test(text)) return true;
+  if (/AKIA[0-9A-Z]{16}/.test(text)) return true;
+  if (/(?:api[_-]?key|secret[_-]?key|password|token)\s*[:=]\s*['"][^\n'"]{8,}['"]/i.test(text)) return true;
+  return false;
+}
+
 export class WorkspaceClipboardStore {
   private session: EditorClipboardSession | null = null;
   private history: HistoryEntry[] = [];
@@ -136,6 +145,7 @@ export class WorkspaceClipboardStore {
     /** Oversized/binary payloads skip the C3b ring but still fill the slot. */
     historyEligible?: boolean;
   }): EditorClipboardSession {
+    const isSensitive = Boolean(input.sensitive) || detectSensitiveClipboardText(input.plainText);
     const session: EditorClipboardSession = {
       sessionId: nextSessionId(),
       sourceViewId: input.sourceViewId,
@@ -145,10 +155,10 @@ export class WorkspaceClipboardStore {
       sourceEol: input.sourceEol,
       createdAt: Date.now(),
       ...(input.systemClipboardUnavailable ? { systemClipboardUnavailable: true } : {}),
-      ...(input.sensitive ? { sensitive: true } : {}),
+      ...(isSensitive ? { sensitive: true } : {}),
     };
     this.session = session;
-    if (input.sensitive) {
+    if (isSensitive) {
       this.lastHistoryExclusion = "sensitive";
     } else {
       this.recordHistory(session, input.historyEligible !== false);
@@ -261,9 +271,26 @@ export class WorkspaceClipboardStore {
 
 const storesByWorkspace = new Map<string, WorkspaceClipboardStore>();
 const refcountsByWorkspace = new Map<string, number>();
+const storeRevisionsByWorkspace = new Map<string, number>();
+const consumersByWorkspace = new Map<string, Set<string>>();
+const listenersByWorkspace = new Map<string, Set<(snapshot: WorkspaceClipboardSnapshot) => void>>();
+const permissionGenerationsByWorkspace = new Map<string, number>();
+
+export interface WorkspaceClipboardSnapshot {
+  revision: number;
+  history: readonly EditorClipboardSession[];
+  exclusion: ClipboardHistoryExclusion;
+  isHistoryEnabled: boolean;
+  limits: { maxItems: number; maxTotalBytes: number };
+  consumerCount: number;
+  permissionGeneration: number;
+}
 
 export interface WorkspaceClipboardHandle {
   readonly workspaceId: string;
+  attachConsumer(consumerId?: string): () => void;
+  getSnapshot(): WorkspaceClipboardSnapshot;
+  subscribe(listener: (snapshot: WorkspaceClipboardSnapshot) => void): () => void;
   write(input: Parameters<WorkspaceClipboardStore["write"]>[0]): EditorClipboardSession;
   read(): EditorClipboardSession | null;
   clear(reason?: ClipboardClearReason): void;
@@ -279,6 +306,12 @@ export interface WorkspaceClipboardHandle {
   historyExclusion(): ClipboardHistoryExclusion;
 }
 
+export const WorkspaceClipboardSessionContext = createContext<WorkspaceClipboardHandle | null>(null);
+
+export function useWorkspaceClipboardSession(): WorkspaceClipboardHandle | null {
+  return useContext(WorkspaceClipboardSessionContext);
+}
+
 /**
  * Acquire one handle for an editor host instance. Refcounted per workspace
  * instance: the last `release()` clears and deletes the slot immediately, so
@@ -289,19 +322,100 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
   if (!store) {
     store = new WorkspaceClipboardStore();
     storesByWorkspace.set(workspaceInstanceId, store);
+    storeRevisionsByWorkspace.set(workspaceInstanceId, 0);
+    consumersByWorkspace.set(workspaceInstanceId, new Set());
+    listenersByWorkspace.set(workspaceInstanceId, new Set());
+    permissionGenerationsByWorkspace.set(workspaceInstanceId, 1);
   }
   refcountsByWorkspace.set(workspaceInstanceId, (refcountsByWorkspace.get(workspaceInstanceId) ?? 0) + 1);
+
+  const getSnapshot = (): WorkspaceClipboardSnapshot => {
+    const current = storesByWorkspace.get(workspaceInstanceId) ?? store!;
+    return {
+      revision: storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0,
+      history: current.historyEntries(),
+      exclusion: current.historyExclusion(),
+      isHistoryEnabled: current.isHistoryEnabled(),
+      limits: current.historyLimits(),
+      consumerCount: consumersByWorkspace.get(workspaceInstanceId)?.size ?? 0,
+      permissionGeneration: permissionGenerationsByWorkspace.get(workspaceInstanceId) ?? 1,
+    };
+  };
+
+  const notify = () => {
+    const listeners = listenersByWorkspace.get(workspaceInstanceId);
+    if (!listeners || listeners.size === 0) return;
+    const snap = getSnapshot();
+    for (const listener of listeners) {
+      try {
+        listener(snap);
+      } catch {
+        // ignore subscriber errors
+      }
+    }
+  };
+
+  const bump = () => {
+    const next = (storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0) + 1;
+    storeRevisionsByWorkspace.set(workspaceInstanceId, next);
+    notify();
+  };
 
   const live = (): WorkspaceClipboardStore => {
     const current = storesByWorkspace.get(workspaceInstanceId) ?? store!;
     return current;
   };
 
-  return {
+  const handle: WorkspaceClipboardHandle = {
     workspaceId: workspaceInstanceId,
-    write: (input) => live().write(input),
+    attachConsumer(consumerId?: string) {
+      const id = consumerId || `anon-${Math.random().toString(36).slice(2, 9)}`;
+      let consumers = consumersByWorkspace.get(workspaceInstanceId);
+      if (!consumers) {
+        consumers = new Set();
+        consumersByWorkspace.set(workspaceInstanceId, consumers);
+      }
+      if (consumers.has(id)) {
+        return () => {
+          if (consumers?.has(id)) {
+            consumers.delete(id);
+            handle.release();
+            notify();
+          }
+        };
+      }
+      consumers.add(id);
+      refcountsByWorkspace.set(workspaceInstanceId, (refcountsByWorkspace.get(workspaceInstanceId) ?? 0) + 1);
+      notify();
+      return () => {
+        if (consumers?.has(id)) {
+          consumers.delete(id);
+          handle.release();
+          notify();
+        }
+      };
+    },
+    getSnapshot,
+    subscribe(listener) {
+      let listeners = listenersByWorkspace.get(workspaceInstanceId);
+      if (!listeners) {
+        listeners = new Set();
+        listenersByWorkspace.set(workspaceInstanceId, listeners);
+      }
+      listeners.add(listener);
+      return () => {
+        listeners?.delete(listener);
+      };
+    },
+    write: (input) => {
+      bump();
+      return live().write(input);
+    },
     read: () => live().read(),
-    clear: (reason) => live().clear(reason),
+    clear: (reason) => {
+      bump();
+      live().clear(reason);
+    },
     release() {
       const next = (refcountsByWorkspace.get(workspaceInstanceId) ?? 1) - 1;
       if (next > 0) {
@@ -316,19 +430,42 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
         if ((refcountsByWorkspace.get(workspaceInstanceId) ?? 0) !== 0) return;
         refcountsByWorkspace.delete(workspaceInstanceId);
         storesByWorkspace.delete(workspaceInstanceId);
+        storeRevisionsByWorkspace.delete(workspaceInstanceId);
+        consumersByWorkspace.delete(workspaceInstanceId);
+        listenersByWorkspace.delete(workspaceInstanceId);
+        permissionGenerationsByWorkspace.delete(workspaceInstanceId);
         store!.clear("workspace-close");
       });
     },
     historyEntries: () => live().historyEntries(),
-    pasteFromHistory(index) { return live().pasteFromHistory(index); },
-    removeHistoryEntry: (index) => live().removeHistoryEntry(index),
-    clearHistory: () => live().clearHistory(),
-    setHistoryEnabled: (enabled) => live().setHistoryEnabled(enabled),
+    pasteFromHistory(index) {
+      return live().pasteFromHistory(index);
+    },
+    removeHistoryEntry: (index) => {
+      const removed = live().removeHistoryEntry(index);
+      if (removed) {
+        bump();
+      }
+      return removed;
+    },
+    clearHistory: () => {
+      bump();
+      live().clearHistory();
+    },
+    setHistoryEnabled: (enabled) => {
+      bump();
+      live().setHistoryEnabled(enabled);
+    },
     isHistoryEnabled: () => live().isHistoryEnabled(),
-    setHistoryLimits: (maxItems, maxTotalBytes) => live().setHistoryLimits(maxItems, maxTotalBytes),
+    setHistoryLimits: (maxItems, maxTotalBytes) => {
+      bump();
+      live().setHistoryLimits(maxItems, maxTotalBytes);
+    },
     historyLimits: () => live().historyLimits(),
     historyExclusion: () => live().historyExclusion(),
   };
+
+  return handle;
 }
 
 /**
@@ -348,4 +485,8 @@ export function clipboardStoreForWorkspace(workspaceId: string): WorkspaceClipbo
 export function resetWorkspaceClipboardStores(): void {
   storesByWorkspace.clear();
   refcountsByWorkspace.clear();
+  storeRevisionsByWorkspace.clear();
+  consumersByWorkspace.clear();
+  listenersByWorkspace.clear();
+  permissionGenerationsByWorkspace.clear();
 }

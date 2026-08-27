@@ -7,8 +7,9 @@ fixtures: [reset_db, ssh_required]
 steps:
   - open: "${cfg.app.base_url}"
   - wait_for: "[data-testid=\"welcome-panel\"]"
-  - assert_not_visible: "text=\"Import OpenSSH config\""
-  - click: '[data-testid="menu-sessions"]'
-  - assert_visible: '[data-testid="menu-import-sessions"]'
-  - wait: 1
+  - assert_not_visible: '[data-testid="welcome-panel"] >> text="Import OpenSSH config"'
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu"] >> text="Import sessions"'
+  - assert_visible: '[data-testid="context-menu"] >> [data-testid="import-openssh"]'
+  - press: Escape
   - screenshot: 055-openssh-config-import.png

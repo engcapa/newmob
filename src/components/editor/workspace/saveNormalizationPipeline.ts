@@ -13,12 +13,39 @@
 
 import type { ResolvedCodeStyle } from "./editorConfigResolver";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
+import {
+  type EffectiveSavePolicyV4,
+  isPathExcluded,
+  containsDisabledFormatterMarker,
+} from "./workspaceCodeStyleScheme";
+import { sha256Hex } from "./projectAnalysisModel";
+
+export type SaveStageKind = "format" | "organize-imports" | "normalization";
+export type SaveStageStatus =
+  | "executed"
+  | "disabled"
+  | "unavailable"
+  | "failed"
+  | "skipped-prior-failure";
+
+export interface SaveStageReport {
+  stage: SaveStageKind;
+  status: SaveStageStatus;
+  error?: string;
+  reason?: string;
+  beforeHash?: string;
+  afterHash?: string;
+}
 
 export interface SaveNormalizationOptions {
   text: string;
   codeStyle: ResolvedCodeStyle | EffectiveCodeStyle;
+  savePolicy?: EffectiveSavePolicyV4;
+  filePath?: string;
   formatOnSave?: boolean;
   formatFn?: (text: string) => Promise<string | null>;
+  organizeImportsOnSave?: boolean;
+  organizeImportsFn?: (text: string) => Promise<string | null>;
   getLatestBufferText?: () => string;
   expectedVersion?: number;
   getLatestBufferVersion?: () => number;
@@ -27,12 +54,14 @@ export interface SaveNormalizationOptions {
 export interface SaveNormalizationResult {
   text: string;
   formatted: boolean;
+  importsOrganized: boolean;
   whitespaceTrimmed: boolean;
   newlineAdjusted: boolean;
   eolNormalized: boolean;
   cancelledDueToEdit: boolean;
   encodingError?: boolean;
   diagnostics: string[];
+  stages: SaveStageReport[];
   resolvedEol?: "lf" | "crlf" | "cr";
   resolvedCharset?: string;
   resolvedBom?: boolean;
@@ -115,10 +144,13 @@ export async function runSaveNormalizationPipeline(
 
   let currentText = initialText;
   let formatted = false;
+  let importsOrganized = false;
   let whitespaceTrimmed = false;
   let newlineAdjusted = false;
   let eolNormalized = false;
   const diagnostics: string[] = [];
+  const stages: SaveStageReport[] = [];
+  let stopEffectful = false;
 
   const explicitEol = codeStyle.endOfLine;
   const eolChar = explicitEol === "crlf" ? "\r\n" : explicitEol === "cr" ? "\r" : explicitEol === "lf" ? "\n" : undefined;
@@ -134,35 +166,115 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
-  // Stage 1: Optional language formatter
-  if (formatOnSave && formatFn) {
+  const formatEnabled = options.savePolicy
+    ? options.savePolicy.format.enabled
+    : (formatOnSave ?? false);
+  const pathIsExcluded = options.savePolicy && options.filePath
+    ? isPathExcluded(options.filePath, options.savePolicy.exclusions.patterns)
+    : false;
+  const markerOff = options.savePolicy?.exclusions.formatterMarkers
+    ? containsDisabledFormatterMarker(currentText)
+    : false;
+
+  // Stage 1: format
+  const formatBeforeHash = sha256Hex(currentText);
+  if (!formatEnabled) {
+    stages.push({ stage: "format", status: "disabled", reason: "format-disabled", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
+  } else if (pathIsExcluded) {
+    stages.push({ stage: "format", status: "disabled", reason: "path-excluded", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
+  } else if (markerOff) {
+    stages.push({ stage: "format", status: "disabled", reason: "formatter-marker-off", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
+  } else if (!formatFn) {
+    stages.push({ stage: "format", status: "unavailable", reason: "no-provider", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
+  } else {
     try {
       const formattedResult = await formatFn(currentText);
       if (formattedResult !== null && formattedResult !== undefined) {
-        // Check if concurrent edits occurred while formatter was running
         if (getLatestBufferVersion && expectedVersion !== undefined) {
           const latestVer = getLatestBufferVersion();
           if (latestVer !== expectedVersion) {
             return {
               text: initialText,
               formatted: false,
+              importsOrganized: false,
               whitespaceTrimmed: false,
               newlineAdjusted: false,
               eolNormalized: false,
               cancelledDueToEdit: true,
               diagnostics: ["Formatter cancelled because buffer was modified concurrently."],
+              stages: [{ stage: "format", status: "failed", error: "concurrent edit", beforeHash: formatBeforeHash, afterHash: formatBeforeHash }],
             };
           }
         }
         currentText = formattedResult;
         formatted = true;
+        stages.push({ stage: "format", status: "executed", beforeHash: formatBeforeHash, afterHash: sha256Hex(currentText) });
+      } else {
+        stages.push({ stage: "format", status: "unavailable", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
       }
     } catch (err) {
-      diagnostics.push(`Format on save failed: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      diagnostics.push(`Format on save failed: ${msg}`);
+      stages.push({ stage: "format", status: "failed", error: msg, beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
+      stopEffectful = true;
     }
   }
 
-  // Stage 2: Trim trailing whitespace
+  // Stage 2: organize-imports
+  const organizeImportsEnabled = options.savePolicy
+    ? options.savePolicy.organizeImports.enabled
+    : (options.organizeImportsOnSave ?? false);
+
+  const organizeBeforeHash = sha256Hex(currentText);
+  if (stopEffectful) {
+    stages.push({
+      stage: "organize-imports",
+      status: "skipped-prior-failure",
+      error: "Skipped due to prior format failure",
+      beforeHash: organizeBeforeHash,
+      afterHash: organizeBeforeHash,
+    });
+  } else if (!organizeImportsEnabled) {
+    stages.push({ stage: "organize-imports", status: "disabled", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
+  } else if (!options.organizeImportsFn) {
+    stages.push({ stage: "organize-imports", status: "unavailable", reason: "no-provider", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
+  } else {
+    try {
+      const organizedResult = await options.organizeImportsFn(currentText);
+      if (organizedResult !== null && organizedResult !== undefined) {
+        if (getLatestBufferVersion && expectedVersion !== undefined) {
+          const latestVer = getLatestBufferVersion();
+          if (latestVer !== expectedVersion) {
+            return {
+              text: initialText,
+              formatted,
+              importsOrganized: false,
+              whitespaceTrimmed: false,
+              newlineAdjusted: false,
+              eolNormalized: false,
+              cancelledDueToEdit: true,
+              diagnostics: ["Organize imports cancelled because buffer was modified concurrently."],
+              stages: [...stages, { stage: "organize-imports", status: "failed", error: "concurrent edit", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash }],
+            };
+          }
+        }
+        currentText = organizedResult;
+        importsOrganized = true;
+        stages.push({ stage: "organize-imports", status: "executed", beforeHash: organizeBeforeHash, afterHash: sha256Hex(currentText) });
+      } else {
+        stages.push({ stage: "organize-imports", status: "unavailable", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      diagnostics.push(`Organize imports on save failed: ${msg}`);
+      stages.push({ stage: "organize-imports", status: "failed", error: msg, beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
+    }
+  }
+
+  // Stage 3: normalization
+  const normBeforeHash = sha256Hex(currentText);
+
+  // Trim trailing whitespace
   if (codeStyle.trimTrailingWhitespace) {
     const trimmed = trimTrailingWhitespace(currentText, eolChar);
     if (trimmed !== currentText) {
@@ -171,7 +283,7 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
-  // Stage 3: Insert final newline
+  // Insert final newline
   if (codeStyle.insertFinalNewline !== undefined) {
     const adjusted = adjustFinalNewline(currentText, codeStyle.insertFinalNewline, eolChar);
     if (adjusted !== currentText) {
@@ -180,11 +292,11 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
-  // Stage 4: End of Line normalization
+  // Normalise line endings (CRLF vs LF vs CR)
   if (codeStyle.endOfLine) {
-    const normalized = normalizeLineEndings(currentText, codeStyle.endOfLine);
-    if (normalized !== currentText) {
-      currentText = normalized;
+    const eolFixed = normalizeLineEndings(currentText, codeStyle.endOfLine);
+    if (eolFixed !== currentText) {
+      currentText = eolFixed;
       eolNormalized = true;
     }
   }
@@ -217,12 +329,14 @@ export async function runSaveNormalizationPipeline(
           return {
             text: initialText,
             formatted: false,
+            importsOrganized: false,
             whitespaceTrimmed: false,
             newlineAdjusted: false,
             eolNormalized: false,
             cancelledDueToEdit: false,
             encodingError: true,
             diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds Latin-1 range (cannot be represented in Latin-1).`],
+            stages: [...stages, { stage: "normalization", status: "failed", error: "Latin-1 encoding error", beforeHash: normBeforeHash, afterHash: normBeforeHash }],
           };
         }
       }
@@ -234,12 +348,14 @@ export async function runSaveNormalizationPipeline(
           return {
             text: initialText,
             formatted: false,
+            importsOrganized: false,
             whitespaceTrimmed: false,
             newlineAdjusted: false,
             eolNormalized: false,
             cancelledDueToEdit: false,
             encodingError: true,
             diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds ASCII range (cannot be represented in US-ASCII).`],
+            stages: [...stages, { stage: "normalization", status: "failed", error: "US-ASCII encoding error", beforeHash: normBeforeHash, afterHash: normBeforeHash }],
           };
         }
       }
@@ -247,6 +363,13 @@ export async function runSaveNormalizationPipeline(
       resolvedCharset = charset.toUpperCase();
     }
   }
+
+  stages.push({
+    stage: "normalization",
+    status: "executed",
+    beforeHash: normBeforeHash,
+    afterHash: sha256Hex(currentText),
+  });
 
   // Final race condition check
   if (getLatestBufferText) {
@@ -256,11 +379,13 @@ export async function runSaveNormalizationPipeline(
       return {
         text: latestText,
         formatted,
+        importsOrganized,
         whitespaceTrimmed,
         newlineAdjusted,
         eolNormalized,
         cancelledDueToEdit: true,
         diagnostics: ["Normalization aborted due to newer buffer edits."],
+        stages,
       };
     }
   }
@@ -268,13 +393,63 @@ export async function runSaveNormalizationPipeline(
   return {
     text: currentText,
     formatted,
+    importsOrganized,
     whitespaceTrimmed,
     newlineAdjusted,
     eolNormalized,
     cancelledDueToEdit: false,
     diagnostics,
+    stages,
     resolvedEol: codeStyle.endOfLine,
     resolvedCharset,
     resolvedBom,
   };
 }
+
+/**
+ * Pure helper to apply LSP text edits to an in-memory string without live buffer mutations (§8.26.5 AA4).
+ */
+export function applyLspTextEditsToString(
+  text: string,
+  edits: readonly { range: { start: { line: number; character: number }; end: { line: number; character: number } }; newText: string }[],
+): string {
+  if (!edits || edits.length === 0) return text;
+  const lines = text.split("\n");
+  const getOffset = (pos: { line: number; character: number }): number => {
+    let offset = 0;
+    const targetLine = Math.min(pos.line, lines.length);
+    for (let i = 0; i < targetLine; i++) {
+      offset += lines[i].length + 1; // +1 for '\n'
+    }
+    if (pos.line < lines.length) {
+      offset += Math.min(pos.character, lines[pos.line].length);
+    }
+    return Math.min(offset, text.length);
+  };
+
+  const offsetEdits = edits.map((e) => ({
+    start: getOffset(e.range.start),
+    end: getOffset(e.range.end),
+    newText: e.newText,
+  }));
+
+  // Sort descending by offset to apply from bottom-to-top
+  offsetEdits.sort((a, b) => b.start - a.start || b.end - a.end);
+
+  let result = text;
+  for (const edit of offsetEdits) {
+    result = result.slice(0, edit.start) + edit.newText + result.slice(edit.end);
+  }
+  return result;
+}
+
+/**
+ * §8.22.6 U2-D: Actions on Save Pipeline coordinator.
+ */
+export const WorkspaceSavePipeline = {
+  run: runSaveNormalizationPipeline,
+  trimTrailingWhitespace,
+  adjustFinalNewline,
+  normalizeLineEndings,
+  applyLspTextEditsToString,
+};

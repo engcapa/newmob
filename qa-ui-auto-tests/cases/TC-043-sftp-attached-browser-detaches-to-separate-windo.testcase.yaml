@@ -15,7 +15,7 @@ steps:
   - wait: 2
   - click: "[data-testid=\"attached-sftp-toggle\"]"
   - wait_for: "[data-testid=\"sftp-browser\"]"
-  - assert_visible: 'button[title="Open in its own window"]'
-  - click: 'button[title="Open in its own window"]'
+  - assert_visible: '[data-testid="sftp-detach"]'
+  - click: '[data-testid="sftp-detach"]'
   - wait: 1
   - screenshot: 043-sftp-detach.png

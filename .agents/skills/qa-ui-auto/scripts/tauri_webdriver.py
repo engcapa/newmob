@@ -304,6 +304,89 @@ class NativeSession:
         )
         return f"sent keys {text}"
 
+    # W3C key code points for named keys that have no printable character.
+    KEY_MAP = {
+        "Enter": "\ue007",
+        "Tab": "\ue004",
+        "Escape": "\ue00c",
+        "Backspace": "\ue003",
+        "Delete": "\ue017",
+        "ArrowUp": "\ue013",
+        "ArrowDown": "\ue015",
+        "ArrowLeft": "\ue012",
+        "ArrowRight": "\ue014",
+        "Home": "\ue011",
+        "End": "\ue010",
+        "PageUp": "\ue00e",
+        "PageDown": "\ue00f",
+        "Insert": "\ue016",
+        **{f"F{i}": chr(0xE031 + i - 1) for i in range(1, 13)},
+    }
+    MODIFIER_MAP = {
+        "Control": "\ue009",
+        "Ctrl": "\ue009",
+        "Shift": "\ue008",
+        "Alt": "\ue00a",
+        "Meta": "\ue03d",
+        "Cmd": "\ue03d",
+        "Command": "\ue03d",
+    }
+
+    def press_combo(self, combo: str) -> str:
+        """Press a chord like `Control+s`, `Control+Shift+p`, or a bare
+        named key (`Enter`). Sends real key events through the W3C Actions
+        API so CodeMirror/keydown handlers in the native WebView see them."""
+        parts = [p.strip() for p in combo.split("+") if p.strip()]
+        if not parts:
+            raise WebDriverError(f"press_combo: empty combo {combo!r}")
+        mods: list[str] = []
+        for p in parts[:-1]:
+            if p not in self.MODIFIER_MAP:
+                raise WebDriverError(f"press_combo: unknown modifier {p!r}")
+            mods.append(self.MODIFIER_MAP[p])
+        final = parts[-1]
+        value = self.MODIFIER_MAP.get(final) or self.KEY_MAP.get(final) or final
+        seq: list[dict[str, Any]] = [{"type": "keyDown", "value": m} for m in mods]
+        seq.append({"type": "keyDown", "value": value})
+        seq.append({"type": "pause", "duration": 30})
+        seq.append({"type": "keyUp", "value": value})
+        seq += [{"type": "keyUp", "value": m} for m in reversed(mods)]
+        self.request(
+            "POST",
+            self.endpoint("/actions"),
+            {"actions": [{"type": "key", "id": "keyboard", "actions": seq}]},
+        )
+        return f"pressed {combo}"
+
+    def type_text(self, text: str) -> str:
+        """Type text into the focused element, one key event pair per char."""
+        seq: list[dict[str, Any]] = []
+        for ch in text:
+            seq.append({"type": "keyDown", "value": ch})
+            seq.append({"type": "keyUp", "value": ch})
+        self.request(
+            "POST",
+            self.endpoint("/actions"),
+            {"actions": [{"type": "key", "id": "keyboard", "actions": seq}]},
+        )
+        return f"typed {len(text)} chars"
+
+    def wait_absent(self, selector: str, timeout: float = 5.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                self.find(selector, timeout=0.5)
+            except WebDriverError:
+                return
+        raise WebDriverError(f"element still present after {timeout}s: {selector}")
+
+    def console_entries(self) -> list[dict[str, Any]]:
+        try:
+            data = self.execute("return window.__QA_UI_AUTO_CONSOLE__ || [];")
+            return data if isinstance(data, list) else []
+        except WebDriverError:
+            return []
+
     def text(self, selector: str) -> str:
         # For terminal-pane, read the data-terminal-text attribute which is
         # kept in sync by TerminalPanel via a 500ms interval. This bypasses

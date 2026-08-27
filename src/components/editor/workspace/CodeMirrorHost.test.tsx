@@ -5,6 +5,7 @@ import { EditorSelection } from "@codemirror/state";
 import { undoDepth } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { CodeMirrorHost } from "./CodeMirrorHost";
+import { virtualSpaceOverflowField } from "./workspaceVirtualSpace";
 
 function renderEditor(
   doc: string,
@@ -453,83 +454,103 @@ describe("CodeMirrorHost search", () => {
     expect(rendered.container.firstElementChild).toHaveAttribute("data-column-selection", "true");
   });
 
-  it("shows explicit Parameter Info when auto-popup is disabled", async () => {
-    const result = {
-      status: {
-        path: "src/example.ts",
-        uri: "file:///src/example.ts",
-        presetId: "typescript-javascript",
-        languageId: "typescript",
-        displayName: "TypeScript",
-        available: true,
-        active: true,
-        selectedCommandId: null,
-        selectedCommand: null,
-        installHint: null,
-        error: null,
-      },
-      signatures: [{
-        label: "open(path: string, mode: number): void",
-        documentation: "Opens the path.",
-        parameters: [
-          { label: "path: string", documentation: null, labelStart: 5, labelEnd: 17 },
-          { label: "mode: number", documentation: null, labelStart: 19, labelEnd: 31 },
-        ],
-        activeParameter: 1,
-      }],
-      activeSignature: 0,
-      activeParameter: 1,
-    };
-    const onSignatureHelp = vi.fn(async () => result);
+  it("§8.20.2: the explicit nonce only EMITS a trigger event; rendering follows the session's controlled popup", async () => {
+    const onParameterTrigger = vi.fn();
     const rendered = renderEditor("open(\"file\", 1)", vi.fn(), {
-      onSignatureHelp,
-      parameterInfoAutoPopup: false,
+      onParameterTrigger,
       parameterInfoRequestNonce: 0,
     });
+    expect(screen.queryByRole("dialog", { name: "Parameter info" })).toBeNull();
 
     rendered.rerender(
       <CodeMirrorHost
         {...rendered.props}
-        parameterInfoAutoPopup={false}
         parameterInfoRequestNonce={1}
       />,
     );
+    // The host never issues requests itself — it hands the trigger to the
+    // workspace-side session.
+    expect(onParameterTrigger).toHaveBeenCalledTimes(1);
+    expect(onParameterTrigger).toHaveBeenCalledWith(expect.objectContaining({ origin: "explicit" }));
 
-    expect(await screen.findByRole("dialog", { name: "Parameter info" })).toHaveTextContent(
-      "open(path: string, mode: number): void",
+    // The session publishes the display state; the host renders it.
+    rendered.rerender(
+      <CodeMirrorHost
+        {...rendered.props}
+        parameterInfoShowFullSignatures
+        parameterPopup={{
+          signatures: [{
+            label: "open(path: string, mode: number): void",
+            documentation: "Opens the path.",
+            parameters: [
+              { label: "path: string", documentation: null, labelStart: 5, labelEnd: 17 },
+              { label: "mode: number", documentation: null, labelStart: 19, labelEnd: 31 },
+            ],
+            activeParameter: 1,
+          }],
+          activeSignature: 0,
+          activeParameter: 1,
+          anchorOffset: 14,
+        }}
+      />,
     );
-    expect(onSignatureHelp).toHaveBeenCalledTimes(1);
+    const dialog = await screen.findByRole("dialog", { name: "Parameter info" });
+    expect(dialog).toHaveTextContent("open(path: string, mode: number): void");
+    expect(dialog.querySelector("[data-signature-index='0'] b")).toHaveTextContent("mode: number");
+
+    // Session hides → the tooltip disappears.
+    rendered.rerender(
+      <CodeMirrorHost {...rendered.props} parameterPopup={null} />,
+    );
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Parameter info" })).toBeNull();
+    });
   });
 
-  it("cancels delayed automatic Parameter Info after a newer edit", async () => {
-    vi.useFakeTimers();
-    const onSignatureHelp = vi.fn(async () => null);
+  it("§8.20.2: typing a signature trigger char emits a typing trigger; other edits emit invalidation", () => {
+    const onParameterTrigger = vi.fn();
+    const onParameterInvalidate = vi.fn();
     const rendered = renderEditor("call", vi.fn(), {
-      onSignatureHelp,
-      signatureTriggers: ["("],
-      parameterInfoAutoPopup: true,
-      parameterInfoDelayMs: 250,
+      onParameterTrigger,
+      onParameterInvalidate,
+      signatureTriggers: ["(", ","],
     });
     const editor = rendered.container.querySelector<HTMLElement>(".cm-editor");
     expect(editor).not.toBeNull();
-    const foundView = EditorView.findFromDOM(editor!);
-    expect(foundView).not.toBeNull();
-    const view = foundView!;
+    const view = EditorView.findFromDOM(editor!)!;
 
+    // Trigger character → typing event, no invalidation.
     view.dispatch({
       changes: { from: view.state.doc.length, insert: "(" },
       selection: { anchor: view.state.doc.length + 1 },
       userEvent: "input.type",
     });
+    expect(onParameterTrigger).toHaveBeenCalledTimes(1);
+    expect(onParameterTrigger).toHaveBeenCalledWith(expect.objectContaining({
+      origin: "typing",
+      triggerCharacter: "(",
+    }));
+    expect(onParameterInvalidate).not.toHaveBeenCalled();
+
+    // Plain edit → doc-changed invalidation (old tooltip must close).
     view.dispatch({
       changes: { from: view.state.doc.length, insert: "x" },
       selection: { anchor: view.state.doc.length + 1 },
       userEvent: "input.type",
     });
-    await vi.advanceTimersByTimeAsync(300);
+    expect(onParameterTrigger).toHaveBeenCalledTimes(1);
+    expect(onParameterInvalidate).toHaveBeenCalledWith("doc-changed");
 
-    expect(onSignatureHelp).not.toHaveBeenCalled();
-    vi.useRealTimers();
+    // Closing paren → closing-char invalidation.
+    view.dispatch({
+      changes: { from: view.state.doc.length - 1, insert: ")" },
+      userEvent: "input.type",
+    });
+    expect(onParameterInvalidate).toHaveBeenLastCalledWith("closing-char");
+
+    // Caret move without an edit → caret-moved invalidation.
+    view.dispatch({ selection: { anchor: 0 } });
+    expect(onParameterInvalidate).toHaveBeenLastCalledWith("caret-moved");
   });
 
   it("reconfigures hover documentation without recreating the editor", () => {
@@ -648,5 +669,51 @@ describe("§8.19.8 semantic editing commands", () => {
     // Parserless language stays on the labelled Local/Heuristic path.
     expect(report.provenance).toMatchObject({ kind: "local-text" });
     expect(view()!.state.doc.toString().startsWith("foo();")).toBe(true);
+  });
+});
+
+describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", () => {
+  afterEach(() => cleanup());
+
+  it("consumes appearance.virtualSpace policy in production editor", async () => {
+    const rendered = renderEditor("first line\nsecond", vi.fn(), {
+      appearance: {
+        fontFamily: "monospace",
+        fontSizePx: 14,
+        lineHeight: 1.5,
+        ligatures: false,
+        colorSchemeId: "default",
+        highContrast: false,
+        virtualSpace: { afterLineEnd: true, atFileBottom: true },
+      },
+    });
+
+    const view = EditorView.findFromDOM(rendered.container.querySelector(".cm-editor")!);
+    expect(view).not.toBeNull();
+
+    // Place caret at line 1 EOL
+    view!.dispatch({ selection: { anchor: 10 } });
+    // Pressing End key moves into virtual space
+    fireEvent.keyDown(rendered.content, { key: "End" });
+    const overflow = view!.state.field(virtualSpaceOverflowField, false)?.get(10) ?? 0;
+    expect(overflow).toBeGreaterThan(0);
+  });
+
+  it("emits explicit-comment provenance for region markers on selection change", async () => {
+    const onFoldProvenanceChange = vi.fn();
+    const doc = "//region MyBlock\nconst x = 1;\n//endregion\n";
+    const rendered = renderEditor(doc, vi.fn(), {
+      path: "src/Test.ts",
+      onFoldProvenanceChange,
+    });
+
+    const view = EditorView.findFromDOM(rendered.container.querySelector(".cm-editor")!);
+    expect(view).not.toBeNull();
+
+    // Move caret to the region comment line
+    view!.dispatch({ selection: { anchor: 5 } });
+    await waitFor(() => {
+      expect(onFoldProvenanceChange).toHaveBeenCalledWith("explicit-comment");
+    });
   });
 });

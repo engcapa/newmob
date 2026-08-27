@@ -1,0 +1,26 @@
+# One R9 native-gate evidence item (§8.19.10). Copy per gate item × platform,
+# fill every field, keep sanitized (no absolute home paths, no session data).
+# Collector: python .agents/skills/qa-ui-auto/scripts/evidence_collect.py --help
+id: TC-IDE-C0-01            # case id or manual-checklist item id
+gate: G0                    # G0 save/disk | G1 keymap/focus/a11y | perf | a11y | provider
+platform: linux             # linux | windows | macos
+commit: "<git hash>"
+app_sha256: "<sha256 of packaged binary>"
+os: "Linux <kernel> <distro>"
+webview: "WebKitGTK <version>"
+arch: x86_64
+keyboard_layout: "us"       # + one non-US layout run required for G1 items
+ime: none                   # an IME run required for G1 composition items
+display_scale: "100%"       # 100% and 200% both required
+filesystem: ext4
+jdk: null                   # provider items only; pin exact version
+jdtls: null
+build_tool: null            # Maven/Gradle version for R3/R6/R7 fixtures
+command: "python -m qa_ui_auto.runner --mode native --filter TC-IDE-C0-01"
+result: environment-blocked # passed | failed | environment-blocked | platform-unverified | provider-unverified
+artifact: qa-ui-auto-report/run-<ts>/<case-id>/summary.json
+artifact_sha256: "<sha256 of artifact>"
+known_gaps:
+  - "single layout only"
+highest_claim: L0           # max L0-L3 this evidence supports; never inflate
+notes: ""

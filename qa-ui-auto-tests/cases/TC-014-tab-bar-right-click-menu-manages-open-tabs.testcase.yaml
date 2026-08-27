@@ -11,10 +11,10 @@ steps:
   - wait_for: "[data-testid=\"settings-panel\"]"
   - right_click: "[data-testid=\"tab-item\"]"
   - wait_for: "[data-testid=\"context-menu\"]"
-  - assert_visible: "text=\"Close\""
-  - assert_visible: "text=\"Close others\""
-  - assert_visible: "text=\"Close all\""
-  - assert_visible: "text=\"Duplicate tab\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Close\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Close others\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Close all\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Duplicate tab\""
   - press: Escape
   # Tab-strip toolbar: split-view, multiexec, more
   - assert_visible: '[data-testid="tab-split-view"]'
@@ -25,5 +25,5 @@ steps:
   - wait: 0.5
   - click: '[data-testid="tab-more"]'
   - wait_for: "[data-testid=\"context-menu\"]"
-  - assert_visible: "text=\"New local terminal\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"New local terminal\""
   - screenshot: 014-tab-right-menu.png

@@ -19,6 +19,6 @@ steps:
   - type: "cd /tmp && echo qa-cwd-change"
   - press: Enter
   - wait: 1
-  - click: 'button[title*="Sync the remote pane"]'
+  - click: '[data-testid="sftp-browser"] >> button[title*="sync the remote pane"]'
   - wait: 1
   - screenshot: 044-sftp-manual-sync.png

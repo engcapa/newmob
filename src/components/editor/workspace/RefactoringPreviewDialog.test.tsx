@@ -103,4 +103,105 @@ describe("RefactoringPreviewDialog", () => {
     expect(screen.getByText(/3 of 3 change\(s\) selected/)).toBeInTheDocument();
     expect(screen.getByTestId("refactoring-preview-apply")).not.toBeDisabled();
   });
+
+  it("renders completeness badge and conflict warnings", () => {
+    const preview = buildWorkspaceEditPreview(sampleEdit);
+    const plan = {
+      actionId: "test-plan",
+      kind: "rename" as const,
+      evidence: {
+        capabilityId: "refactor.rename",
+        languageId: "java",
+        provider: { id: "jdtls", version: null, generation: 1 },
+        projectFingerprint: "fp",
+        document: { uri: "file:///repo/src/UserService.ts", revision: 1 },
+        scope: "project" as const,
+        coverage: {
+          complete: false,
+          truncated: false,
+          providerCount: 1,
+          failedProviderCount: 0,
+          skippedProviderCount: 0,
+          reason: null,
+        },
+        requestId: "req-1",
+        startedAt: 0,
+        completedAt: 0,
+      },
+      completeness: { value: "partial" as const, source: "protocol-bounded" as const, proof: null },
+      conflicts: [
+        { severity: "warning" as const, message: "Possible naming ambiguity", location: null, source: "reported" as const },
+      ],
+      operations: [],
+      documents: [],
+      requiredOperationIndexes: [],
+      affectedUris: [],
+      excludableGroups: [],
+    };
+
+    render(
+      <RefactoringPreviewDialog
+        open={true}
+        preview={preview}
+        originalEdit={sampleEdit}
+        plan={plan}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("refactoring-preview-completeness")).toHaveTextContent("Provider Partial");
+    expect(screen.getByTestId("refactoring-preview-warning-conflicts")).toHaveTextContent("Possible naming ambiguity");
+    expect(screen.getByTestId("refactoring-preview-apply")).not.toBeDisabled();
+  });
+
+  it("disables Apply button when error conflicts exist", () => {
+    const preview = buildWorkspaceEditPreview(sampleEdit);
+    const plan = {
+      actionId: "test-plan-error",
+      kind: "rename" as const,
+      evidence: {
+        capabilityId: "refactor.rename",
+        languageId: "java",
+        provider: { id: "jdtls", version: null, generation: 1 },
+        projectFingerprint: "fp",
+        document: { uri: "file:///repo/src/UserService.ts", revision: 1 },
+        scope: "project" as const,
+        coverage: {
+          complete: false,
+          truncated: false,
+          providerCount: 1,
+          failedProviderCount: 0,
+          skippedProviderCount: 0,
+          reason: null,
+        },
+        requestId: "req-1",
+        startedAt: 0,
+        completedAt: 0,
+      },
+      completeness: { value: "complete" as const, source: "provider-asserted" as const, proof: null },
+      conflicts: [
+        { severity: "error" as const, message: "Target symbol already declared in file", location: null, source: "reported" as const },
+      ],
+      operations: [],
+      documents: [],
+      requiredOperationIndexes: [],
+      affectedUris: [],
+      excludableGroups: [],
+    };
+
+    render(
+      <RefactoringPreviewDialog
+        open={true}
+        preview={preview}
+        originalEdit={sampleEdit}
+        plan={plan}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("refactoring-preview-error-conflicts")).toHaveTextContent("Target symbol already declared");
+    expect(screen.getByTestId("refactoring-preview-apply")).toBeDisabled();
+  });
 });

@@ -3,6 +3,7 @@ import {
   buildFormatPlan,
   DEFAULT_CODE_STYLE_SCHEME,
   findFormatterMarkerRanges,
+  migrateSchemeToV3,
   pathExcludedByPattern,
   resolveStyleField,
 } from "./workspaceCodeStyleScheme";
@@ -29,14 +30,15 @@ describe("§8.18.9.4 code style field precedence", () => {
     expect(resolveStyleField<number>({})).toEqual({ value: undefined, source: "language-default" });
   });
 
-  it("defaults declare no fake provenance", () => {
+  it("defaults declare no fake provenance and track V3 schema with V2 migration", () => {
     expect(DEFAULT_CODE_STYLE_SCHEME.values).toEqual({});
-    expect(DEFAULT_CODE_STYLE_SCHEMA_VERSION()).toBe(2);
+    expect(DEFAULT_CODE_STYLE_SCHEME.schemaVersion).toBe(3);
+    const legacyV2 = { schemaVersion: 2, id: "legacy", name: "Legacy", values: {} };
+    const migrated = migrateSchemeToV3(legacyV2);
+    expect(migrated.schemaVersion).toBe(3);
+    expect(migrated.saveActions).toBeDefined();
+    expect(migrated.exclusions).toBeDefined();
   });
-
-  function DEFAULT_CODE_STYLE_SCHEMA_VERSION(): number {
-    return DEFAULT_CODE_STYLE_SCHEME.schemaVersion;
-  }
 });
 
 describe("§8.18.9.4 formatter exclusion + markers", () => {

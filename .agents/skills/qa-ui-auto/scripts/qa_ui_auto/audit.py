@@ -329,8 +329,124 @@ def _gate(
     results, orphans = build_coverage(features_path, cases_dir)
     snap = _build_snapshot(results, orphans)
     regressions, improvements = _render_gate_diff(baseline, snap)
+    control_ok = not regressions
+
+    evidence_gate: dict[str, Any] = {"ok": False, "reason": "not checked"}
+    try:
+        from evidence_validate import (
+            EntryStatus,
+            get_current_head,
+            get_test_plan_fingerprint,
+            get_tested_source_fingerprint,
+            load_schema as load_evidence_schema,
+            scan_entries as scan_evidence_entries,
+            validate_entry as validate_evidence_entry,
+        )
+        from evidence_rollup import (
+            DEFAULT_MD_OUTPUT as MANIFEST_MD_PATH,
+            generate_manifest_data,
+            render_markdown as render_manifest_markdown,
+        )
+
+        schema = load_evidence_schema()
+        head = get_current_head()
+        source_fp = get_tested_source_fingerprint()
+        plan_fp = get_test_plan_fingerprint()
+        scan_paths = scan_evidence_entries()
+
+        if not scan_paths:
+            evidence_gate = {
+                "ok": False,
+                "reason": "zero evidence entries found in repository",
+                "valid_current": 0,
+                "stale": 0,
+                "invalid": 0,
+            }
+        else:
+            valid_current: list[dict[str, Any]] = []
+            stale_count = 0
+            invalid_count = 0
+            invalid_reasons: list[str] = []
+
+            for p in scan_paths:
+                res = validate_evidence_entry(
+                    p,
+                    schema,
+                    check_current=True,
+                    current_source_fp=source_fp,
+                    current_test_plan_fp=plan_fp,
+                    current_head=head,
+                )
+                if res.status == EntryStatus.VALID_CURRENT and res.data:
+                    valid_current.append(res.data)
+                elif res.status in (
+                    EntryStatus.STALE_SOURCE,
+                    EntryStatus.STALE_TEST_PLAN,
+                    EntryStatus.STALE_BUNDLE,
+                ):
+                    stale_count += 1
+                elif res.status == EntryStatus.INVALID:
+                    invalid_count += 1
+                    invalid_reasons.extend(res.errors)
+
+            if invalid_count > 0:
+                evidence_gate = {
+                    "ok": False,
+                    "reason": f"{invalid_count} invalid entry(ies): {'; '.join(invalid_reasons[:2])}",
+                    "valid_current": len(valid_current),
+                    "stale": stale_count,
+                    "invalid": invalid_count,
+                }
+            elif len(valid_current) == 0:
+                evidence_gate = {
+                    "ok": False,
+                    "reason": f"no valid-current evidence entries ({stale_count} stale)",
+                    "valid_current": 0,
+                    "stale": stale_count,
+                    "invalid": invalid_count,
+                }
+            else:
+                manifest_data = generate_manifest_data(head, source_fp, plan_fp, valid_current, [])
+                expected_md = render_manifest_markdown(manifest_data)
+                expected_json = json.dumps(manifest_data, indent=2, sort_keys=True) + "\n"
+                
+                from evidence_rollup import DEFAULT_JSON_OUTPUT as MANIFEST_JSON_PATH
+                if not MANIFEST_MD_PATH.exists() or not MANIFEST_JSON_PATH.exists():
+                    evidence_gate = {
+                        "ok": False,
+                        "reason": "manifest.v1.md or manifest.v1.json is missing",
+                        "valid_current": len(valid_current),
+                        "stale": stale_count,
+                        "invalid": invalid_count,
+                    }
+                else:
+                    current_md = MANIFEST_MD_PATH.read_text(encoding="utf-8")
+                    current_json = MANIFEST_JSON_PATH.read_text(encoding="utf-8")
+                    if current_md != expected_md or current_json != expected_json:
+                        evidence_gate = {
+                            "ok": False,
+                            "reason": "manifest files are out of date vs current valid evidence",
+                            "valid_current": len(valid_current),
+                            "stale": stale_count,
+                            "invalid": invalid_count,
+                        }
+                    else:
+                        evidence_gate = {
+                            "ok": True,
+                            "reason": f"{len(valid_current)} valid-current entry(ies), manifest up-to-date",
+                            "valid_current": len(valid_current),
+                            "stale": stale_count,
+                            "invalid": invalid_count,
+                        }
+    except Exception as exc:  # noqa: BLE001
+        evidence_gate = {"ok": False, "reason": f"evidence check failed: {exc}"}
+
+    overall_ok = control_ok and evidence_gate.get("ok", False)
+
     return {
-        "ok": not regressions,
+        "ok": overall_ok,
+        "control_ok": control_ok,
+        "evidence_gate": evidence_gate,
         "baseline_path": str(baseline_path),
         "baseline": baseline.get("totals", {}),
         "current": snap["totals"],
@@ -505,7 +621,7 @@ def _render_gate(g: dict[str, Any]) -> list[str]:
         lines.append(f"  improvements ({len(g['improvements'])}):")
         for line in g["improvements"][:10]:
             lines.append(f"    + {line}")
-    if g["regressions"]:
+    if not g.get("control_ok", True):
         lines.append("")
         lines.append(f"  REGRESSIONS ({len(g['regressions'])}):")
         for line in g["regressions"]:
@@ -519,8 +635,20 @@ def _render_gate(g: dict[str, Any]) -> list[str]:
             f"    python -m qa_ui_auto.control_coverage --update-baseline "
             f"{g['baseline_path']}"
         )
+        lines.append("  control-coverage-gate: FAILED — regressions vs baseline")
     else:
-        lines.append("  OK — no regressions vs baseline")
+        lines.append("  control-coverage-gate: OK — no regressions vs baseline")
+
+    ev = g.get("evidence_gate", {})
+    if ev.get("ok"):
+        lines.append(f"  release-evidence-gate: OK — {ev.get('reason', 'valid current evidence')}")
+    else:
+        lines.append(f"  release-evidence-gate: FAILED — {ev.get('reason', 'evidence gate failed')}")
+
+    if g.get("ok"):
+        lines.append("  OK — all gates passed")
+    else:
+        lines.append("  FAILED — gate check failed")
     return lines
 
 

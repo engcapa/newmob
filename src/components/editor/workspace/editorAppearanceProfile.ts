@@ -26,6 +26,11 @@ export interface EditorAppearanceProfile {
     placement: "top" | "bottom";
     languages: string[];
   };
+  clipboard: {
+    historyEnabled: boolean;
+    historyMaxItems: number;
+    historyMaxTotalBytes: number;
+  };
 }
 
 export interface LegacyCodeViewProfileLike {
@@ -98,6 +103,11 @@ export const DEFAULT_EDITOR_APPEARANCE_PROFILE: EditorAppearanceProfile = {
     placement: "top",
     languages: ["*"],
   },
+  clipboard: {
+    historyEnabled: true,
+    historyMaxItems: 30,
+    historyMaxTotalBytes: 1024 * 1024,
+  },
 };
 
 export function defaultEditorAppearanceProfile(): EditorAppearanceProfile {
@@ -119,6 +129,7 @@ export function cloneEditorAppearanceProfile(
       ...normalized.breadcrumbs,
       languages: [...normalized.breadcrumbs.languages],
     },
+    clipboard: { ...normalized.clipboard },
   };
 }
 
@@ -136,6 +147,7 @@ export function normalizeEditorAppearanceProfile(value: unknown): EditorAppearan
   const softWrap = isRecord(source.softWrap) ? source.softWrap : {};
   const virtualSpace = isRecord(source.virtualSpace) ? source.virtualSpace : {};
   const breadcrumbs = isRecord(source.breadcrumbs) ? source.breadcrumbs : {};
+  const clipboard = isRecord(source.clipboard) ? source.clipboard : {};
 
   return {
     fontFamily: readString(source.fontFamily, DEFAULT_FONT_FAMILY),
@@ -162,6 +174,17 @@ export function normalizeEditorAppearanceProfile(value: unknown): EditorAppearan
       visible: readBoolean(breadcrumbs.visible, true),
       placement: breadcrumbs.placement === "bottom" ? "bottom" : "top",
       languages: normalizeLanguageList(breadcrumbs.languages),
+    },
+    clipboard: {
+      historyEnabled: readBoolean(clipboard.historyEnabled, true),
+      historyMaxItems: clampNumber(clipboard.historyMaxItems, 30, 1, 50, 0),
+      historyMaxTotalBytes: clampNumber(
+        clipboard.historyMaxTotalBytes,
+        1024 * 1024,
+        1024,
+        16 * 1024 * 1024,
+        0,
+      ),
     },
   };
 }

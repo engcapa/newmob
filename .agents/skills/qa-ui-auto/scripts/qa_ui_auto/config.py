@@ -20,7 +20,7 @@ from typing import Any
 import yaml
 
 ROOT = Path.cwd()
-PLACEHOLDER = re.compile(r"\$\{(cfg|env)[.:]([A-Za-z0-9_.\-]+)\}")
+PLACEHOLDER = re.compile(r"\$\{(cfg|env|fixture)[.:]([A-Za-z0-9_.\-]+)\}")
 
 
 def _walk(value: Any) -> list[tuple[str, str]]:
@@ -53,10 +53,14 @@ def load_config(path: Path | str = "qa-ui-auto-tests/qa-ui-auto.config.yaml") ->
     return cfg
 
 
-def resolve(value: Any, *, cfg: dict, env: dict[str, str] | None = None) -> Any:
-    """Recursively replace ${cfg.x.y} and ${env.X} placeholders.
+def resolve(value: Any, *, cfg: dict, env: dict[str, str] | None = None,
+            fixture: dict[str, str] | None = None) -> Any:
+    """Recursively replace ${cfg.x.y}, ${env.X} and ${fixture.name} placeholders.
 
     Strict: missing keys raise KeyError so a half-configured run fails fast.
+    `fixture` values are produced by fixtures (e.g. workspace_root) and are
+    only available after those fixtures ran — native runs resolve per-step
+    for this reason; browser dry-runs must tolerate a missing scope.
     """
     if env is None:
         env = dict(os.environ)
@@ -74,12 +78,19 @@ def resolve(value: Any, *, cfg: dict, env: dict[str, str] | None = None) -> Any:
                 if key not in env:
                     raise KeyError(f"env var not set: {key}")
                 return env[key]
+            if kind == "fixture":
+                if fixture is None or key not in fixture:
+                    raise KeyError(
+                        f"fixture value not set: {key} "
+                        "(available only after the providing fixture ran)"
+                    )
+                return str(fixture[key])
             return m.group(0)
         return PLACEHOLDER.sub(repl, value)
     if isinstance(value, dict):
-        return {k: resolve(v, cfg=cfg, env=env) for k, v in value.items()}
+        return {k: resolve(v, cfg=cfg, env=env, fixture=fixture) for k, v in value.items()}
     if isinstance(value, list):
-        return [resolve(v, cfg=cfg, env=env) for v in value]
+        return [resolve(v, cfg=cfg, env=env, fixture=fixture) for v in value]
     return value
 
 

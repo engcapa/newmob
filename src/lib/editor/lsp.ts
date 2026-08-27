@@ -560,16 +560,67 @@ export function lspCompletionResolve(
   });
 }
 
+export interface LspReferenceRequestOptions {
+  /** Per-file cancellation key shared with the native cancel registry. */
+  cancelKey?: string;
+  /**
+   * Monotonic request sequence; a higher seq for the same cancelKey aborts
+   * this request via `$/cancelRequest` (§8.18.6/§8.20.2).
+   */
+  requestSeq?: number;
+}
+
+// §8.20.3 W2: provider-owned Project Analysis facts.
+export interface LspJavaProjectModuleInfo {
+  id: string;
+  rootUri: string | null;
+}
+
+export interface LspJavaClasspathProbeInfo {
+  rootUri: string | null;
+  entryCount: number;
+  entriesSha256: string;
+}
+
+export interface LspBuildFileHashInfo {
+  path: string;
+  sha256: string;
+}
+
+export interface LspJavaProjectModelResult {
+  status: LspDocumentStatus;
+  active: boolean;
+  processId: number | null;
+  serverName: string | null;
+  serverVersion: string | null;
+  registeredCommands: string[];
+  buildFiles: LspBuildFileHashInfo[];
+  javaHomeUsed: string | null;
+  javaProjects: LspJavaProjectModuleInfo[];
+  classpathProbe: LspJavaClasspathProbeInfo | null;
+  probeReason: string | null;
+}
+
+export function lspJavaProjectModel(descriptor: LspDocumentDescriptor): Promise<LspJavaProjectModelResult> {
+  return invoke<LspJavaProjectModelResult>("lsp_java_project_model", {
+    ...documentArgs(descriptor),
+    documentUri: descriptor.documentUri?.trim() || null,
+  });
+}
+
 export function lspSignatureHelp(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
   triggerCharacter?: string | null,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspSignatureHelpResult> {
   return invoke<LspSignatureHelpResult>("lsp_signature_help", {
     ...documentArgs(descriptor),
     line: position.line,
     character: position.character,
     triggerCharacter: triggerCharacter ?? null,
+    cancelKey: options?.cancelKey ?? null,
+    requestSeq: options?.requestSeq ?? null,
   });
 }
 

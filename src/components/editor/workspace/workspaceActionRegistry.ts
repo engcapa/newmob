@@ -44,7 +44,8 @@ export type ActionDisabledReason =
   | "disposed"
   | "invalidCondition"
   | "userDisabled"
-  | "unsupported";
+  | "unsupported"
+  | (string & {});
 
 export interface ActionPlatformKeybindings {
   macos?: string;
@@ -219,6 +220,7 @@ export type ActionResultReason =
   | "aborted"
   | "busy"
   | "condition-not-met"
+  | "disabled"
   | "disposed"
   | "exception"
   | "stale-owner"
@@ -774,6 +776,58 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     keybinding: "Ctrl+H",
     provenance: "provider",
     keywords: ["type", "hierarchy", "supertypes", "subtypes"],
+  },
+  {
+    id: "workspace.findReferences",
+    title: "Find Usages",
+    description: "Find usages and references across the project or scoped selection",
+    category: "Navigate",
+    keybinding: "Shift+F12",
+    provenance: "provider",
+    keywords: ["usages", "references", "callers", "find"],
+  },
+  {
+    id: "workspace.showUsages",
+    title: "Show Usages",
+    description: "Show usages in a lightweight popup over the shared usages session",
+    category: "Navigate",
+    keybinding: "Ctrl+Alt+F7",
+    provenance: "provider",
+    keywords: ["usages", "popup", "lightweight"],
+  },
+  {
+    id: "workspace.previousMethod",
+    title: "Previous Method",
+    description: "Navigate to previous method or function declaration",
+    category: "Navigate",
+    keybinding: "Alt+Up",
+    provenance: "unsupported",
+    keywords: ["previous", "method", "function", "navigate"],
+  },
+  {
+    id: "workspace.nextMethod",
+    title: "Next Method",
+    description: "Navigate to next method or function declaration",
+    category: "Navigate",
+    keybinding: "Alt+Down",
+    provenance: "unsupported",
+    keywords: ["next", "method", "function", "navigate"],
+  },
+  {
+    id: "workspace.previousSibling",
+    title: "Previous Sibling",
+    description: "Navigate to previous sibling element or node",
+    category: "Navigate",
+    provenance: "unsupported",
+    keywords: ["previous", "sibling", "element", "navigate"],
+  },
+  {
+    id: "workspace.nextSibling",
+    title: "Next Sibling",
+    description: "Navigate to next sibling element or node",
+    category: "Navigate",
+    provenance: "unsupported",
+    keywords: ["next", "sibling", "element", "navigate"],
   },
 
   // --- Search ---

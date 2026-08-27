@@ -171,7 +171,33 @@ const gitMocks = vi.hoisted(() => ({
   )),
 }));
 
-vi.mock("../../lib/editor/workspace", () => workspaceMocks);
+vi.mock("../../lib/editor/workspace", () => {
+  // W0 §8.20.1: the production tree IPC returns the WorkspaceTreeLoadResult
+  // union. Test fixtures keep writing raw arrays/chain objects; these
+  // delegates convert them (and rejections) exactly like the real decoder.
+  const wrapResult = (value: unknown): unknown => {
+    if (value && typeof value === "object" && "state" in (value as Record<string, unknown>)) return value;
+    if (Array.isArray(value)) return { state: "ready", entries: value, truncated: false };
+    if (value && typeof value === "object" && "path" in (value as Record<string, unknown>)
+      && "entries" in (value as Record<string, unknown>)) {
+      return { state: "ready", entries: (value as { entries: unknown[] }).entries, truncated: false };
+    }
+    return { state: "failed", message: "malformed fixture payload" };
+  };
+  const wrap = async (fn: () => unknown): Promise<unknown> => {
+    try {
+      return wrapResult(await fn());
+    } catch (error) {
+      return { state: "failed", message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  return {
+    ...workspaceMocks,
+    workspaceListDir: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceListDir(...args)),
+    workspaceCompactChain: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceCompactChain(...args)),
+    workspaceListFilesRecursive: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceListFilesRecursive(...args)),
+  };
+});
 
 vi.mock("../../lib/editor/lsp", () => lspMocks);
 
@@ -1414,6 +1440,7 @@ describe("CodeWorkspaceTab", () => {
       softWrap: { patterns: [], useOriginalIndent: true, additionalIndent: 0, showMarkers: false },
       virtualSpace: { afterLineEnd: false, atFileBottom: false },
       breadcrumbs: { visible: true, placement: "top", languages: ["*"] },
+      clipboard: { historyEnabled: true, historyMaxItems: 30, historyMaxTotalBytes: 1024 * 1024 },
     });
     await waitFor(() => expect(
       registrationRef.current?.items.some((item) => item.id === "workspace.editorAppearanceSettings"),
@@ -4387,7 +4414,7 @@ describe("CodeWorkspaceTab", () => {
     expect(screen.queryByTestId("file-encoding-dialog")).toBeNull();
   });
 
-  it("applies Safe Delete across files as one undoable workspace transaction", async () => {
+  it("blocks Safe Delete when provider does not attest complete coverage and performs 0 disk writes", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
       workspaceId: "ws-safe-delete",
@@ -4498,37 +4525,19 @@ describe("CodeWorkspaceTab", () => {
     await screen.findByTitle("app / src/main.ts");
     const content = rendered.container.querySelector<HTMLElement>(".cm-content");
     expect(content).not.toBeNull();
-    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
-    fireEvent.keyDown(content!, { key: "Delete", code: "Delete", altKey: true });
+    await waitFor(() => expect(registrationRef.current).not.toBeNull());
+    const safeDeleteCmd = registrationRef.current?.items.find((item) => item.id === "workspace.safeDeleteSymbol");
+    expect(safeDeleteCmd?.enabled).toBe(false);
+    expect(registrationRef.current?.execute("workspace.safeDeleteSymbol")).toBe(false);
 
-    await waitFor(() => expect(lspMocks.lspPrepareRename).toHaveBeenCalled());
-    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
-      "/repo/app",
-      "src/main.ts",
-      "const  = 42;",
-      expect.any(String),
-      "UTF-8",
-      false,
-    ));
-    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
-      "/repo/app",
-      "src/use.ts",
-      "use();",
-      "hash-src/use.ts",
-      "UTF-8",
-      false,
-    ));
-    await waitFor(() => expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.enabled)
-      .toBe(true));
-    expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.title)
-      .toBe("Undo Safe delete symbol");
-    expect(disk.get("src/main.ts")).toBe("const  = 42;");
-    expect(disk.get("src/use.ts")).toBe("use();");
-
-    await act(async () => {
-      registrationRef.current?.execute("workspace.undoWorkspaceEdit");
-    });
-    await waitFor(() => expect(disk.get("src/main.ts")).toBe("const answer = 42;"));
+    const execResult = await registrationRef.current?.executeAction("workspace.safeDeleteSymbol");
+    expect(execResult?.kind).toBe("no-op");
+    expect(execResult?.message).toContain("Language provider does not attest complete Safe Delete coverage");
+    expect(lspMocks.lspPrepareRename).not.toHaveBeenCalled();
+    expect(lspMocks.lspReferences).not.toHaveBeenCalled();
+    expect(lspMocks.lspDefinition).not.toHaveBeenCalled();
+    expect(workspaceMocks.workspaceWriteFileEncoded).not.toHaveBeenCalled();
+    expect(disk.get("src/main.ts")).toBe("const answer = 42;");
     expect(disk.get("src/use.ts")).toBe("use(answer);");
   });
 

@@ -270,6 +270,8 @@ export type KeyDispatchResult =
   | {
     kind: "rejected";
     reason: "composing" | "dead-key" | "alt-graph" | "conflict" | "disabled" | "no-match" | "stale-owner";
+    actionId?: string;
+    disabledReason?: string;
   };
 
 /**
@@ -485,6 +487,8 @@ export class WorkspaceActionHost {
         secondaryKeybindings: command.keybindings,
         keywords: command.keywords,
         when: command.when,
+        isEnabled: command.isEnabled,
+        getState: command.getState,
         provenance: command.provenance ?? "local",
         run: async (context, signal) => {
           if (signal?.aborted) {
@@ -724,8 +728,10 @@ export class WorkspaceActionHost {
     if (prepared.state.availability !== "available") {
       return {
         kind: "no-op",
-        reason: prepared.state.availability === "busy" ? "busy" : "condition-not-met",
-        message: `Action "${prepared.actionId}" is ${prepared.state.availability} (${prepared.state.disabledReason ?? "context blocked"}).`,
+        reason: prepared.state.availability === "busy"
+          ? "busy"
+          : (prepared.state.disabledReason ? "disabled" : "condition-not-met"),
+        message: prepared.state.disabledReason ?? `Action "${prepared.actionId}" is ${prepared.state.availability} (context blocked).`,
       };
     }
     if (this.inFlightActions.has(prepared.actionId)) {
@@ -988,9 +994,12 @@ export class WorkspaceActionHost {
       ) {
         this.cancelPendingChord("escape");
       }
+      const firstCandidate = resolved.candidates[0];
       return {
         kind: "rejected",
         reason: resolved.resolution === "unavailable" ? "disabled" : "no-match",
+        actionId: firstCandidate?.actionId,
+        disabledReason: firstCandidate?.evaluation.state.disabledReason,
       };
     }
     this.cancelPendingChord("executed");

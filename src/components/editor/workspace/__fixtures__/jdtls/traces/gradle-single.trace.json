@@ -1,14 +1,16 @@
 {
   "schemaVersion": 1,
   "fixtureId": "gradle-single",
-  "generatedAt": "2026-08-24T07:17:23.756Z",
+  "generatedAt": "2026-08-26T05:31:12.843Z",
   "sanitized": true,
   "toolchain": {
     "java": {
       "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
       "info": {
         "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
-        "major": 21
+        "major": 21,
+        "version": "21.0.4"
       }
     },
     "jdtls": {
@@ -35,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 4989,
+          "msTotal": 12908,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -48,5 +50,78 @@
       "notes": null
     }
   ],
-  "failures": []
+  "failures": [],
+  "providerChannels": {
+    "declaredTypeInfoChannel": false,
+    "declaredStaticDataChannel": false,
+    "topLevelCapabilityKeys": [
+      "callHierarchyProvider",
+      "codeActionProvider",
+      "codeLensProvider",
+      "declarationProvider",
+      "definitionProvider",
+      "documentFormattingProvider",
+      "documentHighlightProvider",
+      "documentOnTypeFormattingProvider",
+      "documentRangeFormattingProvider",
+      "documentSymbolProvider",
+      "executeCommandProvider",
+      "foldingRangeProvider",
+      "hoverProvider",
+      "implementationProvider",
+      "inlayHintProvider",
+      "referencesProvider",
+      "renameProvider",
+      "selectionRangeProvider",
+      "semanticTokensProvider",
+      "textDocumentSync",
+      "typeDefinitionProvider",
+      "typeHierarchyProvider",
+      "workspace",
+      "workspaceSymbolProvider"
+    ],
+    "signatureHelpProviderDeclaredStatically": false,
+    "hoverProviderDeclaredStatically": false,
+    "signatureHelpProvenByScenarios": false,
+    "hoverProvenByScenarios": false,
+    "dynamicRegistrations": []
+  },
+  "analysis": {
+    "serverInfo": {
+      "name": "JDT Language Server (Standard)",
+      "version": "1.61.0-SNAPSHOT"
+    },
+    "registeredCommands": [],
+    "javaProjects": [],
+    "classpathProbe": null,
+    "probeReason": "command-not-registered:java.project.list",
+    "buildFiles": [
+      {
+        "path": "${project}/build.gradle",
+        "sha256": "8a55c1a81cd35c1133c52119c7f11249634247b0e79c8f8b84e096491dcb3609"
+      },
+      {
+        "path": "${project}/settings.gradle",
+        "sha256": "1c072103ac2e32abdd00c5d9112d597a51ba4a8e90de0ab8f7b48b28ca0219b2"
+      }
+    ],
+    "importProgress": {
+      "events": 34,
+      "beginTokens": 6,
+      "titles": [
+        "Synchronizing projects",
+        "Building",
+        "Initialize Workspace",
+        "Detect installed JVMs",
+        "Searching..."
+      ],
+      "anyWithPercentage": true
+    },
+    "diagnosticFlags": {
+      "incompleteOrMissingMentioned": false
+    }
+  },
+  "analysisTiming": {
+    "firstCompletionSatisfiedMs": 16184
+  }
 }

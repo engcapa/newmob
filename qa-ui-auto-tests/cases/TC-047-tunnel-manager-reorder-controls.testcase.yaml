@@ -17,7 +17,7 @@ steps:
   - fill: {selector: 'input[placeholder="0"]', value: "19191"}
   - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
-  - wait_for: "text=\"qa-tunnel-1\""
+  - wait_for: "[data-testid=\"tunnel-manager\"] >> text=\"qa-tunnel-1\""
   - click: "[data-testid=\"tunnel-new\"]"
   - wait_for: "[data-testid=\"tunnel-editor\"]"
   - fill: {selector: "input[placeholder=\"e.g. postgres-replica\"]", value: qa-tunnel-2}
@@ -27,8 +27,8 @@ steps:
   - fill: {selector: 'input[placeholder="0"]', value: "19192"}
   - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
-  - wait_for: "text=\"qa-tunnel-2\""
-  - click: 'tr:has-text("qa-tunnel-1") button[title*="Move down" i]'
+  - wait_for: "[data-testid=\"tunnel-manager\"] >> text=\"qa-tunnel-2\""
+  - click: '[data-testid="tunnel-manager"] tr:has-text("qa-tunnel-1") button[title*="Move down" i]'
   - wait: 1
   - seed_dialog: {confirm: true}
   - wait: 1

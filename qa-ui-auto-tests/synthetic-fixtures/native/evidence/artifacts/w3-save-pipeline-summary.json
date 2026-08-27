@@ -1,0 +1,21 @@
+{
+  "capabilityId": "W3-save-pipeline",
+  "environment": {
+    "arch": "x86_64",
+    "filesystem": "ext4",
+    "ime": "none",
+    "keyboard": "us",
+    "os": "Linux x86_64",
+    "platform": "linux",
+    "scale": 1.0,
+    "webview": "WebKitGTK 2.44"
+  },
+  "execution": {
+    "command": "python -m qa_ui_auto.runner --filter TC-IDE-C0-01",
+    "durationMs": 42,
+    "exitCode": 0
+  },
+  "featureId": "F25.6",
+  "recordedAtCommit": "3ae082f3fd754ed31b8ce1613a3203a3d292c0b1",
+  "status": "passed"
+}

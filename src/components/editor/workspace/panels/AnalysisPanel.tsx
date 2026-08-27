@@ -21,12 +21,17 @@ import {
   workspaceSemanticIndexStatusLabel,
   type WorkspaceSemanticIndexSnapshot,
 } from "../workspaceSemanticIndex";
+import type { JavaProjectAnalysisSnapshotV1, ProjectAnalysisPhase } from "../projectAnalysisModel";
 
 interface AnalysisPanelProps {
   files: ProblemFileGroup[];
   status: LspDocumentStatus | null;
   semanticTokenCount: number;
   semanticIndex: WorkspaceSemanticIndexSnapshot;
+  /** §8.20.3 W2 provider-owned Project Analysis snapshot for this workspace. */
+  projectAnalysis?: JavaProjectAnalysisSnapshotV1 | null;
+  projectAnalysisProbing?: boolean;
+  onRefreshProjectAnalysis?: () => void;
   profile: InspectionProfile;
   onUpdateRule: (id: string, patch: Partial<InspectionRule>) => void;
   onCreateBaseline: () => void;
@@ -37,6 +42,31 @@ interface AnalysisPanelProps {
   onImportBaseline: () => void;
   onOpenLocation: (location: LspLocation) => void;
   onOpenDiagnostic: (fileKey: string, diagnostic: LspDiagnostic) => void;
+}
+
+const PROJECT_PHASE_LABELS: Record<ProjectAnalysisPhase, string> = {
+  unconfigured: "No Java provider configured",
+  scanning: "Scanning",
+  importing: "Importing",
+  analyzing: "Analyzing",
+  ready: "Ready",
+  degraded: "Degraded",
+  offline: "Offline",
+  error: "Error",
+};
+
+function projectPhaseClassName(phase: ProjectAnalysisPhase): string {
+  switch (phase) {
+    case "ready":
+      return "text-emerald-500";
+    case "degraded":
+    case "offline":
+      return "text-amber-500";
+    case "error":
+      return "text-red-500";
+    default:
+      return "text-[var(--taomni-code-muted)]";
+  }
 }
 
 const SEVERITIES: Array<{ value: "inherit" | InspectionSeverity; label: string }> = [
@@ -79,6 +109,9 @@ export function AnalysisPanel({
   status,
   semanticTokenCount,
   semanticIndex,
+  projectAnalysis,
+  projectAnalysisProbing = false,
+  onRefreshProjectAnalysis,
   profile,
   onUpdateRule,
   onCreateBaseline,
@@ -129,10 +162,98 @@ export function AnalysisPanel({
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2 space-y-3">
+        <section data-testid="analysis-project-status" className="space-y-1">
+          <div className="flex items-center gap-1 font-medium">
+            <Server className="h-3.5 w-3.5" />
+            {/* §8.20.3 W2: provider-owned lifecycle facts — never an index. */}
+            <span>Project analysis</span>
+            {onRefreshProjectAnalysis && (
+              <button
+                type="button"
+                data-testid="analysis-project-refresh"
+                aria-label="Refresh project analysis"
+                title="Re-probe the language server's project model"
+                className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)]"
+                onClick={onRefreshProjectAnalysis}
+              >
+                <RefreshCw className={`h-3 w-3 ${projectAnalysisProbing ? "animate-spin" : ""}`} />
+              </button>
+            )}
+          </div>
+          {!projectAnalysis && (
+            <div className="rounded border border-[var(--taomni-code-border)] p-2 text-[10px] text-[var(--taomni-code-muted)]">
+              No project analysis facts yet — add a workspace root to query the provider.
+            </div>
+          )}
+          {projectAnalysis && (
+            <div
+              data-testid="analysis-project-card"
+              className="space-y-1 rounded border border-[var(--taomni-code-border)] p-2 text-[10px]"
+            >
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span
+                  data-testid="analysis-project-phase"
+                  className={`font-medium ${projectPhaseClassName(projectAnalysis.phase)}`}
+                  title="Provider-reported analysis phase (not a PSI/index guarantee)"
+                >
+                  {PROJECT_PHASE_LABELS[projectAnalysis.phase]}
+                </span>
+                {(projectAnalysis.phase === "importing" || projectAnalysis.phase === "analyzing") && (
+                  <RefreshCw className="h-3 w-3 animate-spin text-[var(--taomni-code-muted)]" />
+                )}
+                <span data-testid="analysis-project-provider" className="text-[var(--taomni-code-muted)]">
+                  {projectAnalysis.provider.id}
+                  {projectAnalysis.provider.version ? ` · ${projectAnalysis.provider.version}` : ""}
+                  {projectAnalysis.provider.processId ? ` · pid ${projectAnalysis.provider.processId}` : ""}
+                </span>
+                <span data-testid="analysis-project-completeness" className="text-[var(--taomni-code-muted)]">
+                  {projectAnalysis.completeness}
+                </span>
+              </div>
+              {projectAnalysis.progress.length > 0 && (
+                <div data-testid="analysis-project-progress" className="text-[var(--taomni-code-muted)]">
+                  Provider work:{" "}
+                  {projectAnalysis.progress.slice(0, 3).map((entry) => (
+                    <span key={entry.token} className="mr-1 inline-block">
+                      {entry.title || "task"}
+                      {entry.percentage !== null ? ` (${entry.percentage}%)` : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div data-testid="analysis-project-modules" className="text-[var(--taomni-code-muted)]">
+                Modules: {projectAnalysis.modules.length}
+                {projectAnalysis.modules.length > 0 && (
+                  <> · {projectAnalysis.modules.filter((module) => module.dependencyFingerprint).length} with classpath fingerprint</>
+                )}
+              </div>
+              {projectAnalysis.diagnostics.length > 0 && (
+                <div data-testid="analysis-project-diagnostics" className="text-amber-500" title={projectAnalysis.diagnostics.join("\n")}>
+                  {projectAnalysis.diagnostics.length === 1
+                    ? projectAnalysis.diagnostics[0]
+                    : `${projectAnalysis.diagnostics.length} provider notes`}
+                </div>
+              )}
+              <div
+                data-testid="analysis-project-fingerprint"
+                className="truncate font-mono text-[9px] text-[var(--taomni-code-muted)]"
+                title={`Project fingerprint ${projectAnalysis.projectFingerprint} (generation ${projectAnalysis.generation})`}
+              >
+                fp {projectAnalysis.projectFingerprint.slice(0, 16)}… · gen {projectAnalysis.generation}
+              </div>
+              <div className="text-[var(--taomni-code-muted)]">
+                Semantic actions follow this state: completion/usages/refactoring answers come from the
+                language server and stay stale while it imports or degrades.
+              </div>
+            </div>
+          )}
+        </section>
+
         <section data-testid="analysis-semantic-index" className="space-y-1">
           <div className="flex items-center gap-1 font-medium">
             <RefreshCw className={`h-3.5 w-3.5 ${semanticIndex.status === "building" ? "animate-spin" : ""}`} />
-            <span>Semantic index snapshot</span>
+            {/* §8.20.3 W2 copy rule: this ledger is Provider freshness, never “Index ready”. */}
+            <span>Provider freshness</span>
           </div>
           <div className="space-y-1 rounded border border-[var(--taomni-code-border)] p-2 text-[10px]">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

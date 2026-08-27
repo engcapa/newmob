@@ -1,14 +1,16 @@
 {
   "schemaVersion": 1,
   "fixtureId": "gradle-multi-module",
-  "generatedAt": "2026-08-24T07:17:39.996Z",
+  "generatedAt": "2026-08-26T05:31:30.259Z",
   "sanitized": true,
   "toolchain": {
     "java": {
       "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
       "info": {
         "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
-        "major": 21
+        "major": 21,
+        "version": "21.0.4"
       }
     },
     "jdtls": {
@@ -35,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 4596,
+          "msTotal": 4117,
           "itemCount": 1,
           "isIncomplete": false,
           "satisfied": true,
@@ -44,7 +46,7 @@
         }
       ],
       "resolve": {
-        "ms": 345,
+        "ms": 331,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport org.example.gcore.GCore;\n\n"
@@ -59,5 +61,83 @@
       "notes": null
     }
   ],
-  "failures": []
+  "failures": [],
+  "providerChannels": {
+    "declaredTypeInfoChannel": false,
+    "declaredStaticDataChannel": false,
+    "topLevelCapabilityKeys": [
+      "callHierarchyProvider",
+      "codeActionProvider",
+      "codeLensProvider",
+      "declarationProvider",
+      "definitionProvider",
+      "documentFormattingProvider",
+      "documentHighlightProvider",
+      "documentOnTypeFormattingProvider",
+      "documentRangeFormattingProvider",
+      "documentSymbolProvider",
+      "executeCommandProvider",
+      "foldingRangeProvider",
+      "hoverProvider",
+      "implementationProvider",
+      "inlayHintProvider",
+      "referencesProvider",
+      "renameProvider",
+      "selectionRangeProvider",
+      "semanticTokensProvider",
+      "textDocumentSync",
+      "typeDefinitionProvider",
+      "typeHierarchyProvider",
+      "workspace",
+      "workspaceSymbolProvider"
+    ],
+    "signatureHelpProviderDeclaredStatically": false,
+    "hoverProviderDeclaredStatically": false,
+    "signatureHelpProvenByScenarios": false,
+    "hoverProvenByScenarios": false,
+    "dynamicRegistrations": []
+  },
+  "analysis": {
+    "serverInfo": {
+      "name": "JDT Language Server (Standard)",
+      "version": "1.61.0-SNAPSHOT"
+    },
+    "registeredCommands": [],
+    "javaProjects": [],
+    "classpathProbe": null,
+    "probeReason": "command-not-registered:java.project.list",
+    "buildFiles": [
+      {
+        "path": "${project}/app/build.gradle",
+        "sha256": "cf64e8d2238e137cb6c282ac35d66cb241476841b472e767aaa96be0b1931328"
+      },
+      {
+        "path": "${project}/core/build.gradle",
+        "sha256": "9d0c87a991ef4a04ecb6114217abf5b07e3e6707a97adc83e0d77b1ac346dd58"
+      },
+      {
+        "path": "${project}/settings.gradle",
+        "sha256": "ba4df3057810d039acccdf22d2db7879bbbaf014da5b8b1dd9e0d438746f47a0"
+      }
+    ],
+    "importProgress": {
+      "events": 31,
+      "beginTokens": 8,
+      "titles": [
+        "Synchronizing projects",
+        "Building",
+        "Initialize Workspace",
+        "Detect installed JVMs",
+        "Searching...",
+        "Validate documents"
+      ],
+      "anyWithPercentage": true
+    },
+    "diagnosticFlags": {
+      "incompleteOrMissingMentioned": false
+    }
+  },
+  "analysisTiming": {
+    "firstCompletionSatisfiedMs": 7859
+  }
 }

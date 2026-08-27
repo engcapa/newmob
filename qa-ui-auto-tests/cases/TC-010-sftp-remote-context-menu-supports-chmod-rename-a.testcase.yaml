@@ -22,30 +22,30 @@ steps:
   - seed_dialog: {confirm: true}
   - right_click: { selector: "[data-testid=\"sftp-remote-list\"]", position: { x: 120, y: 220 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  - assert_visible: "text=\"New folder…\""
-  - assert_visible: "text=\"New file…\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"New folder…\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"New file…\""
   - press: Escape
   - seed_dialog: {prompt: qa-ui-auto-menu.txt, confirm: true}
   - click: "[data-testid=\"sftp-remote-new-file\"]"
-  - wait_for: "text=\"qa-ui-auto-menu.txt\""
+  - wait_for: "[data-testid=\"sftp-remote-pane\"] >> text=\"qa-ui-auto-menu.txt\""
   - right_click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-menu.txt"'
   - wait_for: "[data-testid=\"context-menu\"]"
-  - assert_visible: "text=\"Download to local\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Download to local\""
   - assert_visible: "text=\"Rename\""
   - assert_visible: "text=\"Permissions…\""
-  - assert_visible: "text=\"Delete\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Delete\""
   - click: "[data-testid=\"context-menu-item-permissions\"]"
   - wait_for: "[aria-label=\"Permissions\"]"
-  - assert_visible: "text=\"Owner\""
-  - assert_visible: "text=\"Group\""
-  - assert_visible: "text=\"Other\""
+  - assert_visible: "[aria-label=\"Permissions\"] >> text=\"Owner\""
+  - assert_visible: "[aria-label=\"Permissions\"] >> text=\"Group\""
+  - assert_visible: "[aria-label=\"Permissions\"] >> text=\"Other\""
   - click: "role=button[name=\"Apply\"]"
   - wait: 1
   - seed_dialog: {prompt: qa-ui-auto-menu-renamed.txt, confirm: true}
   - right_click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-menu.txt"'
   - wait_for: "[data-testid=\"context-menu\"]"
   - click: "[data-testid=\"context-menu-item-rename\"]"
-  - wait_for: "text=\"qa-ui-auto-menu-renamed.txt\""
+  - wait_for: "[data-testid=\"sftp-remote-pane\"] >> text=\"qa-ui-auto-menu-renamed.txt\""
   - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-menu-renamed.txt"'
   - click: "[data-testid=\"sftp-remote-delete\"]"
   - wait: 1

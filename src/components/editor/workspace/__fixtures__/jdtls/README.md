@@ -17,15 +17,23 @@ trace。任何 capability 在没有对应 trace 证据前,只能声明
 
 | 项目 | 构建工具 | 覆盖场景 |
 |---|---|---|
-| `maven-single/` | maven | JDK type、static member(`Arrays.`)、overload 家族(`appen`)、依赖类型 + resolve import(commons-lang3)、test source set(junit) |
-| `maven-multi-module/` | maven | 跨模块类型(CoreUtil)+ resolve import、同名类型歧义(两个 `Result`) |
-| `gradle-single/` | gradle | Gradle 导入 sanity(JDK type) |
-| `gradle-multi-module/` | gradle | 跨模块类型(GCore)+ resolve import |
-| `maven-broken-classpath/` | maven | 坏 classpath:缺失依赖候选绝不出现、java.lang 仍可补全 |
+| `maven-single/` | maven | JDK type、static member(`Arrays.`)、overload 家族(`appen`)、依赖类型 + resolve import(commons-lang3)、test source set(junit)；§8.20.2 W1: signatureHelp overload 家族/activeParameter 推进/嵌套调用/泛型签名、supersede-cancel(`$/cancelRequest` → -32800)、hover(project javadoc/JDK/commons-lang3 FQN)、provider channel absence、restart 后 completion+signatureHelp 双恢复；§8.20.3 W2: 分析快照(serverInfo/import progress/build-change generation bump/offline-cache hint)；§8.20.4 W3: 未解析类型 + Import quick fix(post-image hash + undo 还原) + codeAction cancel 探针 |
+| `QuickFixTarget.java`(maven-single 内) | — | 简名 `StringUtils` 无 import → unresolved 诊断 + Import quick fix 的专用靶文件 |
+| `maven-multi-module/` | maven | 跨模块类型(CoreUtil)+ resolve import、同名类型歧义(两个 `Result`)；W2 分析快照 |
+| `gradle-single/` | gradle | Gradle 导入 sanity(JDK type)；W2 分析快照 |
+| `gradle-multi-module/` | gradle | 跨模块类型(GCore)+ resolve import；W2 分析快照 |
+| `maven-broken-classpath/` | maven | 坏 classpath:缺失依赖候选绝不出现、java.lang 仍可补全；W2: incomplete/missing 诊断标记(degraded 证据) |
+
+W2 分析快照(`trace.analysis`)记录：serverInfo(提供方自报身份)、
+registered executeCommands（**当前 jdt.ls 不注册 `java.project.*`** →
+module/classpath 详情诚实缺席，lifecycle-only 降级）、build-file 哈希、
+import progress 轨迹(events/begin tokens/titles/百分比)。
 
 补全目标写在 `completionTargets()` 的不可达块里,每行一个裸前缀
 token;runner 按"整行等于 token"(成员触发则行尾)定位 caret,与编译
-代码中的同名标识符无歧义。
+代码中的同名标识符无歧义。W1 的 signature/hover 目标在
+`signatureTargets()` 里,是**真实可编译的调用表达式**(不可达块内),
+runner 按"整行 + 行内前缀/token"定位 caret。
 
 ## Runner(`runner/`)
 
@@ -34,21 +42,31 @@ node runner/run-jdtls-fixture.mjs [--fixture <id>]...
 ```
 
 - 启动配方镜像 `src-tauri/src/lsp.rs`(产品 JVM flags、共享 config 区、
-  `-data` workspace);initialize 的 completion client capabilities 与
-  生产相同,含 `resolveSupport.properties = [documentation, detail,
-  additionalTextEdits]`。
-- 每个场景轮询 completion 直到期望满足或超时(首次项目导入可达数分钟);
-  命中候选项后发 `completionItem/resolve`(原样回传 item.raw,与生产一致),
-  记录 additionalTextEdits。
+  `-data` workspace);initialize 的 client capabilities 与生产相同,
+  含 `resolveSupport.properties = [documentation, detail,
+  additionalTextEdits]` **和 `textDocument.signatureHelp`
+  (contextSupport/signatureInformation)**;initializationOptions 镜像
+  生产 `java.*` 设置块——其中 `java.signatureHelp.enabled=true` 是
+  jdt.ls 暴露 textDocument/signatureHelp 的开关(默认关,漏掉会静默
+  得到空签名)。
+- 每个场景轮询 completion/signatureHelp 直到期望满足或超时(首次项目
+  导入可达数分钟);命中候选项后发 `completionItem/resolve`(原样回传
+  item.raw,与生产一致),记录 additionalTextEdits。
+- W1 supersede-cancel 场景:`requestTracked` 拿到 wire id → 立即发
+  `$/cancelRequest` → 断言首个请求以 -32800/空结束且替换请求满足。
 - `verifyRevert` 场景把 primary+additional edits 应用到内存文档并做哈希
   往返:应用后哈希 → 反向移除全部插入 → 必须精确恢复原始哈希。这验证
   additional edits 是纯插入且范围良定义(R0 ledger 的 hash 记账前提),
   **不等于**编辑器内 Ctrl+Z —— 后者由 mounted/browser/native 层另行记账。
-- restart 场景 SIGKILL 首个 server 后重建会话并复测同一用例。
+- restart 场景 SIGKILL 首个 server 后重建会话并复测同一用例;maven-single
+  额外复测一个 signatureHelp 场景。
 - trace 写入 `traces/<fixture>.trace.json`:工具链版本、构建模型指纹
   (pom/gradle 文件内容 sha256)、逐场景请求次数/耗时/itemCount/
-  isIncomplete、resolve additional edits 原文、acceptance 三哈希、
-  restart 时延;home/tmp/project 绝对路径统一替换为 `~`/`${project}`/
+  isIncomplete、resolve additional edits 原文、acceptance 三哈希、W1 的
+  signaturesCount/labels/activeParameter/hover 摘录+外链/supersede 结果/
+  providerChannels(静态声明 vs 动态注册 vs 场景证明;Type Info 与
+  Expression Static Data 无 LSP 通道的 absence 记录)、restart 时延;
+  home/tmp/project 绝对路径统一替换为 `~`/`${project}`/
   `${fixtures}`,不含源码正文。
 
 ## 诚实边界

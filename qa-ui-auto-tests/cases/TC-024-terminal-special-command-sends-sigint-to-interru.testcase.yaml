@@ -19,9 +19,9 @@ steps:
   - wait: 1
   - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  - hover: text=Special Command
-  - wait_for: "text=\"SIGINT (Interrupt)\""
-  - click: "text=\"SIGINT (Interrupt)\""
+  - hover: '[data-testid="context-menu"] >> text=Special Command'
+  - wait_for: "[data-testid=\"context-menu\"] >> text=\"SIGINT (Interrupt)\""
+  - click: "[data-testid=\"context-menu\"] >> text=\"SIGINT (Interrupt)\""
   - wait: 2
   - click: "[data-testid=\"terminal-pane\"]"
   - type: echo qa-after-sigint

@@ -18,6 +18,7 @@ import argparse
 import json
 import multiprocessing as mp
 import os
+import platform
 import sys
 import time
 import traceback
@@ -271,21 +272,45 @@ def _serialize_case(c: tc_mod.TestCase) -> dict:
 
 def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root: Path,
                 dry_run: bool) -> list[dict]:
-    """Native mode (P1 scope): delegate to tauri_webdriver.py for the smoke subset.
+    """Native mode (P2): full verb subset over tauri-driver + fixtures.
 
-    For P1 we keep the behavior simple: import the legacy harness and run cases
-    sequentially. P3 (covers expansion) will rewrite this with an upgraded driver.
+    R9 §8.19.10 native gate harness. Sequential single session per case;
+    fixtures run before steps; `${fixture.*}` template values resolve
+    strictly after their fixture produced them. App-data isolation is set up
+    by `_prepare_native_env` in main() so the launched binary never touches
+    the developer profile.
     """
+    from types import SimpleNamespace
+
     from tauri_webdriver import NativeHarness, WebDriverError  # type: ignore[no-redef]
+
+    from .native_steps import NativeStepContext, run_native_step
 
     results: list[dict] = []
     if dry_run:
+        # Validate verbs against the native registry and resolve placeholders
+        # that are statically known (cfg/env). ${fixture.*} only binds at
+        # runtime, so dry-run tolerates them being unresolved.
+        from .native_steps import VERBS as NATIVE_VERBS
         for c in cases:
+            status, failure = "passed", None
+            try:
+                for step in c.steps:
+                    verb, raw_args = tc_mod.step_verb_and_args(step)
+                    if verb not in NATIVE_VERBS:
+                        raise StepError(f"unknown native verb: {verb}")
+                    try:
+                        cfg_mod.resolve(raw_args, cfg=cfg, env=env)
+                    except KeyError as e:
+                        if "fixture value not set" not in str(e):
+                            raise
+            except Exception as e:  # noqa: BLE001
+                status, failure = "failed", {"message": f"dry-run validation failed: {e}"}
             results.append({
-                "id": c.id, "title": c.title, "status": "passed",
+                "id": c.id, "title": c.title, "status": status,
                 "tags": c.tags, "covers": c.covers, "modes": c.modes,
                 "duration_sec": 0.0, "step_count": len(c.steps),
-                "worker_id": 0, "failure": None, "fixtures_skipped": None,
+                "worker_id": 0, "failure": failure, "fixtures_skipped": None,
             })
         return results
 
@@ -300,43 +325,138 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                 "duration_sec": 0.0, "step_count": len(c.steps),
                 "worker_id": 0, "failure": None, "fixtures_skipped": None,
             }
+            fixture_values: dict[str, str] = {}
+            last_step, last_verb, last_args = 0, "<setup>", None
+            ctx_ns = SimpleNamespace(
+                page=None, case_id=c.id, case_dir=case_dir, cfg=cfg, env=env,
+                dry_run=False, worker_id=0, report_root=report_root,
+                values=fixture_values, step_index=0,
+            )
             try:
-                session = harness.create_session()
-                try:
-                    # Native is intentionally minimal in P1 — only screenshots + open.
-                    # Cases with non-native verbs are recorded as failed so they're
-                    # visible (rather than silently skipped).
-                    for i, step in enumerate(c.steps, start=1):
-                        verb, args = tc_mod.step_verb_and_args(step)
-                        if verb in ("open", "goto"):
-                            continue  # tauri-driver auto-launches the binary
-                        if verb == "screenshot":
-                            target = case_dir / (
-                                args["path"] if isinstance(args, dict) else str(args)
+                # Fixtures first — a FixtureSkip turns into "skipped".
+                for fname in c.fixtures:
+                    fix = get_fixture(fname)
+                    try:
+                        fix.setup(ctx_ns)
+                    except FixtureSkip as fs:
+                        r["status"] = "skipped"
+                        r["fixtures_skipped"] = f"{fname}: {fs}"
+                        break
+                else:
+                    session = harness.create_session()
+                    try:
+                        nctx = NativeStepContext(session, case_dir, cfg)
+                        last_step, last_verb, last_args = 0, "<setup>", None
+                        for i, step in enumerate(c.steps, start=1):
+                            ctx_ns.step_index = i
+                            verb, raw_args = tc_mod.step_verb_and_args(step)
+                            last_step, last_verb, last_args = i, verb, raw_args
+                            args = cfg_mod.resolve(
+                                raw_args, cfg=cfg, env=env, fixture=fixture_values
                             )
-                            session.screenshot(target)
-                            continue
-                        raise StepError(
-                            f"native runner P1 supports only `open` and `screenshot`; "
-                            f"got {verb!r}"
+                            nctx.case_dir.mkdir(parents=True, exist_ok=True)
+                            run_native_step(nctx, verb, args)
+                    finally:
+                        console = []
+                        with suppress(Exception):
+                            console = session.console_entries()
+                        (case_dir / "console.json").write_text(
+                            json.dumps(console[-500:], ensure_ascii=False, indent=1),
+                            encoding="utf-8",
                         )
-                finally:
-                    session.close()
+                        with suppress(Exception):
+                            session.close()
             except WebDriverError as e:
                 r["status"] = "failed"
                 r["failure"] = {
-                    "step_index": None, "verb": None, "args": None,
+                    "step_index": last_step,
+                    "verb": last_verb,
+                    "args": None,
                     "message": f"WebDriverError: {e}", "artifacts": {},
                 }
             except StepError as e:
                 r["status"] = "failed"
                 r["failure"] = {
-                    "step_index": None, "verb": None, "args": None,
+                    "step_index": last_step,
+                    "verb": last_verb,
+                    "args": last_args,
                     "message": str(e), "artifacts": {},
                 }
+            except Exception as e:  # noqa: BLE001
+                r["status"] = "failed"
+                r["failure"] = {
+                    "step_index": last_step,
+                    "verb": last_verb,
+                    "args": None,
+                    "message": f"{type(e).__name__}: {e}",
+                    "artifacts": {},
+                }
+            if r["status"] == "failed":
+                _capture_native_failure(harness, c, case_dir, r)
             r["duration_sec"] = time.time() - started
             results.append(r)
     return results
+
+
+def _capture_native_failure(harness: Any, case: tc_mod.TestCase,
+                            case_dir: Path, result: dict) -> None:
+    """Best-effort failure artifacts: fresh-session screenshot of the app."""
+    artifacts: dict[str, str] = {}
+    try:
+        session = harness.create_session()
+        try:
+            shot = case_dir / "failure-native.png"
+            session.screenshot(shot)
+            artifacts["screenshot"] = str(shot)
+            entries = session.console_entries()
+            (case_dir / "console-failure.json").write_text(
+                json.dumps(entries[-300:], ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+            artifacts["console"] = str(case_dir / "console-failure.json")
+        finally:
+            with suppress(Exception):
+                session.close()
+    except Exception:  # noqa: BLE001
+        pass
+    result["failure"]["artifacts"] = artifacts  # type: ignore[index]
+
+
+def _prepare_native_env(report_root: Path) -> dict[str, str]:
+    """Redirect the launched app's persistent state into the run directory.
+
+    The WebDriver-spawned binary inherits this process's environment. On
+    Linux Tauri resolves app-data under $XDG_DATA_HOME/<bundle-id>; on
+    Windows under %APPDATA%\\<bundle-id>. The legacy NEWMOB_DATA_DIR var is
+    also exported because reset_db wipes it when set. Returns the overrides
+    applied so reports can record exactly how isolation was achieved.
+    """
+    data_root = (report_root / "native-appdata").resolve()
+    config_root = (report_root / "native-appconfig").resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    config_root.mkdir(parents=True, exist_ok=True)
+    # XDG spec: relative XDG_DATA_HOME values are IGNORED by conforming
+    # readers (the app then silently falls back to the real profile), so
+    # these must be absolute.
+    overrides: dict[str, str] = {}
+    system = platform.system()
+    if system == "Linux":
+        overrides["XDG_DATA_HOME"] = str(data_root)
+        overrides["XDG_CONFIG_HOME"] = str(config_root)
+    elif system == "Windows":
+        overrides["APPDATA"] = str(data_root)
+        overrides["LOCALAPPDATA"] = str(data_root)
+    elif system == "Darwin":
+        # macOS: Tauri uses ~/Library/Application Support; HOME redirect is
+        # invasive (breaks keychain/system services), so it is opt-in via
+        # QA_NATIVE_HOME_OVERRIDE and otherwise recorded as a known gap.
+        custom = os.environ.get("QA_NATIVE_HOME_OVERRIDE")
+        if custom:
+            overrides["HOME"] = custom
+    overrides["NEWMOB_DATA_DIR"] = str(data_root)
+    for k, v in overrides.items():
+        os.environ[k] = v
+    return overrides
 
 
 def _rotate_runs(report_dir: Path, keep: int) -> None:
@@ -415,6 +535,8 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[dict] = []
     if mode == "native":
+        overrides = _prepare_native_env(report_root)
+        print(f"qa-ui-auto: native app-data isolation overrides: {overrides or 'none (record as gap)'}")
         results = _native_run(selected, cfg, env, report_root, args.dry_run)
     else:
         payloads = []

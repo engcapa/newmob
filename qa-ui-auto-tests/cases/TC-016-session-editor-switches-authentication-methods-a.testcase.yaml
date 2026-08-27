@@ -16,11 +16,10 @@ steps:
   - assert_visible: "[data-testid=\"advanced-ssh-settings\"]"
   - assert_visible: "input[aria-label=\"SSH password\"]"
   - fill: {selector: "input[aria-label=\"SSH password\"]", value: qa-secret-123}
+  # SessionEditor no longer offers a password reveal button; the field is
+  # always type=password. Auth-method switching uses the Private key checkbox.
   - assert_attribute: {selector: "input[aria-label=\"SSH password\"]", name: type, equals: password}
-  - click: "button[title=\"Show / hide\"]"
-  - wait: 1
-  - assert_attribute: {selector: "input[aria-label=\"SSH password\"]", name: type, equals: text}
-  - click: 'label:has-text("Private key") input[type="radio"]'
+  - click: '[data-testid="session-editor"] div:has(> input[aria-label="Private key path"]) > input[type="checkbox"]'
   - wait_for: "input[aria-label=\"Private key path\"]"
   - fill: {selector: "input[aria-label=\"Private key path\"]", value: /home/qauser/.ssh/id_ed25519}
   - send_text_via_label: {label_contains: Enable jump host, checked: true}

@@ -258,13 +258,24 @@ export function workspaceSemanticIndexBuildIsCurrent(
     && snapshot.staleReasons.length === 0;
 }
 
+/**
+ * §8.20.3 W2 copy rule: this ledger is PROVIDER FRESHNESS metadata. It must
+ * never read as an IntelliJ-style index ("Ready"/"Building" alone would
+ * overclaim), so every label names the provider relationship explicitly.
+ */
 export function workspaceSemanticIndexStatusLabel(
   snapshot: WorkspaceSemanticIndexSnapshot,
 ): string {
-  if (snapshot.status === "ready") return `Ready · generation ${snapshot.generation}`;
-  if (snapshot.status === "building") return `Building · generation ${snapshot.generation}`;
-  if (snapshot.status === "error") return `Error · generation ${snapshot.generation}`;
-  return `Stale · generation ${snapshot.generation}`;
+  if (snapshot.status === "ready") {
+    return `Provider fresh · generation ${snapshot.generation}`;
+  }
+  if (snapshot.status === "building") {
+    return `Provider working · generation ${snapshot.generation}`;
+  }
+  if (snapshot.status === "error") {
+    return `Provider error · generation ${snapshot.generation}`;
+  }
+  return `Provider stale · generation ${snapshot.generation}`;
 }
 
 /** Detect text replacements made outside CodeMirror's immediate edit path. */

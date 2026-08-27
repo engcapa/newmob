@@ -1,19 +1,46 @@
 id: TC-IDE-C7-01
-title: "smart completion unavailable contract plus surround"
+title: "Inspection heuristic label, syntax unavailable, Generate gate"
 description: |
-  §8.18.10 gate case. Smart action visible but typed-unavailable without expected-type capability; surround try/catch on whole-line selection with one undo.
-  Requires the Tauri native harness (and for provider cases the versioned
-  jdtls fixture from __fixtures__/jdtls). Not executable in browser mode;
-  recorded here so the catalog tracks the gate and the manifest can reference
-  run results per platform.
-covers: [F25.9]
-tags: [code-workspace, ide-c7, native-gate, p1]
-modes: [native]
+  §8.19.10 gate case C7 (heuristic/syntax portion). Capability ids:
+  inspection.heuristic-label / surround-generate.typed-unavailable.
+  Provider Generate candidates need the fixture (provider mode). Browser
+  verifies: analysis panel labels heuristic-only rows as heuristic, syntax
+  highlighting reports its typed unavailable state for unsupported
+  languages, and Surround/Generate actions expose explicit unavailable
+  reasons instead of fake menus. Highest claim on green: L1
+  unavailable-contract + heuristic labeling.
+covers: [F25.5]
+tags: [code-workspace, ide-c7, inspection, unavailable-contract, p1]
+modes: [browser]
 fixtures: [reset_db]
-timeout_sec: 300
+timeout_sec: 120
 steps:
   - open: "${cfg.app.base_url}"
-  - wait_for: "[data-testid=\"tab-bar\"]"
-  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - wait_for: "[data-testid=\"code-workspace-tab\"]"
-  - screenshot: tc-ide-c7-01-placeholder.png
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  # Add the browser-VFS preview folder (/preview prefilled in the prompt).
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  # Open README.txt into the active leaf.
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
+
+  - click: '[data-testid="code-workspace-bottom-tab-analysis"]'
+  - wait_for: '[data-testid="code-workspace-analysis-panel"]'
+  - screenshot: tc-ide-c7-analysis.png
+  # Terminal context menu: Syntax highlighting submenu marks non-JS/TS
+  # languages as disabled (typed unavailable, not hidden).
+  - click: '[data-testid="new-local-terminal"]'
+  - wait_for: '[data-testid="terminal-pane"]'
+  - right_click: {selector: '[data-testid="terminal-pane"]', position: {x: 40, y: 40}}
+  - wait_for: '[data-testid="context-menu"]'
+  - hover: '[data-testid="context-menu"] >> text=Syntax highlighting'
+  - assert_visible: '[data-testid="context-menu"] >> text="Perl syntax"'
+  - screenshot: tc-ide-c7-syntax-unavailable.png
+  - press: Escape

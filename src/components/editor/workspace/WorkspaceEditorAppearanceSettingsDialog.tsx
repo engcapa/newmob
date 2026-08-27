@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RotateCcw, X } from "lucide-react";
 import {
   cloneEditorAppearanceProfile,
@@ -12,6 +12,7 @@ export interface WorkspaceEditorAppearanceSettingsDialogProps {
   profile: EditorAppearanceProfile;
   onApply: (profile: EditorAppearanceProfile) => void;
   onClose: () => void;
+  onClearClipboardHistory?: () => void;
 }
 
 function listText(values: readonly string[]): string {
@@ -30,10 +31,12 @@ export function WorkspaceEditorAppearanceSettingsDialog({
   profile,
   onApply,
   onClose,
+  onClearClipboardHistory,
 }: WorkspaceEditorAppearanceSettingsDialogProps) {
   const [draft, setDraft] = useState(() => cloneEditorAppearanceProfile(profile));
   const [softWrapPatterns, setSoftWrapPatterns] = useState(() => listText(profile.softWrap.patterns));
   const [breadcrumbLanguages, setBreadcrumbLanguages] = useState(() => listText(profile.breadcrumbs.languages));
+  const clearButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -316,6 +319,88 @@ export function WorkspaceEditorAppearanceSettingsDialog({
                 className="block w-full resize-y rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2 py-1 font-mono text-[11px]"
               />
             </label>
+          </section>
+
+          <section aria-labelledby="workspace-editor-appearance-clipboard-heading" className="space-y-3 border-t border-[var(--taomni-code-border)] pt-4">
+            <h3 id="workspace-editor-appearance-clipboard-heading" className="font-medium">Clipboard History</h3>
+            <p
+              data-testid="workspace-editor-appearance-clipboard-scope-note"
+              className="text-[11px] text-[var(--taomni-code-muted)]"
+            >
+              Policy settings persist per-workspace; clipboard content is stored in-memory for the current session only and is never written to disk or local storage.
+            </p>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                data-testid="workspace-editor-appearance-clipboard-history-enabled"
+                checked={draft.clipboard.historyEnabled}
+                onChange={(event) => updateDraft({
+                  clipboard: { ...draft.clipboard, historyEnabled: event.target.checked },
+                })}
+              />
+              <span>Enable clipboard history (Ctrl+Shift+V / Meta+Shift+V)</span>
+            </label>
+            <label className="grid grid-cols-[1fr_270px] items-center gap-3">
+              <span>Maximum history entries</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  step={1}
+                  data-testid="workspace-editor-appearance-clipboard-max-items"
+                  aria-label="Clipboard history maximum entries"
+                  value={draft.clipboard.historyMaxItems}
+                  onChange={(event) => updateDraft({
+                    clipboard: { ...draft.clipboard, historyMaxItems: Number(event.target.value) },
+                  })}
+                  className="h-7 w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">(1–50)</span>
+              </span>
+            </label>
+            <label className="grid grid-cols-[1fr_270px] items-center gap-3">
+              <span>Maximum total memory</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1024}
+                  step={1024}
+                  data-testid="workspace-editor-appearance-clipboard-max-bytes"
+                  aria-label="Clipboard history maximum total bytes"
+                  value={draft.clipboard.historyMaxTotalBytes}
+                  onChange={(event) => updateDraft({
+                    clipboard: { ...draft.clipboard, historyMaxTotalBytes: Number(event.target.value) },
+                  })}
+                  className="h-7 w-32 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2"
+                />
+                <span className="text-[var(--taomni-code-muted)]">bytes</span>
+              </span>
+            </label>
+            <div
+              data-testid="workspace-editor-appearance-clipboard-notice"
+              className="text-[11px] text-[var(--taomni-code-muted)]"
+            >
+              Oversized items (&gt;256KB) and sensitive secrets bypass the history ring and remain in the active paste slot only.
+            </div>
+            {onClearClipboardHistory && (
+              <div className="pt-1">
+                <button
+                  ref={clearButtonRef}
+                  type="button"
+                  data-testid="workspace-editor-appearance-clipboard-clear"
+                  onClick={() => {
+                    if (window.confirm("Clear clipboard history for current workspace session?")) {
+                      onClearClipboardHistory();
+                      clearButtonRef.current?.focus();
+                    }
+                  }}
+                  className="rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-3 py-1 hover:bg-[var(--taomni-code-active-line-bg)]"
+                >
+                  Clear History
+                </button>
+              </div>
+            )}
           </section>
         </div>
 

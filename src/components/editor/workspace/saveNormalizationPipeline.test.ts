@@ -4,6 +4,7 @@ import {
   adjustFinalNewline,
   normalizeLineEndings,
   runSaveNormalizationPipeline,
+  WorkspaceSavePipeline,
 } from "./saveNormalizationPipeline";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 
@@ -178,5 +179,201 @@ describe("saveNormalizationPipeline", () => {
     expect(result.resolvedEol).toBe("crlf");
     expect(result.resolvedCharset).toBe("UTF-8");
     expect(result.resolvedBom).toBe(true);
+  });
+
+  it("reports stages executed in order format -> organize-imports -> normalization", async () => {
+    const style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      trimTrailingWhitespace: true,
+      source: "scheme",
+      label: "Spaces: 2",
+    };
+
+    const formatFn = vi.fn(async (text: string) => `/* formatted */\n${text}`);
+    const organizeImportsFn = vi.fn(async (text: string) => `import A;\n${text}`);
+
+    const result = await runSaveNormalizationPipeline({
+      text: "const x = 1;   \n",
+      codeStyle: style,
+      formatOnSave: true,
+      formatFn,
+      organizeImportsOnSave: true,
+      organizeImportsFn,
+    });
+
+    expect(result.formatted).toBe(true);
+    expect(result.importsOrganized).toBe(true);
+    expect(result.whitespaceTrimmed).toBe(true);
+    expect(result.stages.map((s) => ({ stage: s.stage, status: s.status }))).toEqual([
+      { stage: "format", status: "executed" },
+      { stage: "organize-imports", status: "executed" },
+      { stage: "normalization", status: "executed" },
+    ]);
+    expect(result.stages[0].beforeHash).toBeDefined();
+    expect(result.stages[0].afterHash).toBeDefined();
+    expect(result.text).toBe("import A;\n/* formatted */\nconst x = 1;\n");
+  });
+
+  it("stops subsequent effectful provider stages on format error but preserves user text through normalization", async () => {
+    const style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      trimTrailingWhitespace: true,
+      source: "scheme",
+      label: "Spaces: 2",
+    };
+
+    const formatFn = vi.fn(async () => {
+      throw new Error("LSP formatter crashed");
+    });
+    const organizeImportsFn = vi.fn(async (text: string) => `import B;\n${text}`);
+
+    const userText = "const draft = 42;   \n";
+    const result = await runSaveNormalizationPipeline({
+      text: userText,
+      codeStyle: style,
+      formatOnSave: true,
+      formatFn,
+      organizeImportsOnSave: true,
+      organizeImportsFn,
+    });
+
+    expect(result.formatted).toBe(false);
+    expect(organizeImportsFn).not.toHaveBeenCalled();
+    expect(result.stages[0]).toMatchObject({ stage: "format", status: "failed" });
+    expect(result.stages[1]).toMatchObject({ stage: "organize-imports", status: "skipped-prior-failure" });
+    expect(result.stages[2]).toMatchObject({ stage: "normalization", status: "executed" });
+    // User text preserved with safe whitespace trimming, never dropped!
+    expect(result.text).toBe("const draft = 42;\n");
+  });
+
+  it("respects EffectiveSavePolicyV4 exclusions and reports disabled status", async () => {
+    const style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      source: "scheme",
+      label: "Spaces: 2",
+    };
+
+    const formatFn = vi.fn(async (t: string) => `formatted:\n${t}`);
+
+    // Excluded path
+    const resultPathExcluded = await runSaveNormalizationPipeline({
+      text: "const a = 1;\n",
+      codeStyle: style,
+      filePath: "src/generated/code.ts",
+      savePolicy: {
+        format: { enabled: true, source: "scheme" },
+        organizeImports: { enabled: false, source: "default" },
+        exclusions: { patterns: ["**/generated/**"], formatterMarkers: true, source: "scheme" },
+        unsupported: ["rearrange", "cleanup", "directory", "module"],
+      },
+      formatFn,
+    });
+    expect(resultPathExcluded.formatted).toBe(false);
+    expect(formatFn).not.toHaveBeenCalled();
+    expect(resultPathExcluded.stages[0]).toMatchObject({
+      stage: "format",
+      status: "disabled",
+      reason: "path-excluded",
+    });
+    expect(resultPathExcluded.stages[1]).toMatchObject({
+      stage: "organize-imports",
+      status: "disabled",
+    });
+
+    // Formatter marker @formatter:off
+    const resultMarkerOff = await runSaveNormalizationPipeline({
+      text: "// @formatter:off\nconst b = 2;\n",
+      codeStyle: style,
+      filePath: "src/manual.ts",
+      savePolicy: {
+        format: { enabled: true, source: "scheme" },
+        organizeImports: { enabled: false, source: "default" },
+        exclusions: { patterns: [], formatterMarkers: true, source: "scheme" },
+        unsupported: ["rearrange", "cleanup", "directory", "module"],
+      },
+      formatFn,
+    });
+    expect(resultMarkerOff.formatted).toBe(false);
+    expect(resultMarkerOff.stages[0]).toMatchObject({
+      stage: "format",
+      status: "disabled",
+      reason: "formatter-marker-off",
+    });
+  });
+
+  describe("§8.22.6 U2-D Actions on Save Pipeline", () => {
+    it("aborts organize imports stage immediately when buffer version advances concurrently", async () => {
+      const style: EffectiveCodeStyle = {
+        tabSize: 2,
+        indentSize: 2,
+        continuationIndent: 4,
+        insertSpaces: true,
+        source: "scheme",
+        label: "Spaces: 2",
+      };
+
+      let currentVersion = 1;
+      const organizeImportsFn = vi.fn(async (text: string) => {
+        // User typed while organize imports was running
+        currentVersion = 2;
+        return `import Z;\n${text}`;
+      });
+
+      const initialText = "const a = 1;\n";
+      const result = await WorkspaceSavePipeline.run({
+        text: initialText,
+        codeStyle: style,
+        organizeImportsOnSave: true,
+        organizeImportsFn,
+        expectedVersion: 1,
+        getLatestBufferVersion: () => currentVersion,
+      });
+
+      expect(result.cancelledDueToEdit).toBe(true);
+      expect(result.importsOrganized).toBe(false);
+      expect(result.text).toBe(initialText);
+      expect(result.diagnostics[0]).toContain("Organize imports cancelled because buffer was modified concurrently");
+    });
+
+    it("executes complete pipeline sequence (Format -> Organize -> Whitespace -> EOL)", async () => {
+      const style: EffectiveCodeStyle = {
+        tabSize: 2,
+        indentSize: 2,
+        continuationIndent: 4,
+        insertSpaces: true,
+        trimTrailingWhitespace: true,
+        insertFinalNewline: true,
+        endOfLine: "lf",
+        source: "scheme",
+        label: "Spaces: 2",
+      };
+
+      const formatFn = vi.fn(async (t: string) => `// Formatted\n${t}`);
+      const organizeImportsFn = vi.fn(async (t: string) => `import A;\n${t}`);
+
+      const result = await WorkspaceSavePipeline.run({
+        text: "const hello = 'world';   ",
+        codeStyle: style,
+        formatOnSave: true,
+        formatFn,
+        organizeImportsOnSave: true,
+        organizeImportsFn,
+      });
+
+      expect(result.formatted).toBe(true);
+      expect(result.importsOrganized).toBe(true);
+      expect(result.whitespaceTrimmed).toBe(true);
+      expect(result.newlineAdjusted).toBe(true);
+      expect(result.text).toBe("import A;\n// Formatted\nconst hello = 'world';\n");
+    });
   });
 });

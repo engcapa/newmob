@@ -21,8 +21,8 @@ steps:
   - wait_for: '[data-testid="context-menu"]'
   - hover: '[data-testid="context-menu"] >> text="Import sessions from third-party programs"'
   - wait: 1
-  - hover: 'text="Import iTerm2 profiles"'
+  - hover: '[data-testid="context-menu"] >> text="Import iTerm2 profiles"'
   - wait: 1
-  - assert_visible: 'text="From local iTerm2 DynamicProfiles"'
+  - assert_visible: '[data-testid="context-menu"] >> text="From local iTerm2 DynamicProfiles"'
   - press: Escape
   - screenshot: submenu-flip.png

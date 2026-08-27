@@ -5,7 +5,17 @@ import { EditorGroup } from "./EditorGroup";
 import type { OpenFileViewModel } from "./editorGroupTypes";
 
 vi.mock("./CodeMirrorHost", () => ({
-  CodeMirrorHost: () => <div data-testid="mock-code-mirror" />,
+  CodeMirrorHost: ({ onFoldProvenanceChange }: { onFoldProvenanceChange?: (p: string | null) => void }) => (
+    <div data-testid="mock-code-mirror">
+      <button
+        type="button"
+        data-testid="mock-trigger-fold-provenance"
+        onClick={() => onFoldProvenanceChange?.("explicit-comment")}
+      >
+        Trigger Fold
+      </button>
+    </div>
+  ),
 }));
 
 afterEach(cleanup);
@@ -84,7 +94,10 @@ function props(overrides: Partial<ComponentProps<typeof EditorGroup>> = {}): Com
     onCompleteResolve: vi.fn(async () => null),
     onCompletionIdentity: vi.fn(() => null),
     onCompletionDiagnostic: vi.fn(),
-    onSignatureHelp: vi.fn(async () => null),
+    onParameterTrigger: vi.fn(),
+    onParameterInvalidate: vi.fn(),
+    onParameterEscape: vi.fn(() => false),
+    parameterPopup: null,
     onSelectionChange: vi.fn(),
     onViewportChange: vi.fn(),
     onExpandSelection: vi.fn(async () => null),
@@ -345,5 +358,100 @@ describe("EditorGroup tabs", () => {
 
     // Since mock CodeMirrorHost doesn't fire viewport events by default, we verify the component renders without error
     expect(screen.getByTestId("mock-code-mirror")).toBeInTheDocument();
+  });
+
+  it("orders tabs according to tabPolicy using orderTabsForDisplay", () => {
+    const z = file("zeta");
+    const a = file("alpha");
+    const b = file("beta");
+
+    render(
+      <EditorGroup
+        {...props({
+          openOrder: ["zeta", "alpha", "beta"],
+          openFiles: { zeta: z, alpha: a, beta: b },
+          activeKey: "alpha",
+          pinnedKeys: [],
+          tabPolicy: {
+            schemaVersion: 3,
+            limitPerLeaf: 10,
+            order: "alphabetical",
+            openPosition: "end",
+            activateOnClose: "mru",
+            pinnedRow: "same",
+            previewMode: true,
+            reusePreview: true,
+          },
+        })}
+      />,
+    );
+
+    const tabs = document.querySelectorAll("[data-editor-tab-key]");
+    const keys = Array.from(tabs).map((el) => el.getAttribute("data-editor-tab-key"));
+    expect(keys).toEqual(["alpha", "beta", "zeta"]);
+  });
+
+  it("renders pinned tabs in a separate DOM row with tablist ARIA semantics when pinnedRow is separate", () => {
+    const p1 = file("pin-one");
+    const p2 = file("pin-two");
+    const n1 = file("normal-one");
+
+    render(
+      <EditorGroup
+        {...props({
+          openOrder: ["pin-one", "normal-one", "pin-two"],
+          openFiles: { "pin-one": p1, "normal-one": n1, "pin-two": p2 },
+          activeKey: "normal-one",
+          pinnedKeys: ["pin-one", "pin-two"],
+          tabPolicy: {
+            schemaVersion: 3,
+            limitPerLeaf: 10,
+            order: "open-order",
+            openPosition: "end",
+            activateOnClose: "mru",
+            pinnedRow: "separate",
+            previewMode: true,
+            reusePreview: true,
+          },
+        })}
+      />,
+    );
+
+    const pinnedStrip = screen.getByTestId("code-workspace-editor-pinned-tab-strip");
+    expect(pinnedStrip).toHaveAttribute("role", "tablist");
+    expect(pinnedStrip).toHaveAttribute("aria-label", "Pinned editor tabs");
+    const pinnedTabs = pinnedStrip.querySelectorAll("[data-editor-tab-key]");
+    expect(Array.from(pinnedTabs).map((el) => el.getAttribute("data-editor-tab-key"))).toEqual([
+      "pin-one",
+      "pin-two",
+    ]);
+
+    const mainStrip = screen.getByTestId("code-workspace-editor-tab-strip");
+    expect(mainStrip).toHaveAttribute("role", "tablist");
+    expect(mainStrip).toHaveAttribute("aria-label", "Editor tabs");
+    const mainTabs = mainStrip.querySelectorAll("[data-editor-tab-key]");
+    expect(Array.from(mainTabs).map((el) => el.getAttribute("data-editor-tab-key"))).toEqual([
+      "normal-one",
+    ]);
+  });
+
+  it("displays region fold provenance badge in the file status bar when active", () => {
+    const f1 = file("sample");
+    render(
+      <EditorGroup
+        {...props({
+          openOrder: ["sample"],
+          openFiles: { sample: f1 },
+          activeKey: "sample",
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("code-workspace-fold-provenance")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("mock-trigger-fold-provenance"));
+    const badge = screen.getByTestId("code-workspace-fold-provenance");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute("data-provenance", "explicit-comment");
+    expect(badge).toHaveTextContent("Region: explicit-comment");
   });
 });

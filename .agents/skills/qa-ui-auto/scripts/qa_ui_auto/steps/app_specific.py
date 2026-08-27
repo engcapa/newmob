@@ -304,3 +304,34 @@ def step_send_text_via_label(ctx: StepContext, args: Any) -> None:
     current = cb.is_checked()
     if current != desired:
         cb.click(force=True)
+
+
+@verb("vault_first_run")
+def step_vault_first_run(ctx: StepContext, args: Any) -> None:
+    """Complete the empty-vault first-run master-password gate (browser too).
+
+    Mirrors the native verb: setup dialog -> fill both fields -> confirm.
+    Locked vault with unknown password fails loudly; already-unlocked no-ops.
+    """
+    password = str(args)
+    if ctx.dry_run:
+        return
+    page = ctx.page  # type: ignore[attr-defined]
+    setup = page.locator("[data-testid='vault-setup-dialog']")
+    unlock = page.locator("[data-testid='vault-unlock-dialog']")
+    welcome = page.locator("[data-testid='welcome-panel']")
+    deadline = 20.0
+    try:
+        setup.wait_for(state="visible", timeout=deadline * 1000)
+    except Exception:  # noqa: BLE001
+        if unlock.count() and unlock.first.is_visible():
+            raise StepError(
+                "vault_first_run: vault is LOCKED with an unknown master password"
+            )
+        if welcome.count():
+            return  # already unlocked
+        raise StepError("vault_first_run: neither vault dialog nor welcome-panel appeared")
+    setup.locator("[data-testid='vault-setup-pw1']").fill(password)
+    setup.locator("[data-testid='vault-setup-pw2']").fill(password)
+    setup.locator("[data-testid='vault-setup-confirm']").click()
+    setup.wait_for(state="hidden", timeout=30_000)

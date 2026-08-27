@@ -1,22 +1,85 @@
 id: TC-IDE-C5-01
-title: "QuickDoc explicit request reports typed unavailable without a provider"
+title: "Reference information V3 unavailable contracts (QuickDoc/Parameter/Static Data)"
 description: |
-  §8.18.10 C5 negative path (browser/stub). With no language server active,
-  the explicit Quick Documentation action must surface its typed unavailable
-  status instead of a stale popup or silent no-op. Provider-backed popup/
-  pin/history flows run under the jdtls fixture in the native manifest.
-covers: [F25.6]
-tags: [code-workspace, ide-c5, reference, p1]
+  §8.20.2 W1 gate case C5. Capability ids: editor.quick-doc /
+  editor.reference-info-v3. Provider-backed hover docs, Parameter overload
+  tooltips, pin/history and the jdtls supersede/cancel evidence need the
+  provider fixture (native mode); those steps belong to the native run and
+  the committed trace contract (`jdtlsTraceContract.test.ts`). The browser
+  run pins the honest unavailable contracts end to end: explicit Parameter
+  Info renders nothing without a language server, QuickDoc stays closed,
+  and Expression Static Data — reachable through the action palette —
+  reports its typed unavailable state instead of silently no-oping or
+  guessing from text. Highest claim on green: L1 unavailable-contract only.
+covers: [F25.5]
+tags: [code-workspace, ide-c5, quickdoc, parameter-info, reference-information, unavailable-contract, p1]
 modes: [browser]
 fixtures: [reset_db]
-timeout_sec: 90
+timeout_sec: 180
 steps:
   - open: "${cfg.app.base_url}"
-  - wait_for: "[data-testid=\"tab-bar\"]"
-  # Leave the welcome surface so the sidebar tool strip is mounted.
-  - click: "[data-testid=\"welcome-open-local-terminal\"]"
-  - click: "[data-testid=\"side-tab-tools\"]"
-  - wait_for: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - wait_for: "[data-testid=\"code-workspace-tab\"]"
-  - screenshot: tc-ide-c5-01-shell.png
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  # Add the browser-VFS preview folder (/preview prefilled in the prompt).
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  # Open README.txt into the active leaf.
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
+
+  - click: '[data-testid="code-workspace-bottom-tab-analysis"]'
+  - wait_for: '[data-testid="code-workspace-analysis-panel"]'
+  - screenshot: tc-ide-c5-analysis-empty-provider.png
+  # Focus an editor so editor-scoped actions resolve against README.txt.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+
+  # §8.20.2 W1: explicit Parameter Info (Ctrl+P) on a provider-less plain
+  # text buffer must not render a tooltip nor crash the editor shell.
+  - press: Control+p
+  - wait: 0.6
+  - assert_not_visible: '[data-testid="code-workspace-parameter-info"]'
+  - screenshot: tc-ide-c5-parameter-info-unavailable.png
+
+  # QuickDoc on a plain-text file without provider: no popup crash, status
+  # message explains unavailability.
+  - press: Control+q
+  - wait: 0.6
+  - assert_not_visible: '[data-testid="code-workspace-quick-doc"]'
+  - screenshot: tc-ide-c5-quickdoc-unavailable.png
+
+  # §8.20.2 W1: Expression Static Data is discoverable via Actions and
+  # reports its typed provider-unavailable instead of fabricating facts.
+  - click: '[data-testid="code-workspace-tab"]'
+  - wait: 0.3
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Expression Static Data
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Expression Static Data'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Expression Static Data"
+      timeout_sec: 15
+  - screenshot: tc-ide-c5-expression-static-data-unavailable.png
+
+  # §8.20.4 W3 DoD: unsupported full-project analysis has honest QA — the
+  # Problems panel states "On-the-fly diagnostics only" when the provider
+  # does not expose workspace-wide diagnostics (browser preview never does).
+  - click: '[data-testid="code-workspace-bottom-tab-problems"]'
+  - wait_for: '[data-testid="code-workspace-problems-panel"]'
+  - click: '[data-testid="problems-scope-project"]'
+  - assert_visible: '[data-testid="problems-full-project-note"]'
+  - assert_text:
+      selector: '[data-testid="problems-full-project-note"]'
+      contains: "On-the-fly diagnostics only"
+      timeout_sec: 10
+  - screenshot: tc-ide-c5-full-project-on-the-fly-only.png

@@ -18,10 +18,10 @@ steps:
   - seed_dialog: {prompt: qa-ui-auto-local-folder, confirm: true}
   - click: "[data-testid=\"sftp-local-new-folder\"]"
   - wait: 1
-  - wait_for: "text=\"qa-ui-auto-local-folder\""
+  - wait_for: "[data-testid=\"sftp-local-pane\"] >> text=\"qa-ui-auto-local-folder\""
   - right_click: '[data-testid="sftp-local-pane"] >> text="qa-ui-auto-local-folder"'
   - wait_for: "[data-testid=\"context-menu\"]"
-  - assert_visible: "text=\"Delete\""
-  - click: "text=\"Delete\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Delete\""
+  - click: "[data-testid=\"context-menu\"] >> text=\"Delete\""
   - wait: 1
   - screenshot: 052-sftp-local-new-folder.png

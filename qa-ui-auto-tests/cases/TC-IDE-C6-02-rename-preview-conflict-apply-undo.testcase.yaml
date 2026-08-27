@@ -1,19 +1,28 @@
 id: TC-IDE-C6-02
-title: "rename preview conflict apply undo"
+title: "Rename preview conflict/apply/undo under jdtls"
 description: |
-  §8.18.10 gate case. multi-file rename with conflict confirmation, per-file effect ledger, undo restores all recoverable files.
-  Requires the Tauri native harness (and for provider cases the versioned
-  jdtls fixture from __fixtures__/jdtls). Not executable in browser mode;
-  recorded here so the catalog tracks the gate and the manifest can reference
-  run results per platform.
-covers: [F25.8]
-tags: [code-workspace, ide-c6, native-gate, p1]
+  §8.19.10 gate case C6 part 2. Capability ids: rename.preview-conflict /
+  semantic.workspace-edit-undo. Required mode: PROVIDER FIXTURE — rename
+  conflict detection and cross-file WorkspaceEdit apply need jdtls.
+  Browser runs must report environment-blocked, never passed. Highest
+  claim on green: L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-c6, rename, provider-fixture, p1]
 modes: [native]
-fixtures: [reset_db]
-timeout_sec: 300
+fixtures: [reset_db, jdtls_required]
+timeout_sec: 600
 steps:
   - open: "${cfg.app.base_url}"
-  - wait_for: "[data-testid=\"tab-bar\"]"
-  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - wait_for: "[data-testid=\"code-workspace-tab\"]"
-  - screenshot: tc-ide-c6-02-placeholder.png
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Shift+F6
+  - screenshot: tc-ide-c6b-preview.png

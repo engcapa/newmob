@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   inlayHintsEnabledForLanguage,
   readWorkspaceIntelligencePreferences,
+  toBasicCompletionPolicyV2,
   writeWorkspaceIntelligencePreferences,
 } from "./intelligencePreferences";
 
@@ -39,6 +40,19 @@ describe("workspace intelligence preferences", () => {
         hoverDelayMs: 725,
         defaultTarget: "tool-window",
       },
+      completion: {
+        autoTrigger: false,
+        triggerDelayMs: 120,
+        minPrefixLength: 2,
+        maxItems: 80,
+        showDocumentation: false,
+        documentationDelayMs: 400,
+        caseMatching: "first-letter",
+        sortMode: "provider-relevance",
+        autoInsertSingle: false,
+        excludedSymbols: [],
+        prioritizedSymbols: [],
+      },
     });
     const restored = readWorkspaceIntelligencePreferences("ws");
     expect(inlayHintsEnabledForLanguage(restored, "typescript")).toBe(false);
@@ -56,6 +70,19 @@ describe("workspace intelligence preferences", () => {
       showOnHover: false,
       hoverDelayMs: 725,
       defaultTarget: "tool-window",
+    });
+    expect(restored.completion).toEqual({
+      autoTrigger: false,
+      triggerDelayMs: 120,
+      minPrefixLength: 2,
+      maxItems: 80,
+      showDocumentation: false,
+      documentationDelayMs: 400,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
     });
   });
 
@@ -76,6 +103,66 @@ describe("workspace intelligence preferences", () => {
       showOnHover: true,
       hoverDelayMs: 5_000,
       defaultTarget: "popup",
+    });
+    expect(restored.completion).toEqual({
+      autoTrigger: true,
+      triggerDelayMs: 50,
+      minPrefixLength: 1,
+      maxItems: 50,
+      showDocumentation: true,
+      documentationDelayMs: 250,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
+    });
+  });
+
+  it("normalizes and clamps out-of-range completion preferences", () => {
+    window.localStorage.setItem("taomni.codeWorkspace.intelligence.v1.completion-clamp", JSON.stringify({
+      completion: {
+        autoTrigger: false,
+        triggerDelayMs: 99_999, // exceeds 5000 max -> 5000
+        minPrefixLength: -5,    // below 0 min -> 0
+        maxItems: 500,          // exceeds 200 max -> 200
+        showDocumentation: false,
+        documentationDelayMs: -100, // below 0 min -> 0
+      },
+    }));
+
+    const restored = readWorkspaceIntelligencePreferences("completion-clamp");
+    expect(restored.completion).toEqual({
+      autoTrigger: false,
+      triggerDelayMs: 5_000,
+      minPrefixLength: 0,
+      maxItems: 200,
+      showDocumentation: false,
+      documentationDelayMs: 0,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
+    });
+  });
+
+  it("§8.21.3 V2-E: maps to BasicCompletionPolicyV2 with custom rules", () => {
+    const prefs = readWorkspaceIntelligencePreferences("default-policy");
+    const policy = toBasicCompletionPolicyV2(prefs.completion);
+    expect(policy).toEqual({
+      autoPopup: true,
+      delayMs: 50,
+      caseMatching: "first-letter",
+      sortMode: "provider-relevance",
+      autoInsertSingle: false,
+      excludedSymbols: [],
+      prioritizedSymbols: [],
+      maxVisibleItems: 50,
+      documentation: {
+        enabled: true,
+        delayMs: 250,
+      },
     });
   });
 });

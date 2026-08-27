@@ -447,6 +447,86 @@ export function classifyRegionMarker(
   return isCommentSyntaxNodeName(node.name) ? "comment" : "reject";
 }
 
+export type RegionFoldingProvenance =
+  | "explicit-comment"
+  | "language-syntax"
+  | "indent-fallback";
+
+export function regionFoldingProvenance(
+  node: { name: string } | null,
+  context?: { isCommentMarker?: boolean; isIndent?: boolean },
+): RegionFoldingProvenance {
+  if (context?.isIndent) return "indent-fallback";
+  if (context?.isCommentMarker || (node && node.name !== "" && isCommentSyntaxNodeName(node.name))) {
+    return "explicit-comment";
+  }
+  if (node && node.name !== "") {
+    return "language-syntax";
+  }
+  return "indent-fallback";
+}
+
+export function regionFoldingProvenanceLabel(provenance: RegionFoldingProvenance): string {
+  switch (provenance) {
+    case "explicit-comment":
+      return "explicit-comment";
+    case "language-syntax":
+      return "language-syntax";
+    case "indent-fallback":
+      return "indent-fallback";
+  }
+}
+
+/**
+ * §8.21.3 V2-C: Detects region fold provenance for a given line:
+ * - "explicit-comment": matches region comment marker and passes comment syntax check.
+ * - "language-syntax": non-comment syntax tree node spanning beyond the line.
+ * - "indent-fallback": indented block without parser grammar.
+ */
+export function detectLineFoldProvenance(
+  state: EditorState,
+  lineNumber: number,
+  path?: string | null,
+): RegionFoldingProvenance | null {
+  if (lineNumber < 1 || lineNumber > state.doc.lines) return null;
+  const line = state.doc.line(lineNumber);
+  const grammar = regionGrammarForPath(path ?? null);
+  if (grammar) {
+    const matchers = buildRegionMatchers(grammar);
+    if (matchers.start.test(line.text)) {
+      const startMatch = line.text.match(matchers.start);
+      const markerOffset = startMatch?.index ?? line.text.search(/\S/);
+      const node = syntaxTree(state).resolveInner(line.from + Math.max(markerOffset, 0), -1);
+      const verdict = classifyRegionMarker(node ?? null);
+      if (verdict !== "reject") {
+        return "explicit-comment";
+      }
+    }
+  }
+
+  // Syntax AST check
+  const tree = syntaxTree(state);
+  const nonWs = line.text.search(/\S/);
+  if (nonWs >= 0) {
+    const node = tree.resolveInner(line.from + nonWs, 1);
+    if (node && node.name !== "" && !isCommentSyntaxNodeName(node.name) && node.to > line.to) {
+      return "language-syntax";
+    }
+  }
+
+  // Indent check
+  if (lineNumber < state.doc.lines && line.text.trim().length > 0) {
+    const currentIndent = line.text.match(/^\s*/)?.[0].length ?? 0;
+    const nextLine = state.doc.line(lineNumber + 1);
+    const nextIndent = nextLine.text.match(/^\s*/)?.[0].length ?? 0;
+    if (nextIndent > currentIndent) {
+      return "indent-fallback";
+    }
+  }
+
+  return null;
+}
+
 /**
  * Language-aware region fold service factory (§8.17.6 step 3, gated §8.18.4).
  * The resolver runs per query so the service follows the host's current file

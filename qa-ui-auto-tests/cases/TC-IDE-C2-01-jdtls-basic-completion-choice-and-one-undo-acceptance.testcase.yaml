@@ -1,19 +1,35 @@
 id: TC-IDE-C2-01
-title: "jdtls basic completion choice and one-undo acceptance"
+title: "jdtls basic completion choice acceptance with one undo"
 description: |
-  §8.18.10 gate case. real provider fixture: choice placeholder cycling, auto-import resolve, single dispatch single undo.
-  Requires the Tauri native harness (and for provider cases the versioned
-  jdtls fixture from __fixtures__/jdtls). Not executable in browser mode;
-  recorded here so the catalog tracks the gate and the manifest can reference
-  run results per platform.
-covers: [F25.4]
-tags: [code-workspace, ide-c2, native-gate, p1]
+  §8.19.10 gate case C2. Capability ids: java.basic-completion /
+  completion.choice-session. Required mode: PROVIDER FIXTURE (a versioned
+  jdtls process over a real project — see src/components/editor/workspace/
+  __fixtures__/jdtls). Browser mode cannot start jdtls; a green browser run
+  proves nothing here and must be reported environment-blocked instead.
+  Highest claim on green: L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-c2, completion, provider-fixture, p1]
 modes: [native]
-fixtures: [reset_db]
-timeout_sec: 300
+fixtures: [reset_db, jdtls_required]
+timeout_sec: 600
 steps:
   - open: "${cfg.app.base_url}"
-  - wait_for: "[data-testid=\"tab-bar\"]"
-  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
-  - wait_for: "[data-testid=\"code-workspace-tab\"]"
-  - screenshot: tc-ide-c2-01-placeholder.png
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  # Open the fixture Main.java, trigger Basic completion, accept a choice
+  # item whose additionalTextEdits add the import, verify one undo removes
+  # both the identifier completion and the import together.
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Control+Space
+  - screenshot: tc-ide-c2-popup.png
+  - press: Enter
+  - press: Control+z
+  - screenshot: tc-ide-c2-after-undo.png

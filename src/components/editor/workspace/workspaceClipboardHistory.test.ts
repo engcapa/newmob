@@ -117,4 +117,158 @@ describe("§8.19.5 clipboard history ring", () => {
     expect(other.historyEntries()).toHaveLength(0);
     expect(other.read()?.plainText).toBe("a");
   });
+
+  it("shrinks history immediately when limit is lowered below current length", () => {
+    const handle = acquireClipboardStore("ws-shrink");
+    for (let i = 0; i < 10; i++) writeText(handle, `item-${i}`);
+    expect(handle.historyEntries()).toHaveLength(10);
+    handle.setHistoryLimits(3, 1024 * 1024);
+    expect(handle.historyEntries()).toHaveLength(3);
+    expect(handle.historyEntries().map((e) => e.plainText)).toEqual(["item-9", "item-8", "item-7"]);
+  });
+
+  it("guarantees persistence isolation: localStorage never contains clipboard payload", () => {
+    const wsId = "ws-no-storage-leak";
+    const handle = acquireClipboardStore(wsId);
+    const secretText = "ultra-secret-token-payload-xyz123";
+    writeText(handle, secretText);
+
+    // Assert that nowhere in localStorage is the clipboard payload stored
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key) {
+        const val = localStorage.getItem(key);
+        expect(val).not.toContain(secretText);
+      }
+    }
+  });
+
+  it("§8.22.3 U2-A guarantees canonical workspace clipboard ownership across multiple splits", () => {
+    const wsInstanceId = "ws-canonical-owner";
+    const splitA = acquireClipboardStore(wsInstanceId);
+    const splitB = acquireClipboardStore(wsInstanceId);
+
+    // Split A copies multi-caret rectangular selection
+    splitA.write({
+      sourceViewId: "split-a-editor",
+      plainText: "col1\ncol2",
+      segments: ["col1", "col2"],
+      rectangular: true,
+      sourceEol: "lf",
+    });
+
+    // Split B immediately reads the exact same session and segments
+    const readFromB = splitB.read();
+    expect(readFromB).not.toBeNull();
+    expect(readFromB?.plainText).toBe("col1\ncol2");
+    expect(readFromB?.rectangular).toBe(true);
+    expect(readFromB?.segments).toEqual(["col1", "col2"]);
+
+    // Both splits see identical history entries
+    expect(splitA.historyEntries()).toHaveLength(1);
+    expect(splitB.historyEntries()).toHaveLength(1);
+    expect(splitB.historyEntries()[0].plainText).toBe("col1\ncol2");
+
+    splitA.release();
+    splitB.release();
+  });
+
+  it("§8.22.3 U2-A auto-detects private keys and API tokens as sensitive and excludes them from history", () => {
+    const handle = acquireClipboardStore("ws-auto-sensitive");
+    const privateKey = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...\n-----END RSA PRIVATE KEY-----";
+    handle.write({
+      sourceViewId: "editor",
+      plainText: privateKey,
+      rectangular: false,
+      sourceEol: "lf",
+    });
+
+    expect(handle.read()?.plainText).toBe(privateKey);
+    expect(handle.read()?.sensitive).toBe(true);
+    expect(handle.historyEntries()).toHaveLength(0);
+    expect(handle.historyExclusion()).toBe<ClipboardHistoryExclusion>("sensitive");
+    handle.release();
+  });
+
+  it("§8.23.2 X1 ensures full isolation between workspace A and workspace B and proper refcount disposal", async () => {
+    const wsA1 = acquireClipboardStore("ws-alpha");
+    const wsA2 = acquireClipboardStore("ws-alpha");
+    const wsB = acquireClipboardStore("ws-beta");
+
+    // Copy in workspace Alpha
+    wsA1.write({
+      sourceViewId: "view-a1",
+      plainText: "secret alpha data",
+      rectangular: false,
+      sourceEol: "lf",
+    });
+
+    // Workspace Beta cannot see workspace Alpha data
+    expect(wsB.read()).toBeNull();
+    expect(wsB.historyEntries()).toHaveLength(0);
+
+    // Split 1 of workspace Alpha unmounts/releases, but Split 2 keeps the store alive
+    wsA1.release();
+    expect(wsA2.read()?.plainText).toBe("secret alpha data");
+    expect(wsA2.historyEntries()).toHaveLength(1);
+
+    // Split 2 releases, now the store for Alpha is disposed after microtask
+    wsA2.release();
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Re-acquiring workspace Alpha gets a fresh, empty session store (session-only lifetime)
+    const wsAFresh = acquireClipboardStore("ws-alpha");
+    expect(wsAFresh.read()).toBeNull();
+    expect(wsAFresh.historyEntries()).toHaveLength(0);
+    wsAFresh.release();
+    wsB.release();
+  });
+
+  it("§8.24.2 provides attachConsumer and getSnapshot with monotonic revision tracking", async () => {
+    const handle = acquireClipboardStore("ws-snapshot");
+    const initialSnap = handle.getSnapshot();
+    expect(initialSnap.revision).toBe(0);
+    expect(initialSnap.history).toHaveLength(0);
+
+    const detachChild = handle.attachConsumer("split-child-1");
+    writeText(handle, "data-1");
+    const snap1 = handle.getSnapshot();
+    expect(snap1.revision).toBeGreaterThan(0);
+    expect(snap1.history).toHaveLength(1);
+
+    writeText(handle, "data-2");
+    const snap2 = handle.getSnapshot();
+    expect(snap2.revision).toBeGreaterThan(snap1.revision);
+    expect(snap2.history).toHaveLength(2);
+
+    detachChild();
+    expect(handle.getSnapshot().history).toHaveLength(2);
+    handle.release();
+  });
+
+  it("§8.25.2 Z1 supports idempotent consumer detachment, subscriptions, and clean lifecycle", async () => {
+    const handle = acquireClipboardStore("ws-z1-test");
+    const notifications: number[] = [];
+    const unsubscribe = handle.subscribe((snap) => {
+      notifications.push(snap.revision);
+    });
+
+    const detachA = handle.attachConsumer("consumer-a");
+    const detachA2 = handle.attachConsumer("consumer-a"); // duplicate attach with same consumer id
+    expect(handle.getSnapshot().consumerCount).toBe(1);
+
+    writeText(handle, "payload-z1");
+    expect(notifications.length).toBeGreaterThan(0);
+
+    // Detach A once
+    detachA();
+    expect(handle.getSnapshot().consumerCount).toBe(0);
+
+    // Detaching second time is a safe no-op
+    detachA2();
+    expect(handle.getSnapshot().consumerCount).toBe(0);
+
+    unsubscribe();
+    handle.release();
+  });
 });

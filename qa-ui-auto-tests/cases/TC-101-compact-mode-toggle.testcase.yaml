@@ -1,11 +1,11 @@
 id: TC-101
-title: Compact mode toggle persists across reload
+title: Unified app menu opens, dispatches, and survives reload
 description: |
-  Smoke test for F1.4 (compact UI mode). Click the compact-toggle, verify
-  taomni.compactMode flips in localStorage, that the compact main-menu
-  affordance is reachable in compact mode, then reload and confirm the
-  mode sticks.
-covers: [F1.4]
+  Compact UI mode was removed from the product; this case now covers the
+  surviving title-bar surface (F1.8): the unified app menu opens from
+  app-main-menu, shows top-level entries, dismisses with Escape, and the
+  shell renders identically after a reload.
+covers: [F1.4, F1.8]
 tags: [smoke, p1, main, window]
 modes: [browser]
 fixtures: [reset_db]
@@ -13,15 +13,11 @@ timeout_sec: 30
 steps:
   - open: ${cfg.app.base_url}
   - wait_for: '[data-testid="titlebar-tray"]'
-  - assert_localstorage: { key: "taomni.compactMode", exists: false }
-  - click: '[data-testid="compact-toggle"]'
-  - wait: 0.5
-  - assert_localstorage: { key: "taomni.compactMode", exists: true }
-  - wait_for: '[data-testid="compact-titlebar"]'
-  # Compact main-menu opens the unified context menu and dismisses cleanly
-  - click: '[data-testid="compact-main-menu"]'
+  - assert_visible: '[data-testid="app-main-menu"]'
+  - click: '[data-testid="app-main-menu"]'
   - wait_for: '[data-testid="context-menu"]'
-  - assert_visible: text="New local terminal"
+  - assert_visible: '[data-testid="context-menu-item-new-local-terminal"]'
+  - assert_visible: '[data-testid="context-menu-item-xserver"]'
   - press: Escape
   - wait_for:
       selector: '[data-testid="context-menu"]'
@@ -29,5 +25,5 @@ steps:
       timeout_sec: 5
   - reload:
   - wait_for: '[data-testid="titlebar-tray"]'
-  - assert_localstorage: { key: "taomni.compactMode", exists: true }
-  - screenshot: 101-compact-mode.png
+  - assert_visible: '[data-testid="app-main-menu"]'
+  - screenshot: 101-unified-app-menu.png

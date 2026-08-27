@@ -39,9 +39,72 @@ const FIXTURE_IDS = [...new Set(JDTLS_FIXTURE_EXPECTATIONS.map((entry) => entry.
 
 interface TraceScenario {
   caseId: string;
+  kind?: string;
   requests?: Array<{ satisfied: boolean; itemCount: number; evaluationReason: string | null }>;
   resolve?: { additionalEditCount: number; additionalEditTexts: readonly string[] } | null;
   acceptance?: { revertRestoresOriginalHash: boolean } | null;
+  signatureHelp?: {
+    satisfied: boolean;
+    signaturesCount: number;
+    labels: readonly string[];
+    activeParameter: number | null;
+    evaluationReason: string | null;
+  } | null;
+  supersede?: {
+    firstOutcome: string;
+    firstCancelled: boolean;
+    secondSatisfied: boolean;
+  } | null;
+  hover?: {
+    contentsPresent: boolean;
+    contentsKind: string | null;
+    externalLinks: readonly string[];
+    excerpt: string | null;
+    evaluationReason: string | null;
+  } | null;
+}
+
+interface ProviderChannels {
+  signatureHelpProvider: boolean;
+  hoverProvider: boolean;
+  declaredTypeInfoChannel: boolean;
+  declaredStaticDataChannel: boolean;
+  topLevelCapabilityKeys?: readonly string[];
+}
+
+interface AnalysisSnapshot {
+  serverInfo?: { name: string | null; version: string | null } | null;
+  registeredCommands?: readonly string[];
+  javaProjects?: readonly unknown[];
+  classpathProbe?: { entriesSha256: string } | null;
+  probeReason?: string | null;
+  importProgress?: {
+    events: number;
+    beginTokens: number;
+    anyWithPercentage: boolean;
+  };
+  diagnosticFlags?: { incompleteOrMissingMentioned: boolean };
+  buildChange?: {
+    reimportProgressObserved: boolean;
+    revertedByteExact: boolean;
+  };
+}
+
+interface QuickFixTrace {
+  satisfied: boolean;
+  reason: string | null;
+  diagnosticMessage: string | null;
+  actionTitle: string | null;
+  actionKind: string | null;
+  offeredTitles: readonly string[];
+  resolved: boolean;
+  resolveFailure: string | null;
+  importInsertText: string | null;
+  appliedSha256: string | null;
+  originalSha256: string | null;
+  revertedRestoresOriginalHash: boolean;
+  providerHang?: { attempts: number };
+  quickFixCancel?: { outcome: string; empty?: boolean };
 }
 
 interface FixtureTrace {
@@ -51,7 +114,19 @@ interface FixtureTrace {
   toolchain: Record<string, unknown>;
   buildModelFingerprint: string;
   scenarios: TraceScenario[];
-  restart?: { performed: boolean; completionOkAfterRestart: boolean };
+  providerChannels?: ProviderChannels;
+  analysis?: AnalysisSnapshot;
+  quickFix?: QuickFixTrace;
+  analysisTiming?: {
+    offlineCacheHint?: {
+      fasterThanCold: boolean | null;
+    };
+  };
+  restart?: {
+    performed: boolean;
+    completionOkAfterRestart: boolean;
+    signatureHelpOkAfterRestart?: boolean | null;
+  };
   failures: readonly string[];
 }
 
@@ -123,6 +198,110 @@ describe("§8.19.4 real jdtls trace contract", () => {
         case "restart-ok": {
           expect(trace.restart?.performed).toBe(true);
           expect(trace.restart?.completionOkAfterRestart).toBe(true);
+          break;
+        }
+        case "signature-help": {
+          const assertion = entry.assert;
+          expect(scenario?.signatureHelp, `no signatureHelp record for ${entry.caseId}`).not.toBeNull();
+          expect(scenario!.signatureHelp!.satisfied, scenario!.signatureHelp!.evaluationReason ?? undefined).toBe(true);
+          expect(scenario!.signatureHelp!.signaturesCount).toBeGreaterThanOrEqual(assertion.minSignatures ?? 1);
+          if (assertion.labelContains !== undefined) {
+            expect(
+              scenario!.signatureHelp!.labels.some((label) => label.includes(assertion.labelContains!)),
+              JSON.stringify(scenario!.signatureHelp!.labels),
+            ).toBe(true);
+          }
+          if (assertion.activeParameterEquals !== undefined) {
+            expect(scenario!.signatureHelp!.activeParameter).toBe(assertion.activeParameterEquals);
+          }
+          break;
+        }
+        case "hover-doc": {
+          expect(scenario?.hover, `no hover record for ${entry.caseId}`).not.toBeNull();
+          expect(scenario!.hover!.contentsPresent, scenario!.hover!.evaluationReason ?? undefined).toBe(true);
+          break;
+        }
+        case "supersede-cancelled-first": {
+          expect(scenario?.supersede, `no supersede record for ${entry.caseId}`).not.toBeNull();
+          expect(scenario!.supersede!.firstCancelled).toBe(true);
+          // The replacement request must satisfy — cancel is not a outage.
+          expect(scenario!.supersede!.secondSatisfied).toBe(true);
+          break;
+        }
+        case "channel-absent": {
+          const channels = trace.providerChannels;
+          expect(channels, `no providerChannels record in ${entry.fixture} trace`).toBeDefined();
+          const declared = entry.assert.channel === "typeInfoChannel"
+            ? channels!.declaredTypeInfoChannel
+            : channels!.declaredStaticDataChannel;
+          expect(declared, `${entry.fixture} unexpectedly declares a channel; the unavailable contract must be re-evaluated`).toBe(false);
+          break;
+        }
+        case "restart-signature-ok": {
+          expect(trace.restart?.performed).toBe(true);
+          expect(trace.restart?.signatureHelpOkAfterRestart, "signatureHelp did not recover after restart").toBe(true);
+          break;
+        }
+        // §8.20.3 W2: Project Analysis truth assertions.
+        case "analysis-server-info": {
+          const analysis = trace.analysis;
+          expect(analysis?.serverInfo, `no serverInfo recorded for ${entry.fixture}`).not.toBeNull();
+          expect(analysis!.serverInfo!.name ?? "").not.toBe("");
+          break;
+        }
+        case "analysis-progress-observed": {
+          const progress = trace.analysis?.importProgress;
+          expect(progress, `no importProgress recorded for ${entry.fixture}`).toBeDefined();
+          expect(progress!.events).toBeGreaterThan(0);
+          expect(progress!.beginTokens).toBeGreaterThanOrEqual(1);
+          break;
+        }
+        case "analysis-lifecycle-only": {
+          const analysis = trace.analysis;
+          expect(analysis, `no analysis snapshot for ${entry.fixture}`).toBeDefined();
+          // The java.project.* commands are genuinely absent from the
+          // provider's registrations — module facts must NOT be fabricated.
+          expect(analysis!.registeredCommands ?? []).not.toContain("java.project.list");
+          expect(analysis!.registeredCommands ?? []).not.toContain("java.project.getClasspaths");
+          expect((analysis!.javaProjects ?? []).length).toBe(0);
+          expect(analysis!.probeReason ?? "").toContain("command-not-registered");
+          break;
+        }
+        case "analysis-build-change-generation": {
+          const change = trace.analysis?.buildChange;
+          expect(change, `no buildChange record for ${entry.fixture}`).toBeDefined();
+          expect(change!.reimportProgressObserved, "provider did not re-import after build-file change").toBe(true);
+          expect(change!.revertedByteExact, "fixture build file not restored byte-exactly").toBe(true);
+          break;
+        }
+        case "analysis-offline-cache-faster": {
+          const hint = trace.analysisTiming?.offlineCacheHint;
+          expect(hint, `no offlineCacheHint for ${entry.fixture}`).toBeDefined();
+          expect(hint!.fasterThanCold, "warm session was not faster than cold import").toBe(true);
+          break;
+        }
+        case "analysis-broken-classpath-flagged": {
+          const flagged = trace.analysis?.diagnosticFlags?.incompleteOrMissingMentioned;
+          expect(flagged, `broken classpath was not flagged in ${entry.fixture} diagnostics`).toBe(true);
+          break;
+        }
+        case "quickfix-provider-hang-recorded": {
+          const quickFix = trace.quickFix;
+          expect(quickFix, `no quickFix record for ${entry.fixture}`).toBeDefined();
+          // The unresolved-type diagnostic itself IS real…
+          expect(quickFix!.diagnosticMessage ?? "").toContain("cannot be resolved");
+          // …but jdt.ls 1.61 never ANSWERS textDocument/codeAction (hang on
+          // healthy and broken files alike). Record that honestly — an
+          // explicit provider-hang reason with at least one full-budget
+          // attempt — never fake a fix.
+          expect(quickFix!.satisfied).toBe(false);
+          expect(quickFix!.reason ?? "").toContain("provider-hang");
+          expect((quickFix!.providerHang?.attempts ?? 0)).toBeGreaterThanOrEqual(1);
+          break;
+        }
+        case "rename-provider-registered": {
+          const registered = trace.providerChannels?.topLevelCapabilityKeys ?? [];
+          expect(registered).toContain("renameProvider");
           break;
         }
       }

@@ -37,6 +37,7 @@ import {
   type PreparedSaveCommitter,
   type SaveCommitResult,
 } from "./saveCommit";
+import type { EffectiveSavePolicyV4 } from "./workspaceCodeStyleScheme";
 
 export interface WorkspaceStyleRoot {
   id?: string;
@@ -437,8 +438,11 @@ export class WorkspaceStyleController {
     transaction: SaveTransactionV2,
     commit: PreparedSaveCommitter,
     options?: {
+      savePolicy?: EffectiveSavePolicyV4;
       formatOnSave?: boolean;
       formatFn?: (text: string) => Promise<string | null>;
+      organizeImportsOnSave?: boolean;
+      organizeImportsFn?: (text: string) => Promise<string | null>;
       getLatestBufferVersion?: () => number;
     },
   ): Promise<SaveCommitOutcome> {
@@ -478,8 +482,12 @@ export class WorkspaceStyleController {
         endOfLine: resolvedEol,
         charset: resolvedCharset,
       },
-      formatOnSave: options?.formatOnSave,
+      savePolicy: options?.savePolicy,
+      filePath: transaction.filePath,
+      formatOnSave: options?.savePolicy ? options.savePolicy.format.enabled : options?.formatOnSave,
       formatFn: options?.formatFn,
+      organizeImportsOnSave: options?.savePolicy ? options.savePolicy.organizeImports.enabled : options?.organizeImportsOnSave,
+      organizeImportsFn: options?.organizeImportsFn,
       expectedVersion: transaction.bufferVersion,
       getLatestBufferVersion: options?.getLatestBufferVersion,
     });

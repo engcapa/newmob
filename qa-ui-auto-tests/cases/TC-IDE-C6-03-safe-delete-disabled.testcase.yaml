@@ -1,0 +1,29 @@
+id: TC-IDE-C6-03
+title: "Safe Delete disabled without dedicated provider coverage"
+description: |
+  §8.22.2 U1 refactor safety gate case. In the absence of a dedicated
+  language provider attesting complete Safe Delete coverage, the action
+  must remain safely disabled before request time, display disabled
+  reason in UI, and fail closed with zero provider requests and zero disk writes.
+covers: [F25.5]
+tags: [code-workspace, ide-c6, safe-delete, refactor-safety, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 120
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Alt+Delete
+  - screenshot: tc-ide-c6-safe-delete-disabled.png

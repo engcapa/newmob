@@ -168,6 +168,7 @@ export function enforceTabPolicy(
   keys: readonly string[],
   meta: ReadonlyMap<string, TabEvictionMeta>,
   policy: AnyWorkspaceTabPolicy,
+  options?: { allowDirty?: boolean },
 ): TabEvictionResult {
   if (policy.limitPerLeaf <= 0 || keys.length <= policy.limitPerLeaf) {
     return { kind: "within-limit" };
@@ -177,9 +178,10 @@ export function enforceTabPolicy(
     .reverse()
     .map((key) => meta.get(key))
     .filter((entry): entry is TabEvictionMeta => !!entry)
-    .filter((entry) => !entry.dirty && !entry.pinned)
+    .filter((entry) => (options?.allowDirty ? !entry.pinned : !entry.dirty && !entry.pinned))
     .sort((left, right) => {
       if (left.preview !== right.preview) return left.preview ? -1 : 1;
+      if (left.dirty !== right.dirty) return left.dirty ? 1 : -1;
       return left.lastUsedAt - right.lastUsedAt;
     })
     .slice(0, overflow)
@@ -391,3 +393,278 @@ export function pushClosedTab(
   const next = [entry, ...stack.filter((existing) => existing.fileIdentity !== entry.fileIdentity)];
   return next.slice(0, CLOSED_TAB_STACK_LIMIT);
 }
+
+// ---------------------------------------------------------------------------
+// §8.21.3 V2-B: Tab Policy Transaction
+// ---------------------------------------------------------------------------
+
+export interface ApplyWorkspaceTabPolicyInput {
+  rawPolicy: unknown;
+  editorGroups: Record<string, {
+    openOrder: readonly string[];
+    pinnedKeys: readonly string[];
+    previewKey: string | null;
+    activeKey: string | null;
+  }>;
+  openFiles: Record<string, { dirty?: boolean; title?: string }>;
+  mruFileKeys: readonly string[];
+  allowDirtyCandidates?: boolean;
+}
+
+export interface ApplyWorkspaceTabPolicyExecution {
+  policy: WorkspaceTabPolicyV3;
+  evictionsByGroup: Record<string, readonly string[]>;
+  allEvictedKeys: readonly string[];
+  protectedCount: number;
+  message: string;
+}
+
+/**
+ * §8.21.3 V2-B: Transactional helper that normalizes the policy draft,
+ * evaluates eviction candidates per leaf group with dirty/pinned protection,
+ * and compiles the resulting eviction schedule.
+ */
+export function computeWorkspaceTabPolicyApplication(
+  input: ApplyWorkspaceTabPolicyInput,
+): ApplyWorkspaceTabPolicyExecution {
+  const { policy } = migrateWorkspaceTabPolicy(input.rawPolicy);
+  const normalizedPolicy: WorkspaceTabPolicyV3 = {
+    ...policy,
+    limitPerLeaf: Math.max(1, Math.min(50, Math.round(policy.limitPerLeaf))),
+  };
+
+  const evictionsByGroup: Record<string, string[]> = {};
+  const allEvictedKeys: string[] = [];
+  let protectedCount = 0;
+
+  for (const [groupId, group] of Object.entries(input.editorGroups)) {
+    const meta = new Map<string, TabEvictionMeta>(
+      group.openOrder.map((k) => [
+        k,
+        {
+          key: k,
+          dirty: !!input.openFiles[k]?.dirty,
+          pinned: group.pinnedKeys.includes(k),
+          preview: group.previewKey === k,
+          lastUsedAt: 1_000_000 - input.mruFileKeys.indexOf(k),
+        },
+      ]),
+    );
+
+    const eviction = enforceTabPolicy(group.openOrder, meta, normalizedPolicy, {
+      allowDirty: input.allowDirtyCandidates,
+    });
+    if (eviction.kind === "evicted") {
+      evictionsByGroup[groupId] = [...eviction.evictedKeys];
+      allEvictedKeys.push(...eviction.evictedKeys);
+    } else if (eviction.kind === "over-limit-protected") {
+      protectedCount += group.openOrder.length;
+    }
+  }
+
+  const message = allEvictedKeys.length > 0
+    ? `Saved editor tab policy (limit: ${normalizedPolicy.limitPerLeaf}, evicted ${allEvictedKeys.length} tabs)`
+    : `Saved editor tab policy (limit: ${normalizedPolicy.limitPerLeaf}, order: ${normalizedPolicy.order})`;
+
+  return {
+    policy: normalizedPolicy,
+    evictionsByGroup,
+    allEvictedKeys,
+    protectedCount,
+    message,
+  };
+}
+
+export interface WorkspaceTabPolicyTransactionResult {
+  status: "applied" | "no-op" | "aborted" | "stale";
+  reason?: "user-cancelled" | "empty" | "layout-revision-changed";
+  policy: WorkspaceTabPolicyV3;
+  evictedKeysByGroup: Record<string, readonly string[]>;
+  allEvictedKeys: readonly string[];
+  message: string;
+}
+
+/**
+ * §8.23.3 X2: Top-level atomic tab policy transaction.
+ * Pre-computes evictions across all groups, confirms dirty closures asynchronously,
+ * aborts without partial mutations if cancelled or layout is stale, commits policy
+ * on zero-eviction policy changes, and closes evicted files completely through lifecycle.
+ */
+export async function applyWorkspaceTabPolicyTransaction(params: {
+  workspaceInstanceId: string;
+  nextPolicyRaw: unknown;
+  currentPolicy?: WorkspaceTabPolicyV3;
+  baseLayoutRevision?: number;
+  currentLayoutRevision?: number;
+  getLiveLayoutRevision?: () => number;
+  currentGroups: Record<string, {
+    openOrder: readonly string[];
+    pinnedKeys: readonly string[];
+    previewKey: string | null;
+    activeKey: string | null;
+  }>;
+  openFiles: Record<string, { dirty?: boolean; title?: string; text?: string }>;
+  mruFileKeys: readonly string[];
+  allowDirtyCandidates?: boolean;
+  confirmDirtyClose?: (dirtyKeys: readonly string[]) => Promise<boolean>;
+  onEvictClosedFile?: (fileKey: string) => Promise<void> | void;
+  commitAtomicUpdate: (result: {
+    nextGroups: Record<string, {
+      openOrder: readonly string[];
+      pinnedKeys: readonly string[];
+      previewKey: string | null;
+      activeKey: string | null;
+    }>;
+    evictedKeys: readonly string[];
+    policy: WorkspaceTabPolicyV3;
+  }) => void;
+}): Promise<WorkspaceTabPolicyTransactionResult> {
+  // Stale check
+  if (
+    params.baseLayoutRevision != null &&
+    params.currentLayoutRevision != null &&
+    params.baseLayoutRevision !== params.currentLayoutRevision
+  ) {
+    const { policy } = migrateWorkspaceTabPolicy(params.nextPolicyRaw);
+    return {
+      status: "stale",
+      reason: "layout-revision-changed",
+      policy,
+      evictedKeysByGroup: {},
+      allEvictedKeys: [],
+      message: "Layout changed concurrently; tab policy application aborted",
+    };
+  }
+
+  const execution = computeWorkspaceTabPolicyApplication({
+    rawPolicy: params.nextPolicyRaw,
+    editorGroups: params.currentGroups,
+    openFiles: params.openFiles,
+    mruFileKeys: params.mruFileKeys,
+    allowDirtyCandidates: params.allowDirtyCandidates ?? Boolean(params.confirmDirtyClose),
+  });
+
+  if (execution.allEvictedKeys.length === 0) {
+    const policyChanged =
+      !params.currentPolicy ||
+      JSON.stringify(params.currentPolicy) !== JSON.stringify(execution.policy);
+
+    if (policyChanged) {
+      params.commitAtomicUpdate({
+        nextGroups: params.currentGroups,
+        evictedKeys: [],
+        policy: execution.policy,
+      });
+      return {
+        status: "applied",
+        policy: execution.policy,
+        evictedKeysByGroup: {},
+        allEvictedKeys: [],
+        message: "Tab policy updated successfully with 0 evictions",
+      };
+    }
+
+    return {
+      status: "no-op",
+      policy: execution.policy,
+      evictedKeysByGroup: {},
+      allEvictedKeys: [],
+      message: execution.message,
+    };
+  }
+
+  // Pre-check for any dirty evicted keys across all groups
+  const dirtyEvictedKeys = execution.allEvictedKeys.filter(
+    (k) => params.openFiles[k]?.dirty,
+  );
+
+  if (dirtyEvictedKeys.length > 0 && params.confirmDirtyClose) {
+    const confirmed = await params.confirmDirtyClose(dirtyEvictedKeys);
+    if (!confirmed) {
+      return {
+        status: "aborted",
+        reason: "user-cancelled",
+        policy: execution.policy,
+        evictedKeysByGroup: {},
+        allEvictedKeys: [],
+        message: "Tab policy application cancelled: dirty tabs preserved",
+      };
+    }
+    // Re-check layout revision after async user confirmation prompt (§8.26.3 AA2)
+    if (
+      params.getLiveLayoutRevision &&
+      params.baseLayoutRevision != null &&
+      params.getLiveLayoutRevision() !== params.baseLayoutRevision
+    ) {
+      const { policy } = migrateWorkspaceTabPolicy(params.nextPolicyRaw);
+      return {
+        status: "stale",
+        reason: "layout-revision-changed",
+        policy,
+        evictedKeysByGroup: {},
+        allEvictedKeys: [],
+        message: "Layout changed concurrently during confirmation; tab policy application aborted",
+      };
+    }
+  }
+
+  // Atomically compute new group state for all groups
+  const nextGroups: Record<string, {
+    openOrder: readonly string[];
+    pinnedKeys: readonly string[];
+    previewKey: string | null;
+    activeKey: string | null;
+  }> = {};
+
+  for (const [groupId, group] of Object.entries(params.currentGroups)) {
+    const evicted = execution.evictionsByGroup[groupId] ?? [];
+    const remainingOpenOrder = group.openOrder.filter((k) => !evicted.includes(k));
+    const nextActive = group.activeKey && evicted.includes(group.activeKey)
+      ? remainingOpenOrder[remainingOpenOrder.length - 1] ?? null
+      : group.activeKey;
+    const nextPreview = group.previewKey && evicted.includes(group.previewKey)
+      ? null
+      : group.previewKey;
+
+    nextGroups[groupId] = {
+      openOrder: remainingOpenOrder,
+      pinnedKeys: group.pinnedKeys.filter((k) => !evicted.includes(k)),
+      activeKey: nextActive,
+      previewKey: nextPreview,
+    };
+  }
+
+  const uniqueEvictedKeys = Array.from(new Set(execution.allEvictedKeys));
+
+  // Single atomic store commit
+  params.commitAtomicUpdate({
+    nextGroups,
+    evictedKeys: uniqueEvictedKeys,
+    policy: execution.policy,
+  });
+
+  // Purge closed files via lifecycle only when unreferenced in post-commit nextGroups
+  if (params.onEvictClosedFile) {
+    const allRemainingKeys = new Set(
+      Object.values(nextGroups).flatMap((g) => g.openOrder)
+    );
+    for (const evictedKey of uniqueEvictedKeys) {
+      if (!allRemainingKeys.has(evictedKey)) {
+        try {
+          await params.onEvictClosedFile(evictedKey);
+        } catch {
+          // preserve recovery log / handle gracefully
+        }
+      }
+    }
+  }
+
+  return {
+    status: "applied",
+    policy: execution.policy,
+    evictedKeysByGroup: execution.evictionsByGroup,
+    allEvictedKeys: uniqueEvictedKeys,
+    message: execution.message,
+  };
+}
+

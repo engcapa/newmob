@@ -37,6 +37,6 @@ steps:
   - wait_for:
       selector: '[data-testid="multiexec-bar"]'
       timeout_sec: 5
-  - click: 'text="All"'
-  - assert_visible: 'text="1 / 2"'
+  - click: '[data-testid="multiexec-bar"] >> text="All"'
+  - assert_visible: '[data-testid="multiexec-bar"] >> text="1 / 2"'
   - screenshot: 110-terminal-split-smoke.png

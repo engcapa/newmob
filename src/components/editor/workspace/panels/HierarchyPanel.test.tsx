@@ -135,4 +135,43 @@ describe("HierarchyPanel", () => {
     expect(updated.expanded).toBe(true);
     expect(updated.item).toBe(root);
   });
+
+  it("renders stale banner and triggers onRerunStale", () => {
+    const root = item("root", 1);
+    const onRerunStale = vi.fn();
+    render(
+      <HierarchyPanel
+        mode="call"
+        root={{ descriptor, item: root }}
+        active
+        staleReason="Provider restarted since this hierarchy was prepared"
+        onRerunStale={onRerunStale}
+        onOpenLocation={vi.fn()}
+      />,
+    );
+
+    const banner = screen.getByTestId("hierarchy-stale-banner");
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent("Provider restarted since this hierarchy was prepared");
+
+    const rerunBtn = screen.getByTestId("hierarchy-stale-rerun");
+    fireEvent.click(rerunBtn);
+    expect(onRerunStale).toHaveBeenCalledTimes(1);
+  });
+
+  it("prohibits expanding stale nodes until rerun", () => {
+    const root = item("root", 1);
+    render(
+      <HierarchyPanel
+        mode="call"
+        root={{ descriptor, item: root, rootQueryId: "qid-1", providerGeneration: 1, projectFingerprint: "fp-1" }}
+        active
+        staleReason="Provider restarted"
+        onOpenLocation={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand root" }));
+    expect(lspMocks.lspCallHierarchyIncoming).not.toHaveBeenCalled();
+  });
 });

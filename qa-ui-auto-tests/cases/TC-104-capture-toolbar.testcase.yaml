@@ -23,6 +23,6 @@ steps:
   - assert_visible: '[data-testid="capture-menu"]'
   - click: '[data-testid="capture-menu"]'
   - wait: 0.5
-  - assert_visible: 'text=Save visible PNG'
+  - assert_visible: '[data-testid="capture-menu-dropdown"] >> text=Save visible PNG'
   - press: Escape
   - screenshot: 104-capture-toolbar.png

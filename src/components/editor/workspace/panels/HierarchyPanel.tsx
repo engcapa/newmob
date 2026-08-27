@@ -21,6 +21,9 @@ type HierarchyDirection = CallHierarchyDirection | TypeHierarchyDirection;
 export interface HierarchyRootState {
   descriptor: LspDocumentDescriptor;
   item: LspHierarchyItem;
+  rootQueryId?: string;
+  providerGeneration?: number;
+  projectFingerprint?: string;
 }
 
 interface HierarchyNode {
@@ -34,6 +37,9 @@ interface HierarchyNode {
   children: HierarchyNode[] | null;
   callRanges: LspRange[];
   callSiteItem: LspHierarchyItem;
+  rootQueryId?: string;
+  providerGeneration?: number;
+  projectFingerprint?: string;
 }
 
 interface HierarchyPanelProps {
@@ -42,6 +48,13 @@ interface HierarchyPanelProps {
   active: boolean;
   onOpenLocation: (location: LspLocation) => void;
   onStatus?: (status: LspDocumentStatus) => void;
+  /**
+   * §8.20.5 W4: set when the provider restarted or the project fingerprint
+   * moved after this root was prepared — expanded nodes are stale and the
+   * panel offers Rerun instead of silently trusting them.
+   */
+  staleReason?: string | null;
+  onRerunStale?: () => void;
 }
 
 const MAX_HIERARCHY_DEPTH = 16;
@@ -55,7 +68,7 @@ export function hierarchyItemKey(item: LspHierarchyItem): string {
   ].join(":");
 }
 
-function rootNode(item: LspHierarchyItem): HierarchyNode {
+function rootNode(item: LspHierarchyItem, rootState?: HierarchyRootState | null): HierarchyNode {
   const key = hierarchyItemKey(item);
   return {
     id: key,
@@ -68,6 +81,9 @@ function rootNode(item: LspHierarchyItem): HierarchyNode {
     children: null,
     callRanges: [],
     callSiteItem: item,
+    rootQueryId: rootState?.rootQueryId,
+    providerGeneration: rootState?.providerGeneration,
+    projectFingerprint: rootState?.projectFingerprint,
   };
 }
 
@@ -112,12 +128,14 @@ export function HierarchyPanel({
   active,
   onOpenLocation,
   onStatus,
+  staleReason = null,
+  onRerunStale,
 }: HierarchyPanelProps) {
   const [direction, setDirection] = useState<HierarchyDirection>(
     mode === "call" ? "callers" : "supertypes",
   );
   const [rootItem, setRootItem] = useState<LspHierarchyItem | null>(root?.item ?? null);
-  const [tree, setTree] = useState<HierarchyNode | null>(() => root?.item ? rootNode(root.item) : null);
+  const [tree, setTree] = useState<HierarchyNode | null>(() => root?.item ? rootNode(root.item, root) : null);
   const [error, setError] = useState<string | null>(null);
   const treeRef = useRef(tree);
   treeRef.current = tree;
@@ -126,18 +144,19 @@ export function HierarchyPanel({
     const nextDirection = mode === "call" ? "callers" : "supertypes";
     setDirection(nextDirection);
     setRootItem(root?.item ?? null);
-    setTree(root?.item ? rootNode(root.item) : null);
+    setTree(root?.item ? rootNode(root.item, root) : null);
     setError(null);
   }, [mode, root]);
 
   useEffect(() => {
     if (!rootItem) return;
-    setTree(rootNode(rootItem));
+    setTree(rootNode(rootItem, root));
     setError(null);
-  }, [direction, rootItem]);
+  }, [direction, root, rootItem]);
 
   const loadChildren = useCallback(async (id: string) => {
     if (!root) return;
+    if (staleReason) return;
     const node = findNode(treeRef.current, id);
     if (!node || node.loading || node.cycle || node.depth >= MAX_HIERARCHY_DEPTH) return;
     if (node.children) {
@@ -188,6 +207,9 @@ export function HierarchyPanel({
           children: null,
           callRanges: entry.callRanges,
           callSiteItem: entry.callSiteItem,
+          rootQueryId: root.rootQueryId,
+          providerGeneration: root.providerGeneration,
+          projectFingerprint: root.projectFingerprint,
         };
       });
       setTree((current) => current
@@ -204,11 +226,11 @@ export function HierarchyPanel({
         ? updateHierarchyNode(current, id, (item) => ({ ...item, loading: false }))
         : current);
     }
-  }, [direction, mode, onStatus, root]);
+  }, [direction, mode, onStatus, root, staleReason]);
 
   const setNewRoot = (item: LspHierarchyItem) => {
     setRootItem(item);
-    setTree(rootNode(item));
+    setTree(rootNode(item, root));
   };
 
   const renderNode = (node: HierarchyNode) => (
@@ -278,6 +300,27 @@ export function HierarchyPanel({
       data-active={active || undefined}
       className="flex h-full min-h-0 flex-col text-[11px]"
     >
+      {/* §8.20.5 W4: provider restart / fingerprint change stale banner with
+          an explicit Rerun affordance — never silently trust old expansions. */}
+      {staleReason && root && (
+        <div
+          data-testid="hierarchy-stale-banner"
+          className="flex shrink-0 items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-500"
+        >
+          <RotateCcw className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 flex-1 truncate" title={staleReason}>{staleReason}</span>
+          {onRerunStale && (
+            <button
+              type="button"
+              data-testid="hierarchy-stale-rerun"
+              className="rounded px-1.5 py-0.5 hover:bg-[var(--taomni-code-active-line-bg)]"
+              onClick={onRerunStale}
+            >
+              Rerun
+            </button>
+          )}
+        </div>
+      )}
       <div className="flex h-7 shrink-0 items-center gap-1 border-b border-[var(--taomni-code-border)] px-2">
         {directions.map((value) => (
           <button

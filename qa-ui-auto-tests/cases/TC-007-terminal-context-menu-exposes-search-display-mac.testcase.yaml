@@ -29,7 +29,7 @@ steps:
   - assert_visible: "text=\"Terminal display\""
   - assert_visible: "text=\"Syntax highlighting\""
   - assert_visible: "text=\"Record new macro\""
-  - assert_visible: "text=\"Special Command\""
+  - assert_visible: "[data-testid=\"context-menu\"] >> text=\"Special Command\""
   - assert_visible: "text=\"Event Log\""
   - click: "[data-testid=\"context-menu-item-find\"]"
   - wait_for: "input[placeholder=\"Find\"]"

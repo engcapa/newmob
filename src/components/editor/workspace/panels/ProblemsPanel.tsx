@@ -32,6 +32,15 @@ interface ProblemsPanelProps {
   /** Display-only inspection transform. Callbacks still receive the provider diagnostic. */
   diagnosticTransform?: (diagnostic: LspDiagnostic, path?: string) => LspDiagnostic | null;
   onOpenRelatedInformation?: (diagnostic: LspDiagnostic) => void;
+  /** §8.20.4 DoD: provider/scope/revision/completeness line per diagnostic. */
+  evidenceLine?: (fileKey: string, diagnostic: LspDiagnostic) => string | null;
+  /** True when the provider's own suppression edit applied ("Suppressed in source"). */
+  suppressedInSource?: (fileKey: string, diagnostic: LspDiagnostic) => boolean;
+  /**
+   * §8.20.4 gate: shown verbatim when the server lacks workspace diagnostics —
+   * full-project inspection stays "On-the-fly diagnostics only".
+   */
+  fullProjectNote?: string | null;
 }
 
 type SeverityKind = "error" | "warning" | "info";
@@ -61,6 +70,9 @@ export function ProblemsPanel({
   loading,
   diagnosticTransform,
   onOpenRelatedInformation,
+  evidenceLine,
+  suppressedInSource,
+  fullProjectNote = null,
 }: ProblemsPanelProps) {
   const projectScope = scope === "project";
   const [visible, setVisible] = useState<Record<SeverityKind, boolean>>({
@@ -114,6 +126,15 @@ export function ProblemsPanel({
           </div>
         ) : (
           <span className="mr-1 text-[10px] text-[var(--taomni-code-muted)]">Open files</span>
+        )}
+        {fullProjectNote && projectScope && (
+          <span
+            data-testid="problems-full-project-note"
+            className="mr-1 truncate text-[10px] text-amber-500"
+            title={fullProjectNote}
+          >
+            {fullProjectNote}
+          </span>
         )}
         {projectScope && onRebuild && (
           <button
@@ -183,12 +204,16 @@ export function ProblemsPanel({
                     },
                     ...(onSuppress
                       ? [
+                          // §8.20.4 naming rule: these hide the diagnostic in
+                          // THIS client only. "Suppressed in source" is
+                          // reserved for a provider suppression edit that
+                          // actually applied.
                           {
-                            label: "Suppress for line",
+                            label: "Hide this diagnostic locally (line)",
                             onClick: () => onSuppress(file.key, original, "line" as const),
                           },
                           {
-                            label: "Suppress for file",
+                            label: "Hide this diagnostic locally (whole file)",
                             onClick: () => onSuppress(file.key, original, "file" as const),
                           },
                         ]
@@ -211,6 +236,23 @@ export function ProblemsPanel({
                   <span className="min-w-0 flex-1">
                     <span className="block break-words text-[var(--taomni-code-text)]">{diagnostic.message}</span>
                     {detail && <span className="block truncate text-[10px] text-[var(--taomni-code-muted)]">{detail}</span>}
+                    {/* §8.20.4 DoD: provider/scope/revision/completeness on every row. */}
+                    {evidenceLine && (
+                      <span
+                        data-testid="problems-evidence-line"
+                        className="block truncate text-[10px] text-[var(--taomni-code-muted)]"
+                      >
+                        {evidenceLine(file.key, original)}
+                      </span>
+                    )}
+                    {suppressedInSource?.(file.key, original) && (
+                      <span
+                        data-testid="problems-suppressed-in-source"
+                        className="block text-[10px] text-emerald-500"
+                      >
+                        Suppressed in source
+                      </span>
+                    )}
                     {diagnostic.tags?.includes(1) && (
                       <span className="block text-[10px] text-[var(--taomni-code-muted)]">unnecessary</span>
                     )}

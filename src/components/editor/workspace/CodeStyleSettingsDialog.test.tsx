@@ -138,4 +138,75 @@ describe("§8.19.9 R8-D1 Code Style settings dialog", () => {
     expect(screen.getByTestId("code-style-rename").hasAttribute("disabled")).toBe(true);
     expect(screen.getByTestId("code-style-delete").hasAttribute("disabled")).toBe(true);
   });
+
+  it("edits Save Actions (format, organize imports) while keeping rearrange and cleanup disabled", () => {
+    const onChange = vi.fn();
+    const seeded = normalizeCodeStyleSchemeStore({
+      schemes: [{ id: "s1", name: "Custom" }],
+    });
+    render(
+      <CodeStyleSettingsDialog open={true} store={seeded} activeLanguageId={null} provenance={null} onChange={onChange} onClose={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTestId("code-style-scheme-row-s1"));
+
+    const formatCb = screen.getByTestId("code-style-save-format") as HTMLInputElement;
+    const organizeImportsCb = screen.getByTestId("code-style-save-organize-imports") as HTMLInputElement;
+    const rearrangeCb = screen.getByTestId("code-style-save-rearrange") as HTMLInputElement;
+    const cleanupCb = screen.getByTestId("code-style-save-cleanup") as HTMLInputElement;
+
+    expect(rearrangeCb).toBeDisabled();
+    expect(cleanupCb).toBeDisabled();
+
+    fireEvent.click(formatCb);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0][0].schemes[1].saveActions.format).toBe(true);
+
+    fireEvent.click(organizeImportsCb);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange.mock.calls[1][0].schemes[1].saveActions.organizeImports).toBe(true);
+  });
+
+  it("edits exclusion patterns and formatter markers", () => {
+    const onChange = vi.fn();
+    const seeded = normalizeCodeStyleSchemeStore({
+      schemes: [{ id: "s1", name: "Custom", exclusions: { patterns: ["dist/**"], formatterMarkers: true } }],
+    });
+    render(
+      <CodeStyleSettingsDialog open={true} store={seeded} activeLanguageId={null} provenance={null} onChange={onChange} onClose={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByTestId("code-style-scheme-row-s1"));
+
+    expect(screen.getByText("dist/**")).toBeInTheDocument();
+
+    const input = screen.getByTestId("code-style-add-exclusion-input");
+    fireEvent.change(input, { target: { value: "**/*.generated.ts" } });
+    fireEvent.click(screen.getByTestId("code-style-add-exclusion-btn"));
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0][0].schemes[1].exclusions.patterns).toContain("**/*.generated.ts");
+
+    const markersCb = screen.getByTestId("code-style-formatter-markers");
+    fireEvent.click(markersCb);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange.mock.calls[1][0].schemes[1].exclusions.formatterMarkers).toBe(false);
+  });
+
+  it("displays per-field provenance tag", () => {
+    const seeded = normalizeCodeStyleSchemeStore({
+      schemes: [{ id: "s1", name: "Custom", values: { tabSize: { value: 4 } } }],
+    });
+    render(
+      <CodeStyleSettingsDialog
+        open={true}
+        store={seeded}
+        activeLanguageId="java"
+        provenance={PROVENANCE}
+        onChange={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("code-style-scheme-row-s1"));
+
+    expect(screen.getByTestId("code-style-field-provenance-tabSize")).toHaveTextContent("scheme");
+  });
 });

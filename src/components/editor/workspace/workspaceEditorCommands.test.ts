@@ -24,6 +24,8 @@ import {
   plainTextClipboardPayload,
   createRegionFoldService,
   regionFoldAvailableForPath,
+  regionFoldingProvenance,
+  regionFoldingProvenanceLabel,
   reverseLines,
   selectNextEditorOccurrence,
   selectionHistoryField,
@@ -613,5 +615,25 @@ describe("N9.3/N14.4 region grammar strategy", () => {
     const line = view.state.doc.line(1);
     expect(foldable(view.state, line.from, line.to)).toBeNull();
     view.destroy();
+  });
+
+  it("marks region folding provenance as explicit-comment, language-syntax, or indent-fallback", () => {
+    // Comment node present -> explicit-comment
+    const commentNode = { name: "LineComment" };
+    expect(regionFoldingProvenance(commentNode)).toBe("explicit-comment");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(commentNode))).toBe("explicit-comment");
+
+    // Syntax block node present -> language-syntax
+    const syntaxNode = { name: "Block" };
+    expect(regionFoldingProvenance(syntaxNode)).toBe("language-syntax");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(syntaxNode))).toBe("language-syntax");
+
+    // Null / empty node / indent -> indent-fallback
+    expect(regionFoldingProvenance(null)).toBe("indent-fallback");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(null))).toBe("indent-fallback");
+
+    const emptyNode = { name: "" };
+    expect(regionFoldingProvenance(emptyNode)).toBe("indent-fallback");
+    expect(regionFoldingProvenanceLabel(regionFoldingProvenance(emptyNode))).toBe("indent-fallback");
   });
 });

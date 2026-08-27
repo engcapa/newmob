@@ -28,6 +28,92 @@ export interface WorkspaceCompactChain {
   entries: WorkspaceEntry[];
 }
 
+/**
+ * Discriminated result every tree IPC crosses the boundary with (W0 §8.20.1).
+ * Hooks must never assume an `invoke()` payload contains an array: a missing
+ * command, a stub gap, or a malformed backend response decodes to
+ * `failed`/`unavailable` here instead of leaking `undefined` into state.
+ */
+export type WorkspaceTreeLoadResult<T> =
+  | { state: "ready"; entries: readonly T[]; truncated: boolean }
+  | { state: "cancelled" }
+  | { state: "unavailable"; reason: string }
+  | { state: "failed"; message: string };
+
+const WORKSPACE_ENTRY_TYPES: readonly WorkspaceEntryType[] = ["file", "dir", "symlink", "other"];
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isWorkspaceEntry(value: unknown): value is WorkspaceEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.name === "string" &&
+    typeof candidate.path === "string" &&
+    WORKSPACE_ENTRY_TYPES.includes(candidate.fileType as WorkspaceEntryType) &&
+    typeof candidate.size === "number" &&
+    Number.isFinite(candidate.size) &&
+    typeof candidate.mtime === "number" &&
+    Number.isFinite(candidate.mtime) &&
+    typeof candidate.isHidden === "boolean"
+  );
+}
+
+function decodeWorkspaceEntries(
+  value: unknown,
+  command: string,
+  maxFiles?: number | null,
+): WorkspaceTreeLoadResult<WorkspaceEntry> {
+  if (value === undefined || value === null) {
+    return { state: "failed", message: `${command} returned no payload` };
+  }
+  if (!Array.isArray(value)) {
+    return {
+      state: "failed",
+      message: `${command}: expected an array, got ${typeof value}`,
+    };
+  }
+  const entries: WorkspaceEntry[] = [];
+  for (const item of value) {
+    if (!isWorkspaceEntry(item)) {
+      return {
+        state: "failed",
+        message: `${command}: malformed entry at index ${entries.length}`,
+      };
+    }
+    entries.push(item);
+  }
+  return {
+    state: "ready",
+    entries,
+    truncated: maxFiles != null && entries.length >= maxFiles,
+  };
+}
+
+function decodeWorkspaceCompactChain(
+  value: unknown,
+  command: string,
+): WorkspaceTreeLoadResult<WorkspaceEntry> {
+  if (value === undefined || value === null) {
+    return { state: "failed", message: `${command} returned no payload` };
+  }
+  if (typeof value !== "object" || typeof (value as WorkspaceCompactChain).path !== "string") {
+    return { state: "failed", message: `${command}: malformed chain payload` };
+  }
+  const chain = value as WorkspaceCompactChain;
+  if (!Array.isArray(chain.entries)) {
+    return { state: "failed", message: `${command}: chain entries is not an array` };
+  }
+  for (const item of chain.entries) {
+    if (!isWorkspaceEntry(item)) {
+      return { state: "failed", message: `${command}: malformed chain entry` };
+    }
+  }
+  return { state: "ready", entries: chain.entries, truncated: false };
+}
+
 export interface WorkspaceGitRootCandidate {
   id: string;
   name: string;
@@ -307,20 +393,30 @@ export interface WorkspaceExecutionModel {
 export function workspaceListDir(
   repoRoot: string,
   path = "",
-): Promise<WorkspaceEntry[]> {
-  return invoke<WorkspaceEntry[]>("workspace_list_dir", { repoRoot, path });
+): Promise<WorkspaceTreeLoadResult<WorkspaceEntry>> {
+  return invoke<unknown>("workspace_list_dir", { repoRoot, path })
+    .then((value) => decodeWorkspaceEntries(value, "workspace_list_dir"))
+    .catch((error: unknown) => ({
+      state: "failed" as const,
+      message: errorMessage(error),
+    }));
 }
 
 export function workspaceCompactChain(
   repoRoot: string,
   path: string,
   maxDepth?: number,
-): Promise<WorkspaceCompactChain> {
-  return invoke<WorkspaceCompactChain>("workspace_compact_chain", {
+): Promise<WorkspaceTreeLoadResult<WorkspaceEntry>> {
+  return invoke<unknown>("workspace_compact_chain", {
     repoRoot,
     path,
     maxDepth: maxDepth ?? null,
-  });
+  })
+    .then((value) => decodeWorkspaceCompactChain(value, "workspace_compact_chain"))
+    .catch((error: unknown) => ({
+      state: "failed" as const,
+      message: errorMessage(error),
+    }));
 }
 
 export function workspaceListFilesRecursive(
@@ -328,13 +424,20 @@ export function workspaceListFilesRecursive(
   path = "",
   maxDepth?: number,
   maxFiles?: number,
-): Promise<WorkspaceEntry[]> {
-  return invoke<WorkspaceEntry[]>("workspace_list_files_recursive", {
+): Promise<WorkspaceTreeLoadResult<WorkspaceEntry>> {
+  return invoke<unknown>("workspace_list_files_recursive", {
     repoRoot,
     path,
     maxDepth: maxDepth ?? null,
     maxFiles: maxFiles ?? null,
-  });
+  })
+    .then((value) =>
+      decodeWorkspaceEntries(value, "workspace_list_files_recursive", maxFiles),
+    )
+    .catch((error: unknown) => ({
+      state: "failed" as const,
+      message: errorMessage(error),
+    }));
 }
 
 export function workspaceDetectGitRoots(

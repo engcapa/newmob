@@ -21,18 +21,18 @@ steps:
   - fill: {selector: "input[placeholder=\"5432\"]", value: "8080"}
   - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
-  - wait_for: "text=\"qa-ui-auto-remote-tunnel\""
-  - assert_visible: "text=\"Remote\""
-  - click: 'tr:has-text("qa-ui-auto-remote-tunnel") button[title="Clone"]'
+  - wait_for: "[data-testid=\"tunnel-manager\"] >> text=\"qa-ui-auto-remote-tunnel\""
+  - assert_visible: "[data-testid=\"tunnel-editor\"] >> text=\"Remote\""
+  - click: '[data-testid="tunnel-manager"] tr:has-text("qa-ui-auto-remote-tunnel") button[title="Clone"]'
   - wait: 1
-  - wait_for: "text=\"qa-ui-auto-remote-tunnel (copy)\""
-  - click: 'tr:has-text("qa-ui-auto-remote-tunnel (copy)") button[title="Edit"]'
+  - wait_for: "[data-testid=\"tunnel-manager\"] >> text=\"qa-ui-auto-remote-tunnel (copy)\""
+  - click: '[data-testid="tunnel-manager"] tr:has-text("qa-ui-auto-remote-tunnel (copy)") button[title="Edit"]'
   - wait: 1
   - click: 'label:has-text("Dynamic port forwarding (SOCKS proxy)") input[type="radio"]'
   - wait: 1
   - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
-  - wait_for: "text=\"Dynamic\""
+  - wait_for: "[data-testid=\"tunnel-editor\"] >> text=\"Dynamic\""
   - seed_dialog: {confirm: true}
   - wait: 1
   - screenshot: 056-tunnel-remote-dynamic-clone.png

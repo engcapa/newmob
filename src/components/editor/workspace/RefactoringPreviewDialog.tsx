@@ -1,6 +1,16 @@
 import { useMemo, useState } from "react";
-import { CheckSquare, ChevronDown, ChevronRight, FileCode, Square, X } from "lucide-react";
+import {
+  AlertCircle,
+  AlertTriangle,
+  CheckSquare,
+  ChevronDown,
+  ChevronRight,
+  FileCode,
+  Square,
+  X,
+} from "lucide-react";
 import type { LspWorkspaceEdit } from "../../../lib/editor/lsp";
+import type { RefactorPlanV3 } from "./refactorPlan";
 import {
   filterWorkspaceEditByUsages,
   type WorkspaceEditPreview,
@@ -12,6 +22,7 @@ export interface RefactoringPreviewDialogProps {
   title?: string;
   preview: WorkspaceEditPreview;
   originalEdit: LspWorkspaceEdit;
+  plan?: RefactorPlanV3;
   onConfirm: (filteredEdit: LspWorkspaceEdit) => void;
   onCancel: () => void;
 }
@@ -21,12 +32,49 @@ export function RefactoringPreviewDialog({
   title = "Refactoring Usages Preview",
   preview,
   originalEdit,
+  plan,
   onConfirm,
   onCancel,
 }: RefactoringPreviewDialogProps) {
   const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set());
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const [searchFilter, setSearchFilter] = useState("");
+
+  const errorConflicts = useMemo(
+    () => plan?.conflicts.filter((c) => c.severity === "error") ?? [],
+    [plan?.conflicts],
+  );
+  const warningConflicts = useMemo(
+    () => plan?.conflicts.filter((c) => c.severity === "warning") ?? [],
+    [plan?.conflicts],
+  );
+
+  const requiredUsageIds = useMemo(() => {
+    const set = new Set<string>();
+    if (!plan) return set;
+    for (const group of plan.excludableGroups) {
+      if (group.required) {
+        for (const idx of group.operationIndexes) {
+          const op = plan.operations[idx];
+          if (op && op.kind === "text") {
+            for (const usage of preview.usages) {
+              if (
+                usage.path === op.document.path &&
+                op.document.edits.some(
+                  (edit) =>
+                    usage.range.start.line === edit.range.start.line &&
+                    usage.range.start.character === edit.range.start.character,
+                )
+              ) {
+                set.add(usage.id);
+              }
+            }
+          }
+        }
+      }
+    }
+    return set;
+  }, [plan, preview.usages]);
 
   const usagesByFile = useMemo(() => {
     const map = new Map<string, WorkspaceEditPreviewUsage[]>();
@@ -46,6 +94,7 @@ export function RefactoringPreviewDialog({
   const includedCount = totalUsages - excludedIds.size;
 
   const toggleUsage = (id: string) => {
+    if (requiredUsageIds.has(id)) return;
     setExcludedIds((current) => {
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
@@ -56,10 +105,12 @@ export function RefactoringPreviewDialog({
 
   const toggleFile = (path: string) => {
     const usages = usagesByFile.get(path) ?? [];
-    const allExcluded = usages.every((u) => excludedIds.has(u.id));
+    const excludable = usages.filter((u) => !requiredUsageIds.has(u.id));
+    if (excludable.length === 0) return;
+    const allExcluded = excludable.every((u) => excludedIds.has(u.id));
     setExcludedIds((current) => {
       const next = new Set(current);
-      for (const u of usages) {
+      for (const u of excludable) {
         if (allExcluded) next.delete(u.id);
         else next.add(u.id);
       }
@@ -77,7 +128,10 @@ export function RefactoringPreviewDialog({
   };
 
   const selectAll = () => setExcludedIds(new Set());
-  const selectNone = () => setExcludedIds(new Set(preview.usages.map((u) => u.id)));
+  const selectNone = () =>
+    setExcludedIds(
+      new Set(preview.usages.filter((u) => !requiredUsageIds.has(u.id)).map((u) => u.id)),
+    );
 
   const handleApply = () => {
     const filtered = filterWorkspaceEditByUsages(originalEdit, excludedIds);
@@ -96,9 +150,39 @@ export function RefactoringPreviewDialog({
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--taomni-code-border)] px-4 py-3">
           <div>
-            <h2 id="refactoring-preview-dialog-title" className="text-[14px] font-semibold">
-              {title}
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 id="refactoring-preview-dialog-title" className="text-[14px] font-semibold">
+                {title}
+              </h2>
+              {plan && (() => {
+                const compVal: string = typeof plan.completeness === "object" && plan.completeness !== null
+                  ? (plan.completeness as any).value
+                  : String(plan.completeness);
+                const isComplete = compVal === "complete" || compVal === "provider-complete";
+                const isPartial = compVal === "partial" || compVal === "provider-partial";
+                const source = typeof plan.completeness === "object" && plan.completeness !== null ? plan.completeness.source : null;
+
+                return (
+                  <span
+                    data-testid="refactoring-preview-completeness"
+                    title={source ? `Completeness source: ${source}` : undefined}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                      isComplete
+                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                        : isPartial
+                        ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                        : "bg-[var(--taomni-code-active-line-bg)] text-[var(--taomni-code-muted)] border border-[var(--taomni-code-border)]"
+                    }`}
+                  >
+                    {isComplete
+                      ? "Provider Complete"
+                      : isPartial
+                      ? "Provider Partial"
+                      : "Completeness Unknown"}
+                  </span>
+                );
+              })()}
+            </div>
             <p className="text-[11px] text-[var(--taomni-code-muted)] mt-0.5">
               {preview.affectedFileCount} file(s) affected · {includedCount} of {totalUsages} change(s) selected
               {preview.resourceOperationCount > 0 && ` · ${preview.resourceOperationCount} resource operation(s)`}
@@ -114,6 +198,48 @@ export function RefactoringPreviewDialog({
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        {/* Conflicts Banner */}
+        {errorConflicts.length > 0 && (
+          <div
+            data-testid="refactoring-preview-error-conflicts"
+            className="mx-4 mt-2 flex items-start gap-2 rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-300"
+          >
+            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
+            <div>
+              <div className="font-semibold">Refactoring Blocked by Conflicts:</div>
+              <ul className="list-disc pl-4 mt-0.5 space-y-0.5">
+                {errorConflicts.map((c, i) => (
+                  <li key={i}>{c.message}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+        {warningConflicts.length > 0 && errorConflicts.length === 0 && (
+          <div
+            data-testid="refactoring-preview-warning-conflicts"
+            className="mx-4 mt-2 flex items-start gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300"
+          >
+            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+            <div>
+              <div className="font-semibold">Warnings:</div>
+              <ul className="list-disc pl-4 mt-0.5 space-y-0.5">
+                {warningConflicts.map((c, i) => (
+                  <li key={i}>{c.message}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+        {errorConflicts.length === 0 && warningConflicts.length === 0 && plan && (
+          <div
+            data-testid="refactoring-preview-conflict-status"
+            className="mx-4 mt-2 flex items-center gap-1.5 px-1 text-[11px] text-[var(--taomni-code-muted)]"
+          >
+            <span>Conflict analysis unavailable from provider</span>
+          </div>
+        )}
 
         {/* Toolbar */}
         <div className="flex items-center justify-between border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-active-line-bg)]/40 px-4 py-2 text-[11px]">
@@ -205,17 +331,22 @@ export function RefactoringPreviewDialog({
                   <div className="ml-8 space-y-0.5 mt-0.5">
                     {filteredUsages.map((usage) => {
                       const isIncluded = !excludedIds.has(usage.id);
+                      const isRequired = requiredUsageIds.has(usage.id);
                       return (
                         <label
                           key={usage.id}
-                          className="flex items-center gap-2 rounded px-2 py-1 hover:bg-[var(--taomni-code-active-line-bg)] cursor-pointer font-mono text-[11px]"
+                          className={`flex items-center gap-2 rounded px-2 py-1 hover:bg-[var(--taomni-code-active-line-bg)] font-mono text-[11px] ${
+                            isRequired ? "cursor-not-allowed opacity-80" : "cursor-pointer"
+                          }`}
                         >
                           <input
                             type="checkbox"
                             data-testid={`refactoring-preview-usage-${usage.id}`}
                             checked={isIncluded}
+                            disabled={isRequired}
+                            title={isRequired ? "Required refactoring change (cannot be excluded)" : undefined}
                             onChange={() => toggleUsage(usage.id)}
-                            className="rounded border-[var(--taomni-code-border)]"
+                            className="rounded border-[var(--taomni-code-border)] disabled:opacity-60"
                           />
                           <span className="text-[var(--taomni-code-muted)] shrink-0 w-16">
                             L{usage.range.start.line + 1}:{usage.range.start.character + 1}
@@ -226,6 +357,11 @@ export function RefactoringPreviewDialog({
                           {usage.annotationLabel && (
                             <span className="rounded bg-sky-500/10 px-1.5 py-0.2 text-[9px] text-sky-400">
                               {usage.annotationLabel}
+                            </span>
+                          )}
+                          {isRequired && (
+                            <span className="rounded bg-amber-500/10 px-1.5 py-0.2 text-[9px] text-amber-400 font-sans">
+                              required
                             </span>
                           )}
                         </label>
@@ -252,7 +388,15 @@ export function RefactoringPreviewDialog({
             type="button"
             data-testid="refactoring-preview-apply"
             onClick={handleApply}
-            disabled={includedCount === 0 && preview.resourceOperationCount === 0}
+            disabled={
+              (includedCount === 0 && preview.resourceOperationCount === 0) ||
+              errorConflicts.length > 0
+            }
+            title={
+              errorConflicts.length > 0
+                ? "Cannot apply refactoring with unresolved conflicts"
+                : undefined
+            }
             className="rounded bg-sky-600 px-4 py-1.5 font-medium text-white hover:bg-sky-500 disabled:opacity-50"
           >
             Do Refactor ({includedCount})

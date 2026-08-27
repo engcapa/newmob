@@ -23,8 +23,8 @@ steps:
   - wait: 1
   - click: "[data-testid=\"sftp-remote-new-folder\"]"
   - wait: 1
-  - wait_for: "text=\"qa-ui-auto-folder-a\""
-  - wait_for: "text=\"qa-ui-auto-folder-b\""
+  - wait_for: "[data-testid=\"session-tree\"] >> text=\"qa-ui-auto-folder-a\""
+  - wait_for: "[data-testid=\"session-tree\"] >> text=\"qa-ui-auto-folder-b\""
   - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-folder-a"'
   - click:
       selector: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-folder-b"'

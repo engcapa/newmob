@@ -577,6 +577,7 @@ pub fn run() {
             lsp::lsp_selection_ranges,
             lsp::lsp_semantic_tokens,
             lsp::lsp_signature_help,
+            lsp::lsp_java_project_model,
             windowing::open_detached_window,
             windowing::close_current_detached_window,
             appearance::list_system_fonts,

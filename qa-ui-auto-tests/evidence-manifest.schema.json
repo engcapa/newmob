@@ -1,0 +1,297 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://taomni.local/qa-ui-auto/evidence-manifest.schema.json",
+  "title": "EditorEvidenceEntry",
+  "description": "Native gate evidence entry (§8.21.1 / §8.23.1). Supports v4 (with strict identity verification and matrix validation), v3, and v2 (legacy history).",
+  "oneOf": [
+    {
+      "title": "EditorEvidenceEntryV4",
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "capabilityId",
+        "languageId",
+        "subject",
+        "recordedAtCommit",
+        "owner",
+        "environment",
+        "provider",
+        "evidenceLayers",
+        "result",
+        "command",
+        "artifacts",
+        "knownGaps",
+        "maximumClaim",
+        "collectedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "type": "integer", "const": 4 },
+        "capabilityId": { "type": "string", "minLength": 1 },
+        "languageId": { "type": ["string", "null"] },
+        "subject": {
+          "type": "object",
+          "required": [
+            "appCommit",
+            "recordedAtCommit",
+            "sourceTreeHash",
+            "sourceDirty",
+            "bundleHash",
+            "testPlanHash"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "appCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "recordedAtCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "sourceTreeHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "sourceDirty": { "type": "boolean" },
+            "bundleHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "testPlanHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        "recordedAtCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "owner": {
+          "type": "object",
+          "required": ["featureId", "paths"],
+          "additionalProperties": false,
+          "properties": {
+            "featureId": { "type": "string", "minLength": 1 },
+            "paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            }
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "provider": {
+          "$ref": "#/$defs/provider"
+        },
+        "evidenceLayers": {
+          "$ref": "#/$defs/evidenceLayers"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "command": { "type": "string" },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        },
+        "claimKeys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "performanceMeasurement": {
+          "type": "object",
+          "properties": {
+            "typingP95Ms": { "type": "number" },
+            "localActionP95Ms": { "type": "number" },
+            "rawSamples": { "type": "array", "items": { "type": "number" } },
+            "status": { "type": "string", "enum": ["passed", "failed"] }
+          }
+        },
+        "knownGaps": { "type": "array", "items": { "type": "string" } },
+        "maximumClaim": {
+          "$ref": "#/$defs/maximumClaim"
+        },
+        "evidencePurpose": {
+          "type": "string",
+          "enum": ["release", "synthetic", "test-fixture"]
+        },
+        "notes": { "type": "string" },
+        "collectedAt": { "type": "string" }
+      }
+    },
+    {
+      "title": "EditorEvidenceEntryV3",
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "capabilityId",
+        "languageId",
+        "subject",
+        "recordedAtCommit",
+        "owner",
+        "environment",
+        "provider",
+        "evidenceLayers",
+        "result",
+        "command",
+        "artifacts",
+        "knownGaps",
+        "maximumClaim",
+        "collectedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "type": "integer", "const": 3 },
+        "capabilityId": { "type": "string", "minLength": 1 },
+        "languageId": { "type": ["string", "null"] },
+        "subject": {
+          "type": "object",
+          "required": ["appCommit", "testedSourceFingerprint", "bundleHash", "testPlanFingerprint"],
+          "additionalProperties": false,
+          "properties": {
+            "appCommit": { "type": "string", "minLength": 1 },
+            "testedSourceFingerprint": { "type": "string", "minLength": 1 },
+            "bundleHash": { "type": "string", "minLength": 1 },
+            "testPlanFingerprint": { "type": "string", "minLength": 1 }
+          }
+        },
+        "recordedAtCommit": { "type": "string", "minLength": 1 },
+        "owner": {
+          "type": "object",
+          "required": ["featureId", "paths"],
+          "additionalProperties": false,
+          "properties": {
+            "featureId": { "type": "string", "minLength": 1 },
+            "paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            }
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "provider": {
+          "$ref": "#/$defs/provider"
+        },
+        "evidenceLayers": {
+          "$ref": "#/$defs/evidenceLayers"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "command": { "type": "string", "description": "exact command(s) executed" },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        },
+        "knownGaps": { "type": "array", "items": { "type": "string" } },
+        "maximumClaim": {
+          "$ref": "#/$defs/maximumClaim"
+        },
+        "notes": { "type": "string" },
+        "collectedAt": { "type": "string" }
+      }
+    },
+    {
+      "title": "EditorEvidenceEntryV2",
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "capabilityId",
+        "languageId",
+        "app",
+        "environment",
+        "provider",
+        "evidenceLayers",
+        "result",
+        "command",
+        "artifacts",
+        "knownGaps",
+        "maximumClaim",
+        "collectedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "type": "integer", "const": 2 },
+        "capabilityId": { "type": "string", "minLength": 1 },
+        "languageId": { "type": ["string", "null"] },
+        "app": {
+          "type": "object",
+          "required": ["commit", "bundleHash", "version"],
+          "additionalProperties": false,
+          "properties": {
+            "commit": { "type": "string", "minLength": 1 },
+            "bundleHash": { "type": "string", "minLength": 1 },
+            "version": { "type": "string" }
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "provider": {
+          "$ref": "#/$defs/provider"
+        },
+        "evidenceLayers": {
+          "$ref": "#/$defs/evidenceLayers"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "command": { "type": "string", "description": "exact command(s) executed" },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        },
+        "knownGaps": { "type": "array", "items": { "type": "string" } },
+        "maximumClaim": {
+          "$ref": "#/$defs/maximumClaim"
+        },
+        "notes": { "type": "string" },
+        "collectedAt": { "type": "string" }
+      }
+    }
+  ],
+  "$defs": {
+    "environment": {
+      "type": "object",
+      "required": ["platform", "os", "arch", "webview", "keyboard", "ime", "scale", "filesystem"],
+      "additionalProperties": false,
+      "properties": {
+        "platform": { "type": "string", "enum": ["linux", "windows", "macos"] },
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "webview": { "type": "string" },
+        "keyboard": { "type": "string", "description": "keyboard layout, e.g. us / de / cn,us" },
+        "ime": { "type": "string" },
+        "scale": { "type": "number", "description": "display scale, 1 = 100%, 2 = 200%" },
+        "filesystem": { "type": "string" }
+      }
+    },
+    "provider": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["id", "version", "fixture"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string" },
+            "version": { "type": "string" },
+            "fixture": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "evidenceLayers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["unit", "mounted", "browser", "native", "provider", "idea-compare"] }
+    },
+    "result": {
+      "enum": ["passed", "failed", "blocked", "platform-unverified", "provider-unverified", "manual-native"]
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path", "sha256", "redacted"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string" },
+          "path": { "type": "string" },
+          "sha256": { "type": "string" },
+          "redacted": { "type": "boolean" }
+        }
+      }
+    },
+    "maximumClaim": {
+      "enum": ["L0", "L1", "L2", "L3"],
+      "description": "highest L0-L3 claim this single entry supports; never inferred across platforms"
+    }
+  }
+}

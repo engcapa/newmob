@@ -116,6 +116,9 @@ export const MailHtmlReader = forwardRef<MailHtmlReaderHandle, MailHtmlReaderPro
       setFrameHeight((prev) => (Math.abs(prev - height) > 1 ? height : prev));
     };
 
+    let t1: number | undefined;
+    let t2: number | undefined;
+
     const attachObservers = () => {
       const doc = iframe.contentDocument;
       if (!doc?.body) return;
@@ -139,8 +142,10 @@ export const MailHtmlReader = forwardRef<MailHtmlReaderHandle, MailHtmlReaderPro
         img.addEventListener("load", measure, { once: true });
         img.addEventListener("error", measure, { once: true });
       });
-      window.setTimeout(measure, 50);
-      window.setTimeout(measure, 250);
+      if (typeof window !== "undefined") {
+        t1 = window.setTimeout(measure, 50);
+        t2 = window.setTimeout(measure, 250);
+      }
     };
 
     const onLoad = () => attachObservers();
@@ -151,6 +156,8 @@ export const MailHtmlReader = forwardRef<MailHtmlReaderHandle, MailHtmlReaderPro
 
     return () => {
       cancelled = true;
+      if (t1 !== undefined) clearTimeout(t1);
+      if (t2 !== undefined) clearTimeout(t2);
       iframe.removeEventListener("load", onLoad);
       ro?.disconnect();
       mo?.disconnect();

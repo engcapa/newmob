@@ -428,6 +428,53 @@ describe("PathBreadcrumb Windows drives root", () => {
     fireEvent.click(drivesBtn);
     expect(onNavigate).toHaveBeenCalledWith("\\\\");
   });
+
+  it("switches to input on click, supports pasting a path with quotes, and submits cleaned path on Enter", () => {
+    const onSubmit = vi.fn();
+    const onNavigate = vi.fn();
+    const { getByTestId } = render(
+      <PathBreadcrumb
+        testId="sftp-remote-path"
+        path="/var/www/html"
+        onNavigate={onNavigate}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const breadcrumb = getByTestId("sftp-remote-path");
+    fireEvent.click(breadcrumb);
+
+    const input = getByTestId("sftp-remote-path") as HTMLInputElement;
+    expect(input.tagName).toBe("INPUT");
+    expect(input.value).toBe("/var/www/html");
+
+    // Paste path with surrounding quotes
+    fireEvent.change(input, { target: { value: "'/etc/nginx/conf.d'" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledWith("/etc/nginx/conf.d");
+  });
+
+  it("cancels editing and restores original path on Escape", () => {
+    const onSubmit = vi.fn();
+    const { getByTestId } = render(
+      <PathBreadcrumb
+        testId="sftp-local-path"
+        path="/home/user/docs"
+        onNavigate={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    fireEvent.click(getByTestId("sftp-local-path"));
+    const input = getByTestId("sftp-local-path") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "/home/user/modified" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    const breadcrumb = getByTestId("sftp-local-path");
+    expect(breadcrumb.tagName).toBe("DIV");
+  });
 });
 
 describe("FileBrowser pane order", () => {

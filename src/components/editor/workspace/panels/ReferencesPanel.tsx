@@ -42,6 +42,12 @@ interface ReferencesPanelProps {
    */
   pinned?: boolean;
   onPinChange?: (pinned: boolean) => void;
+  /** §8.20.5 W4: the scope selection this result was produced under. */
+  scopeSelection?: { scope: string; includeDeclaration: boolean; includeLibraries: boolean; includeTests: boolean } | null;
+  /** Recent immutable sessions (bounded); restoring swaps the view only. */
+  recentSessions?: ReadonlyArray<{ id: string; label: string }>;
+  onRestoreRecent?: (id: string) => void;
+  recentsRevision?: number;
 }
 
 function displayLocationPath(location: LspLocation, roots: CodeWorkspaceRootInfo[]): string {
@@ -57,7 +63,7 @@ function displayLocationPath(location: LspLocation, roots: CodeWorkspaceRootInfo
  * Find Usages tool-window panel (§8.18.7): grouped results with explicit
  * batch continuation (never a silent cap), pin, and provider-identity rerun.
  */
-export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, onRerun, pinned, onPinChange }: ReferencesPanelProps) {
+export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, onRerun, pinned, onPinChange, scopeSelection = null, recentSessions = [], onRestoreRecent, recentsRevision = 0 }: ReferencesPanelProps) {
   const [pinState, setPinState] = useState(false);
   const isPinned = pinned ?? pinState;
   const [cursor, setCursor] = useState(0);
@@ -159,7 +165,39 @@ export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation, 
             <RefreshCw className="h-3 w-3" />
           </button>
         )}
+        {/* §8.20.5 W4: recent immutable sessions — restoring swaps the VIEW,
+            never re-queries or mutates the pinned truth. */}
+        {recentSessions.length > 1 && onRestoreRecent && (
+          <select
+            data-testid="references-recent-sessions"
+            aria-label="Recent usages sessions"
+            className="h-6 max-w-[140px] rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 text-[10px]"
+            defaultValue=""
+            onChange={(event) => {
+              if (event.target.value) onRestoreRecent(event.target.value);
+              event.target.value = "";
+            }}
+            key={recentsRevision}
+          >
+            <option value="">Recent…</option>
+            {recentSessions.map((session) => (
+              <option key={session.id} value={session.id}>{session.label}</option>
+            ))}
+          </select>
+        )}
       </div>
+      {scopeSelection && (
+        <div
+          data-testid="references-scope-line"
+          className="truncate px-3 pt-1 text-[10px] text-[var(--taomni-code-muted)]"
+          title="Scope is a client-side selection over one document-scope provider response"
+        >
+          Scope: {scopeSelection.scope}
+          {scopeSelection.includeDeclaration ? " · +declaration" : ""}
+          {scopeSelection.includeLibraries ? " · +libraries" : " · libraries hidden"}
+          {!scopeSelection.includeTests ? " · tests hidden" : ""}
+        </div>
+      )}
       {result.loading && (
         <div className="flex items-center gap-2 px-3 py-2 text-[var(--taomni-code-muted)]">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />

@@ -38,6 +38,7 @@ describe("editorAppearanceProfile", () => {
       },
       virtualSpace: { afterLineEnd: true, atFileBottom: "yes" },
       breadcrumbs: { visible: false, placement: "invalid", languages: [] },
+      clipboard: { historyEnabled: "no", historyMaxItems: 1000, historyMaxTotalBytes: 50 },
     });
 
     expect(normalized).toMatchObject({
@@ -55,6 +56,7 @@ describe("editorAppearanceProfile", () => {
       },
       virtualSpace: { afterLineEnd: true, atFileBottom: false },
       breadcrumbs: { visible: false, placement: "top", languages: ["*"] },
+      clipboard: { historyEnabled: true, historyMaxItems: 50, historyMaxTotalBytes: 1024 },
     });
     expect(defaultEditorAppearanceProfile()).toEqual(DEFAULT_EDITOR_APPEARANCE_PROFILE);
   });

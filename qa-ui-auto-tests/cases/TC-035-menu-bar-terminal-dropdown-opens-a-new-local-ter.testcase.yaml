@@ -1,24 +1,25 @@
 id: TC-035
-title: Menu bar Terminal dropdown opens a new local terminal
-covers: [F1.2]
-tags: [legacy-imported, main, menu-bar, p1]
+title: Unified app menu opens a new local terminal and lists session entries
+covers: [F1.2, F1.8]
+tags: [legacy-imported, main, unified-menu, p1]
 modes: [browser, native]
 fixtures: [reset_db]
 steps:
   - open: "${cfg.app.base_url}"
-  - wait_for: "[data-testid=\"menu-bar\"]"
-  - click: '[data-testid="menu-bar"] button:has-text("Terminal")'
+  - wait_for: "[data-testid=\"app-titlebar\"]"
+  - click: '[data-testid="app-main-menu"]'
   - wait_for: "[data-testid=\"context-menu\"]"
-  - assert_visible: "text=\"New local terminal\""
-  - assert_visible: "text=\"New remote session…\""
-  - assert_visible: "text=\"Close active tab\""
-  - click: "text=\"New local terminal\""
+  - assert_visible: '[data-testid="context-menu-item-new-local-terminal"]'
+  - assert_visible: '[data-testid="context-menu"] >> text="New remote session…"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Close active tab"'
+  - click: '[data-testid="context-menu-item-new-local-terminal"]'
   - wait_for: "[data-testid=\"terminal-pane\"]"
   - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: 1 terminals}
-  - click: '[data-testid="menu-bar"] button:has-text("Sessions")'
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu"] >> text="Sessions"'
   - wait_for: "[data-testid=\"context-menu\"]"
-  - assert_visible: "text=\"New session…\""
-  - assert_visible: "text=\"Show sessions\""
-  - assert_visible: "text=\"Reload sessions\""
+  - assert_visible: '[data-testid="context-menu"] >> text="New session…"'
+  - assert_visible: '[data-testid="context-menu"] >> text="Show sessions"'
+  - assert_visible: '[data-testid="context-menu-item-reload-sessions"]'
   - press: Escape
-  - screenshot: 035-menubar-dropdowns.png
+  - screenshot: 035-unified-menu.png

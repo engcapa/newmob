@@ -8,6 +8,7 @@ use notify::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -273,6 +274,57 @@ pub struct LspHoverResult {
 pub struct LspLocationsResult {
     pub status: LspDocumentStatus,
     pub locations: Vec<LspLocation>,
+}
+
+/// One provider-reported Java project/module root (`java.project.list`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspJavaProjectModule {
+    pub id: String,
+    pub root_uri: Option<String>,
+}
+
+/// §8.20.3 W2: hashed summary of one project's resolved classpath. Entry
+/// paths are never returned verbatim — only their count and joint hash —
+/// so fingerprints stay free of machine-local plaintext.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspJavaClasspathProbe {
+    pub root_uri: Option<String>,
+    pub entry_count: u64,
+    pub entries_sha256: String,
+}
+
+/// Build descriptor under a workspace root (pom.xml / build.gradle* /
+/// settings.gradle*) with its content hash. Feeds the project fingerprint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspBuildFileHash {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// Provider-owned Project Analysis facts (§8.20.3 W2). Lifecycle-only
+/// providers leave `classpath_probe` unset and explain why in
+/// `probe_reason`; the frontend derives phase/completeness from exactly
+/// these fields and never invents module details.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspJavaProjectModelResult {
+    pub status: LspDocumentStatus,
+    pub active: bool,
+    pub process_id: Option<u32>,
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    /// `workspace/executeCommand` command names the provider registered.
+    pub registered_commands: Vec<String>,
+    pub build_files: Vec<LspBuildFileHash>,
+    /// Tooling JDK home used to launch this session (hashed client-side;
+    /// never embedded verbatim into fingerprints or traces).
+    pub java_home_used: Option<String>,
+    pub java_projects: Vec<LspJavaProjectModule>,
+    pub classpath_probe: Option<LspJavaClasspathProbe>,
+    pub probe_reason: Option<String>,
 }
 
 /// Contents of a library / virtual document (JDK, dependency JAR, jdt:// URI).
@@ -1085,6 +1137,10 @@ struct LspSession {
     diagnostic_provider_generation: AtomicU64,
     capabilities: RwLock<Option<LspCapabilitySummary>>,
     server_capabilities: RwLock<Value>,
+    /// `serverInfo` from the initialize result (§8.20.3 W2 provider identity).
+    server_info: RwLock<Option<Value>>,
+    /// Resolved tooling JDK home used to launch this server (jdtls only).
+    tooling_java_home_used: Mutex<Option<PathBuf>>,
     client_configuration: RwLock<Value>,
     work_done_progress: RwLock<HashMap<String, WorkDoneProgressState>>,
     dynamic_capabilities: RwLock<HashMap<String, DynamicCapabilityRegistration>>,
@@ -1748,6 +1804,134 @@ impl LspManager {
                 started.elapsed()
             ),
         }
+        result
+    }
+
+    /// §8.20.3 W2: gather provider-owned Project Analysis facts for the
+    /// session that would serve this document. Never errors — unavailable
+    /// probes are reported through `probe_reason` so the UI can stay honest
+    /// about WHY module details are missing.
+    async fn java_project_model(
+        &self,
+        document: &ResolvedDocument,
+        preferred_command_id: Option<&str>,
+        custom_command: Option<&LspCustomServerCommand>,
+    ) -> LspJavaProjectModelResult {
+        let status = self
+            .document_status(document, preferred_command_id, custom_command)
+            .await;
+        let mut result = LspJavaProjectModelResult {
+            status,
+            active: false,
+            process_id: None,
+            server_name: None,
+            server_version: None,
+            registered_commands: Vec::new(),
+            build_files: scan_build_file_hashes(&document.root_path),
+            java_home_used: None,
+            java_projects: Vec::new(),
+            classpath_probe: None,
+            probe_reason: None,
+        };
+        let Some(session) = self
+            .active_session(document, preferred_command_id, custom_command)
+            .await
+        else {
+            result.probe_reason = Some("no-active-session".into());
+            return result;
+        };
+        result.active = true;
+        result.process_id = session.child.lock().await.id();
+        result.java_home_used = session
+            .tooling_java_home_used
+            .lock()
+            .await
+            .clone()
+            .map(|home| home.to_string_lossy().into_owned());
+        if let Some(server_info) = session.server_info.read().await.as_ref() {
+            result.server_name = server_info
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            result.server_version = server_info
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        // Registered executeCommand names gate every probe: a provider that
+        // never registered `java.project.*` simply reports lifecycle facts.
+        let registered: Vec<String> = {
+            let capabilities = session.dynamic_capabilities.read().await;
+            let mut commands: Vec<String> = capabilities
+                .values()
+                .filter(|registration| registration.method == "workspace/executeCommand")
+                .flat_map(|registration| {
+                    registration
+                        .register_options
+                        .get("commands")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .filter_map(|command| command.as_str().map(str::to_owned))
+                .collect();
+            commands.sort();
+            commands.dedup();
+            commands
+        };
+
+        if registered.iter().any(|command| command == "java.project.list") {
+            match session
+                .request_with_timeout(
+                    "workspace/executeCommand",
+                    json!({ "command": "java.project.list", "arguments": [] }),
+                    JAVA_COMMAND_TIMEOUT_SECS,
+                )
+                .await
+            {
+                Ok(value) => result.java_projects = parse_java_project_list(&value),
+                Err(error) => {
+                    result.probe_reason =
+                        Some(format!("java.project.list-failed:{error}"));
+                }
+            }
+        }
+
+        if registered
+            .iter()
+            .any(|command| command == "java.project.getClasspaths")
+        {
+            match session
+                .request_with_timeout(
+                    "workspace/executeCommand",
+                    json!({
+                        "command": "java.project.getClasspaths",
+                        "arguments": [document.uri],
+                    }),
+                    JAVA_COMMAND_TIMEOUT_SECS,
+                )
+                .await
+            {
+                Ok(value) => match parse_java_classpath_probe(&value) {
+                    Some(mut probe) => {
+                        probe.root_uri.get_or_insert_with(|| document.uri.clone());
+                        result.classpath_probe = Some(probe);
+                    }
+                    None => {
+                        result.probe_reason =
+                            Some("java.project.getClasspaths-unrecognized-shape".into());
+                    }
+                },
+                Err(error) => {
+                    result.probe_reason =
+                        Some(format!("java.project.getClasspaths-failed:{error}"));
+                }
+            }
+        } else if result.probe_reason.is_none() {
+            result.probe_reason =
+                Some("command-not-registered:java.project.getClasspaths".into());
+        }
+        result.registered_commands = registered;
         result
     }
 
@@ -2710,13 +2894,19 @@ impl LspSession {
         }
         // Ensure jdtls wrappers (non-Windows) use the tooling JDK. The project
         // JDK is delivered independently through java.configuration.runtimes.
-        if is_jdtls
-            && let Ok((java, _)) = resolve_java_for_jdtls_with_sdk(
+        // §8.20.3 W2: remember the resolved home so Project Analysis can hash
+        // the JDK identity into its fingerprint.
+        let resolved_java_home = if is_jdtls {
+            resolve_java_for_jdtls_with_sdk(
                 tooling_java_home,
                 sdk_environment.tooling_java_error.as_deref(),
             )
-            && let Some(home) = java_home_from_binary(&java)
-        {
+            .ok()
+            .and_then(|(java, _)| java_home_from_binary(&java))
+        } else {
+            None
+        };
+        if let Some(home) = &resolved_java_home {
             process.env("JAVA_HOME", home);
         }
         // Non-Windows launches the `jdtls` wrapper; inject JVM args via JAVA_OPTS
@@ -2772,6 +2962,8 @@ impl LspSession {
             diagnostic_provider_generation: AtomicU64::new(0),
             capabilities: RwLock::new(None),
             server_capabilities: RwLock::new(Value::Null),
+            server_info: RwLock::new(None),
+            tooling_java_home_used: Mutex::new(resolved_java_home),
             client_configuration: RwLock::new(client_configuration),
             work_done_progress: RwLock::new(HashMap::new()),
             dynamic_capabilities: RwLock::new(HashMap::new()),
@@ -2959,6 +3151,8 @@ impl LspSession {
             .cloned()
             .unwrap_or(Value::Null);
         *session.server_capabilities.write().await = server_caps;
+        // §8.20.3 W2: keep the provider's own identity for Project Analysis.
+        *session.server_info.write().await = initialize_result.get("serverInfo").cloned();
         session.refresh_capabilities().await;
         if let Some(error) = start.cancellation.lock().await.clone() {
             session.abort(&error).await;
@@ -8043,6 +8237,148 @@ pub async fn lsp_range_formatting(
     })
 }
 
+fn sha256_hex_string(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sha256_hex_file(path: &Path) -> Option<String> {
+    // Chunked read: Sha256's io::Write impl is feature-gated upstream.
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+const BUILD_DESCRIPTOR_NAMES: &[&str] = &[
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+];
+const BUILD_FILE_SCAN_DEPTH: usize = 3;
+const BUILD_FILE_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Collect build descriptors under the root (depth-limited, size-capped) with
+/// content hashes — the build-model half of the project fingerprint.
+fn scan_build_file_hashes(root: &Path) -> Vec<LspBuildFileHash> {
+    let mut found: Vec<LspBuildFileHash> = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Build tool output and VCS metadata never carry descriptors.
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if matches!(name, "target" | "build" | ".git" | "node_modules") {
+                    continue;
+                }
+                if depth + 1 < BUILD_FILE_SCAN_DEPTH {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !BUILD_DESCRIPTOR_NAMES.contains(&name) {
+                continue;
+            }
+            if entry.metadata().map(|m| m.len() > BUILD_FILE_MAX_BYTES).unwrap_or(true) {
+                continue;
+            }
+            if let Some(hash) = sha256_hex_file(&path) {
+                found.push(LspBuildFileHash {
+                    path: path.to_string_lossy().into_owned(),
+                    sha256: hash,
+                });
+            }
+        }
+    }
+    found.sort_by(|left, right| left.path.cmp(&right.path));
+    found.dedup_by(|left, right| left.path == right.path);
+    found
+}
+
+/// Tolerant parser for `java.project.list` results. vscode-java returns an
+/// array of `{ uri }` objects (older builds returned bare strings); anything
+/// else parses to an empty list rather than guessing.
+fn parse_java_project_list(value: &Value) -> Vec<LspJavaProjectModule> {
+    let items = match value {
+        Value::Array(items) => Some(items.clone()),
+        Value::Object(map) => map.get("projects").and_then(Value::as_array).cloned(),
+        _ => None,
+    };
+    (items.unwrap_or_default())
+        .into_iter()
+        .filter_map(|item| match item {
+            Value::String(uri) => Some(LspJavaProjectModule {
+                root_uri: Some(uri.clone()),
+                id: uri,
+            }),
+            Value::Object(map) => {
+                let uri = map
+                    .get("uri")
+                    .or_else(|| map.get("root"))
+                    .or_else(|| map.get("rootUri"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let id = uri.clone().unwrap_or_default();
+                (!id.is_empty()).then_some(LspJavaProjectModule { id, root_uri: uri })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Tolerant parser for `java.project.getClasspaths`: vscode-java answers
+/// `{ root, classpaths: [...] }`; accept a raw array too. Returns None when
+/// the shape is unrecognizable so the caller records an honest reason.
+fn parse_java_classpath_probe(value: &Value) -> Option<LspJavaClasspathProbe> {
+    let entries: Vec<String> = match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|entry| entry.as_str().map(str::to_owned))
+            .collect(),
+        Value::Object(map) => map
+            .get("classpaths")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_owned))
+                    .collect()
+            })?,
+        _ => return None,
+    };
+    let root_uri = value
+        .get("root")
+        .or_else(|| value.get("projectRoot"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut sorted = entries.clone();
+    sorted.sort();
+    Some(LspJavaClasspathProbe {
+        root_uri,
+        entry_count: sorted.len() as u64,
+        entries_sha256: sha256_hex_string(&sorted.join("\n")),
+    })
+}
+
 #[tauri::command]
 pub async fn lsp_signature_help(
     state: State<'_, AppState>,
@@ -8055,6 +8391,8 @@ pub async fn lsp_signature_help(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspSignatureHelpResult, String> {
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
     let session = match state
@@ -8092,17 +8430,25 @@ pub async fn lsp_signature_help(
         }),
         None => json!({ "triggerKind": 1, "isRetrigger": false }),
     };
+    // §8.20.2 W1: same cancellation identity as lsp_hover — a newer request
+    // for the same key aborts this one via `$/cancelRequest`.
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => tokio_util::sync::CancellationToken::new(),
+    };
     let result = session
-        .request(
+        .request_with_cancellation(
             "textDocument/signatureHelp",
             json!({
                 "textDocument": { "uri": document.uri },
                 "position": { "line": line, "character": character },
                 "context": context,
             }),
+            &cancellation,
         )
         .await
         .unwrap_or(Value::Null);
+    let cancelled = cancellation.is_cancelled();
     let status = state
         .lsp
         .document_status(
@@ -8111,6 +8457,16 @@ pub async fn lsp_signature_help(
             custom_server_command.as_ref(),
         )
         .await;
+    if cancelled {
+        // Cancelled requests report no content; the status snapshot stays
+        // fresh so the next parameter request can proceed immediately.
+        return Ok(LspSignatureHelpResult {
+            status,
+            signatures: Vec::new(),
+            active_signature: 0,
+            active_parameter: 0,
+        });
+    }
     let (signatures, active_signature, active_parameter) = parse_signature_help(&result);
     Ok(LspSignatureHelpResult {
         status,
@@ -8118,6 +8474,34 @@ pub async fn lsp_signature_help(
         active_signature,
         active_parameter,
     })
+}
+
+/// §8.20.3 W2: provider-owned Project Analysis facts for the language server
+/// session that serves this file. Never rejects — unavailability is reported
+/// inside the payload so UI states stay explainable.
+#[tauri::command]
+pub async fn lsp_java_project_model(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    document_uri: Option<String>,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<LspJavaProjectModelResult, String> {
+    let mut document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    if let Some(uri) = document_uri.as_deref().map(str::trim).filter(|uri| !uri.is_empty()) {
+        document.uri = uri.to_string();
+    }
+    Ok(state
+        .lsp
+        .java_project_model(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await)
 }
 
 fn resolve_document(

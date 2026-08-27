@@ -21,15 +21,15 @@ steps:
   - wait: 1
   - seed_dialog: {prompt: qa-ui-auto-transfer.txt, confirm: true}
   - click: "[data-testid=\"sftp-local-new-file\"]"
-  - wait_for: "text=\"qa-ui-auto-transfer.txt\""
+  - wait_for: "[data-testid=\"sftp-local-pane\"] >> text=\"qa-ui-auto-transfer.txt\""
   - click: '[data-testid="sftp-local-pane"] >> text="qa-ui-auto-transfer.txt"'
   - click: "[data-testid=\"sftp-local-upload-selected\"]"
-  - wait_for: "text=\"done\""
+  - wait_for: "[data-testid=\"sftp-transfer-queue\"] >> text=\"done\""
   - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-transfer.txt"'
   - click: "[data-testid=\"sftp-remote-download-selected\"]"
-  - wait_for: "text=\"done\""
+  - wait_for: "[data-testid=\"sftp-transfer-queue\"] >> text=\"done\""
   - click: "[data-testid=\"sftp-remote-preview\"]"
-  - assert_visible: "text=\"qa-ui-auto-transfer.txt\""
+  - assert_visible: "[data-testid=\"sftp-remote-pane\"] >> text=\"qa-ui-auto-transfer.txt\""
   - click: "role=button[name=\"Close\"]"
   - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-transfer.txt"'
   - click: "[data-testid=\"sftp-remote-delete\"]"

@@ -388,6 +388,9 @@ export function SearchEverywhere({
                 >
                   {symbolQueryStatus.providerCount}/{symbolQueryStatus.sessionCount} provider{symbolQueryStatus.sessionCount === 1 ? "" : "s"}
                   {symbolQueryStatus.complete ? " · complete" : " · incomplete"}
+                  {symbolQueryStatus.failedProviderCount > 0 ? ` (${symbolQueryStatus.failedProviderCount} failed)` : ""}
+                  {symbolQueryStatus.skippedProviderCount > 0 ? ` (${symbolQueryStatus.skippedProviderCount} skipped)` : ""}
+                  {symbolQueryStatus.truncated ? " · truncated" : ""}
                   {symbolQueryStatus.truncated || symbolQueryStatus.skippedProviderCount > 0 || symbolQueryStatus.failedProviderCount > 0 || (symbolQueryStatus.diagnostics?.length ?? 0) > 0 ? " · bounded" : ""}
                   {" · "}
                 </span>

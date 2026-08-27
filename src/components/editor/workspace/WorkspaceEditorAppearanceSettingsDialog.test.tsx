@@ -157,4 +157,45 @@ describe("WorkspaceEditorAppearanceSettingsDialog", () => {
     );
     expect(screen.queryByTestId("workspace-editor-appearance-settings-dialog")).toBeNull();
   });
+
+  it("edits clipboard history settings and confirms clear history", () => {
+    const onApply = vi.fn();
+    const onClearClipboardHistory = vi.fn();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(
+      <WorkspaceEditorAppearanceSettingsDialog
+        open
+        profile={DEFAULT_EDITOR_APPEARANCE_PROFILE}
+        onApply={onApply}
+        onClose={vi.fn()}
+        onClearClipboardHistory={onClearClipboardHistory}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("workspace-editor-appearance-clipboard-history-enabled"));
+    fireEvent.change(screen.getByTestId("workspace-editor-appearance-clipboard-max-items"), {
+      target: { value: "40" },
+    });
+    fireEvent.change(screen.getByTestId("workspace-editor-appearance-clipboard-max-bytes"), {
+      target: { value: "2097152" },
+    });
+
+    fireEvent.click(screen.getByTestId("workspace-editor-appearance-clipboard-clear"));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(onClearClipboardHistory).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByTestId("workspace-editor-appearance-apply"));
+    expect(onApply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clipboard: {
+          historyEnabled: false,
+          historyMaxItems: 40,
+          historyMaxTotalBytes: 2097152,
+        },
+      }),
+    );
+
+    confirmSpy.mockRestore();
+  });
 });

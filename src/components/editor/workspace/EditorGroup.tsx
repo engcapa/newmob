@@ -33,8 +33,8 @@ import type {
 import type {
   LspCompletionItem,
   LspCompletionResult,
-  LspSignatureHelpResult,
 } from "../../../lib/editor/lsp";
+import type { ParameterPopupView } from "./referenceInfoSession";
 import {
   CodeMirrorHost,
   type EditorCommandPortRegistration,
@@ -46,6 +46,7 @@ import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type { FileCoverage } from "./coverageModel";
 import {
   mergeCompletionTriggers,
+  LspCompletionController,
   type CompletionAcceptanceDiagnostic,
   type CompletionRequestIdentity,
   type CompletionRequestToken,
@@ -70,6 +71,13 @@ import {
   setScrollLeft,
   type EditorTabScrollState,
 } from "./editorTabScroll";
+import {
+  orderTabsForDisplay,
+  DEFAULT_WORKSPACE_TAB_POLICY_V3,
+  type TabEvictionMeta,
+  type WorkspaceTabPolicyV3,
+} from "./workspaceTabPolicy";
+import type { RegionFoldingProvenance } from "./workspaceEditorCommands";
 
 export type MarkdownViewMode = "edit" | "preview" | "split";
 
@@ -89,6 +97,8 @@ interface EditorGroupProps {
   visible: boolean;
   /** Temporarily blocks mutations while an external resource edit is committing. */
   readOnly?: boolean;
+  tabPolicy?: WorkspaceTabPolicyV3;
+  lastUsedByKey?: ReadonlyMap<string, number>;
   openOrder: string[];
   openFiles: Record<string, OpenFileViewModel>;
   activeKey: string | null;
@@ -139,8 +149,6 @@ interface EditorGroupProps {
   showHoverDocumentation?: boolean;
   hoverDocumentationDelayMs?: number;
   parameterInfoRequestNonce?: number;
-  parameterInfoAutoPopup?: boolean;
-  parameterInfoDelayMs?: number;
   parameterInfoShowFullSignatures?: boolean;
   onActivate: (key: string) => void;
   onActivateGroup: () => void;
@@ -194,11 +202,20 @@ interface EditorGroupProps {
     kind: CompletionAcceptanceDiagnostic,
     detail?: string,
   ) => void;
-  onSignatureHelp: (
+  completionController?: LspCompletionController;
+  /** §8.20.2 W1 single channel: file-scoped trigger event into the session. */
+  onParameterTrigger?: (
     file: OpenFileViewModel,
-    position: LspPosition,
-    trigger: string | null,
-  ) => Promise<LspSignatureHelpResult | null>;
+    event: {
+      position: LspPosition;
+      anchorOffset: number;
+      triggerCharacter: string | null;
+      origin: "explicit" | "typing";
+    },
+  ) => void;
+  onParameterInvalidate?: (reason: "doc-changed" | "caret-moved" | "closing-char") => void;
+  onParameterEscape?: () => boolean;
+  parameterPopup?: ParameterPopupView | null;
   onSelectionChange: (selection: EditorSelectionRange) => void;
   onViewportChange: (range: LspRange) => void;
   onExpandSelection: (file: OpenFileViewModel, selection: EditorSelectionRange) => Promise<LspRange[] | null>;
@@ -226,6 +243,8 @@ export function EditorGroup({
   visible,
   onClipboardUnavailable,
   readOnly = false,
+  tabPolicy,
+  lastUsedByKey,
   openOrder,
   openFiles,
   activeKey,
@@ -268,8 +287,6 @@ export function EditorGroup({
   showHoverDocumentation = true,
   hoverDocumentationDelayMs = 300,
   parameterInfoRequestNonce = 0,
-  parameterInfoAutoPopup = true,
-  parameterInfoDelayMs = 0,
   parameterInfoShowFullSignatures = false,
   onActivate,
   onActivateGroup,
@@ -303,7 +320,11 @@ export function EditorGroup({
   onCompleteResolve,
   onCompletionIdentity,
   onCompletionDiagnostic,
-  onSignatureHelp,
+  completionController,
+  onParameterTrigger,
+  onParameterInvalidate,
+  onParameterEscape,
+  parameterPopup = null,
   onSelectionChange,
   onViewportChange,
   onExpandSelection,
@@ -352,11 +373,42 @@ export function EditorGroup({
     atEnd: true,
   });
   useEffect(() => setGitDiffPeek(null), [activeKey]);
-  const pinnedSet = new Set(pinnedKeys);
-  const orderedKeys = [
-    ...openOrder.filter((key) => pinnedSet.has(key)),
-    ...openOrder.filter((key) => !pinnedSet.has(key)),
-  ];
+  const [activeFoldProvenance, setActiveFoldProvenance] = useState<RegionFoldingProvenance | null>(null);
+  useEffect(() => setActiveFoldProvenance(null), [activeKey]);
+  const tabEvictionMeta = useMemo(() => {
+    const map = new Map<string, TabEvictionMeta>();
+    for (const key of openOrder) {
+      map.set(key, {
+        key,
+        dirty: !!openFiles[key]?.dirty,
+        pinned: pinnedKeys.includes(key),
+        preview: previewKey === key,
+        lastUsedAt: lastUsedByKey?.get(key) ?? 0,
+      });
+    }
+    return map;
+  }, [openOrder, openFiles, pinnedKeys, previewKey, lastUsedByKey]);
+
+  const pinnedSet = useMemo(() => new Set(pinnedKeys), [pinnedKeys]);
+
+  const orderedKeys = useMemo(() => {
+    return [
+      ...orderTabsForDisplay(
+        openOrder,
+        tabEvictionMeta,
+        tabPolicy ?? DEFAULT_WORKSPACE_TAB_POLICY_V3,
+      ),
+    ];
+  }, [openOrder, tabEvictionMeta, tabPolicy]);
+
+  const isSeparatePinnedRow = tabPolicy?.pinnedRow === "separate";
+  const separatePinnedKeys = useMemo(() => {
+    return isSeparatePinnedRow ? orderedKeys.filter((k) => pinnedSet.has(k)) : [];
+  }, [isSeparatePinnedRow, orderedKeys, pinnedSet]);
+
+  const normalDisplayKeys = useMemo(() => {
+    return isSeparatePinnedRow ? orderedKeys.filter((k) => !pinnedSet.has(k)) : orderedKeys;
+  }, [isSeparatePinnedRow, orderedKeys, pinnedSet]);
 
   const updateTabScrollState = useCallback(() => {
     const el = tabScrollRef.current;
@@ -456,9 +508,65 @@ export function EditorGroup({
       className="h-full min-h-0 flex flex-col bg-[var(--taomni-code-bg)]"
       style={editorPaneStyle}
     >
+      {openOrder.length > 0 && isSeparatePinnedRow && separatePinnedKeys.length > 0 && (
+        <div
+          data-testid="code-workspace-editor-pinned-tab-strip"
+          role="tablist"
+          aria-label="Pinned editor tabs"
+          className="shrink-0 flex items-stretch border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] overflow-x-auto taomni-tab-scroll"
+          style={{ height: "var(--taomni-code-editor-tab-height)" }}
+        >
+          {separatePinnedKeys.map((key) => {
+            const file = openFiles[key];
+            if (!file) return null;
+            const active = key === activeKey;
+            const preview = key === previewKey;
+            const pinned = true;
+            return (
+              <div
+                key={key}
+                data-editor-tab-key={key}
+                data-active={active || undefined}
+                data-preview={preview || undefined}
+                data-pinned={pinned || undefined}
+                role="tab"
+                aria-selected={active}
+                className="h-full min-w-[96px] max-w-[240px] flex items-center border-r border-[var(--taomni-code-border)] text-[length:var(--taomni-code-editor-ui-small-font-size)] text-[var(--taomni-code-muted)] data-[active=true]:bg-[var(--taomni-code-bg)] data-[active=true]:text-[var(--taomni-code-text)]"
+              >
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 h-full flex items-center gap-1.5 px-2 text-left hover:bg-[var(--taomni-code-active-line-bg)]"
+                  title={file.subtitle}
+                  onClick={() => onActivate(key)}
+                  onDoubleClick={() => onPromotePreview(key)}
+                  onAuxClick={(event) => {
+                    if (event.button === 1) onClose(key);
+                  }}
+                  onContextMenu={(event) => showTabMenu(event, key)}
+                >
+                  <File className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-code-muted)]" />
+                  <Pin className="h-3 w-3 shrink-0" />
+                  <span className={`truncate ${preview ? "italic" : ""}`}>{file.title}</span>
+                  {file.dirty && <span className="text-[var(--taomni-accent)]">*</span>}
+                </button>
+                <button
+                  type="button"
+                  className="h-full w-6 shrink-0 inline-flex items-center justify-center hover:bg-[var(--taomni-code-active-line-bg)]"
+                  title="Close"
+                  onClick={() => onClose(key)}
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {openOrder.length > 0 && (
         <div
           data-testid="code-workspace-editor-tab-strip"
+          role="tablist"
+          aria-label="Editor tabs"
           className="shrink-0 flex items-stretch border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]"
           style={{ height: "var(--taomni-code-editor-tab-height)" }}
         >
@@ -487,7 +595,7 @@ export function EditorGroup({
             className="taomni-tab-scroll min-w-0 flex-1 flex items-stretch overflow-x-auto overflow-y-hidden"
             onScroll={updateTabScrollState}
           >
-            {orderedKeys.map((key) => {
+            {normalDisplayKeys.map((key) => {
               const file = openFiles[key];
               if (!file) return null;
               const active = key === activeKey;
@@ -575,6 +683,16 @@ export function EditorGroup({
                 data-testid="code-workspace-file-status"
                 className="min-h-7 shrink-0 flex items-center gap-2 px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] text-[length:var(--taomni-code-editor-ui-small-font-size)] text-[var(--taomni-code-text)]"
               >
+                {activeFoldProvenance && (
+                  <span
+                    data-testid="code-workspace-fold-provenance"
+                    data-provenance={activeFoldProvenance}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[10px] bg-[var(--taomni-code-active-line-bg)] text-[var(--taomni-code-muted)]"
+                    title={`Region fold source: ${activeFoldProvenance}`}
+                  >
+                    Region: {activeFoldProvenance}
+                  </span>
+                )}
                 <div className="ml-auto flex min-w-0 items-center gap-2">
                   <span className="shrink-0 text-[var(--taomni-code-muted)]">{formatBytes(activeFile.size)}</span>
                   {formatMtime(activeFile.mtime) && (
@@ -699,7 +817,10 @@ export function EditorGroup({
                         onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
                         getCompletionIdentity={() => onCompletionIdentity(activeFile)}
                         onCompletionDiagnostic={onCompletionDiagnostic}
-                        onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
+                        onParameterTrigger={(event) => onParameterTrigger?.(activeFile, event)}
+                        onParameterInvalidate={onParameterInvalidate}
+                        onParameterEscape={onParameterEscape}
+                        parameterPopup={parameterPopup}
                         onSelectionChange={onSelectionChange}
                         onViewportChange={handleViewportChange}
                         onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
@@ -708,6 +829,7 @@ export function EditorGroup({
                         onContextMenu={(request) => onEditorContextMenu(activeFile, { ...request, groupId })}
                         onCommandPortChange={handleEditorCommandPortChange}
                         completionTriggers={completionTriggers}
+                        completionController={completionController}
                         signatureTriggers={signatureTriggers}
                         softWrap={softWrap}
                         appearance={appearance}
@@ -715,9 +837,8 @@ export function EditorGroup({
                         showHoverDocumentation={showHoverDocumentation}
                         hoverDocumentationDelayMs={hoverDocumentationDelayMs}
                         parameterInfoRequestNonce={parameterInfoRequestNonce}
-                        parameterInfoAutoPopup={parameterInfoAutoPopup}
-                        parameterInfoDelayMs={parameterInfoDelayMs}
                         parameterInfoShowFullSignatures={parameterInfoShowFullSignatures}
+                        onFoldProvenanceChange={setActiveFoldProvenance}
                         codeStyle={activeCodeStyle}
                       />
                     </div>
@@ -770,7 +891,10 @@ export function EditorGroup({
                       onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
                       getCompletionIdentity={() => onCompletionIdentity(activeFile)}
                       onCompletionDiagnostic={onCompletionDiagnostic}
-                      onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
+                      onParameterTrigger={(event) => onParameterTrigger?.(activeFile, event)}
+                      onParameterInvalidate={onParameterInvalidate}
+                      onParameterEscape={onParameterEscape}
+                      parameterPopup={parameterPopup}
                       onSelectionChange={onSelectionChange}
                       onViewportChange={handleViewportChange}
                       onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
@@ -779,6 +903,7 @@ export function EditorGroup({
                       onContextMenu={(request) => onEditorContextMenu(activeFile, { ...request, groupId })}
                       onCommandPortChange={handleEditorCommandPortChange}
                       completionTriggers={completionTriggers}
+                      completionController={completionController}
                       signatureTriggers={signatureTriggers}
                       softWrap={softWrap}
                       appearance={appearance}
@@ -786,9 +911,8 @@ export function EditorGroup({
                       showHoverDocumentation={showHoverDocumentation}
                       hoverDocumentationDelayMs={hoverDocumentationDelayMs}
                       parameterInfoRequestNonce={parameterInfoRequestNonce}
-                      parameterInfoAutoPopup={parameterInfoAutoPopup}
-                      parameterInfoDelayMs={parameterInfoDelayMs}
                       parameterInfoShowFullSignatures={parameterInfoShowFullSignatures}
+                      onFoldProvenanceChange={setActiveFoldProvenance}
                       codeStyle={activeCodeStyle}
                     />
                   </div>
