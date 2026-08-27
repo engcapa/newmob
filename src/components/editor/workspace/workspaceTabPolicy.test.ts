@@ -3,6 +3,7 @@ import {
   CLOSED_TAB_STACK_LIMIT,
   DEFAULT_WORKSPACE_TAB_POLICY,
   buildReopenTreeRoute,
+  computeWorkspaceTabPolicyApplication,
   enforceTabPolicy,
   orderTabsForDisplay,
   pushClosedTab,
@@ -174,5 +175,74 @@ describe("§8.19.6 ReopenLocationV2 resolution", () => {
     const single: LayoutNode = { type: "leaf", id: "only", openFileKeys: [], activeKey: null };
     expect(resolveReopenLocation(single, { leafId: null, treeRoute: [], siblingFileKeys: [] }, "only"))
       .toEqual({ kind: "relocated", leafId: "only", reason: "active" });
+  });
+});
+
+describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () => {
+  it("normalizes limits and preserves dirty and pinned tabs during limit shrinking", () => {
+    const res = computeWorkspaceTabPolicyApplication({
+      rawPolicy: {
+        schemaVersion: 3,
+        limitPerLeaf: 2,
+        order: "alphabetical",
+        openPosition: "after-active",
+        activateOnClose: "mru",
+        pinnedRow: "separate",
+        previewMode: true,
+        reusePreview: true,
+      },
+      editorGroups: {
+        g1: {
+          openOrder: ["clean1", "clean2", "dirty1", "pinned1"],
+          pinnedKeys: ["pinned1"],
+          previewKey: null,
+          activeKey: "clean1",
+        },
+      },
+      openFiles: {
+        clean1: { dirty: false },
+        clean2: { dirty: false },
+        dirty1: { dirty: true },
+        pinned1: { dirty: false },
+      },
+      mruFileKeys: ["clean1", "clean2", "dirty1", "pinned1"],
+    });
+
+    expect(res.policy.limitPerLeaf).toBe(2);
+    expect(res.evictionsByGroup.g1).toEqual(["clean2", "clean1"]);
+    expect(res.allEvictedKeys).toEqual(["clean2", "clean1"]);
+    expect(res.message).toContain("evicted 2 tabs");
+  });
+
+  it("handles over-limit protected scenarios where all excess tabs are unclosable", () => {
+    const res = computeWorkspaceTabPolicyApplication({
+      rawPolicy: {
+        schemaVersion: 3,
+        limitPerLeaf: 1,
+        order: "open-order",
+        openPosition: "end",
+        activateOnClose: "mru",
+        pinnedRow: "same",
+        previewMode: true,
+        reusePreview: true,
+      },
+      editorGroups: {
+        g1: {
+          openOrder: ["dirty1", "pinned1"],
+          pinnedKeys: ["pinned1"],
+          previewKey: null,
+          activeKey: "dirty1",
+        },
+      },
+      openFiles: {
+        dirty1: { dirty: true },
+        pinned1: { dirty: false },
+      },
+      mruFileKeys: ["dirty1", "pinned1"],
+    });
+
+    expect(res.allEvictedKeys).toEqual([]);
+    expect(res.protectedCount).toBe(2);
+    expect(res.message).toContain("limit: 1, order: open-order");
   });
 });

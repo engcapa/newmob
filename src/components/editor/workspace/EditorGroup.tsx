@@ -398,6 +398,15 @@ export function EditorGroup({
     ];
   }, [openOrder, tabEvictionMeta, tabPolicy]);
 
+  const isSeparatePinnedRow = tabPolicy?.pinnedRow === "separate";
+  const separatePinnedKeys = useMemo(() => {
+    return isSeparatePinnedRow ? orderedKeys.filter((k) => pinnedSet.has(k)) : [];
+  }, [isSeparatePinnedRow, orderedKeys, pinnedSet]);
+
+  const normalDisplayKeys = useMemo(() => {
+    return isSeparatePinnedRow ? orderedKeys.filter((k) => !pinnedSet.has(k)) : orderedKeys;
+  }, [isSeparatePinnedRow, orderedKeys, pinnedSet]);
+
   const updateTabScrollState = useCallback(() => {
     const el = tabScrollRef.current;
     if (!el) return;
@@ -496,9 +505,65 @@ export function EditorGroup({
       className="h-full min-h-0 flex flex-col bg-[var(--taomni-code-bg)]"
       style={editorPaneStyle}
     >
+      {openOrder.length > 0 && isSeparatePinnedRow && separatePinnedKeys.length > 0 && (
+        <div
+          data-testid="code-workspace-editor-pinned-tab-strip"
+          role="tablist"
+          aria-label="Pinned editor tabs"
+          className="shrink-0 flex items-stretch border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] overflow-x-auto taomni-tab-scroll"
+          style={{ height: "var(--taomni-code-editor-tab-height)" }}
+        >
+          {separatePinnedKeys.map((key) => {
+            const file = openFiles[key];
+            if (!file) return null;
+            const active = key === activeKey;
+            const preview = key === previewKey;
+            const pinned = true;
+            return (
+              <div
+                key={key}
+                data-editor-tab-key={key}
+                data-active={active || undefined}
+                data-preview={preview || undefined}
+                data-pinned={pinned || undefined}
+                role="tab"
+                aria-selected={active}
+                className="h-full min-w-[96px] max-w-[240px] flex items-center border-r border-[var(--taomni-code-border)] text-[length:var(--taomni-code-editor-ui-small-font-size)] text-[var(--taomni-code-muted)] data-[active=true]:bg-[var(--taomni-code-bg)] data-[active=true]:text-[var(--taomni-code-text)]"
+              >
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 h-full flex items-center gap-1.5 px-2 text-left hover:bg-[var(--taomni-code-active-line-bg)]"
+                  title={file.subtitle}
+                  onClick={() => onActivate(key)}
+                  onDoubleClick={() => onPromotePreview(key)}
+                  onAuxClick={(event) => {
+                    if (event.button === 1) onClose(key);
+                  }}
+                  onContextMenu={(event) => showTabMenu(event, key)}
+                >
+                  <File className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-code-muted)]" />
+                  <Pin className="h-3 w-3 shrink-0" />
+                  <span className={`truncate ${preview ? "italic" : ""}`}>{file.title}</span>
+                  {file.dirty && <span className="text-[var(--taomni-accent)]">*</span>}
+                </button>
+                <button
+                  type="button"
+                  className="h-full w-6 shrink-0 inline-flex items-center justify-center hover:bg-[var(--taomni-code-active-line-bg)]"
+                  title="Close"
+                  onClick={() => onClose(key)}
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {openOrder.length > 0 && (
         <div
           data-testid="code-workspace-editor-tab-strip"
+          role="tablist"
+          aria-label="Editor tabs"
           className="shrink-0 flex items-stretch border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]"
           style={{ height: "var(--taomni-code-editor-tab-height)" }}
         >
@@ -527,7 +592,7 @@ export function EditorGroup({
             className="taomni-tab-scroll min-w-0 flex-1 flex items-stretch overflow-x-auto overflow-y-hidden"
             onScroll={updateTabScrollState}
           >
-            {orderedKeys.map((key) => {
+            {normalDisplayKeys.map((key) => {
               const file = openFiles[key];
               if (!file) return null;
               const active = key === activeKey;

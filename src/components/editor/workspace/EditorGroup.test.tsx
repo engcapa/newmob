@@ -380,4 +380,48 @@ describe("EditorGroup tabs", () => {
     const keys = Array.from(tabs).map((el) => el.getAttribute("data-editor-tab-key"));
     expect(keys).toEqual(["alpha", "beta", "zeta"]);
   });
+
+  it("renders pinned tabs in a separate DOM row with tablist ARIA semantics when pinnedRow is separate", () => {
+    const p1 = file("pin-one");
+    const p2 = file("pin-two");
+    const n1 = file("normal-one");
+
+    render(
+      <EditorGroup
+        {...props({
+          openOrder: ["pin-one", "normal-one", "pin-two"],
+          openFiles: { "pin-one": p1, "normal-one": n1, "pin-two": p2 },
+          activeKey: "normal-one",
+          pinnedKeys: ["pin-one", "pin-two"],
+          tabPolicy: {
+            schemaVersion: 3,
+            limitPerLeaf: 10,
+            order: "open-order",
+            openPosition: "end",
+            activateOnClose: "mru",
+            pinnedRow: "separate",
+            previewMode: true,
+            reusePreview: true,
+          },
+        })}
+      />,
+    );
+
+    const pinnedStrip = screen.getByTestId("code-workspace-editor-pinned-tab-strip");
+    expect(pinnedStrip).toHaveAttribute("role", "tablist");
+    expect(pinnedStrip).toHaveAttribute("aria-label", "Pinned editor tabs");
+    const pinnedTabs = pinnedStrip.querySelectorAll("[data-editor-tab-key]");
+    expect(Array.from(pinnedTabs).map((el) => el.getAttribute("data-editor-tab-key"))).toEqual([
+      "pin-one",
+      "pin-two",
+    ]);
+
+    const mainStrip = screen.getByTestId("code-workspace-editor-tab-strip");
+    expect(mainStrip).toHaveAttribute("role", "tablist");
+    expect(mainStrip).toHaveAttribute("aria-label", "Editor tabs");
+    const mainTabs = mainStrip.querySelectorAll("[data-editor-tab-key]");
+    expect(Array.from(mainTabs).map((el) => el.getAttribute("data-editor-tab-key"))).toEqual([
+      "normal-one",
+    ]);
+  });
 });

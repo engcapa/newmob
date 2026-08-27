@@ -391,3 +391,82 @@ export function pushClosedTab(
   const next = [entry, ...stack.filter((existing) => existing.fileIdentity !== entry.fileIdentity)];
   return next.slice(0, CLOSED_TAB_STACK_LIMIT);
 }
+
+// ---------------------------------------------------------------------------
+// §8.21.3 V2-B: Tab Policy Transaction
+// ---------------------------------------------------------------------------
+
+export interface ApplyWorkspaceTabPolicyInput {
+  rawPolicy: unknown;
+  editorGroups: Record<string, {
+    openOrder: readonly string[];
+    pinnedKeys: readonly string[];
+    previewKey: string | null;
+    activeKey: string | null;
+  }>;
+  openFiles: Record<string, { dirty?: boolean; title?: string }>;
+  mruFileKeys: readonly string[];
+}
+
+export interface ApplyWorkspaceTabPolicyExecution {
+  policy: WorkspaceTabPolicyV3;
+  evictionsByGroup: Record<string, readonly string[]>;
+  allEvictedKeys: readonly string[];
+  protectedCount: number;
+  message: string;
+}
+
+/**
+ * §8.21.3 V2-B: Transactional helper that normalizes the policy draft,
+ * evaluates eviction candidates per leaf group with dirty/pinned protection,
+ * and compiles the resulting eviction schedule.
+ */
+export function computeWorkspaceTabPolicyApplication(
+  input: ApplyWorkspaceTabPolicyInput,
+): ApplyWorkspaceTabPolicyExecution {
+  const { policy } = migrateWorkspaceTabPolicy(input.rawPolicy);
+  const normalizedPolicy: WorkspaceTabPolicyV3 = {
+    ...policy,
+    limitPerLeaf: Math.max(1, Math.min(50, Math.round(policy.limitPerLeaf))),
+  };
+
+  const evictionsByGroup: Record<string, string[]> = {};
+  const allEvictedKeys: string[] = [];
+  let protectedCount = 0;
+
+  for (const [groupId, group] of Object.entries(input.editorGroups)) {
+    const meta = new Map<string, TabEvictionMeta>(
+      group.openOrder.map((k) => [
+        k,
+        {
+          key: k,
+          dirty: !!input.openFiles[k]?.dirty,
+          pinned: group.pinnedKeys.includes(k),
+          preview: group.previewKey === k,
+          lastUsedAt: 1_000_000 - input.mruFileKeys.indexOf(k),
+        },
+      ]),
+    );
+
+    const eviction = enforceTabPolicy(group.openOrder, meta, normalizedPolicy);
+    if (eviction.kind === "evicted") {
+      evictionsByGroup[groupId] = [...eviction.evictedKeys];
+      allEvictedKeys.push(...eviction.evictedKeys);
+    } else if (eviction.kind === "over-limit-protected") {
+      protectedCount += group.openOrder.length;
+    }
+  }
+
+  const message = allEvictedKeys.length > 0
+    ? `Saved editor tab policy (limit: ${normalizedPolicy.limitPerLeaf}, evicted ${allEvictedKeys.length} tabs)`
+    : `Saved editor tab policy (limit: ${normalizedPolicy.limitPerLeaf}, order: ${normalizedPolicy.order})`;
+
+  return {
+    policy: normalizedPolicy,
+    evictionsByGroup,
+    allEvictedKeys,
+    protectedCount,
+    message,
+  };
+}
+
