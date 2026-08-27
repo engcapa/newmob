@@ -46,6 +46,7 @@ import { shouldSuppressMacImeKeydown, clearStaleKeyDownSeen, clearStaleKeyDownSe
 import { isEditableTarget, isTerminalFocused } from "../../lib/terminal/keyboardGuards";
 import {
   readFiles as clipboardReadFiles,
+  parseFilePaths as clipboardParseFilePaths,
   readText as clipboardReadText,
   writeText as clipboardWriteText,
   writeMultiFormat as clipboardWriteMultiFormat,
@@ -1381,6 +1382,16 @@ export function TerminalPanel({
           allowEmpty: true,
         })) ||
         "";
+      if (!text) return;
+
+      if (!isLocal && onUploadLocalPathsRef.current) {
+        const textPaths = await clipboardParseFilePaths(text);
+        if (textPaths.length > 0) {
+          await handleLocalFilePaths(textPaths);
+          return;
+        }
+      }
+
       await pasteTextIntoTerminal(text);
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : "Clipboard paste failed");

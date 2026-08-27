@@ -150,6 +150,7 @@ const ipcMocks = vi.hoisted(() => {
 
 const clipboardMocks = vi.hoisted(() => ({
   readFiles: vi.fn(async () => [] as string[]),
+  parseFilePaths: vi.fn(async (_text: string) => [] as string[]),
 }));
 
 const sockscapMocks = vi.hoisted(() => ({
@@ -240,6 +241,7 @@ vi.mock("../../lib/clipboard", async () => {
   return {
     ...actual,
     readFiles: clipboardMocks.readFiles,
+    parseFilePaths: clipboardMocks.parseFilePaths,
   };
 });
 
@@ -321,6 +323,8 @@ describe("TerminalPanel focus behavior", () => {
     sockscapMocks.sockscapStopLaunchedApp.mockClear();
     clipboardMocks.readFiles.mockReset();
     clipboardMocks.readFiles.mockResolvedValue([]);
+    clipboardMocks.parseFilePaths.mockReset();
+    clipboardMocks.parseFilePaths.mockResolvedValue([]);
     webglMocks.instances.length = 0;
     webglMocks.ctor.mockClear();
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
@@ -870,6 +874,57 @@ describe("TerminalPanel focus behavior", () => {
       );
     });
     expect(onUploadLocalPaths).not.toHaveBeenCalled();
+  });
+
+  it("prompts to upload when clipboard text contains a quoted local file path", async () => {
+    const originalClipboard = window.navigator.clipboard;
+    const readText = vi.fn(async () => "'/home/zhyhang/图片/2026-08-27_23-08.png'");
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { readText },
+    });
+    clipboardMocks.readFiles.mockResolvedValue([]);
+    clipboardMocks.parseFilePaths.mockResolvedValue(["/home/zhyhang/图片/2026-08-27_23-08.png"]);
+
+    const onSessionReady = vi.fn();
+    const onUploadLocalPaths = vi.fn(async () => undefined);
+
+    try {
+      render(
+        <TerminalPanel
+          visible
+          ssh={sshInfo}
+          onSessionReady={onSessionReady}
+          onUploadLocalPaths={onUploadLocalPaths}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(onSessionReady).toHaveBeenCalledWith("terminal-session");
+      });
+      terminalMocks.oscHandlers.get(7)?.("file://example.test/home/user/project");
+
+      fireEvent.keyDown(window, { key: "Insert", shiftKey: true });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument();
+      });
+      expect(screen.getByTestId("confirm-dialog-confirm")).toHaveFocus();
+
+      fireEvent.click(screen.getByTestId("confirm-dialog-confirm"));
+
+      await waitFor(() => {
+        expect(onUploadLocalPaths).toHaveBeenCalledWith({
+          paths: ["/home/zhyhang/图片/2026-08-27_23-08.png"],
+          cwd: "/home/user/project",
+        });
+      });
+    } finally {
+      Object.defineProperty(window.navigator, "clipboard", {
+        configurable: true,
+        value: originalClipboard,
+      });
+    }
   });
 
   it("prompts to upload dragged file paths in an SSH shell", async () => {

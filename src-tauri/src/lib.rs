@@ -604,6 +604,7 @@ pub fn run() {
             config::clipboard_write_multi_format,
             config::clipboard_capabilities,
             config::clipboard_read_files,
+            config::clipboard_parse_file_paths,
             config::clipboard_write_files,
             tunnel::list_tunnels,
             tunnel::upsert_tunnel,
