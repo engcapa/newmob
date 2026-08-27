@@ -115,6 +115,14 @@ interface HistoryEntry {
   bytes: number;
 }
 
+export function detectSensitiveClipboardText(text: string): boolean {
+  if (!text || text.length < 8) return false;
+  if (/-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/i.test(text)) return true;
+  if (/AKIA[0-9A-Z]{16}/.test(text)) return true;
+  if (/(?:api[_-]?key|secret[_-]?key|password|token)\s*[:=]\s*['"][^\n'"]{8,}['"]/i.test(text)) return true;
+  return false;
+}
+
 export class WorkspaceClipboardStore {
   private session: EditorClipboardSession | null = null;
   private history: HistoryEntry[] = [];
@@ -136,6 +144,7 @@ export class WorkspaceClipboardStore {
     /** Oversized/binary payloads skip the C3b ring but still fill the slot. */
     historyEligible?: boolean;
   }): EditorClipboardSession {
+    const isSensitive = Boolean(input.sensitive) || detectSensitiveClipboardText(input.plainText);
     const session: EditorClipboardSession = {
       sessionId: nextSessionId(),
       sourceViewId: input.sourceViewId,
@@ -145,10 +154,10 @@ export class WorkspaceClipboardStore {
       sourceEol: input.sourceEol,
       createdAt: Date.now(),
       ...(input.systemClipboardUnavailable ? { systemClipboardUnavailable: true } : {}),
-      ...(input.sensitive ? { sensitive: true } : {}),
+      ...(isSensitive ? { sensitive: true } : {}),
     };
     this.session = session;
-    if (input.sensitive) {
+    if (isSensitive) {
       this.lastHistoryExclusion = "sensitive";
     } else {
       this.recordHistory(session, input.historyEligible !== false);

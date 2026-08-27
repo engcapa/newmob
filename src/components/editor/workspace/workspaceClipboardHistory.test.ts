@@ -142,4 +142,50 @@ describe("§8.19.5 clipboard history ring", () => {
       }
     }
   });
+
+  it("§8.22.3 U2-A guarantees canonical workspace clipboard ownership across multiple splits", () => {
+    const wsInstanceId = "ws-canonical-owner";
+    const splitA = acquireClipboardStore(wsInstanceId);
+    const splitB = acquireClipboardStore(wsInstanceId);
+
+    // Split A copies multi-caret rectangular selection
+    splitA.write({
+      sourceViewId: "split-a-editor",
+      plainText: "col1\ncol2",
+      segments: ["col1", "col2"],
+      rectangular: true,
+      sourceEol: "lf",
+    });
+
+    // Split B immediately reads the exact same session and segments
+    const readFromB = splitB.read();
+    expect(readFromB).not.toBeNull();
+    expect(readFromB?.plainText).toBe("col1\ncol2");
+    expect(readFromB?.rectangular).toBe(true);
+    expect(readFromB?.segments).toEqual(["col1", "col2"]);
+
+    // Both splits see identical history entries
+    expect(splitA.historyEntries()).toHaveLength(1);
+    expect(splitB.historyEntries()).toHaveLength(1);
+    expect(splitB.historyEntries()[0].plainText).toBe("col1\ncol2");
+
+    splitA.release();
+    splitB.release();
+  });
+
+  it("§8.22.3 U2-A auto-detects private keys and API tokens as sensitive and excludes them from history", () => {
+    const handle = acquireClipboardStore("ws-auto-sensitive");
+    const privateKey = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...\n-----END RSA PRIVATE KEY-----";
+    handle.write({
+      sourceViewId: "editor",
+      plainText: privateKey,
+      rectangular: false,
+      sourceEol: "lf",
+    });
+
+    expect(handle.read()?.plainText).toBe(privateKey);
+    expect(handle.read()?.sensitive).toBe(true);
+    expect(handle.historyEntries()).toHaveLength(0);
+    expect(handle.historyExclusion()).toBe<ClipboardHistoryExclusion>("sensitive");
+  });
 });
