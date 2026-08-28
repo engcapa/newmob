@@ -309,6 +309,7 @@ import { ClipboardHistoryPopup } from "./workspace/ClipboardHistoryPopup";
 import {
   acquireClipboardStore,
   type EditorClipboardSession,
+  WorkspaceClipboardSessionContext,
 } from "./workspace/workspaceClipboardSession";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
@@ -13959,11 +13960,12 @@ export function CodeWorkspaceTab({
   };
 
   return (
-    <div
-      ref={rootRef}
-      data-testid="code-workspace-tab"
-      className="relative h-full w-full min-h-0 flex flex-col overflow-hidden bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)]"
-    >
+    <WorkspaceClipboardSessionContext.Provider value={clipboardHandle}>
+      <div
+        ref={rootRef}
+        data-testid="code-workspace-tab"
+        className="relative h-full w-full min-h-0 flex flex-col overflow-hidden bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)]"
+      >
       <header className="h-10 shrink-0 flex items-center gap-2 overflow-x-auto px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]">
         <Braces className="w-4 h-4 text-[var(--taomni-accent)]" />
         <div className="min-w-0">
@@ -15180,6 +15182,7 @@ export function CodeWorkspaceTab({
           onClose={() => setDapGuideOpen(false)}
         />
       )}
-    </div>
+      </div>
+    </WorkspaceClipboardSessionContext.Provider>
   );
 }

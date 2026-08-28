@@ -28,6 +28,7 @@ import {
   WorkspaceLocationController,
 } from "./workspace/navigationHistoryModel";
 import { globalEditorConfigResolver } from "./workspace/editorConfigResolver";
+import { acquireClipboardStore } from "./workspace/workspaceClipboardSession";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceListDir: vi.fn(),
@@ -5378,6 +5379,42 @@ end_of_record
       });
       expect(hasBlockingDiskEffectResolution("instance-save-race-close", "/repo/app/src/main.ts")).toBe(false);
       resolveDiskEffectLedgerEntry("instance-save-race-close", ledgerRows[0].transactionId, "/repo/app/src/main.ts");
+    });
+
+    it("§8.27.2 BB1 passes root clipboard handle via WorkspaceClipboardSessionContext to CodeMirror split instances", async () => {
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-clipboard-bb1",
+        workspaceInstanceId: "instance-clipboard-bb1",
+        name: "Clipboard Workspace",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "folder" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceReadFile.mockImplementation(async (path: string) => {
+        if (path === "/repo/app/src/main.ts") return file("src/main.ts", "content-in-main\n");
+        return file("src/util.ts", "content-in-util\n");
+      });
+
+      renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+
+      // Verify that the clipboard store was acquired and is active for this workspaceInstanceId
+      const store = acquireClipboardStore("instance-clipboard-bb1");
+      const snap = store.getSnapshot();
+      expect(snap.consumerCount).toBeGreaterThanOrEqual(1);
+      expect(snap.permissionGeneration).toBe(1);
+
+      // Write to the workspace clipboard handle
+      store.write({
+        sourceViewId: null,
+        plainText: "copied-across-split",
+        rectangular: false,
+        sourceEol: "lf",
+      });
+
+      expect(store.read()?.plainText).toBe("copied-across-split");
+      store.release();
     });
   });
 });

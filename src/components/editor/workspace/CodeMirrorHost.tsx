@@ -2071,14 +2071,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     const view = viewRef.current;
     if (!view) return;
     const consumerId = `cm-${fileKey || Math.random().toString(36).slice(2, 9)}`;
-    const detach = effectiveClipboardHandle?.attachConsumer(consumerId);
+    const lease = effectiveClipboardHandle?.attachConsumer(consumerId, "codemirror-host");
     clipboardContextByView.set(view, {
       workspaceId: effectiveClipboardHandle?.workspaceId ?? clipboardWorkspaceId ?? null,
       onUnavailable: (message) => onClipboardUnavailableRef.current(message),
       handle: effectiveClipboardHandle ?? null,
     });
     return () => {
-      detach?.();
+      lease?.detach();
       clipboardContextByView.set(view, {
         workspaceId: null,
         onUnavailable: () => {},

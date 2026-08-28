@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -176,6 +177,18 @@ def _compute_delta(feat) -> ControlDelta | None:  # feat: Feature
         for sel in c.all_selectors():
             declared_selectors.add(_normalize_selector(sel))
 
+    # Collect template string literals from merged source, e.g. `settings-language-${entry.code}`
+    template_literals = re.findall(r"`[^`\n]*\$\{[^}]+\}[^`\n]*`", merged_source)
+    template_patterns: list[re.Pattern] = []
+    for t in template_literals:
+        inner = t[1:-1]
+        pat = re.escape(inner)
+        pat = re.sub(r"\\\$(\\\{[^}]+\\\}|\{[^}]+\})", ".*", pat)
+        try:
+            template_patterns.append(re.compile(f"^{pat}$"))
+        except Exception:
+            pass
+
     # `extractor_visible` filters which declared selectors we even attempt
     # to validate. Pure text=, role=, button[title=...] selectors aren't
     # something static analysis can prove the existence of, so we don't
@@ -202,6 +215,8 @@ def _compute_delta(feat) -> ControlDelta | None:  # feat: Feature
 
     added = sorted(found_selectors - declared_selectors)
     removed: list[str] = []
+    en_locale_file = Path("src/lib/i18n/locales/en.ts")
+    en_locale_text = en_locale_file.read_text(encoding="utf-8") if en_locale_file.exists() else ""
     for s in declared_selectors - found_selectors:
         sig = _selector_signature(s)
         if sig is None:
@@ -209,6 +224,10 @@ def _compute_delta(feat) -> ControlDelta | None:  # feat: Feature
         if sig in merged_source:
             # Selector is still wired up indirectly (e.g. <Comp testId="x">
             # → renders data-testid="x"). Keep it as "unchanged".
+            continue
+        if any(pat.match(sig) for pat in template_patterns):
+            continue
+        if en_locale_text and f'"{sig}"' in en_locale_text:
             continue
         removed.append(s)
     removed.sort()
@@ -262,8 +281,10 @@ def analyze(
 
     # Aggregate every removed selector across impacted features → set
     removed_selectors: set[str] = set()
+    removed_by_feature: dict[str, set[str]] = {}
     for fh in feature_hits:
         if fh.delta:
+            removed_by_feature[fh.id] = set(fh.delta.removed)
             for sel in fh.delta.removed:
                 removed_selectors.add(sel)
 
@@ -276,7 +297,12 @@ def analyze(
         yaml_changed = case_path_norm in changed_set
         if not (via or yaml_changed):
             continue
-        broken = _broken_selectors_for_case(c, removed_selectors) if removed_selectors else []
+        case_removed: set[str] = set()
+        for fid in via:
+            case_removed.update(removed_by_feature.get(fid, ()))
+        if yaml_changed and not via:
+            case_removed = removed_selectors
+        broken = _broken_selectors_for_case(c, case_removed) if case_removed else []
         case_hits.append(CaseImpact(
             id=c.id, title=c.title,
             path=str(c.source_path) if c.source_path else "",
