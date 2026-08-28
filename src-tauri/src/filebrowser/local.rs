@@ -1,6 +1,24 @@
 use crate::filebrowser::sftp::FileEntryDto;
 use std::fs;
+use std::io;
 use std::path::Path;
+
+const MAX_LIST_DIAGNOSTICS: usize = 20;
+
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct FileEntryDiagnosticDto {
+    pub name: Option<String>,
+    pub path: Option<String>,
+    pub error: String,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct DirectoryListingDto {
+    pub entries: Vec<FileEntryDto>,
+    #[serde(rename = "skippedCount")]
+    pub skipped_count: usize,
+    pub diagnostics: Vec<FileEntryDiagnosticDto>,
+}
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct DriveDto {
@@ -57,22 +75,114 @@ pub fn list_drives() -> Vec<DriveDto> {
 }
 
 pub fn list_dir(path: &Path) -> Result<Vec<FileEntryDto>, String> {
+    let listing = list_dir_detailed(path)?;
+    if listing.skipped_count > 0 {
+        let first_error = listing
+            .diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.error.as_str())
+            .unwrap_or("unknown directory entry error");
+        return Err(format!(
+            "Failed to fully list {}: {} entr{} could not be read. First error: {}",
+            path.display(),
+            listing.skipped_count,
+            if listing.skipped_count == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            first_error,
+        ));
+    }
+    Ok(listing.entries)
+}
+
+pub fn list_dir_detailed(path: &Path) -> Result<DirectoryListingDto, String> {
     let mut entries = Vec::new();
-    let read =
-        fs::read_dir(path).map_err(|e| format!("Failed to list {}: {}", path.display(), e))?;
+    let mut skipped_count = 0;
+    let mut diagnostics = Vec::new();
+    let read = fs::read_dir(path).map_err(|error| list_error(path, &error))?;
     for item in read {
         match item {
             Ok(item) => {
                 let entry_path = item.path();
-                if let Ok(entry) = entry_for(&entry_path) {
-                    entries.push(entry);
+                match entry_for(&entry_path) {
+                    Ok(entry) => entries.push(entry),
+                    Err(error) => {
+                        skipped_count += 1;
+                        if diagnostics.len() < MAX_LIST_DIAGNOSTICS {
+                            diagnostics.push(FileEntryDiagnosticDto {
+                                name: Some(item.file_name().to_string_lossy().to_string()),
+                                path: Some(entry_path.to_string_lossy().to_string()),
+                                error,
+                            });
+                        }
+                    }
                 }
             }
-            Err(_) => continue,
+            Err(error) => {
+                skipped_count += 1;
+                if diagnostics.len() < MAX_LIST_DIAGNOSTICS {
+                    diagnostics.push(FileEntryDiagnosticDto {
+                        name: None,
+                        path: None,
+                        error: format!("Failed to read a directory entry: {error}"),
+                    });
+                }
+            }
         }
     }
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    Ok(entries)
+    if skipped_count > 0 {
+        tracing::warn!(
+            path = %path.display(),
+            skipped_count,
+            "local directory listing omitted unreadable entries"
+        );
+    }
+    Ok(DirectoryListingDto {
+        entries,
+        skipped_count,
+        diagnostics,
+    })
+}
+
+fn list_error(path: &Path, error: &io::Error) -> String {
+    let hint = if error.kind() == io::ErrorKind::PermissionDenied {
+        permission_hint()
+    } else {
+        ""
+    };
+    format!("Failed to list {}: {}{}", path.display(), error, hint)
+}
+
+fn stat_error(path: &Path, error: &io::Error) -> String {
+    let hint = if error.kind() == io::ErrorKind::PermissionDenied {
+        permission_hint()
+    } else {
+        ""
+    };
+    format!("stat {}: {}{}", path.display(), error, hint)
+}
+
+#[cfg(target_os = "macos")]
+fn permission_hint() -> &'static str {
+    " Allow Taomni access in System Settings > Privacy & Security > Files and Folders, or Full Disk Access."
+}
+
+#[cfg(target_os = "windows")]
+fn permission_hint() -> &'static str {
+    " Check the folder's Windows security permissions and security-software policy."
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn permission_hint() -> &'static str {
+    " Check the directory permissions and mount access."
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn permission_hint() -> &'static str {
+    " Check the directory permissions."
 }
 
 pub fn stat(path: &Path) -> Result<FileEntryDto, String> {
@@ -229,7 +339,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
 }
 
 fn entry_for(path: &Path) -> Result<FileEntryDto, String> {
-    let meta = fs::symlink_metadata(path).map_err(|e| format!("stat {}: {}", path.display(), e))?;
+    let meta = fs::symlink_metadata(path).map_err(|error| stat_error(path, &error))?;
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -285,11 +395,24 @@ fn entry_for(path: &Path) -> Result<FileEntryDto, String> {
         mode,
         file_type: file_type.into(),
         target_file_type,
-        is_hidden: name.starts_with('.'),
+        is_hidden: is_hidden(&name, &meta),
         symlink_target,
         owner: None,
         group: None,
     })
+}
+
+#[cfg(windows)]
+fn is_hidden(name: &str, meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    name.starts_with('.') || meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+#[cfg(not(windows))]
+fn is_hidden(name: &str, _meta: &fs::Metadata) -> bool {
+    name.starts_with('.')
 }
 
 #[cfg(unix)]
@@ -309,11 +432,77 @@ fn mode_for(meta: &fs::Metadata) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::open_url;
+    use super::{list_dir, list_dir_detailed, open_url, permission_hint};
+    use std::fs;
 
     #[test]
     fn open_url_rejects_non_http_schemes() {
         let err = open_url("file:///tmp/demo").expect_err("file URLs should be rejected");
         assert!(err.contains("Only http:// and https:// URLs"));
+    }
+
+    #[test]
+    fn detailed_listing_reports_entries_without_diagnostics() {
+        let dir = tempfile::tempdir().expect("create temp directory");
+        fs::write(dir.path().join("visible.txt"), b"visible").expect("write visible file");
+        fs::write(dir.path().join(".hidden"), b"hidden").expect("write hidden file");
+
+        let listing = list_dir_detailed(dir.path()).expect("list temp directory");
+
+        assert_eq!(listing.skipped_count, 0);
+        assert!(listing.diagnostics.is_empty());
+        assert_eq!(listing.entries.len(), 2);
+        assert!(
+            listing
+                .entries
+                .iter()
+                .any(|entry| entry.name == ".hidden" && entry.is_hidden)
+        );
+        assert!(listing.entries.iter().any(|entry| {
+            entry.name == "visible.txt" && !entry.is_hidden && entry.file_type == "file"
+        }));
+    }
+
+    #[test]
+    fn strict_listing_preserves_top_level_errors() {
+        let dir = tempfile::tempdir().expect("create temp directory");
+        let missing = dir.path().join("missing");
+
+        let error = list_dir(&missing).expect_err("missing directory should fail");
+
+        assert!(error.contains("Failed to list"));
+        assert!(error.contains("missing"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_stat_failures_are_reported_and_strict_listing_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp directory");
+        fs::write(dir.path().join("private.txt"), b"private").expect("write private file");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o400))
+            .expect("remove directory search permission");
+
+        let detailed = list_dir_detailed(dir.path());
+        let strict = list_dir(dir.path());
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))
+            .expect("restore directory permissions");
+
+        let listing = detailed.expect("reading names should remain possible");
+        assert!(listing.entries.is_empty());
+        assert_eq!(listing.skipped_count, 1);
+        assert_eq!(listing.diagnostics.len(), 1);
+        assert_eq!(listing.diagnostics[0].name.as_deref(), Some("private.txt"));
+        assert!(
+            listing.diagnostics[0]
+                .error
+                .contains(permission_hint().trim())
+        );
+
+        let error = strict.expect_err("strict listing must not omit unreadable entries");
+        assert!(error.contains("1 entry could not be read"));
+        assert!(error.contains("private.txt"));
     }
 }

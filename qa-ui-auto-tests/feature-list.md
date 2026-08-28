@@ -1823,6 +1823,25 @@ controls:
   - id: local-toggle-hidden
     selector: '[data-testid="sftp-local-toggle-hidden"]'
     kind: interactive
+  - id: local-filter
+    selector: '[data-testid="sftp-local-filter"]'
+    kind: interactive
+  - id: local-listing-status
+    selector: '[data-testid="sftp-local-listing-status"]'
+    kind: display
+    optional: true       # only while hidden/filter/unreadable diagnostics exist
+  - id: local-access-warning
+    selector: '[data-testid="sftp-local-access-warning"]'
+    kind: display
+    optional: true       # native filesystem only, when individual entries cannot be read
+  - id: local-clear-filter
+    selector: '[data-testid="sftp-local-clear-filter"]'
+    kind: interactive
+    optional: true       # only while filter text is non-empty
+  - id: local-show-hidden-filtered
+    selector: '[data-testid="sftp-local-show-hidden-filtered"]'
+    kind: interactive
+    optional: true       # only while hidden entries are suppressed
   # toolbar — remote side
   - id: remote-back
     selector: '[data-testid="sftp-remote-back"]'
@@ -1866,6 +1885,25 @@ controls:
   - id: remote-toggle-hidden
     selector: '[data-testid="sftp-remote-toggle-hidden"]'
     kind: interactive
+  - id: remote-filter
+    selector: '[data-testid="sftp-remote-filter"]'
+    kind: interactive
+  - id: remote-listing-status
+    selector: '[data-testid="sftp-remote-listing-status"]'
+    kind: display
+    optional: true       # only while hidden/filter diagnostics exist
+  - id: remote-access-warning
+    selector: '[data-testid="sftp-remote-access-warning"]'
+    kind: display
+    optional: true       # reserved for partial remote listings
+  - id: remote-clear-filter
+    selector: '[data-testid="sftp-remote-clear-filter"]'
+    kind: interactive
+    optional: true       # only while filter text is non-empty
+  - id: remote-show-hidden-filtered
+    selector: '[data-testid="sftp-remote-show-hidden-filtered"]'
+    kind: interactive
+    optional: true       # only while hidden entries are suppressed
   - id: remote-open-terminal-here
     selector: '[data-testid="sftp-remote-open-terminal-here"]'
     kind: interactive

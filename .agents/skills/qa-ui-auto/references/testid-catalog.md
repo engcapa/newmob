@@ -1024,6 +1024,11 @@
 - `[data-testid="sftp-local-chmod"]` — interactive [optional] — F7.5.local-chmod
 - `[data-testid="sftp-local-preview"]` — interactive [optional] — F7.5.local-preview
 - `[data-testid="sftp-local-toggle-hidden"]` — interactive — F7.5.local-toggle-hidden
+- `[data-testid="sftp-local-filter"]` — interactive — F7.5.local-filter
+- `[data-testid="sftp-local-listing-status"]` — display [optional] — F7.5.local-listing-status
+- `[data-testid="sftp-local-access-warning"]` — display [optional] — F7.5.local-access-warning
+- `[data-testid="sftp-local-clear-filter"]` — interactive [optional] — F7.5.local-clear-filter
+- `[data-testid="sftp-local-show-hidden-filtered"]` — interactive [optional] — F7.5.local-show-hidden-filtered
 - `[data-testid="sftp-remote-back"]` — interactive — F7.5.remote-back
 - `[data-testid="sftp-remote-forward"]` — interactive — F7.5.remote-forward
 - `[data-testid="sftp-remote-up"]` — interactive — F7.5.remote-up
@@ -1036,6 +1041,11 @@
 - `[data-testid="sftp-remote-chmod"]` — interactive [optional] — F7.5.remote-chmod
 - `[data-testid="sftp-remote-preview"]` — interactive [optional] — F7.5.remote-preview
 - `[data-testid="sftp-remote-toggle-hidden"]` — interactive — F7.5.remote-toggle-hidden
+- `[data-testid="sftp-remote-filter"]` — interactive — F7.5.remote-filter
+- `[data-testid="sftp-remote-listing-status"]` — display [optional] — F7.5.remote-listing-status
+- `[data-testid="sftp-remote-access-warning"]` — display [optional] — F7.5.remote-access-warning
+- `[data-testid="sftp-remote-clear-filter"]` — interactive [optional] — F7.5.remote-clear-filter
+- `[data-testid="sftp-remote-show-hidden-filtered"]` — interactive [optional] — F7.5.remote-show-hidden-filtered
 - `[data-testid="sftp-remote-open-terminal-here"]` — interactive [optional] — F7.5.remote-open-terminal-here
 - `[data-testid="context-menu-item-permissions"]` — interactive — F7.5.ctx-permissions
   ↳ `text="Permissions…"` — alias

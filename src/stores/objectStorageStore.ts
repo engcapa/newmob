@@ -1,8 +1,9 @@
 import { create } from "zustand";
 import {
-  sftpListLocal,
+  sftpListLocalDetailed,
   sftpLocalHome,
   sftpLocalDrives,
+  type DirectoryListing,
   type FileEntry,
 } from "../lib/sftp";
 import {
@@ -80,21 +81,31 @@ async function listRemote(sessionId: string, path: string): Promise<FileEntry[]>
   return out;
 }
 
-async function listSide(sessionId: string, side: PaneSide, path: string): Promise<FileEntry[]> {
-  if (side === "remote") return listRemote(sessionId, path);
+async function listSide(sessionId: string, side: PaneSide, path: string): Promise<DirectoryListing> {
+  if (side === "remote") {
+    return {
+      entries: await listRemote(sessionId, path),
+      skippedCount: 0,
+      diagnostics: [],
+    };
+  }
   if (path === WINDOWS_DRIVES_ROOT) {
     const drives = await sftpLocalDrives();
-    return drives.map<FileEntry>((d) => ({
-      name: d.label,
-      path: d.path,
-      fileType: "dir",
-      size: 0,
-      mtime: 0,
-      mode: 0,
-      isHidden: false,
-    }));
+    return {
+      entries: drives.map<FileEntry>((d) => ({
+        name: d.label,
+        path: d.path,
+        fileType: "dir",
+        size: 0,
+        mtime: 0,
+        mode: 0,
+        isHidden: false,
+      })),
+      skippedCount: 0,
+      diagnostics: [],
+    };
   }
-  return sftpListLocal(path);
+  return sftpListLocalDetailed(path);
 }
 
 export interface ObjStorageSessionState {
@@ -132,6 +143,8 @@ function emptyPane(): PaneState {
     selection: [],
     loading: false,
     error: null,
+    skippedEntryCount: 0,
+    entryDiagnostics: [],
     history: [],
     historyIndex: -1,
     showHidden: false,
@@ -181,6 +194,34 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function listingState(listing: DirectoryListing): Pick<
+  PaneState,
+  "entries" | "skippedEntryCount" | "entryDiagnostics"
+> {
+  return {
+    entries: listing.entries,
+    skippedEntryCount: listing.skippedCount,
+    entryDiagnostics: listing.diagnostics,
+  };
+}
+
+function emptyListing(): DirectoryListing {
+  return { entries: [], skippedCount: 0, diagnostics: [] };
+}
+
+async function loadInitialListing(
+  sessionId: string,
+  side: PaneSide,
+  path: string,
+): Promise<{ listing: DirectoryListing; error: string | null }> {
+  if (!path) return { listing: emptyListing(), error: null };
+  try {
+    return { listing: await listSide(sessionId, side, path), error: null };
+  } catch (error) {
+    return { listing: emptyListing(), error: errMsg(error) };
+  }
+}
+
 const refCounts = new Map<string, number>();
 const inFlight = new Map<string, Promise<void>>();
 
@@ -225,11 +266,19 @@ export const useObjectStorageStore = create<ObjStorageStoreState>((set, get) => 
         await storageAttach(sessionId, effectiveConfig);
         const home = effectiveConfig.defaultBucket || effectiveConfig.defaultContainer;
         const remotePath = home ? `/${home}` : OBJ_ROOT;
-        const localHome = await sftpLocalHome().catch(() => "");
-        const remoteEntries = await listSide(sessionId, "remote", remotePath).catch(() => []);
-        const localEntries = localHome
-          ? await listSide(sessionId, "local", localHome).catch(() => [])
-          : [];
+        let localHome = "";
+        let localHomeError: string | null = null;
+        try {
+          localHome = await sftpLocalHome();
+        } catch (error) {
+          localHomeError = errMsg(error);
+        }
+        const [remoteLoad, localLoad] = await Promise.all([
+          loadInitialListing(sessionId, "remote", remotePath),
+          localHomeError
+            ? Promise.resolve({ listing: emptyListing(), error: localHomeError })
+            : loadInitialListing(sessionId, "local", localHome),
+        ]);
         set((state) => ({
           sessions: {
             ...state.sessions,
@@ -239,8 +288,22 @@ export const useObjectStorageStore = create<ObjStorageStoreState>((set, get) => 
               attaching: false,
               homeDir: remotePath,
               config: effectiveConfig,
-              remote: { ...emptyPane(), path: remotePath, entries: remoteEntries, history: [remotePath], historyIndex: 0 },
-              local: { ...emptyPane(), path: localHome, entries: localEntries, history: localHome ? [localHome] : [], historyIndex: localHome ? 0 : -1 },
+              remote: {
+                ...emptyPane(),
+                path: remotePath,
+                ...listingState(remoteLoad.listing),
+                error: remoteLoad.error,
+                history: [remotePath],
+                historyIndex: 0,
+              },
+              local: {
+                ...emptyPane(),
+                path: localHome,
+                ...listingState(localLoad.listing),
+                error: localLoad.error,
+                history: localHome ? [localHome] : [],
+                historyIndex: localHome ? 0 : -1,
+              },
             },
           },
         }));
@@ -302,14 +365,22 @@ export const useObjectStorageStore = create<ObjStorageStoreState>((set, get) => 
       },
     }));
     try {
-      const entries = await listSide(sessionId, side, pane.path);
+      const listing = await listSide(sessionId, side, pane.path);
       set((state) => {
         const cur = state.sessions[sessionId];
         if (!cur) return state;
         return {
           sessions: {
             ...state.sessions,
-            [sessionId]: { ...cur, [side]: { ...cur[side], entries, loading: false, error: null } },
+            [sessionId]: {
+              ...cur,
+              [side]: {
+                ...cur[side],
+                ...listingState(listing),
+                loading: false,
+                error: null,
+              },
+            },
           },
         };
       });
@@ -334,16 +405,35 @@ export const useObjectStorageStore = create<ObjStorageStoreState>((set, get) => 
     set((state) => ({
       sessions: {
         ...state.sessions,
-        [sessionId]: { ...state.sessions[sessionId], [side]: { ...prev, loading: true, error: null, path } },
+        [sessionId]: {
+          ...state.sessions[sessionId],
+          [side]: {
+            ...prev,
+            path,
+            entries: [],
+            selection: [],
+            skippedEntryCount: 0,
+            entryDiagnostics: [],
+            loading: true,
+            error: null,
+          },
+        },
       },
     }));
     try {
-      const entries = await listSide(sessionId, side, path);
+      const listing = await listSide(sessionId, side, path);
       set((state) => {
         const cur = state.sessions[sessionId];
         if (!cur) return state;
         const after = pushHistory(
-          { ...cur[side], path, entries, loading: false, error: null, selection: [] },
+          {
+            ...cur[side],
+            path,
+            ...listingState(listing),
+            loading: false,
+            error: null,
+            selection: [],
+          },
           path,
         );
         return { sessions: { ...state.sessions, [sessionId]: { ...cur, [side]: after } } };
@@ -356,7 +446,7 @@ export const useObjectStorageStore = create<ObjStorageStoreState>((set, get) => 
         return {
           sessions: {
             ...state.sessions,
-            [sessionId]: { ...cur, [side]: { ...cur[side], loading: false, error: message } },
+            [sessionId]: { ...cur, [side]: { ...prev, loading: false, error: message } },
           },
         };
       });
@@ -480,18 +570,40 @@ async function applyHistoryNav(
   set((state) => ({
     sessions: {
       ...state.sessions,
-      [sessionId]: { ...sess, [side]: { ...pane, historyIndex: idx, path, loading: true } },
+      [sessionId]: {
+        ...sess,
+        [side]: {
+          ...pane,
+          historyIndex: idx,
+          path,
+          entries: [],
+          selection: [],
+          skippedEntryCount: 0,
+          entryDiagnostics: [],
+          loading: true,
+          error: null,
+        },
+      },
     },
   }));
   try {
-    const entries = await listSide(sessionId, side, path);
+    const listing = await listSide(sessionId, side, path);
     set((state) => {
       const cur = state.sessions[sessionId];
       if (!cur) return state;
       return {
         sessions: {
           ...state.sessions,
-          [sessionId]: { ...cur, [side]: { ...cur[side], entries, loading: false, error: null, selection: [] } },
+          [sessionId]: {
+            ...cur,
+            [side]: {
+              ...cur[side],
+              ...listingState(listing),
+              loading: false,
+              error: null,
+              selection: [],
+            },
+          },
         },
       };
     });
@@ -503,7 +615,7 @@ async function applyHistoryNav(
       return {
         sessions: {
           ...state.sessions,
-          [sessionId]: { ...cur, [side]: { ...cur[side], loading: false, error: message } },
+          [sessionId]: { ...cur, [side]: { ...pane, loading: false, error: message } },
         },
       };
     });

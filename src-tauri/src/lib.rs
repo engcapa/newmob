@@ -398,6 +398,7 @@ pub fn run() {
             filebrowser::sftp_detach,
             filebrowser::sftp_list_remote,
             filebrowser::sftp_list_local,
+            filebrowser::sftp_list_local_detailed,
             filebrowser::sftp_local_home,
             filebrowser::sftp_local_drives,
             filebrowser::sftp_mkdir,

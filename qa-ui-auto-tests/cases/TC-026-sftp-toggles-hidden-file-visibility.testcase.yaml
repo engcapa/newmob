@@ -1,11 +1,20 @@
 id: TC-026
-title: SFTP toggles hidden file visibility
-covers: [F7.2]
+title: SFTP reports hidden and filtered file visibility
+description: |
+  Verifies that local hidden files and active local/remote filters are
+  explained in the listing status instead of being presented as empty
+  directories. The hidden file is zero-byte data in the browser-only VFS;
+  the remote side is only browsed and filtered.
+covers: [F7.2, F7.5]
 tags: [legacy-imported, p1, sftp, toolbar]
 modes: [browser]
 fixtures: [reset_db, ssh_required, sftp_required]
 steps:
   - open: "${cfg.app.base_url}"
+  - click: '[data-testid="app-main-menu"]'
+  - hover: '[data-testid="context-menu-item-view"]'
+  - click: '[data-testid="context-menu-item-toggle-quick-connect"]'
+  - wait_for: '[data-testid="quick-connect"]'
   - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
   - click: "[data-testid=\"qc-submit\"]"
   - wait_for: "[data-testid=\"auth-prompt\"]"
@@ -15,9 +24,24 @@ steps:
   - wait: 2
   - click: "[data-testid=\"attached-sftp-toggle\"]"
   - wait_for: "[data-testid=\"sftp-browser\"]"
-  - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
-  - press: Enter
+  - set_remote_path: '${cfg.sftp.remote_test_dir}'
   - wait: 1
+  - fill: {selector: '[data-testid="sftp-remote-filter"]', value: __taomni_no_match_539__}
+  - wait_for: '[data-testid="sftp-remote-listing-status"]'
+  - assert_text: {selector: '[data-testid="sftp-remote-listing-status"]', contains: match}
+  - click: '[data-testid="sftp-remote-clear-filter"]'
+  - click: '[data-testid="sftp-local-new-file"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill: {selector: '[data-testid="text-input-dialog-input"]', value: .taomni-qa-539-hidden}
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="sftp-local-listing-status"]'
+  - assert_text: {selector: '[data-testid="sftp-local-listing-status"]', contains: 'Hidden: 1'}
+  - click: '[data-testid="sftp-local-show-hidden-filtered"]'
+  - wait_for: '[data-testid="sftp-local-pane"] >> text=".taomni-qa-539-hidden"'
+  - fill: {selector: '[data-testid="sftp-local-filter"]', value: __taomni_no_match_539__}
+  - assert_text: {selector: '[data-testid="sftp-local-listing-status"]', contains: match}
+  - click: '[data-testid="sftp-local-clear-filter"]'
+  - wait_for: '[data-testid="sftp-local-pane"] >> text=".taomni-qa-539-hidden"'
   - click: "[data-testid=\"sftp-remote-toggle-hidden\"]"
   - wait: 1
   - click: "[data-testid=\"sftp-local-toggle-hidden\"]"
