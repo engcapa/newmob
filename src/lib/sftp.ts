@@ -34,6 +34,18 @@ export interface FileEntry {
   group?: string | null;
 }
 
+export interface FileEntryDiagnostic {
+  name?: string | null;
+  path?: string | null;
+  error: string;
+}
+
+export interface DirectoryListing {
+  entries: FileEntry[];
+  skippedCount: number;
+  diagnostics: FileEntryDiagnostic[];
+}
+
 export interface DriveEntry {
   id: string;
   label: string;
@@ -129,6 +141,10 @@ export async function sftpListRemote(
 
 export async function sftpListLocal(path: string): Promise<FileEntry[]> {
   return invoke<FileEntry[]>("sftp_list_local", { path });
+}
+
+export async function sftpListLocalDetailed(path: string): Promise<DirectoryListing> {
+  return invoke<DirectoryListing>("sftp_list_local_detailed", { path });
 }
 
 export async function sftpLocalHome(): Promise<string> {

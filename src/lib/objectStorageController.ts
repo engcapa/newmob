@@ -204,7 +204,7 @@ export function useObjectStorageController(sessionId: string) {
 
   const uploadDirTree = useCallback(
     async (localDir: string, bucket: string, destPrefix: string) => {
-      const entries = await sftpListLocal(localDir).catch(() => [] as FileEntry[]);
+      const entries = await sftpListLocal(localDir);
       for (const e of entries) {
         if (e.fileType === "dir") {
           await uploadDirTree(e.path, bucket, `${destPrefix}${e.name}/`);

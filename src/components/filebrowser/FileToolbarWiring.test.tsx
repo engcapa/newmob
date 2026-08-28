@@ -52,6 +52,7 @@ vi.mock("../../lib/sftp", async () => {
     ...actual,
     sftpListRemote: vi.fn(async () => []),
     sftpListLocal: vi.fn(async () => []),
+    sftpListLocalDetailed: vi.fn(async () => ({ entries: [], skippedCount: 0, diagnostics: [] })),
     sftpLocalHome: vi.fn(async () => "/home/test"),
     sftpAttach: vi.fn(async () => undefined),
     sftpDetach: vi.fn(async () => undefined),
@@ -92,6 +93,8 @@ function makePane(overrides: Partial<PaneState> = {}): PaneState {
     selection: [],
     loading: false,
     error: null,
+    skippedEntryCount: 0,
+    entryDiagnostics: [],
     history: ["/work"],
     historyIndex: 0,
     showHidden: false,
@@ -267,13 +270,63 @@ describe("FileToolbar wiring through FilePanel", () => {
     // Hidden file initially filtered out.
     expect(screen.queryByText(".hidden")).not.toBeInTheDocument();
 
-    const toggle = screen.getByTitle(/Show hidden files/i);
+    const toggle = screen.getByTestId("sftp-remote-toggle-hidden");
     await user.click(toggle);
 
     // Now visible, and the toggle's title flips to the inverse action.
     expect(screen.getByText(".hidden")).toBeInTheDocument();
     expect(screen.getByTitle(/Hide hidden files/i)).toBeInTheDocument();
     expect(useSftpStore.getState().sessions[SESSION_ID].remote.showHidden).toBe(true);
+  });
+
+  it("explains when an otherwise empty pane only contains hidden entries", async () => {
+    const user = userEvent.setup();
+    seedSession({ entries: [file(".env")] });
+    renderLocal();
+
+    expect(screen.getByText("Hidden items not shown: 1")).toBeInTheDocument();
+    expect(screen.queryByText("Empty directory")).not.toBeInTheDocument();
+    expect(screen.getByText("Hidden: 1")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("sftp-local-show-hidden-filtered"));
+
+    expect(screen.getByText(".env")).toBeInTheDocument();
+  });
+
+  it("shows filter counts and exposes a clear-filter action", async () => {
+    const user = userEvent.setup();
+    const onFilterTextChange = vi.fn();
+    seedSession({ entries: [file("notes.txt"), file("image.png")] });
+    renderLocal({ filterText: "missing", onFilterTextChange });
+
+    expect(screen.getByText('0 of 2 match "missing"')).toBeInTheDocument();
+    expect(screen.getByText('No items match "missing"')).toBeInTheDocument();
+    expect(screen.queryByText("Empty directory")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("sftp-local-clear-filter"));
+
+    expect(onFilterTextChange).toHaveBeenCalledWith("");
+  });
+
+  it("shows partial-listing diagnostics instead of claiming the directory is empty", () => {
+    seedSession({
+      entries: [],
+      skippedEntryCount: 2,
+      entryDiagnostics: [{
+        name: "private.txt",
+        path: "/work/private.txt",
+        error: "Permission denied",
+      }],
+    });
+    renderLocal();
+
+    expect(screen.getByText("Unreadable: 2")).toBeInTheDocument();
+    expect(screen.getByText("No readable items")).toBeInTheDocument();
+    expect(screen.queryByText("Empty directory")).not.toBeInTheDocument();
+    expect(screen.getByTestId("sftp-local-access-warning")).toHaveAttribute(
+      "title",
+      expect.stringContaining("private.txt: Permission denied"),
+    );
   });
 
   it("renders the LOCAL/REMOTE badges with side-specific styling", () => {

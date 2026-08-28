@@ -2,13 +2,15 @@ import { create } from "zustand";
 import type { StoreApi, UseBoundStore } from "zustand";
 import {
   sftpListRemote,
-  sftpListLocal,
+  sftpListLocalDetailed,
   sftpLocalHome,
   sftpLocalDrives,
   sftpAttach,
   sftpDetach,
   sftpRealpath,
   type FileEntry,
+  type DirectoryListing,
+  type FileEntryDiagnostic,
   type AttachOptions,
 } from "../lib/sftp";
 
@@ -28,6 +30,8 @@ export interface PaneState {
   selection: string[];
   loading: boolean;
   error: string | null;
+  skippedEntryCount: number;
+  entryDiagnostics: FileEntryDiagnostic[];
   history: string[];
   historyIndex: number;
   showHidden: boolean;
@@ -107,6 +111,8 @@ function emptyPane(): PaneState {
     selection: [],
     loading: false,
     error: null,
+    skippedEntryCount: 0,
+    entryDiagnostics: [],
     history: [],
     historyIndex: -1,
     showHidden: false,
@@ -142,29 +148,64 @@ async function listSide(
   sessionId: string,
   side: PaneSide,
   path: string,
-): Promise<FileEntry[]> {
+): Promise<DirectoryListing> {
   if (side === "local" && path === WINDOWS_DRIVES_ROOT) {
     // Synthesize folder-like entries from the available Windows drives so
     // the standard file-list UI (sort, double-click to enter, etc.) works
     // unchanged for the virtual drives root.
     const drives = await sftpLocalDrives();
-    return drives.map<FileEntry>((d) => ({
-      name: d.label,
-      path: d.path,
-      fileType: "dir",
-      size: 0,
-      mtime: 0,
-      mode: 0,
-      isHidden: false,
-    }));
+    return {
+      entries: drives.map<FileEntry>((d) => ({
+        name: d.label,
+        path: d.path,
+        fileType: "dir",
+        size: 0,
+        mtime: 0,
+        mode: 0,
+        isHidden: false,
+      })),
+      skippedCount: 0,
+      diagnostics: [],
+    };
   }
-  return side === "remote"
-    ? sftpListRemote(sessionId, path)
-    : sftpListLocal(path);
+  if (side === "local") return sftpListLocalDetailed(path);
+  return {
+    entries: await sftpListRemote(sessionId, path),
+    skippedCount: 0,
+    diagnostics: [],
+  };
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function listingState(listing: DirectoryListing): Pick<
+  PaneState,
+  "entries" | "skippedEntryCount" | "entryDiagnostics"
+> {
+  return {
+    entries: listing.entries,
+    skippedEntryCount: listing.skippedCount,
+    entryDiagnostics: listing.diagnostics,
+  };
+}
+
+function emptyListing(): DirectoryListing {
+  return { entries: [], skippedCount: 0, diagnostics: [] };
+}
+
+async function loadInitialListing(
+  sessionId: string,
+  side: PaneSide,
+  path: string,
+): Promise<{ listing: DirectoryListing; error: string | null }> {
+  if (!path) return { listing: emptyListing(), error: null };
+  try {
+    return { listing: await listSide(sessionId, side, path), error: null };
+  } catch (error) {
+    return { listing: emptyListing(), error: errorMessage(error) };
+  }
 }
 
 export function isConnectionError(err: unknown): boolean {
@@ -285,9 +326,19 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
         } catch {
           /* keep home as-is */
         }
-        const localHome = await sftpLocalHome().catch(() => "");
-        const remoteEntries = await sftpListRemote(sid, realHome).catch(() => []);
-        const localEntries = await sftpListLocal(localHome).catch(() => []);
+        let localHome = "";
+        let localHomeError: string | null = null;
+        try {
+          localHome = await sftpLocalHome();
+        } catch (error) {
+          localHomeError = errorMessage(error);
+        }
+        const [remoteLoad, localLoad] = await Promise.all([
+          loadInitialListing(sid, "remote", realHome),
+          localHomeError
+            ? Promise.resolve({ listing: emptyListing(), error: localHomeError })
+            : loadInitialListing(sid, "local", localHome),
+        ]);
         set((state) => ({
           sessions: {
             ...state.sessions,
@@ -299,16 +350,18 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
               remote: {
                 ...emptyPane(),
                 path: realHome,
-                entries: remoteEntries,
+                ...listingState(remoteLoad.listing),
+                error: remoteLoad.error,
                 history: [realHome],
                 historyIndex: 0,
               },
               local: {
                 ...emptyPane(),
                 path: localHome,
-                entries: localEntries,
-                history: [localHome],
-                historyIndex: 0,
+                ...listingState(localLoad.listing),
+                error: localLoad.error,
+                history: localHome ? [localHome] : [],
+                historyIndex: localHome ? 0 : -1,
               },
             },
           },
@@ -403,12 +456,17 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
     if (get().sessions[sessionId]?.attached) return;
 
     let path = initialPath?.trim() || "";
+    let homeError: string | null = null;
     if (!path) {
-      path = await sftpLocalHome().catch(() => "");
+      try {
+        path = await sftpLocalHome();
+      } catch (error) {
+        homeError = errorMessage(error);
+      }
     }
-    const entries = path
-      ? await listSide(sessionId, "local", path).catch(() => [])
-      : [];
+    const load = homeError
+      ? { listing: emptyListing(), error: homeError }
+      : await loadInitialListing(sessionId, "local", path);
     set((state) => ({
       sessions: {
         ...state.sessions,
@@ -422,7 +480,8 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
           local: {
             ...emptyPane(),
             path,
-            entries,
+            ...listingState(load.listing),
+            error: load.error,
             history: path ? [path] : [],
             historyIndex: path ? 0 : -1,
           },
@@ -459,7 +518,7 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
       },
     }));
     try {
-      const entries = await listSide(sessionId, side, pane.path);
+      const listing = await listSide(sessionId, side, pane.path);
       set((state) => {
         const cur = state.sessions[sessionId];
         if (!cur) return state;
@@ -468,7 +527,12 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
             ...state.sessions,
             [sessionId]: {
               ...cur,
-              [side]: { ...cur[side], entries, loading: false, error: null },
+              [side]: {
+                ...cur[side],
+                ...listingState(listing),
+                loading: false,
+                error: null,
+              },
             },
           },
         };
@@ -504,17 +568,33 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
         ...state.sessions,
         [sessionId]: {
           ...state.sessions[sessionId],
-          [side]: { ...prev, loading: true, error: null, path },
+          [side]: {
+            ...prev,
+            path,
+            entries: [],
+            selection: [],
+            skippedEntryCount: 0,
+            entryDiagnostics: [],
+            loading: true,
+            error: null,
+          },
         },
       },
     }));
     try {
-      const entries = await listSide(sessionId, side, path);
+      const listing = await listSide(sessionId, side, path);
       set((state) => {
         const cur = state.sessions[sessionId];
         if (!cur) return state;
         const after = pushHistory(
-          { ...cur[side], path, entries, loading: false, error: null, selection: [] },
+          {
+            ...cur[side],
+            path,
+            ...listingState(listing),
+            loading: false,
+            error: null,
+            selection: [],
+          },
           path,
         );
         return {
@@ -528,7 +608,7 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
       let displayErr = err;
       if (side === "remote" && isSftpRefreshDirectorySignal(err)) {
         try {
-          const entries = await listSide(sessionId, side, prev.path);
+          const listing = await listSide(sessionId, side, prev.path);
           set((state) => {
             const cur = state.sessions[sessionId];
             if (!cur) return state;
@@ -538,9 +618,8 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
                 [sessionId]: {
                   ...cur,
                   [side]: {
-                    ...cur[side],
-                    path: prev.path,
-                    entries,
+                    ...prev,
+                    ...listingState(listing),
                     loading: false,
                     error: null,
                     selection: [],
@@ -560,7 +639,7 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
         if (!cur) return state;
         const nextSession = {
           ...cur,
-          [side]: { ...cur[side], loading: false, error: message },
+          [side]: { ...prev, loading: false, error: message },
         };
         if (side === "remote" && isConnectionError(displayErr)) {
           nextSession.attached = false;
@@ -588,12 +667,22 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
         ...state.sessions,
         [sessionId]: {
           ...sess,
-          [side]: { ...pane, historyIndex: idx, path, loading: true },
+          [side]: {
+            ...pane,
+            historyIndex: idx,
+            path,
+            entries: [],
+            selection: [],
+            skippedEntryCount: 0,
+            entryDiagnostics: [],
+            loading: true,
+            error: null,
+          },
         },
       },
     }));
     try {
-      const entries = await listSide(sessionId, side, path);
+      const listing = await listSide(sessionId, side, path);
       set((state) => {
         const cur = state.sessions[sessionId];
         if (!cur) return state;
@@ -602,7 +691,13 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
             ...state.sessions,
             [sessionId]: {
               ...cur,
-              [side]: { ...cur[side], entries, loading: false, error: null, selection: [] },
+              [side]: {
+                ...cur[side],
+                ...listingState(listing),
+                loading: false,
+                error: null,
+                selection: [],
+              },
             },
           },
         };
@@ -614,7 +709,7 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
         if (!cur) return state;
         const nextSession = {
           ...cur,
-          [side]: { ...cur[side], loading: false, error: message },
+          [side]: { ...pane, loading: false, error: message },
         };
         if (side === "remote" && isConnectionError(err)) {
           nextSession.attached = false;
@@ -642,12 +737,22 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
         ...state.sessions,
         [sessionId]: {
           ...sess,
-          [side]: { ...pane, historyIndex: idx, path, loading: true },
+          [side]: {
+            ...pane,
+            historyIndex: idx,
+            path,
+            entries: [],
+            selection: [],
+            skippedEntryCount: 0,
+            entryDiagnostics: [],
+            loading: true,
+            error: null,
+          },
         },
       },
     }));
     try {
-      const entries = await listSide(sessionId, side, path);
+      const listing = await listSide(sessionId, side, path);
       set((state) => {
         const cur = state.sessions[sessionId];
         if (!cur) return state;
@@ -656,7 +761,13 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
             ...state.sessions,
             [sessionId]: {
               ...cur,
-              [side]: { ...cur[side], entries, loading: false, error: null, selection: [] },
+              [side]: {
+                ...cur[side],
+                ...listingState(listing),
+                loading: false,
+                error: null,
+                selection: [],
+              },
             },
           },
         };
@@ -668,7 +779,7 @@ export const useSftpStore = create<SftpStoreState>((set, get) => ({
         if (!cur) return state;
         const nextSession = {
           ...cur,
-          [side]: { ...cur[side], loading: false, error: message },
+          [side]: { ...pane, loading: false, error: message },
         };
         if (side === "remote" && isConnectionError(err)) {
           nextSession.attached = false;

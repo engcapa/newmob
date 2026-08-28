@@ -1,10 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSftpStore, type PaneState, type SftpSessionState } from "./sftpStore";
-import { sftpListRemote, sftpAttach, sftpDetach, type FileEntry } from "../lib/sftp";
+import {
+  sftpListRemote,
+  sftpListLocalDetailed,
+  sftpAttach,
+  sftpDetach,
+  type FileEntry,
+} from "../lib/sftp";
 
 vi.mock("../lib/sftp", () => ({
   sftpListRemote: vi.fn(async () => []),
   sftpListLocal: vi.fn(async () => []),
+  sftpListLocalDetailed: vi.fn(async () => ({ entries: [], skippedCount: 0, diagnostics: [] })),
   sftpLocalHome: vi.fn(async () => "/"),
   sftpLocalDrives: vi.fn(async () => []),
   sftpAttach: vi.fn(async () => ({ homeDir: "/" })),
@@ -39,6 +46,8 @@ function pane(path: string, entries: FileEntry[]): PaneState {
     selection: [],
     loading: false,
     error: null,
+    skippedEntryCount: 0,
+    entryDiagnostics: [],
     history: path ? [path] : [],
     historyIndex: path ? 0 : -1,
     showHidden: false,
@@ -60,6 +69,12 @@ function session(): SftpSessionState {
 describe("sftpStore", () => {
   beforeEach(() => {
     vi.mocked(sftpListRemote).mockReset();
+    vi.mocked(sftpListLocalDetailed).mockReset();
+    vi.mocked(sftpListLocalDetailed).mockResolvedValue({
+      entries: [],
+      skippedCount: 0,
+      diagnostics: [],
+    });
     useSftpStore.setState({ sessions: { sid: session() } });
   });
 
@@ -152,5 +167,53 @@ describe("sftpStore", () => {
     expect(s.attached).toBe(true);
     expect(s.error).toBeNull();
     expect(s.remote.error).toBe("Permission denied");
+  });
+
+  it("keeps readable local entries and diagnostics from a partial listing", async () => {
+    vi.mocked(sftpListLocalDetailed).mockResolvedValue({
+      entries: [hostEntry],
+      skippedCount: 2,
+      diagnostics: [{
+        name: "private.txt",
+        path: "/target/private.txt",
+        error: "Permission denied",
+      }],
+    });
+
+    await useSftpStore.getState().navigate("sid", "local", "/target");
+
+    const local = useSftpStore.getState().sessions.sid.local;
+    expect(local.path).toBe("/target");
+    expect(local.entries).toEqual([hostEntry]);
+    expect(local.skippedEntryCount).toBe(2);
+    expect(local.entryDiagnostics).toHaveLength(1);
+    expect(local.error).toBeNull();
+  });
+
+  it("restores the previous pane when local navigation fails", async () => {
+    useSftpStore.setState({
+      sessions: { sid: { ...session(), local: pane("/previous", [hostEntry]) } },
+    });
+    vi.mocked(sftpListLocalDetailed).mockRejectedValue(new Error("Permission denied"));
+
+    await useSftpStore.getState().navigate("sid", "local", "/protected");
+
+    const local = useSftpStore.getState().sessions.sid.local;
+    expect(local.path).toBe("/previous");
+    expect(local.entries).toEqual([hostEntry]);
+    expect(local.error).toBe("Permission denied");
+  });
+
+  it("surfaces an initial local-only listing failure in the pane", async () => {
+    vi.mocked(sftpListLocalDetailed).mockRejectedValue(new Error("Operation not permitted"));
+
+    await useSftpStore.getState().attachLocalOnly("local-only", "/protected");
+
+    const local = useSftpStore.getState().sessions["local-only"].local;
+    expect(local.path).toBe("/protected");
+    expect(local.entries).toEqual([]);
+    expect(local.error).toBe("Operation not permitted");
+
+    useSftpStore.getState().detachLocalOnly("local-only");
   });
 });

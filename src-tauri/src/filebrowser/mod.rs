@@ -137,6 +137,11 @@ pub fn sftp_list_local(path: String) -> Result<Vec<sftp::FileEntryDto>, String> 
 }
 
 #[tauri::command]
+pub fn sftp_list_local_detailed(path: String) -> Result<local::DirectoryListingDto, String> {
+    local::list_dir_detailed(Path::new(&path))
+}
+
+#[tauri::command]
 pub fn sftp_local_home() -> Result<String, String> {
     local::home_dir()
 }

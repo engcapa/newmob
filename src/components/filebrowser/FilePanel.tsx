@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState, useCallback, useRef, type DragEvent, type MouseEvent } from "react";
-import { Folder, File as FileIcon, Link as LinkIcon, HardDrive, ChevronDown, HelpCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  Eye,
+  File as FileIcon,
+  Folder,
+  HardDrive,
+  HelpCircle,
+  Link as LinkIcon,
+  X,
+} from "lucide-react";
 import { PathBreadcrumb } from "./PathBreadcrumb";
 import { FileToolbar } from "./FileToolbar";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
@@ -244,6 +254,21 @@ export function FilePanel({
     });
   }, [pane, sortKey, sortDir, showHidden, filterText]);
 
+  const normalizedFilter = filterText?.trim() ?? "";
+  const filterActive = normalizedFilter.length > 0;
+  const hiddenEntryCount = pane?.entries.filter((entry) => entry.isHidden).length ?? 0;
+  const hiddenBySettingCount = showHidden ? 0 : hiddenEntryCount;
+  const filterCandidateCount = Math.max(0, (pane?.entries.length ?? 0) - hiddenBySettingCount);
+  const skippedEntryCount = pane?.skippedEntryCount ?? 0;
+  const entryDiagnostics = pane?.entryDiagnostics ?? [];
+  const diagnosticTitle = entryDiagnostics
+    .map((diagnostic, index) => {
+      const label = diagnostic.name ?? diagnostic.path ?? `#${index + 1}`;
+      return `${label}: ${diagnostic.error}`;
+    })
+    .join("\n");
+  const hasListingStatus = hiddenBySettingCount > 0 || filterActive || skippedEntryCount > 0;
+
   const onHeaderClick = useCallback(
     (key: typeof sortKey) => {
       if (key === sortKey) {
@@ -461,6 +486,7 @@ export function FilePanel({
         {onFilterTextChange && (
           <input
             type="search"
+            data-testid={`sftp-${side}-filter`}
             value={filterText ?? ""}
             placeholder={t("fileBrowser.filterPlaceholder")}
             onChange={(e) => onFilterTextChange(e.target.value)}
@@ -579,6 +605,62 @@ export function FilePanel({
         />
       </div>
 
+      {!pane.error && hasListingStatus && (
+        <div
+          data-testid={`sftp-${side}-listing-status`}
+          role="status"
+          className="min-h-6 flex flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1 border-b shrink-0 text-[11px]"
+          style={{
+            borderColor: "var(--taomni-divider)",
+            background: "var(--taomni-quick-bg)",
+            color: "var(--taomni-text-muted)",
+          }}
+        >
+          {skippedEntryCount > 0 && (
+            <span
+              data-testid={`sftp-${side}-access-warning`}
+              className="inline-flex min-w-0 items-center gap-1 text-amber-700 dark:text-amber-400"
+              title={diagnosticTitle || undefined}
+            >
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("fileBrowser.unreadableItemsSummary", { count: skippedEntryCount })}</span>
+            </span>
+          )}
+          {hiddenBySettingCount > 0 && (
+            <button
+              type="button"
+              data-testid={`sftp-${side}-show-hidden-filtered`}
+              className="inline-flex items-center gap-1 hover:text-[var(--taomni-text)]"
+              title={t("fileBrowser.showHidden")}
+              onClick={() => toggleHidden(sessionId, side)}
+            >
+              <Eye className="h-3.5 w-3.5" />
+              <span>{t("fileBrowser.hiddenItemsSummary", { count: hiddenBySettingCount })}</span>
+            </button>
+          )}
+          {filterActive && (
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <span className="truncate">
+                {t("fileBrowser.filterSummary", {
+                  shown: sortedEntries.length,
+                  total: filterCandidateCount,
+                  query: normalizedFilter,
+                })}
+              </span>
+              <button
+                type="button"
+                data-testid={`sftp-${side}-clear-filter`}
+                className="inline-flex h-5 w-5 shrink-0 items-center justify-center hover:text-[var(--taomni-text)]"
+                title={t("fileBrowser.clearFilter")}
+                onClick={() => onFilterTextChange?.("")}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </span>
+          )}
+        </div>
+      )}
+
       <div
         ref={listRef}
         data-testid={`sftp-${side}-list`}
@@ -676,7 +758,13 @@ export function FilePanel({
             {sortedEntries.length === 0 && !pane.loading && !pane.error && (
               <tr>
                 <td colSpan={4} className="px-2 py-3 text-center text-[var(--taomni-text-muted)]">
-                  {t("fileBrowser.emptyDirectory")}
+                  {pane.entries.length === 0 && skippedEntryCount > 0
+                    ? t("fileBrowser.noReadableEntries")
+                    : filterActive
+                      ? t("fileBrowser.noFilterMatches", { query: normalizedFilter })
+                      : hiddenBySettingCount > 0
+                        ? t("fileBrowser.hiddenItemsNotShown", { count: hiddenBySettingCount })
+                        : t("fileBrowser.emptyDirectory")}
                 </td>
               </tr>
             )}

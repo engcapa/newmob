@@ -2260,6 +2260,11 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       const entries = await vfsList(path);
       return entries as T;
     }
+    case "sftp_list_local_detailed": {
+      const path = (args?.path as string) || "";
+      const entries = await vfsList(path);
+      return { entries, skippedCount: 0, diagnostics: [] } as T;
+    }
     case "sftp_local_home": {
       const home = await vfsHome();
       return home as T;
