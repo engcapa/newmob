@@ -1,0 +1,28 @@
+id: TC-IDE-C6-04
+title: "Rename preview conflict/apply/undo under jdtls"
+description: |
+  §8.19.10 gate case C6-04. Capability ids: rename.preview-conflict /
+  semantic.workspace-edit-undo. Required mode: PROVIDER FIXTURE — rename
+  conflict detection and cross-file WorkspaceEdit apply need jdtls.
+  Browser runs must report environment-blocked, never passed. Highest
+  claim on green: L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-c6, rename, provider-fixture, p1]
+modes: [native]
+fixtures: [reset_db, jdtls_required]
+timeout_sec: 600
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Shift+F6
+  - screenshot: tc-ide-c6b-preview.png

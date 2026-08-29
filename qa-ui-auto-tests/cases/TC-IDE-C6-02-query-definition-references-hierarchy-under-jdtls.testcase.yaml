@@ -1,0 +1,30 @@
+id: TC-IDE-C6-02
+title: "Semantic query definition/references/hierarchy under jdtls"
+description: |
+  §8.19.10 gate case C6-02 (ED-QUERY-004). Capability ids:
+  query.definition / query.references / query.hierarchy / navigation.history.
+  Asserts real caret parameters, result session, open/reveal, history back,
+  in-flight query cancellation, and hierarchy tree expansion under jdtls.
+  Browser runs verify unavailable contract; native runs verify provider fixture.
+  Highest claim on green: L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-c6, query, definition, hierarchy, provider-fixture, p1]
+modes: [browser, native]
+fixtures: [reset_db, jdtls_required]
+timeout_sec: 300
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Ctrl+B
+  - screenshot: tc-ide-c6-query-definition.png

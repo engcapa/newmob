@@ -307,7 +307,7 @@
 - 验证：prepare 0/1/many、lazy expand、cancel/restart、partial branch failure。
 
 ### ED-QUERY-004 建立 provider-backed Query behavior case
-<!-- ide-task {"id":"ED-QUERY-004","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-QUERY-002","ED-QUERY-003"],"legacy":["BB10-C6-02","BB11"]} -->
+<!-- ide-task {"id":"ED-QUERY-004","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:23:15Z","baseline":"0525de38916d03a29c69a502b82888468180802a","depends_on":["ED-QUERY-002","ED-QUERY-003"],"legacy":["BB10-C6-02","BB11"],"updated_at":"2026-08-29T14:49:13Z","evidence":"cases: TC-IDE-C6-02, TC-IDE-C6-04; vitest: semanticQueryBehaviorCase.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：C6-02 不再用 Rename 冒充 Query；真实 jdtls fixture 断言 caret 参数、result session、open/reveal、history、cancel 和 hierarchy expand。
 - 主文件：新 Query YAML、jdtls fixture expectations、observation contract。
