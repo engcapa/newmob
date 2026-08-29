@@ -1304,6 +1304,22 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     keywords: ["clear", "highlight", "escape"],
   },
   {
+    id: "workspace.compareWithClipboard",
+    title: "Compare with Clipboard",
+    description: "Compare current file or selection with clipboard content",
+    category: "View",
+    provenance: "local",
+    keywords: ["diff", "compare", "clipboard"],
+  },
+  {
+    id: "workspace.compareWithFile",
+    title: "Compare with File…",
+    description: "Compare current file with another file in workspace",
+    category: "View",
+    provenance: "local",
+    keywords: ["diff", "compare", "file"],
+  },
+  {
     id: "workspace.toggleInlayHints",
     title: "Toggle Inlay Hints",
     description: "Show or hide parameter names and type inlay hints",

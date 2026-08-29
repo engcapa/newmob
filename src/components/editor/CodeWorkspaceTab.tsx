@@ -444,6 +444,11 @@ import {
   writeHighlightingLevel,
   type HighlightingLevel,
 } from "./workspace/highlightingLevelModel";
+import {
+  createClipboardCompareSession,
+  type EditorCompareSession,
+} from "./workspace/editorCompareModel";
+import { EditorCompareDialog } from "./workspace/EditorCompareDialog";
 import { HighlightingWidget } from "./workspace/HighlightingWidget";
 import { useDeferredOpenFileTodos } from "./workspace/useDeferredOpenFileTodos";
 import { type QuickDocContent } from "./workspace/referenceDocumentation";
@@ -1749,6 +1754,7 @@ export function CodeWorkspaceTab({
     writeHighlightingLevel(workspaceInstanceId, fileKey, level);
     setFileHighlightingLevels((prev) => ({ ...prev, [fileKey]: level }));
   }, [workspaceInstanceId]);
+  const [activeCompareSession, setActiveCompareSession] = useState<EditorCompareSession | null>(null);
   const [referencesResult, setReferencesResult] = useState<ReferencesResultState>({
     loading: false,
     origin: null,
@@ -9092,6 +9098,22 @@ export function CodeWorkspaceTab({
     return true;
   }, [activeEditorGroupId, occurrenceSession, setStatusMessage]);
 
+  const compareWithClipboard = useCallback(async () => {
+    const file = activeFile;
+    if (!file) return;
+    try {
+      const clipText = await navigator.clipboard.readText();
+      const result = createClipboardCompareSession(file.title, file.path, file.text, clipText);
+      if (!result.session) {
+        setStatusMessage(result.error || "Cannot compare with clipboard");
+        return;
+      }
+      setActiveCompareSession(result.session);
+    } catch {
+      setStatusMessage("Failed to read clipboard text");
+    }
+  }, [activeFile, setStatusMessage]);
+
   const navigateDiagnostic = useCallback((direction: 1 | -1) => {
     const file = activeFile;
     if (!file) return;
@@ -10249,6 +10271,22 @@ export function CodeWorkspaceTab({
       keywords: ["clear", "highlight", "escape"],
       when: (context) => context.focus === "editor" && !!occurrenceSession,
       run: clearHighlightUsages,
+    },
+    {
+      id: "workspace.compareWithClipboard",
+      title: "Compare with Clipboard",
+      category: "Diff",
+      keywords: ["diff", "compare", "clipboard"],
+      when: () => !!activeFile,
+      run: compareWithClipboard,
+    },
+    {
+      id: "workspace.compareWithFile",
+      title: "Compare with File…",
+      category: "Diff",
+      keywords: ["diff", "compare", "file"],
+      when: () => !!activeFile,
+      run: compareWithClipboard,
     },
     {
       id: "workspace.toggleInlayHints",
@@ -15784,6 +15822,19 @@ export function CodeWorkspaceTab({
           onCancel={() => {
             refactoringPreviewModal.resolve(false);
             setRefactoringPreviewModal(null);
+          }}
+        />
+      )}
+      {activeCompareSession && (
+        <EditorCompareDialog
+          session={activeCompareSession}
+          onClose={() => setActiveCompareSession(null)}
+          onApplyRight={(newText) => {
+            if (activeFile && !workspaceResourceOperationLocked) {
+              updateFileText(activeFile.key, newText);
+              setActiveCompareSession(null);
+              setStatusMessage("Applied changes from comparison");
+            }
           }}
         />
       )}

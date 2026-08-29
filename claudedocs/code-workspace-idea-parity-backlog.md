@@ -498,7 +498,7 @@
 - 验证：set/replace/remove、file rename/delete、restore、keyboard-only。
 
 ### ED-COMPARE-001 通用 editor Compare workflow
-<!-- ide-task {"id":"ED-COMPARE-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["N11.4"]} -->
+<!-- ide-task {"id":"ED-COMPARE-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:54:14Z","baseline":"2ec31875694f1bcd3e92a140e7713a1311ae76bc","depends_on":[],"legacy":["N11.4"],"updated_at":"2026-08-29T12:58:01Z","evidence":"vitest: editorCompareModel.test.ts, EditorCompareDialog.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：Compare with Clipboard / Files / Local History selection 共用 diff surface；Git branch compare 只复用现有 Git 数据，不扩完整 Git client。
 - 验证：encoding/EOL、selection, binary/large unavailable、apply/copy action、a11y。
