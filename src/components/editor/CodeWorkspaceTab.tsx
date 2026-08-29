@@ -10462,6 +10462,8 @@ export function CodeWorkspaceTab({
     // Terminal dock marks itself with data-workspace-focus="terminal".
     const el = node instanceof Element ? node : node.parentElement;
     if (el?.closest?.('[data-workspace-focus="terminal"]')) return "terminal";
+    if (el?.closest?.('[data-workspace-focus="modal"]') || el?.closest?.('[role="dialog"]') || el?.closest?.('[data-testid$="-popup"]')) return "modal";
+    if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !el.closest(".cm-editor")) return "modal";
     if (treePaneRef.current?.contains(node)) return "tree";
     if (editorPaneRef.current?.contains(node)) return "editor";
     return "workspace";

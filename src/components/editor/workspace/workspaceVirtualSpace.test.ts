@@ -19,7 +19,6 @@ import {
   virtualOverflowAt,
   virtualSelectDown,
   virtualSpaceClickHandler,
-  virtualSpaceKeymap,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
   virtualTabCommand,
@@ -27,6 +26,9 @@ import {
   VIRTUAL_SPACE_KNOWN_GAPS,
 } from "./workspaceVirtualSpace";
 import { editorVirtualSpacePolicy } from "./workspaceEditorCommands";
+import { buildEditorHostActions } from "./workspaceCodeMirrorKeymap";
+import { DEFAULT_WORKSPACE_ACTIONS } from "./workspaceActionRegistry";
+import { WorkspaceActionHost, EditorActionBridge } from "./workspaceActionHost";
 
 const POLICY = editorVirtualSpacePolicy.of({ afterLineEnd: true, atFileBottom: true });
 
@@ -355,26 +357,107 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       expect(virtualOverflowAt(view.state, 3)).toBe(5);
     });
 
-    it("exports complete virtualSpaceKeymap and VirtualSpaceController", () => {
-      expect(virtualSpaceKeymap.length).toBeGreaterThanOrEqual(15);
-      const keys = virtualSpaceKeymap.map((b) => b.key);
-      expect(keys).toContain("ArrowUp");
-      expect(keys).toContain("ArrowDown");
-      expect(keys).toContain("ArrowLeft");
-      expect(keys).toContain("ArrowRight");
-      expect(keys).toContain("Home");
-      expect(keys).toContain("End");
-      expect(keys).toContain("Backspace");
-      expect(keys).toContain("Delete");
-      expect(keys).toContain("Enter");
-      expect(keys).toContain("Tab");
-      expect(keys).toContain("Escape");
-      expect(keys).toContain("PageUp");
-      expect(keys).toContain("PageDown");
-      expect(keys).toContain("Shift-PageUp");
-      expect(keys).toContain("Shift-PageDown");
+    it("§ED-VSPACE-001: registers all virtual space actions into WorkspaceActionHost with unified definition", () => {
+      const NOOP_HANDLERS = {
+        save: () => {},
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: () => false,
+      };
+      const editorActions = buildEditorHostActions(NOOP_HANDLERS);
+      const actionIds = new Set(editorActions.map((a) => a.id));
 
-      expect(VirtualSpaceController.keymap).toBe(virtualSpaceKeymap);
+      const expectedIds = [
+        "editor.moveUp",
+        "editor.moveDown",
+        "editor.selectUp",
+        "editor.selectDown",
+        "editor.pageUp",
+        "editor.selectPageUp",
+        "editor.pageDown",
+        "editor.selectPageDown",
+        "editor.moveLeft",
+        "editor.selectLeft",
+        "editor.moveRight",
+        "editor.selectRight",
+        "editor.moveToLineStart",
+        "editor.moveToLineEnd",
+        "editor.selectToLineEnd",
+        "editor.deleteBackward",
+        "editor.deleteForward",
+        "editor.insertNewline",
+        "editor.insertTab",
+      ];
+
+      for (const id of expectedIds) {
+        expect(actionIds.has(id)).toBe(true);
+        // Matching catalog action in DEFAULT_WORKSPACE_ACTIONS
+        const catalogAction = DEFAULT_WORKSPACE_ACTIONS.find((a) => a.id === id);
+        expect(catalogAction).toBeDefined();
+      }
+
+      expect("keymap" in VirtualSpaceController).toBe(false);
+    });
+
+    it("§ED-VSPACE-001: dispatches keystroke exactly once to focused editor and zero times to non-owner focus", async () => {
+      const host = new WorkspaceActionHost({ workspaceId: "ws-vspace-test" });
+      const bridge = new EditorActionBridge(host);
+      bridge.registerView("editor-view-1");
+
+      let commandRunCount = 0;
+
+      const actions = buildEditorHostActions({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: (_command) => {
+          commandRunCount += 1;
+          return true;
+        },
+      });
+
+      host.registerActions(actions);
+
+      const makeEvent = (key: string, code: string, modifiers: { shiftKey?: boolean; ctrlKey?: boolean } = {}) => ({
+        key,
+        code,
+        shiftKey: modifiers.shiftKey ?? false,
+        ctrlKey: modifiers.ctrlKey ?? false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+      });
+
+      // 1. Dispatch ArrowUp with editor focus on registered view -> single dispatch
+      const result1 = host.dispatchKeydownV2({
+        event: makeEvent("ArrowUp", "ArrowUp"),
+        workspaceId: "ws-vspace-test",
+        targetViewId: "editor-view-1",
+      });
+
+      expect(result1.kind).toBe("executed");
+      if (result1.kind === "executed") {
+        expect(result1.actionId).toBe("editor.moveUp");
+      }
+      await Promise.resolve();
+      expect(commandRunCount).toBe(1);
+
+      // 2. Dispatch with non-owner focus (e.g. tree/search focus, targetViewId: null) -> rejected/zero dispatch
+      commandRunCount = 0;
+      const result2 = host.dispatchKeydownV2({
+        event: makeEvent("ArrowUp", "ArrowUp"),
+        workspaceId: "ws-vspace-test",
+        targetViewId: null,
+      });
+
+      // Editor-scoped action requires editor focus, so non-editor focus rejects with disabled/no-match
+      expect(result2.kind).toBe("rejected");
+      await Promise.resolve();
+      expect(commandRunCount).toBe(0); // Zero dispatch to editor!
     });
   });
 });

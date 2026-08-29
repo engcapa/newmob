@@ -608,85 +608,10 @@ export function virtualEscapeCommand(view: EditorView): boolean {
   return true;
 }
 
-/**
- * §8.22.5 U2-C: Complete Virtual Space Keymap bundle.
- */
-export const virtualSpaceKeymap = [
-  {
-    key: "ArrowUp",
-    run: (view: EditorView) => {
-      const pol = view.state.facet(editorVirtualSpacePolicy);
-      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "up", false) : false;
-    },
-  },
-  {
-    key: "ArrowDown",
-    run: (view: EditorView) => {
-      const pol = view.state.facet(editorVirtualSpacePolicy);
-      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "down", false) : false;
-    },
-  },
-  {
-    key: "Shift-ArrowUp",
-    run: (view: EditorView) => {
-      const pol = view.state.facet(editorVirtualSpacePolicy);
-      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "up", true) : false;
-    },
-  },
-  {
-    key: "Shift-ArrowDown",
-    run: (view: EditorView) => {
-      const pol = view.state.facet(editorVirtualSpacePolicy);
-      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "down", true) : false;
-    },
-  },
-  {
-    key: "PageUp",
-    run: (view: EditorView) => {
-      const pol = view.state.facet(editorVirtualSpacePolicy);
-      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageUp", false) : false;
-    },
-  },
-  {
-    key: "Shift-PageUp",
-    run: (view: EditorView) => {
-      const pol = view.state.facet(editorVirtualSpacePolicy);
-      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageUp", true) : false;
-    },
-  },
-  {
-    key: "PageDown",
-    run: (view: EditorView) => {
-      const pol = view.state.facet(editorVirtualSpacePolicy);
-      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageDown", false) : false;
-    },
-  },
-  {
-    key: "Shift-PageDown",
-    run: (view: EditorView) => {
-      const pol = view.state.facet(editorVirtualSpacePolicy);
-      return (pol.afterLineEnd || pol.atFileBottom) ? virtualVerticalMoveCommand(view, "pageDown", true) : false;
-    },
-  },
-  { key: "ArrowLeft", run: (view: EditorView) => virtualMoveLeftCommand(view, false) },
-  { key: "Shift-ArrowLeft", run: (view: EditorView) => virtualMoveLeftCommand(view, true) },
-  { key: "ArrowRight", run: (view: EditorView) => virtualMoveRightCommand(view, false) },
-  { key: "Shift-ArrowRight", run: (view: EditorView) => virtualMoveRightCommand(view, true) },
-  { key: "Home", run: virtualHomeCommand },
-  { key: "End", run: (view: EditorView) => virtualLineEndCommand(view, false) },
-  { key: "Shift-End", run: (view: EditorView) => virtualLineEndCommand(view, true) },
-  { key: "Backspace", run: virtualBackspaceCommand },
-  { key: "Delete", run: virtualDeleteCommand },
-  { key: "Enter", run: virtualEnterCommand },
-  { key: "Tab", run: virtualTabCommand },
-  { key: "Escape", run: virtualEscapeCommand },
-];
-
 export const VirtualSpaceController = {
   measureVisualPositions,
   virtualOverflowAt,
   setVirtualHead,
-  keymap: virtualSpaceKeymap,
   typingHandler: virtualSpaceTypingHandler,
   clickHandler: virtualSpaceClickHandler,
   paddingForOverflow,

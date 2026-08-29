@@ -26,8 +26,9 @@ import {
 /** Accept KeyboardEventLike whose optional `code` falls back to `key`. */
 function strokeFromEvent(event: KeyboardEventLike): ShortcutStroke {
   // jsdom/fireEvent produce `code: ""` (not undefined) for unspecified codes;
-  // treat any empty code as absent so `key` remains the fallback identity.
-  const code = event.code && event.code.length > 0 ? event.code : event.key;
+  // map `key` to its physical code fallback so matching against definition strokes succeeds.
+  const rawCode = event.code && event.code.length > 0 ? event.code : undefined;
+  const code = rawCode ?? (event.key ? logicalKeyToCode(event.key) ?? event.key : "");
   return strokeFromKeyboardEvent({
     code,
     key: event.key,
@@ -969,9 +970,15 @@ export class WorkspaceActionHost {
       return { kind: "rejected", reason: "stale-owner" };
     }
 
+    const target = (event as KeyboardEventLike & { target?: EventTarget | null }).target ?? null;
+    const targetNode = target instanceof Node ? target : null;
+    const targetEl = targetNode instanceof Element ? targetNode : targetNode?.parentElement;
+    const isExternalInput = (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) && !targetEl.closest?.(".cm-editor");
+
     const resolved = this.prepareBinding(event, {
       kind: "keyboard",
-      eventTarget: (event as KeyboardEventLike & { target?: EventTarget | null }).target ?? null,
+      eventTarget: target,
+      context: (context.targetViewId && !isExternalInput) ? { focus: "editor", hasActiveFile: true } : undefined,
     });
     if (resolved.resolution === "shadowed" && resolved.reason === "chord-pending") {
       return {

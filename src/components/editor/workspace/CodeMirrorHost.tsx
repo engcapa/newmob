@@ -150,7 +150,6 @@ import { observeSyntaxFacts, treeRevisionField } from "./workspaceSyntaxFacts";
 import {
   desiredVisualColumnField,
   virtualSpaceClickHandler,
-  virtualSpaceKeymap,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
 } from "./workspaceVirtualSpace";
@@ -1863,7 +1862,6 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         desiredVisualColumnField,
         virtualSpaceTypingHandler,
         virtualSpaceClickHandler,
-        keymap.of(virtualSpaceKeymap),
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),

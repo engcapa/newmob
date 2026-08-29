@@ -6,6 +6,7 @@ import { undoDepth } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import { virtualSpaceOverflowField } from "./workspaceVirtualSpace";
+import { WorkspaceActionHost } from "./workspaceActionHost";
 
 function renderEditor(
   doc: string,
@@ -676,7 +677,9 @@ describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", 
   afterEach(() => cleanup());
 
   it("consumes appearance.virtualSpace policy in production editor", async () => {
+    const actionHost = new WorkspaceActionHost({ workspaceId: "ws-test-vspace" });
     const rendered = renderEditor("first line\nsecond", vi.fn(), {
+      workspaceActionHost: actionHost,
       appearance: {
         fontFamily: "monospace",
         fontSizePx: 14,
@@ -693,8 +696,26 @@ describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", 
 
     // Place caret at line 1 EOL
     view!.dispatch({ selection: { anchor: 10 } });
-    // Pressing End key moves into virtual space
-    fireEvent.keyDown(rendered.content, { key: "End" });
+    // Pressing End key moves into virtual space via ActionHost dispatch
+    const dispatchResult = actionHost.dispatchKeydownV2({
+      event: {
+        key: "End",
+        code: "End",
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      },
+      workspaceId: "ws-test-vspace",
+      targetViewId: "src/example.ts",
+    });
+    expect(dispatchResult.kind).toBe("executed");
+    if (dispatchResult.kind === "executed") {
+      expect(dispatchResult.actionId).toBe("editor.moveToLineEnd");
+    }
+    await Promise.resolve();
     const overflow = view!.state.field(virtualSpaceOverflowField, false)?.get(10) ?? 0;
     expect(overflow).toBeGreaterThan(0);
   });

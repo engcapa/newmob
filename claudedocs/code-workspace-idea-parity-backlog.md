@@ -181,7 +181,7 @@
 - 验证：qa audit/dry-run/browser；native key-release Switcher 单列未验证格。
 
 ### ED-VSPACE-001 统一 Virtual Space action owner
-<!-- ide-task {"id":"ED-VSPACE-001","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB4"]} -->
+<!-- ide-task {"id":"ED-VSPACE-001","status":"done","priority":"P0","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T09:35:39Z","baseline":"bdebe152b3000c1ffcb8bb41ca08162884192c87","depends_on":[],"legacy":["BB4"],"updated_at":"2026-08-29T09:51:49Z","evidence":"vitest: workspaceVirtualSpace.test.ts, workspaceKeymapRuntime.test.ts, CodeMirrorHost.test.tsx, CodeWorkspaceTab.test.tsx; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：horizontal/vertical/Page/Shift-Page/Tab 全部注册到 workspace ActionHost；CodeMirror keymap 只路由 action id；移除 `virtualSpaceKeymap` 与 controller keymap 的第二行为真值。
 - 主文件：`workspaceVirtualSpace.ts`、`workspaceActionRegistry.ts`、`CodeMirrorHost.tsx`、tests。
