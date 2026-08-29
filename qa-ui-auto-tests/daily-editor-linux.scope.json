@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "releaseScopeId": "daily-editor-linux",
+  "version": "1.0.0",
+  "platform": "linux",
+  "description": "Daily Linux Editor release scope and observation contract",
+  "observationPolicy": {
+    "readOnly": true,
+    "productionDisabled": true,
+    "redaction": "hashes-and-counts-only",
+    "disallowedActions": [
+      "execute-command",
+      "inject-state",
+      "mutate-document",
+      "write-disk",
+      "override-policy"
+    ]
+  },
+  "capabilities": [
+    {
+      "id": "C0-save-pipeline",
+      "name": "Save Pipeline",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C0-01-save-pipeline",
+      "controls": ["editor.save", "editor.save-all"],
+      "requiredEffects": [
+        "atomic-disk-write",
+        "final-bytes-receipt-match",
+        "zero-disk-corruption",
+        "normalization-preserved"
+      ],
+      "requiredLayers": ["unit", "browser", "native"],
+      "providerRequirement": "host-filesystem"
+    },
+    {
+      "id": "C3-clipboard-session",
+      "name": "Clipboard Session",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C3-01-clipboard-multicaret",
+      "controls": ["editor.copy", "editor.cut", "editor.paste", "editor.paste-history"],
+      "requiredEffects": [
+        "workspace-session-broadcast",
+        "multicaret-segment-distribution",
+        "single-undo-commit",
+        "zero-unapproved-mutation"
+      ],
+      "requiredLayers": ["unit", "browser"],
+      "providerRequirement": "workspace-clipboard-session"
+    },
+    {
+      "id": "C4-tab-policy",
+      "name": "Tab Policy & Layout",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C4-01-tab-policy-lifecycle",
+      "controls": ["editor.tab-close", "editor.tab-pin", "editor.tab-split"],
+      "requiredEffects": [
+        "layout-revision-increment",
+        "post-image-lease-preservation",
+        "recoverable-tab-commit"
+      ],
+      "requiredLayers": ["unit", "browser"],
+      "providerRequirement": "workspace-tab-policy-v3"
+    },
+    {
+      "id": "C5-completion",
+      "name": "Code Completion",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C5-01-completion-resolve",
+      "controls": ["editor.autocomplete-popup", "editor.autocomplete-item"],
+      "requiredEffects": [
+        "tier-sorted-candidates",
+        "safe-resolve-gate-transition",
+        "single-atomic-dispatch-insert-and-imports"
+      ],
+      "requiredLayers": ["unit", "browser"],
+      "providerRequirement": "lsp-completion-provider"
+    },
+    {
+      "id": "C6-01-quick-fix",
+      "name": "Quick Fix & Intentions",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C6-01-quick-fix-execution",
+      "controls": ["editor.intention-lightbulb", "editor.quick-fix-menu"],
+      "requiredEffects": [
+        "diagnostic-matched-actions",
+        "clean-execution-pipeline",
+        "single-undo-restoration"
+      ],
+      "requiredLayers": ["unit", "browser"],
+      "providerRequirement": "lsp-code-action-provider"
+    },
+    {
+      "id": "C6-02-semantic-query",
+      "name": "Semantic Navigation Query",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C6-02-semantic-query-cancellation",
+      "controls": [
+        "editor.goto-definition",
+        "editor.goto-declaration",
+        "editor.goto-implementation",
+        "editor.find-references"
+      ],
+      "requiredEffects": [
+        "envelope-wrapped-dispatch",
+        "live-guard-verification",
+        "history-recorded-only-on-single-jump",
+        "hierarchical-cancellation"
+      ],
+      "requiredLayers": ["unit", "browser"],
+      "providerRequirement": "lsp-semantic-query-host"
+    },
+    {
+      "id": "C6-03-safe-delete",
+      "name": "Safe Delete Protection",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C6-03-safe-delete-disabled",
+      "controls": ["editor.safe-delete"],
+      "requiredEffects": [
+        "fail-closed-disabled-state",
+        "zero-mutation-request",
+        "zero-disk-write"
+      ],
+      "requiredLayers": ["unit", "browser"],
+      "providerRequirement": "destructive-refactoring-guard"
+    },
+    {
+      "id": "C7-project-structure",
+      "name": "Project Structure Model",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C7-01-project-descriptor-discovery",
+      "controls": ["editor.project-tree", "editor.source-roots"],
+      "requiredEffects": [
+        "descriptor-only-discovery",
+        "no-unverified-classpath-fabrication",
+        "consumer-generation-guard"
+      ],
+      "requiredLayers": ["unit", "browser"],
+      "providerRequirement": "project-descriptor-scanner"
+    },
+    {
+      "id": "C8-multiview-transaction",
+      "name": "Shared Document & Multiview",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C8-01-shared-document-sync",
+      "controls": ["editor.split-horizontal", "editor.split-vertical"],
+      "requiredEffects": [
+        "incremental-delta-broadcasting",
+        "remote-transaction-echo-suppression",
+        "per-view-selection-mapping",
+        "single-document-revision-bump"
+      ],
+      "requiredLayers": ["unit", "browser"],
+      "providerRequirement": "workspace-document-transaction-owner"
+    }
+  ]
+}

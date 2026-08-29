@@ -353,7 +353,7 @@
 本轨道用于可信发布声明，但不阻塞普通 Editor 小任务开始开发；某 capability 要提升为 release `verified` 时，必须满足对应任务。
 
 ### ED-QA-001 定义 daily-editor-linux release scope 与 observation
-<!-- ide-task {"id":"ED-QA-001","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-GATE-002"],"legacy":["BB10"]} -->
+<!-- ide-task {"id":"ED-QA-001","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:21:26Z","baseline":"630a89d94904b6e67cced3e9e0dc7e47c6286f1f","depends_on":["ED-GATE-002"],"legacy":["BB10"],"updated_at":"2026-08-29T12:23:06Z","evidence":"scope: daily-editor-linux.scope.json; vitest: editorReleaseScope.test.ts, workspaceObservationBridge.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：机器可读 scope 列 capability/control/case/effect/layer/provider requirement；dev/test-only observation 只读 revisions/requests/writes/leases/history/hashes，不可执行 action，production build 关闭。
 - 主文件：release scope schema/data、observation bridge/tests。
