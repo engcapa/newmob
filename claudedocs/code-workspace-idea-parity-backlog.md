@@ -420,7 +420,7 @@
 - 验证：多 view decoration/fold/scroll、resource lease、restore。
 
 ### ED-FIND-001 扩展文件内 Replace 的 Preserve Case
-<!-- ide-task {"id":"ED-FIND-001","status":"ready","priority":"P1","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["N9.1"]} -->
+<!-- ide-task {"id":"ED-FIND-001","status":"done","priority":"P1","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:29:51Z","baseline":"cf700b5b00687820b467eca6bd3159f6cc154aa0","depends_on":[],"legacy":["N9.1"],"updated_at":"2026-08-29T12:34:40Z","evidence":"vitest: editorSearchPanel.test.ts, CodeMirrorHost.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：自有 search panel 增加 Preserve Case，literal/word/regex 的可用性和 replacement 规则明确。
 - 验证：lower/title/upper/mixed、多行、zero-length regex 与 undo。

@@ -103,9 +103,7 @@ import {
   lspJavaModules,
   javaTestDiscover,
   javaTestResolveLaunch,
-  lspPrepareCallHierarchy,
   lspPrepareRename,
-  lspPrepareTypeHierarchy,
   lspRangeFormatting,
   lspExecuteCommand,
   lspResolveWorkspaceEdit,
@@ -5674,7 +5672,7 @@ export function CodeWorkspaceTab({
     try {
       const position = cursorPositions[activeEditorGroupId] ?? editorSelectionRef.current.start;
       const fileKey = file.key;
-      const docRevision = openFilesRef.current[fileKey]?.revision ?? 0;
+      const docRevision = openFilesRef.current[fileKey]?.documentRevision ?? 0;
       const lspGen = lspSessionGeneration();
 
       const prepareResult = await executeHierarchyPrepare(
@@ -5689,7 +5687,7 @@ export function CodeWorkspaceTab({
           lspSessionGeneration: lspGen,
           projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
           guards: {
-            getLiveDocumentRevision: () => openFilesRef.current[fileKey]?.revision ?? 0,
+            getLiveDocumentRevision: () => openFilesRef.current[fileKey]?.documentRevision ?? 0,
             getLiveLspGeneration: () => lspSessionGeneration(),
           },
         },

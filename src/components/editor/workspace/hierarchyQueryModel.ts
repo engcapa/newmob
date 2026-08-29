@@ -1,6 +1,4 @@
 import type {
-  LspCallHierarchyIncomingEntry,
-  LspCallHierarchyOutgoingEntry,
   LspDocumentDescriptor,
   LspDocumentStatus,
   LspHierarchyItem,
@@ -17,6 +15,7 @@ import {
 } from "../../../lib/editor/lsp";
 import {
   WorkspaceSemanticQueryHost,
+  type SemanticQueryContext,
   type SemanticQueryLiveGuards,
 } from "./workspaceSemanticQueryHost";
 
@@ -120,55 +119,66 @@ export async function executeHierarchyPrepare(
   },
 ): Promise<HierarchyPrepareResult> {
   const kind = mode === "call" ? "call-hierarchy" : "type-hierarchy";
+  const uri = descriptor.documentUri ?? (descriptor.filePath ? `file://${descriptor.filePath}` : "file:///");
+  let capturedStatus: LspDocumentStatus = {
+    path: descriptor.filePath,
+    uri,
+    presetId: null,
+    languageId: descriptor.languageId ?? null,
+    displayName: null,
+    available: true,
+    active: true,
+    selectedCommandId: descriptor.serverCommandId ?? null,
+    selectedCommand: null,
+    installHint: null,
+    error: null,
+  };
 
-  const envelope = await queryHost.executeEnvelope(
-    {
-      kind,
-      identity: {
-        workspaceId: context.workspaceId,
-        fileKey: context.fileKey,
-        uri: descriptor.uri,
-        position,
-        documentRevision: context.documentRevision,
-        lspSessionGeneration: context.lspSessionGeneration,
-      },
-      guards: context.guards,
+  const envelope = await queryHost.executeEnvelope<LspHierarchyItem>({
+    kind,
+    identity: {
+      workspaceId: context.workspaceId,
+      fileKey: context.fileKey,
+      uri,
+      position,
+      documentRevision: context.documentRevision,
+      lspSessionGeneration: context.lspSessionGeneration,
     },
-    async (ctx) => {
-      if (ctx.signal.aborted) {
-        return { status: { languageId: descriptor.languageId, syncing: false, queueLength: 0 }, items: [] };
-      }
-      return mode === "call"
+    guards: context.guards,
+    fetcher: async (ctx: SemanticQueryContext) => {
+      if (ctx.signal.aborted) return null;
+      const res = mode === "call"
         ? await lspPrepareCallHierarchy(descriptor, position)
         : await lspPrepareTypeHierarchy(descriptor, position);
+      capturedStatus = res.status;
+      return res.items;
     },
-  );
+  });
 
   if (envelope.status === "cancelled" || envelope.status === "stale") {
     return {
-      status: { languageId: descriptor.languageId, syncing: false, queueLength: 0 },
+      status: capturedStatus,
       items: [],
       root: null,
       cancelled: true,
     };
   }
 
-  const rawResult = envelope.result;
-  const items = rawResult?.items ?? [];
+  const items = envelope.items ?? [];
   const firstItem = items[0] ?? null;
 
   const root: HierarchyRootState | null = firstItem
     ? {
         descriptor,
         item: firstItem,
-        rootQueryId: envelope.identity.requestId,
+        rootQueryId: envelope.queryId,
         providerGeneration: context.lspSessionGeneration,
         projectFingerprint: context.projectFingerprint,
       }
     : null;
 
   return {
-    status: rawResult?.status ?? { languageId: descriptor.languageId, syncing: false, queueLength: 0 },
+    status: capturedStatus,
     items,
     root,
     cancelled: false,
@@ -208,35 +218,53 @@ export async function executeHierarchyExpand(
   }
 
   const kind = mode === "call" ? "call-hierarchy" : "type-hierarchy";
+  const uri = descriptor.documentUri ?? (descriptor.filePath ? `file://${descriptor.filePath}` : "file:///");
+  let capturedStatus: LspDocumentStatus | undefined;
 
   try {
-    const envelope = await queryHost.executeEnvelope(
-      {
-        kind,
-        identity: {
-          workspaceId: context.workspaceId,
-          fileKey: context.fileKey,
-          uri: descriptor.uri,
-          position: node.item.selectionRange.start,
-          documentRevision: context.documentRevision,
-          lspSessionGeneration: context.lspSessionGeneration,
-        },
-        guards: context.guards,
+    interface ExpandedEntry {
+      item: LspHierarchyItem;
+      callRanges: LspRange[];
+      callSiteItem: LspHierarchyItem;
+    }
+
+    const envelope = await queryHost.executeEnvelope<ExpandedEntry>({
+      kind,
+      identity: {
+        workspaceId: context.workspaceId,
+        fileKey: context.fileKey,
+        uri,
+        position: node.item.selectionRange.start,
+        documentRevision: context.documentRevision,
+        lspSessionGeneration: context.lspSessionGeneration,
       },
-      async (ctx) => {
-        if (ctx.signal.aborted) throw new Error("Query aborted");
+      guards: context.guards,
+      fetcher: async (ctx: SemanticQueryContext) => {
+        if (ctx.signal.aborted) return null;
 
         if (mode === "call") {
-          return direction === "callers"
+          const res = direction === "callers"
             ? await lspCallHierarchyIncoming(descriptor, node.item.raw)
             : await lspCallHierarchyOutgoing(descriptor, node.item.raw);
+          capturedStatus = res.status;
+          return res.entries.map((entry) => ({
+            item: entry.item,
+            callRanges: entry.fromRanges,
+            callSiteItem: direction === "callers" ? entry.item : node.item,
+          }));
         } else {
-          return direction === "supertypes"
+          const res = direction === "supertypes"
             ? await lspTypeHierarchySupertypes(descriptor, node.item.raw)
             : await lspTypeHierarchySubtypes(descriptor, node.item.raw);
+          capturedStatus = res.status;
+          return res.items.map((item) => ({
+            item,
+            callRanges: [],
+            callSiteItem: item,
+          }));
         }
       },
-    );
+    });
 
     if (envelope.status === "cancelled" || envelope.status === "stale") {
       return {
@@ -247,37 +275,7 @@ export async function executeHierarchyExpand(
       };
     }
 
-    let entries: Array<{
-      item: LspHierarchyItem;
-      callRanges: LspRange[];
-      callSiteItem: LspHierarchyItem;
-    }> = [];
-    let status: LspDocumentStatus | undefined;
-
-    if (mode === "call") {
-      const callResult = envelope.result as {
-        status: LspDocumentStatus;
-        entries: LspCallHierarchyIncomingEntry[] | LspCallHierarchyOutgoingEntry[];
-      };
-      status = callResult?.status;
-      entries = (callResult?.entries ?? []).map((entry) => ({
-        item: entry.item,
-        callRanges: "fromRanges" in entry ? entry.fromRanges : entry.fromRanges,
-        callSiteItem: direction === "callers" ? entry.item : node.item,
-      }));
-    } else {
-      const typeResult = envelope.result as {
-        status: LspDocumentStatus;
-        items: LspHierarchyItem[];
-      };
-      status = typeResult?.status;
-      entries = (typeResult?.items ?? []).map((item) => ({
-        item,
-        callRanges: [],
-        callSiteItem: item,
-      }));
-    }
-
+    const entries = envelope.items ?? [];
     const children = entries.map((entry, index): HierarchyNode => {
       const key = hierarchyItemKey(entry.item);
       return {
@@ -299,7 +297,7 @@ export async function executeHierarchyExpand(
     });
 
     return {
-      status,
+      status: capturedStatus,
       entries,
       children,
       stale: false,

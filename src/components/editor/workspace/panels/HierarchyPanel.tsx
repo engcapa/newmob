@@ -5,7 +5,6 @@ import {
   lspCallHierarchyOutgoing,
   lspTypeHierarchySubtypes,
   lspTypeHierarchySupertypes,
-  type LspDocumentDescriptor,
   type LspDocumentStatus,
   type LspHierarchyItem,
   type LspLocation,
@@ -150,7 +149,7 @@ export function HierarchyPanel({
         direction,
         {
           workspaceId: root.descriptor.workspaceId ?? "default",
-          fileKey: root.descriptor.fileKey ?? root.descriptor.uri,
+          fileKey: root.descriptor.filePath,
           documentRevision: 0,
           lspSessionGeneration: root.providerGeneration ?? 0,
           liveLspGeneration,
@@ -356,7 +355,7 @@ export function HierarchyPanel({
           aria-label="Refresh hierarchy"
           className="ml-auto inline-flex h-5 w-5 items-center justify-center"
           disabled={!rootItem}
-          onClick={() => rootItem && setTree(rootNode(rootItem))}
+          onClick={() => rootItem && setTree(createHierarchyRootNode(rootItem, root))}
         >
           <RefreshCw className="h-3 w-3" />
         </button>

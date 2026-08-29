@@ -50,6 +50,129 @@ function matchStatus(view: EditorView, query: SearchQuery): string {
   return current === -1 ? `${matches.length} matches` : `${current + 1} / ${matches.length}`;
 }
 
+export type CasingStyle = "upper" | "lower" | "title" | "camel" | "pascal" | "other";
+
+export function detectCasing(text: string): CasingStyle {
+  if (!text) return "other";
+  if (text === text.toUpperCase() && text !== text.toLowerCase()) return "upper";
+  if (text === text.toLowerCase() && text !== text.toUpperCase()) return "lower";
+  if (/^[A-Z][a-z0-9]*$/.test(text)) return "title";
+  if (/^[A-Z][a-zA-Z0-9]*$/.test(text) && /[a-z]/.test(text) && /[A-Z]/.test(text.slice(1))) return "pascal";
+  if (/^[a-z][a-zA-Z0-9]*$/.test(text) && /[A-Z]/.test(text)) return "camel";
+  return "other";
+}
+
+export function applyPreserveCase(originalMatch: string, replacement: string): string {
+  if (!originalMatch || !replacement) return replacement;
+  const casing = detectCasing(originalMatch);
+  switch (casing) {
+    case "upper":
+      return replacement.toUpperCase();
+    case "lower":
+      return replacement.toLowerCase();
+    case "title":
+      return replacement.charAt(0).toUpperCase() + replacement.slice(1).toLowerCase();
+    case "pascal":
+      return replacement.charAt(0).toUpperCase() + replacement.slice(1);
+    case "camel":
+      return replacement.charAt(0).toLowerCase() + replacement.slice(1);
+    default:
+      return replacement;
+  }
+}
+
+export function replaceNextPreserveCase(
+  view: EditorView,
+  query: SearchQuery,
+  preserveCase: boolean,
+): boolean {
+  if (!query.valid || !query.search) return false;
+  if (!preserveCase) return replaceNext(view);
+
+  const sel = view.state.selection.main;
+  const cursor = query.getCursor(view.state);
+  let targetMatch: { from: number; to: number } | null = null;
+  let nextMatch: { from: number; to: number } | null = null;
+
+  for (let item = cursor.next(); !item.done; item = cursor.next()) {
+    if (item.value.from === sel.from && item.value.to === sel.to) {
+      targetMatch = item.value;
+      const next = cursor.next();
+      if (!next.done) nextMatch = next.value;
+      break;
+    } else if (item.value.from >= sel.to && !targetMatch) {
+      targetMatch = item.value;
+      break;
+    }
+  }
+
+  // If no match found at or after current selection, wrap around to first match
+  if (!targetMatch) {
+    const wrapCursor = query.getCursor(view.state);
+    const first = wrapCursor.next();
+    if (!first.done) targetMatch = first.value;
+  }
+
+  if (!targetMatch) return false;
+
+  const matchedText = view.state.sliceDoc(targetMatch.from, targetMatch.to);
+  const replacement = applyPreserveCase(matchedText, query.replace);
+
+  view.dispatch({
+    changes: { from: targetMatch.from, to: targetMatch.to, insert: replacement },
+    selection: { anchor: targetMatch.from + replacement.length },
+    scrollIntoView: true,
+    userEvent: "input.replace",
+  });
+
+  // After replacing, advance selection to the next match if found
+  if (!nextMatch) {
+    const freshCursor = query.getCursor(view.state, targetMatch.from + replacement.length);
+    const next = freshCursor.next();
+    if (!next.done) {
+      view.dispatch({
+        selection: { anchor: next.value.from, head: next.value.to },
+        scrollIntoView: true,
+      });
+    }
+  } else {
+    const offset = replacement.length - matchedText.length;
+    view.dispatch({
+      selection: { anchor: nextMatch.from + offset, head: nextMatch.to + offset },
+      scrollIntoView: true,
+    });
+  }
+
+  return true;
+}
+
+export function replaceAllPreserveCase(
+  view: EditorView,
+  query: SearchQuery,
+  preserveCase: boolean,
+): boolean {
+  if (!query.valid || !query.search) return false;
+  if (!preserveCase) return replaceAll(view);
+
+  const cursor = query.getCursor(view.state);
+  const changes: Array<{ from: number; to: number; insert: string }> = [];
+
+  for (let item = cursor.next(); !item.done; item = cursor.next()) {
+    const matchedText = view.state.sliceDoc(item.value.from, item.value.to);
+    const replacement = applyPreserveCase(matchedText, query.replace);
+    changes.push({ from: item.value.from, to: item.value.to, insert: replacement });
+  }
+
+  if (changes.length === 0) return false;
+
+  view.dispatch({
+    changes,
+    userEvent: "input.replace.all",
+  });
+
+  return true;
+}
+
 class WorkspaceSearchPanel implements Panel {
   readonly dom: HTMLElement;
   readonly top = true;
@@ -60,6 +183,7 @@ class WorkspaceSearchPanel implements Panel {
   private readonly caseButton: HTMLButtonElement;
   private readonly wordButton: HTMLButtonElement;
   private readonly regexpButton: HTMLButtonElement;
+  private readonly preserveCaseButton: HTMLButtonElement;
   private readonly status: HTMLSpanElement;
 
   constructor(private readonly view: EditorView) {
@@ -71,6 +195,7 @@ class WorkspaceSearchPanel implements Panel {
     this.caseButton = button("Match case", "Aa", () => this.toggle("caseSensitive"));
     this.wordButton = button("Match whole word", "W", () => this.toggle("wholeWord"));
     this.regexpButton = button("Use regular expression", ".*", () => this.toggle("regexp"));
+    this.preserveCaseButton = button("Preserve case", "AB/ab", () => this.togglePreserveCase());
     this.status = document.createElement("span");
     this.status.className = "cm-workspace-search-status";
     this.status.setAttribute("aria-live", "polite");
@@ -92,8 +217,9 @@ class WorkspaceSearchPanel implements Panel {
     replaceRow.className = "cm-workspace-search-row cm-workspace-replace-row";
     replaceRow.append(
       fieldShell(this.replaceField),
-      button("Replace current match", "Replace", () => replaceNext(this.view)),
-      button("Replace all matches", "Replace All", () => replaceAll(this.view)),
+      this.preserveCaseButton,
+      button("Replace current match", "Replace", () => this.handleReplaceNext()),
+      button("Replace all matches", "Replace All", () => this.handleReplaceAll()),
     );
 
     this.dom = document.createElement("div");
@@ -146,6 +272,24 @@ class WorkspaceSearchPanel implements Panel {
     this.searchField.focus();
   }
 
+  private togglePreserveCase(): void {
+    const current = this.preserveCaseButton.getAttribute("aria-pressed") === "true";
+    this.preserveCaseButton.setAttribute("aria-pressed", current ? "false" : "true");
+    this.replaceField.focus();
+  }
+
+  private handleReplaceNext(): void {
+    const isPreserveCase = this.preserveCaseButton.getAttribute("aria-pressed") === "true";
+    replaceNextPreserveCase(this.view, this.query, isPreserveCase);
+    this.updateStatus();
+  }
+
+  private handleReplaceAll(): void {
+    const isPreserveCase = this.preserveCaseButton.getAttribute("aria-pressed") === "true";
+    replaceAllPreserveCase(this.view, this.query, isPreserveCase);
+    this.updateStatus();
+  }
+
   private syncQuery(query: SearchQuery): void {
     this.query = query;
     this.searchField.value = query.search;
@@ -173,7 +317,7 @@ class WorkspaceSearchPanel implements Panel {
     }
     if (event.key === "Enter" && event.target === this.replaceField) {
       event.preventDefault();
-      replaceNext(this.view);
+      this.handleReplaceNext();
     }
   }
 }
