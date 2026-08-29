@@ -532,7 +532,7 @@
 详细场景与历史根因见 [`code-workspace-performance-todo.md`](./code-workspace-performance-todo.md)。以下只保留可独立领取的切片。
 
 ### ED-PERF-001 稳定 status/empty props 与 CodeMirror reconfigure
-<!-- ide-task {"id":"ED-PERF-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["PERF-3.1","PERF-3.2"]} -->
+<!-- ide-task {"id":"ED-PERF-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:30:02Z","baseline":"d637f163130026019c214581d325ca4bf46bdbbf","depends_on":[],"legacy":["PERF-3.1","PERF-3.2"],"updated_at":"2026-08-29T13:33:57Z","evidence":"vitest: CodeMirrorHost.test.tsx, appStore.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：相同状态不重复写 Zustand；空 diagnostics/git/highlights 等使用稳定值；compartment 语义未变不 reconfigure。
 - 验证：render/reconfigure counters、typing/parent rerender regression、before/after samples。

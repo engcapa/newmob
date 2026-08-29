@@ -14566,10 +14566,28 @@ export function CodeWorkspaceTab({
           if (groupFile) {
             noteCaretPosition(groupFile.key, selection.end);
           }
-          setCursorPositions((current) => ({ ...current, [groupId]: selection.end }));
+          setCursorPositions((current) => {
+            const prev = current[groupId];
+            if (prev && prev.line === selection.end.line && prev.character === selection.end.character) {
+              return current;
+            }
+            return { ...current, [groupId]: selection.end };
+          });
         }}
         onViewportChange={(range) => {
-          setViewportRanges((current) => ({ ...current, [groupId]: range }));
+          setViewportRanges((current) => {
+            const prev = current[groupId];
+            if (
+              prev &&
+              prev.start.line === range.start.line &&
+              prev.start.character === range.start.character &&
+              prev.end.line === range.end.line &&
+              prev.end.character === range.end.character
+            ) {
+              return current;
+            }
+            return { ...current, [groupId]: range };
+          });
           if (syncSplitScroll && splitOrientation) {
             // §8.17.4: sync to every OTHER tree leaf (any depth/count), not a
             // hardcoded primary<->secondary swap.

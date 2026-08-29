@@ -1229,7 +1229,8 @@ export const useAppStore = create<AppState>((set) => ({
     });
   },
 
-  setStatusMessage: (message) => set({ statusMessage: message }),
+  setStatusMessage: (message) =>
+    set((s) => (s.statusMessage === message ? s : { statusMessage: message })),
 
   toggleMultiExec: () =>
     set((s) => {

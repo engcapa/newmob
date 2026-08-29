@@ -940,10 +940,13 @@ const LSP_EDITOR_STYLE = EditorView.theme({
   // --taomni-code-* even when the tooltip is portaled outside the editor host.
 });
 
+const EMPTY_DIAGNOSTICS: LspDiagnostic[] = [];
 const EMPTY_HIGHLIGHTS: LspDocumentHighlight[] = [];
 const EMPTY_INLAY_HINTS: LspInlayHint[] = [];
 const EMPTY_SEMANTIC_TOKENS: LspSemanticToken[] = [];
 const EMPTY_GIT_CHANGES: GitLineChange[] = [];
+const EMPTY_DEBUG_BREAKPOINTS: DebugBreakpointMarker[] = [];
+const EMPTY_DEBUG_INLINE_VALUES: Record<string, string> = {};
 
 /**
  * New empty-array props are common while LSP requests are debounced, and a
@@ -1422,7 +1425,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   transactionOwner = null,
   doc,
   visible,
-  diagnostics,
+  diagnostics = EMPTY_DIAGNOSTICS,
   highlights = EMPTY_HIGHLIGHTS,
   inlayHints = EMPTY_INLAY_HINTS,
   semanticTokens = EMPTY_SEMANTIC_TOKENS,
@@ -1467,9 +1470,9 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   softWrap = false,
   appearance,
   columnSelectionMode = false,
-  debugBreakpoints,
+  debugBreakpoints = EMPTY_DEBUG_BREAKPOINTS,
   debugCurrentLine,
-  debugInlineValues,
+  debugInlineValues = EMPTY_DEBUG_INLINE_VALUES,
   debugStep,
   debugRunToCursor,
   debugStop,
@@ -1582,6 +1585,12 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     inlineValues: debugInlineValues,
     evaluating: !!debugEvaluate,
   });
+  const renderedCompletionPolicyRef = useRef<{
+    autoPopup: boolean;
+    delayMs: number;
+    maxVisibleItems: number;
+    docDelayMs: number;
+  } | null>(null);
   const onToggleBreakpointRef = useRef(onToggleBreakpoint);
   const onEditBreakpointRef = useRef(onEditBreakpoint);
   const onPinHoverDocRef = useRef(onPinHoverDoc);
@@ -2499,24 +2508,41 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     });
   }, [buildDebugChrome, debugBreakpoints, debugCurrentLine, debugEvaluate, debugInlineValues]);
 
-  useEffect(() => {
+  const reconfigureAutocompletion = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
+    const policy = completionControllerRef.current?.getPolicy();
+    const autoPopup = policy?.autoPopup ?? true;
+    const delayMs = policy?.delayMs ?? 100;
+    const maxVisibleItems = policy?.maxVisibleItems ?? 100;
+    const docDelayMs = policy?.documentation?.delayMs ?? hoverDocumentationDelayMs ?? 75;
+
+    const prev = renderedCompletionPolicyRef.current;
+    if (
+      prev &&
+      prev.autoPopup === autoPopup &&
+      prev.delayMs === delayMs &&
+      prev.maxVisibleItems === maxVisibleItems &&
+      prev.docDelayMs === docDelayMs
+    ) {
+      return;
+    }
+    renderedCompletionPolicyRef.current = { autoPopup, delayMs, maxVisibleItems, docDelayMs };
     view.dispatch({
       effects: completionCompartment.current.reconfigure(buildAutocompletionExtension()),
     });
-  }, [buildAutocompletionExtension]);
+  }, [buildAutocompletionExtension, hoverDocumentationDelayMs]);
+
+  useEffect(() => {
+    reconfigureAutocompletion();
+  }, [reconfigureAutocompletion]);
 
   useEffect(() => {
     if (!completionController) return;
     return completionController.subscribe(() => {
-      const view = viewRef.current;
-      if (!view) return;
-      view.dispatch({
-        effects: completionCompartment.current.reconfigure(buildAutocompletionExtension()),
-      });
+      reconfigureAutocompletion();
     });
-  }, [completionController, buildAutocompletionExtension]);
+  }, [completionController, reconfigureAutocompletion]);
 
   useEffect(() => {
     const owner = transactionOwner;
