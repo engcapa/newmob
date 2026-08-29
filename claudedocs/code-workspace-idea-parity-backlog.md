@@ -244,7 +244,7 @@
 - 验证：single/multi-file、overlap、wrong URI/version、provider unavailable/failed policy。
 
 ### ED-SAVE-003 一次 byte writer 与 final bytes receipt
-<!-- ide-task {"id":"ED-SAVE-003","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-SAVE-002"],"legacy":["BB6"]} -->
+<!-- ide-task {"id":"ED-SAVE-003","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T11:43:07Z","baseline":"391e6f8f1d20699ad44f8bc64966c01af768d869","depends_on":["ED-SAVE-002"],"legacy":["BB6"],"updated_at":"2026-08-29T11:51:59Z","evidence":"vitest: saveCommit.test.ts, writeDiskByteCorrectness.test.ts; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：同步 pre-write 重验后一次 writer；记录 final text/encoded bytes SHA-256、disk pre/post、write count、history/recovery id；writeback merge-only。
 - 主文件：PreparedSave/open+closed committer、Rust byte writer boundary、tests。

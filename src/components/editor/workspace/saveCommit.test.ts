@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildPreparedSave,
   classifySaveWriteback,
   classifyUnknownDiskEffect,
+  createSingleWriterSaveCommitter,
+  encodeSaveBytes,
   isLegalSaveCommitTransition,
   nextSaveTransactionId,
   normalizeSaveEol,
@@ -11,10 +13,14 @@ import {
   SaveTransactionRegistry,
   saveCommitResultFromError,
   validatePreparedSaveBoundary,
+  type FinalBytesReceipt,
   type PreparedSave,
   type SaveCommitResult,
 } from "./saveCommit";
-import { WorkspaceHashMismatchError } from "../../../lib/editor/workspace";
+import {
+  WorkspaceHashMismatchError,
+  type WorkspaceFile,
+} from "../../../lib/editor/workspace";
 
 function preparedFixture(overrides: Partial<PreparedSave> = {}): PreparedSave {
   return {
@@ -389,5 +395,231 @@ describe("§8.19.1 resolveUnknownDiskResolution (three-hash classification)", ()
       expectedOldHash: "old",
       observedHash: "something",
     })).toBe("foreign-blocked");
+  });
+});
+
+describe("§ED-SAVE-003: Single Writer Save Committer & Final Bytes Receipt", () => {
+  const fakeFile = (overrides: Partial<WorkspaceFile> = {}): WorkspaceFile => ({
+    path: "/repo/src/App.java",
+    text: "class App {}\n",
+    size: 13,
+    mtime: 1700000000000,
+    hash: "hash-post-disk-1",
+    ...overrides,
+  });
+
+  describe("encodeSaveBytes", () => {
+    it("encodes UTF-8 with BOM prepending [0xEF, 0xBB, 0xBF]", () => {
+      const result = encodeSaveBytes("hello", { eol: "lf", encoding: "UTF-8", bom: true });
+      expect(result.bytes.length).toBe(8);
+      expect(result.bytes[0]).toBe(0xef);
+      expect(result.bytes[1]).toBe(0xbb);
+      expect(result.bytes[2]).toBe(0xbf);
+      expect(result.byteLength).toBe(8);
+      expect(result.textSha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(result.bytesSha256).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it("encodes UTF-8 without BOM stripping existing BOM if present", () => {
+      const result = encodeSaveBytes("\uFEFFhello", { eol: "lf", encoding: "UTF-8", bom: false });
+      expect(result.bytes.length).toBe(5);
+      expect(result.bytes[0]).toBe(104); // 'h'
+      expect(result.byteLength).toBe(5);
+    });
+
+    it("encodes UTF-16LE and UTF-16BE with correct byte order", () => {
+      const text = "A"; // 0x0041
+      const le = encodeSaveBytes(text, { eol: "lf", encoding: "UTF-16LE", bom: false });
+      expect(le.bytes).toEqual(new Uint8Array([0x41, 0x00]));
+
+      const be = encodeSaveBytes(text, { eol: "lf", encoding: "UTF-16BE", bom: false });
+      expect(be.bytes).toEqual(new Uint8Array([0x00, 0x41]));
+    });
+
+    it("throws typed WorkspaceWriteError on Latin-1 / ASCII encoding range violation", () => {
+      expect(() => {
+        encodeSaveBytes("emoji 🚀", { eol: "lf", encoding: "ISO-8859-1", bom: false });
+      }).toThrowError(/cannot be represented in Latin-1/);
+
+      expect(() => {
+        encodeSaveBytes("accent é", { eol: "lf", encoding: "US-ASCII", bom: false });
+      }).toThrowError(/cannot be represented in US-ASCII/);
+    });
+  });
+
+  describe("createSingleWriterSaveCommitter", () => {
+    it("cancels synchronously before write if open buffer was closed or changed", async () => {
+      const writeToDisk = vi.fn();
+      const committer = createSingleWriterSaveCommitter({
+        getLiveBoundary: () => null, // Buffer was closed!
+        writeToDisk,
+      });
+
+      const prepared = preparedFixture();
+      const result = await committer(prepared);
+
+      expect(result.kind).toBe("cancelled");
+      expect(result.diskEffect).toBe("none");
+      if (result.kind === "cancelled") {
+        expect(result.phase).toBe("pre-write");
+        expect(result.reason).toContain("Open buffer was closed before write");
+      }
+      expect(writeToDisk).not.toHaveBeenCalled();
+    });
+
+    it("cancels synchronously before write if buffer revision advanced (typing race)", async () => {
+      const writeToDisk = vi.fn();
+      const committer = createSingleWriterSaveCommitter({
+        getLiveBoundary: () => ({
+          filePath: "/repo/app/a.ts",
+          documentRevision: 4, // Live revision advanced past prepared revision (3)!
+          styleGeneration: 7,
+        }),
+        writeToDisk,
+      });
+
+      const prepared = preparedFixture({ bufferRevision: 3 });
+      const result = await committer(prepared);
+
+      expect(result.kind).toBe("cancelled");
+      expect(result.diskEffect).toBe("none");
+      if (result.kind === "cancelled") {
+        expect(result.phase).toBe("pre-write");
+        expect(result.reason).toContain("Buffer revision changed");
+      }
+      expect(writeToDisk).not.toHaveBeenCalled();
+    });
+
+    it("executes single write and generates comprehensive FinalBytesReceipt on success", async () => {
+      let writeCount = 0;
+      const writeToDisk = vi.fn(async () => {
+        writeCount += 1;
+        return fakeFile({ hash: "disk-sha-final" });
+      });
+
+      const committer = createSingleWriterSaveCommitter({
+        getLiveBoundary: () => ({
+          filePath: "/repo/app/a.ts",
+          documentRevision: 3,
+          styleGeneration: 7,
+        }),
+        writeToDisk,
+        generateHistoryId: (p) => `history-${p.transactionId}`,
+      });
+
+      const prepared = preparedFixture({
+        transactionId: "tx-save-receipt-1",
+        bufferRevision: 3,
+        text: "const app = 42;\n",
+        expectedDiskHash: "disk-pre-sha",
+      });
+
+      const result = await committer(prepared);
+
+      expect(result.kind).toBe("saved-current");
+      expect(result.diskEffect).toBe("committed");
+      expect(result.memoryEffect).toBe("saved-current");
+      expect(result.providerEffect).toBe("did-save");
+      expect(writeCount).toBe(1);
+      expect(writeToDisk).toHaveBeenCalledTimes(1);
+
+      if (result.kind === "saved-current") {
+        expect(result.receipt).toBeDefined();
+        const receipt: FinalBytesReceipt = result.receipt!;
+        expect(receipt.receiptId).toBe("receipt-tx-save-receipt-1");
+        expect(receipt.writeCount).toBe(1);
+        expect(receipt.diskPreSha256).toBe("disk-pre-sha");
+        expect(receipt.diskPostSha256).toBe("disk-sha-final");
+        expect(receipt.historyId).toBe("history-tx-save-receipt-1");
+        expect(receipt.finalTextSha256).toMatch(/^[a-f0-9]{64}$/);
+        expect(receipt.encodedBytesSha256).toMatch(/^[a-f0-9]{64}$/);
+      }
+    });
+
+    it("classifies writeback as saved-stale-snapshot when user types during in-flight writer", async () => {
+      let currentRevision = 3;
+      const writeToDisk = vi.fn(async () => {
+        // User types while disk writer is in flight!
+        currentRevision = 4;
+        return fakeFile();
+      });
+
+      const committer = createSingleWriterSaveCommitter({
+        getLiveBoundary: () => ({
+          filePath: "/repo/app/a.ts",
+          documentRevision: 3,
+          styleGeneration: 7,
+        }),
+        getLiveAfterWrite: () => ({
+          documentRevision: currentRevision,
+        }),
+        writeToDisk,
+      });
+
+      const prepared = preparedFixture({ bufferRevision: 3 });
+      const result = await committer(prepared);
+
+      expect(result.kind).toBe("saved-stale-snapshot");
+      expect(result.diskEffect).toBe("committed");
+      expect(result.memoryEffect).toBe("kept-dirty");
+      expect(result.providerEffect).toBe("did-change-current");
+      if (result.kind === "saved-stale-snapshot") {
+        expect(result.savedRevision).toBe(3);
+        expect(result.currentRevision).toBe(4);
+        expect(result.receipt?.writeCount).toBe(1);
+      }
+    });
+
+    it("classifies writeback as committed-writeback-discarded when buffer closed during in-flight writer", async () => {
+      let liveBuffer: { documentRevision: number } | null = { documentRevision: 3 };
+      const writeToDisk = vi.fn(async () => {
+        // User closed tab while disk writer was in flight!
+        liveBuffer = null;
+        return fakeFile();
+      });
+
+      const committer = createSingleWriterSaveCommitter({
+        getLiveBoundary: () => ({
+          filePath: "/repo/app/a.ts",
+          documentRevision: 3,
+          styleGeneration: 7,
+        }),
+        getLiveAfterWrite: () => liveBuffer,
+        writeToDisk,
+      });
+
+      const prepared = preparedFixture({ bufferRevision: 3 });
+      const result = await committer(prepared);
+
+      expect(result.kind).toBe("committed-writeback-discarded");
+      expect(result.diskEffect).toBe("committed");
+      expect(result.memoryEffect).toBe("writeback-discarded");
+      expect(result.providerEffect).toBe("discarded");
+      if (result.kind === "committed-writeback-discarded") {
+        expect(result.receipt?.writeCount).toBe(1);
+      }
+    });
+
+    it("returns conflict on disk hash race", async () => {
+      const writeToDisk = vi.fn(async () => {
+        throw new WorkspaceHashMismatchError("expected hash mismatch", "disk-pre-sha", "foreign-disk-sha");
+      });
+
+      const committer = createSingleWriterSaveCommitter({
+        getLiveBoundary: () => ({
+          filePath: "/repo/app/a.ts",
+          documentRevision: 3,
+          styleGeneration: 7,
+        }),
+        writeToDisk,
+      });
+
+      const prepared = preparedFixture({ bufferRevision: 3 });
+      const result = await committer(prepared);
+
+      expect(result.kind).toBe("conflict");
+      expect(result.diskEffect).toBe("none");
+      expect(result.memoryEffect).toBe("unchanged");
+    });
   });
 });
