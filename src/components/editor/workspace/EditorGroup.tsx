@@ -43,6 +43,8 @@ import {
 } from "./CodeMirrorHost";
 import type { WorkspaceDocumentTransactionOwner } from "./workspaceDocumentTransactionOwner";
 import type { EditorAppearanceExtensionProfile } from "./editorAppearanceExtension";
+import { EditorBanner } from "./EditorBanner";
+import type { EditorBannerItem } from "./editorBannerModel";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type { FileCoverage } from "./coverageModel";
 import {
@@ -138,6 +140,8 @@ interface EditorGroupProps {
   lspStatusPill: ReactNode;
   breadcrumbs: ReactNode;
   breadcrumbsPlacement?: "top" | "bottom";
+  editorBanners?: EditorBannerItem[];
+  onDismissBanner?: (id: string) => void;
   activeSymbols?: LspDocumentSymbol[];
   stickyLinesEnabled?: boolean;
   onRevealTargetLine?: (line: number) => void;
@@ -278,6 +282,8 @@ export function EditorGroup({
   lspStatusPill,
   breadcrumbs,
   breadcrumbsPlacement = "top",
+  editorBanners = [],
+  onDismissBanner,
   activeSymbols,
   stickyLinesEnabled = true,
   onRevealTargetLine,
@@ -683,6 +689,7 @@ export function EditorGroup({
           {activeFile ? (
             <div className="absolute inset-0 flex flex-col">
               {breadcrumbsPlacement === "top" ? breadcrumbs : null}
+              <EditorBanner banners={editorBanners} onDismiss={onDismissBanner ?? (() => {})} />
               <div
                 data-testid="code-workspace-file-status"
                 className="min-h-7 shrink-0 flex items-center gap-2 px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] text-[length:var(--taomni-code-editor-ui-small-font-size)] text-[var(--taomni-code-text)]"

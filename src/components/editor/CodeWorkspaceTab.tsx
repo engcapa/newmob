@@ -435,6 +435,10 @@ import {
   stepOccurrence,
   type OccurrenceHighlightSession,
 } from "./workspace/occurrenceHighlightModel";
+import {
+  selectActiveBanners,
+  type EditorBannerItem,
+} from "./workspace/editorBannerModel";
 import { useDeferredOpenFileTodos } from "./workspace/useDeferredOpenFileTodos";
 import { type QuickDocContent } from "./workspace/referenceDocumentation";
 import {
@@ -1728,6 +1732,7 @@ export function CodeWorkspaceTab({
     secondary: false,
   });
   const [occurrenceSession, setOccurrenceSession] = useState<OccurrenceHighlightSession | null>(null);
+  const [dismissedBannerIds, setDismissedBannerIds] = useState<Set<string>>(new Set());
   const [referencesResult, setReferencesResult] = useState<ReferencesResultState>({
     loading: false,
     origin: null,
@@ -14242,12 +14247,51 @@ export function CodeWorkspaceTab({
     const groupDebugStoppedHere = debug.state?.status === "stopped" && groupDebugCurrentLine != null;
     const groupDebugInlineValues = groupDebugStoppedHere ? debug.frameVariables : undefined;
 
+    const groupBanners = (() => {
+      const list: EditorBannerItem[] = [];
+      if (workspaceResourceOperationLocked || !!groupFile?.library) {
+        list.push({
+          id: `ro:${groupFile?.key ?? "global"}`,
+          fileKey: groupFile?.key,
+          category: "read-only",
+          severity: "info",
+          title: "File is read-only",
+          description: "Modifications cannot be written directly to disk.",
+          priority: 100,
+          dismissible: false,
+          createdAt: 0,
+        });
+      }
+      if (groupLspState?.error) {
+        list.push({
+          id: `lsp-error:${groupLspState.status?.presetId ?? "default"}`,
+          category: "indexing-degraded",
+          severity: "warning",
+          title: "Language Server Degraded",
+          description: groupLspState.error,
+          priority: 60,
+          actions: [
+            {
+              id: "open-settings",
+              label: "Configure",
+              primary: true,
+              run: () => openLanguageServersSettings(groupLspState.status?.presetId),
+            },
+          ],
+          createdAt: 0,
+        });
+      }
+      return selectActiveBanners(list, groupFile?.key, dismissedBannerIds);
+    })();
+
     return (
       <EditorGroup
         onClipboardUnavailable={setStatusMessage}
         groupId={groupId}
         workspaceInstanceId={workspaceInstanceId}
         visible={visible}
+        editorBanners={groupBanners}
+        onDismissBanner={(id) => setDismissedBannerIds((prev) => new Set(prev).add(id))}
         workspaceActionHost={actionsController.host}
         transactionOwner={documentTransactionOwnerRef.current}
         readOnly={workspaceResourceOperationLocked}

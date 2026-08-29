@@ -468,7 +468,7 @@
 - 验证：真实 jdtls/tooling fixture、partial results、provider restart。
 
 ### ED-CHROME-002 可操作 Editor Banner framework
-<!-- ide-task {"id":"ED-CHROME-002","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["N10.3"]} -->
+<!-- ide-task {"id":"ED-CHROME-002","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:47:00Z","baseline":"09b07c14b2449722862e5c86b711b0c87dc25bcf","depends_on":[],"legacy":["N10.3"],"updated_at":"2026-08-29T12:50:47Z","evidence":"vitest: editorBannerModel.test.ts, EditorBanner.test.tsx, EditorGroup.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：顶部 banner 支持 read-only、encoding mismatch、SDK/project import、indexing/degraded，带 typed actions、priority/dismiss/lifecycle；不复用瞬时 statusMessage。
 - 验证：多 banner priority、file switch、action failure、focus/a11y、layout no-overlap。
