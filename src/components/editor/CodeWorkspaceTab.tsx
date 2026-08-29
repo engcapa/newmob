@@ -450,6 +450,11 @@ import {
 } from "./workspace/editorCompareModel";
 import { EditorCompareDialog } from "./workspace/EditorCompareDialog";
 import { HighlightingWidget } from "./workspace/HighlightingWidget";
+import {
+  isDocCommentRenderingSupported,
+  readReaderModePreference,
+  writeReaderModePreference,
+} from "./workspace/renderedDocCommentsModel";
 import { useDeferredOpenFileTodos } from "./workspace/useDeferredOpenFileTodos";
 import { type QuickDocContent } from "./workspace/referenceDocumentation";
 import {
@@ -1755,6 +1760,7 @@ export function CodeWorkspaceTab({
     setFileHighlightingLevels((prev) => ({ ...prev, [fileKey]: level }));
   }, [workspaceInstanceId]);
   const [activeCompareSession, setActiveCompareSession] = useState<EditorCompareSession | null>(null);
+  const [readerModeByFile, setReaderModeByFile] = useState<Record<string, boolean>>({});
   const [referencesResult, setReferencesResult] = useState<ReferencesResultState>({
     loading: false,
     origin: null,
@@ -9114,6 +9120,20 @@ export function CodeWorkspaceTab({
     }
   }, [activeFile, setStatusMessage]);
 
+  const toggleRenderedDocComments = useCallback(() => {
+    const file = activeFile;
+    if (!file) return;
+    if (!isDocCommentRenderingSupported(activeLanguageId)) {
+      setStatusMessage(`Rendered documentation comments not supported for ${activeLanguageId || "plain text"}`);
+      return;
+    }
+    const current = readerModeByFile[file.key] ?? readReaderModePreference(workspaceInstanceId, file.key);
+    const next = !current;
+    writeReaderModePreference(workspaceInstanceId, file.key, next);
+    setReaderModeByFile((prev) => ({ ...prev, [file.key]: next }));
+    setStatusMessage(next ? "Rendered documentation enabled (Reader Mode)" : "Rendered documentation disabled");
+  }, [activeFile, activeLanguageId, readerModeByFile, setStatusMessage, workspaceInstanceId]);
+
   const navigateDiagnostic = useCallback((direction: 1 | -1) => {
     const file = activeFile;
     if (!file) return;
@@ -10287,6 +10307,15 @@ export function CodeWorkspaceTab({
       keywords: ["diff", "compare", "file"],
       when: () => !!activeFile,
       run: compareWithClipboard,
+    },
+    {
+      id: "workspace.toggleRenderedDocComments",
+      title: "Toggle Rendered Documentation",
+      category: "View",
+      keybinding: "Ctrl+Alt+Q",
+      keywords: ["doc", "render", "documentation", "reader", "comment", "jsdoc", "javadoc"],
+      when: () => !!activeFile && isDocCommentRenderingSupported(activeLanguageId),
+      run: toggleRenderedDocComments,
     },
     {
       id: "workspace.toggleInlayHints",

@@ -480,7 +480,7 @@
 - 验证：valid/invalid name、package path、existing file conflict、undo/recovery、untrusted template variable。
 
 ### ED-DOC-001 Rendered documentation / Reader Mode
-<!-- ide-task {"id":"ED-DOC-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["N10.1"]} -->
+<!-- ide-task {"id":"ED-DOC-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:16:27Z","baseline":"207448e3245e5f7b43a2386aff6b26c5de87e189","depends_on":[],"legacy":["N10.1"],"updated_at":"2026-08-29T13:22:12Z","evidence":"vitest: renderedDocCommentsModel.test.ts, renderedDocCommentsExtension.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：先交付一门语言的 doc-comment rendered toggle、links/images 安全策略与 hover setting；与 QuickDoc popup/pane 分账。
 - 验证：edit/render toggle、sanitization、broken link/image、large doc、unsupported language。

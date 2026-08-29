@@ -1320,6 +1320,15 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     keywords: ["diff", "compare", "file"],
   },
   {
+    id: "workspace.toggleRenderedDocComments",
+    title: "Toggle Rendered Documentation",
+    description: "Toggle in-place rendered documentation comments in reader mode",
+    category: "View",
+    keybinding: "Ctrl+Alt+Q",
+    provenance: "local",
+    keywords: ["doc", "render", "documentation", "reader", "comment", "jsdoc", "javadoc"],
+  },
+  {
     id: "workspace.toggleInlayHints",
     title: "Toggle Inlay Hints",
     description: "Show or hide parameter names and type inlay hints",
