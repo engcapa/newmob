@@ -342,7 +342,7 @@
 - 验证：文件变化、tool/JDK/env change、restart、双 workspace、cache hit/miss。
 
 ### ED-PROJECT-005 接入 completion/query/refactor 三个 consumer
-<!-- ide-task {"id":"ED-PROJECT-005","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-PROJECT-004"],"legacy":["BB9-D"]} -->
+<!-- ide-task {"id":"ED-PROJECT-005","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:13:51Z","baseline":"367fbf4e5c47b9c58a7a80f6a24413053b74a3f1","depends_on":["ED-PROJECT-004"],"legacy":["BB9-D"],"updated_at":"2026-08-29T14:14:44Z","evidence":"vitest: projectFactsConsumers.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：Completion scope、Semantic Query classification、Rename/refactor coverage 使用同一个 ready generation；loading/degraded/untrusted 都 fail closed 并显示原因。
 - 主文件：三个 consumer adapter 和 mounted tests；不要在本任务扩 tooling ingestion。
