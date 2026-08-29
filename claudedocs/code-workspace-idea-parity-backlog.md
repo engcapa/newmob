@@ -386,7 +386,7 @@
 - 验证：mode/deleted/symlink/git error/missing bundle/changed test plan attack matrix。
 
 ### ED-REL-003 约束 release plan/channel/artifact roots
-<!-- ide-task {"id":"ED-REL-003","status":"ready","priority":"P2","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-REL-002"],"legacy":["BB2"]} -->
+<!-- ide-task {"id":"ED-REL-003","status":"done","priority":"P2","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:53:26Z","baseline":"71757035a93b19c1f59b2029513ff1d78c77a3e1","depends_on":["ED-REL-002"],"legacy":["BB2"],"updated_at":"2026-08-29T14:54:17Z","evidence":"vitest: releasePlanValidator.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：validator/rollup/audit 消费同一 release plan；channel 真正选择 requirements；artifact 只允许 committed repo-relative evidence roots，拒绝 absolute、`/tmp`、ignored、symlink escape 和 mixed source。
 - 验证：channel/bundle/artifact/mixed-current attack tests。
