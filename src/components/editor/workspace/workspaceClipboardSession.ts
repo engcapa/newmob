@@ -334,7 +334,7 @@ interface WorkspaceSlotState {
   permission: "unknown" | "granted" | "denied";
   consumers: Map<string, { token: string; id: string; kind: string }>;
   listeners: Set<(snapshot: WorkspaceClipboardSnapshotV3) => void>;
-  refcount: number;
+  rootAcquisitions: number;
   leaseSeq: number;
 }
 
@@ -353,7 +353,7 @@ function getOrCreateSlot(workspaceInstanceId: string): WorkspaceSlotState {
       permission: "unknown",
       consumers: new Map(),
       listeners: new Set(),
-      refcount: 0,
+      rootAcquisitions: 0,
       leaseSeq: 0,
     };
     slotStatesByWorkspace.set(workspaceInstanceId, slot);
@@ -368,12 +368,12 @@ function getOrCreateSlot(workspaceInstanceId: string): WorkspaceSlotState {
  */
 export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceClipboardHandle {
   const slot = getOrCreateSlot(workspaceInstanceId);
-  slot.refcount += 1;
+  slot.rootAcquisitions += 1;
+  let handleReleased = false;
 
   const getSnapshot = (): WorkspaceClipboardSnapshotV3 => {
     const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
     const consumerList = Array.from(current.consumers.values());
-    const uniqueIds = new Set(consumerList.map((c) => c.id));
     return {
       payloadRevision: current.payloadRevision,
       historyRevision: current.historyRevision,
@@ -387,7 +387,7 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
       exclusion: current.store.historyExclusion(),
       isHistoryEnabled: current.store.isHistoryEnabled(),
       limits: current.store.historyLimits(),
-      consumerCount: uniqueIds.size,
+      consumerCount: current.consumers.size,
     };
   };
 
@@ -411,19 +411,10 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
       current.leaseSeq += 1;
       const token = `lease-${workspaceInstanceId}-${current.leaseSeq}-${Math.random().toString(36).slice(2, 7)}`;
       const id = consumerId || `anon-${current.leaseSeq}`;
-      
-      // If same consumerId already attached, clean up previous duplicate entry
-      for (const [existingToken, existing] of current.consumers) {
-        if (existing.id === id) {
-          current.consumers.delete(existingToken);
-          current.refcount = Math.max(0, current.refcount - 1);
-        }
-      }
 
       const entry = { token, id, kind };
       current.consumers.set(token, entry);
       current.lifecycleRevision += 1;
-      current.refcount += 1;
       notify();
 
       let active = true;
@@ -431,24 +422,11 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
         if (!active) return "already-detached";
         active = false;
         const liveSlot = slotStatesByWorkspace.get(workspaceInstanceId);
-        if (liveSlot) {
-          let removed = false;
-          if (liveSlot.consumers.has(token)) {
-            liveSlot.consumers.delete(token);
-            removed = true;
-          }
-          for (const [t, c] of Array.from(liveSlot.consumers.entries())) {
-            if (c.id === id) {
-              liveSlot.consumers.delete(t);
-              removed = true;
-            }
-          }
-          if (removed) {
-            liveSlot.lifecycleRevision += 1;
-            liveSlot.refcount = Math.max(0, liveSlot.refcount - 1);
-            notify();
-            return "detached";
-          }
+        if (liveSlot && liveSlot.consumers.has(token)) {
+          liveSlot.consumers.delete(token);
+          liveSlot.lifecycleRevision += 1;
+          notify();
+          return "detached";
         }
         return "already-detached";
       };
@@ -494,10 +472,14 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
       }
     },
     release() {
+      if (handleReleased) return;
+      handleReleased = true;
       const current = slotStatesByWorkspace.get(workspaceInstanceId);
       if (!current) return;
-      current.refcount = Math.max(0, current.refcount - 1);
-      if (current.refcount > 0) {
+      current.rootAcquisitions = Math.max(0, current.rootAcquisitions - 1);
+      current.lifecycleRevision += 1;
+      notify();
+      if (current.rootAcquisitions > 0) {
         return;
       }
       // Deferred by a microtask so a synchronous view remount (cleanup →
@@ -505,9 +487,11 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
       // re-acquire happens, the slot really is going away.
       queueMicrotask(() => {
         const liveSlot = slotStatesByWorkspace.get(workspaceInstanceId);
-        if (!liveSlot || liveSlot.refcount > 0) return;
+        if (!liveSlot || liveSlot.rootAcquisitions > 0) return;
         slotStatesByWorkspace.delete(workspaceInstanceId);
         liveSlot.store.clear("workspace-close");
+        liveSlot.consumers.clear();
+        liveSlot.listeners.clear();
       });
     },
     historyEntries: () => {

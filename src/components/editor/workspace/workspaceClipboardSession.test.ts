@@ -333,3 +333,139 @@ describe("§8.27.2 BB1 clipboard lease model and permission epoch", () => {
   });
 });
 
+describe("ED-CLIP-001 consumer lease token ownership & accounting", () => {
+  it("allocates independent tokens for duplicate consumerId and retains both leases", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-dup-id");
+    const lease1 = handle.attachConsumer("split-main", "editor");
+    const lease2 = handle.attachConsumer("split-main", "editor");
+
+    expect(lease1.token).toBeDefined();
+    expect(lease2.token).toBeDefined();
+    expect(lease1.token).not.toBe(lease2.token);
+    expect(lease1.consumerId).toBe("split-main");
+    expect(lease2.consumerId).toBe("split-main");
+
+    const snap = handle.getSnapshot();
+    expect(snap.consumers).toHaveLength(2);
+    expect(snap.consumerCount).toBe(2);
+    expect(snap.consumers.map((c) => c.token)).toContain(lease1.token);
+    expect(snap.consumers.map((c) => c.token)).toContain(lease2.token);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("supports arbitrary detach order without deleting newer or older leases", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-detach-order");
+    const leaseA = handle.attachConsumer("same-consumer", "editor");
+    const leaseB = handle.attachConsumer("same-consumer", "editor");
+    const leaseC = handle.attachConsumer("same-consumer", "editor");
+
+    expect(handle.getSnapshot().consumers).toHaveLength(3);
+
+    // Detach middle lease (leaseB) first
+    expect(leaseB.detach()).toBe("detached");
+    let snap = handle.getSnapshot();
+    expect(snap.consumers).toHaveLength(2);
+    expect(snap.consumers.map((c) => c.token)).toEqual([leaseA.token, leaseC.token]);
+
+    // Detach oldest lease (leaseA)
+    expect(leaseA.detach()).toBe("detached");
+    snap = handle.getSnapshot();
+    expect(snap.consumers).toHaveLength(1);
+    expect(snap.consumers[0].token).toBe(leaseC.token);
+
+    // Old lease detach MUST NOT have affected leaseC
+    expect(leaseC.detach()).toBe("detached");
+    expect(handle.getSnapshot().consumers).toHaveLength(0);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("isolates duplicate consumerIds across different workspace instances", () => {
+    resetWorkspaceClipboardStores();
+    const ws1 = acquireClipboardStore("ws-inst-1");
+    const ws2 = acquireClipboardStore("ws-inst-2");
+
+    const lease1 = ws1.attachConsumer("shared-file-key", "codemirror-host");
+    const lease2 = ws2.attachConsumer("shared-file-key", "codemirror-host");
+
+    expect(ws1.getSnapshot().consumerCount).toBe(1);
+    expect(ws2.getSnapshot().consumerCount).toBe(1);
+    expect(lease1.token).not.toBe(lease2.token);
+
+    expect(lease1.detach()).toBe("detached");
+    expect(ws1.getSnapshot().consumerCount).toBe(0);
+    expect(ws2.getSnapshot().consumerCount).toBe(1);
+
+    expect(lease2.detach()).toBe("detached");
+    expect(ws2.getSnapshot().consumerCount).toBe(0);
+
+    ws1.release();
+    ws2.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("enforces idempotent detach without mutating active consumers or re-triggering revisions", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-idempotent");
+    const lease = handle.attachConsumer("consumer-1");
+    const initialRevision = handle.getSnapshot().lifecycleRevision;
+
+    expect(lease.detach()).toBe("detached");
+    const afterDetachRev = handle.getSnapshot().lifecycleRevision;
+    expect(afterDetachRev).toBe(initialRevision + 1);
+
+    // Second and third calls must be idempotent
+    expect(lease.detach()).toBe("already-detached");
+    expect(lease()).toBe("already-detached");
+    expect(handle.getSnapshot().lifecycleRevision).toBe(afterDetachRev);
+    expect(handle.getSnapshot().consumerCount).toBe(0);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("segregates root acquisition refcount from consumer leases and cleans up on last root release", async () => {
+    resetWorkspaceClipboardStores();
+    const root1 = acquireClipboardStore("ws-segregation");
+    const root2 = acquireClipboardStore("ws-segregation");
+
+    const lease1 = root1.attachConsumer("child-1");
+    const lease2 = root1.attachConsumer("child-2");
+
+    root1.write({
+      sourceViewId: null,
+      plainText: "segregated-payload",
+      rectangular: false,
+      sourceEol: "lf",
+    });
+    expect(root2.read()?.plainText).toBe("segregated-payload");
+
+    // Releasing root1 does not destroy the slot because root2 is still active
+    root1.release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(root2.read()?.plainText).toBe("segregated-payload");
+
+    // Detaching all consumers does not destroy the slot if root2 is active
+    expect(lease1.detach()).toBe("detached");
+    expect(lease2.detach()).toBe("detached");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(root2.read()?.plainText).toBe("segregated-payload");
+
+    // Releasing root2 (the last root) triggers deferred teardown
+    root2.release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const fresh = acquireClipboardStore("ws-segregation");
+    expect(fresh.read()).toBeNull();
+    expect(fresh.getSnapshot().consumerCount).toBe(0);
+
+    fresh.release();
+    resetWorkspaceClipboardStores();
+  });
+});
+

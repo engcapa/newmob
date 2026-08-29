@@ -125,7 +125,7 @@
 - 验证：相同 HEAD 两次输出 byte-identical；dirty/untracked product input 显式标记。
 
 ### ED-CLIP-001 修复 consumer lease 的 token 所有权
-<!-- ide-task {"id":"ED-CLIP-001","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB1"]} -->
+<!-- ide-task {"id":"ED-CLIP-001","status":"done","priority":"P0","size":"S","owner":"editor-agent-01","claimed_at":"2026-08-29T07:50:04Z","baseline":"6305e60b19da8554373204b6d0822b7aa2caf88e","depends_on":[],"legacy":["BB1"],"updated_at":"2026-08-29T07:59:35Z","evidence":"focused 35/35; CodeWorkspaceTab+Popup 83/83; pnpm build exit 0; cargo test --lib 1302 passed exit 0; pnpm test 349 files / 3171 tests exit 0; qa audit --diff exit 0"} -->
 
 - 结果：duplicate `consumerId` 返回 typed conflict 或独立 token；任一 `detach()` 只删除自己的 token，旧 lease 绝不删除后来 lease；root acquisition 与 consumer lease 计数分账。
 - 主文件：`workspaceClipboardSession.ts` 及其测试。
