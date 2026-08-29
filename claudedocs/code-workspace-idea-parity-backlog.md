@@ -374,7 +374,7 @@
 - 验证：每格记录 expected/observed/effect/scope/undo/unavailable；Windows/macOS 独立 blocked，不从 Linux 外推。
 
 ### ED-REL-001 定义 runner-owned receipt 与签名边界
-<!-- ide-task {"id":"ED-REL-001","status":"ready","priority":"P2","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB2"]} -->
+<!-- ide-task {"id":"ED-REL-001","status":"done","priority":"P2","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:50:53Z","baseline":"30a121d2d0a8000524cf807b7d4cf2234aa02b05","depends_on":[],"legacy":["BB2"],"updated_at":"2026-08-29T14:51:59Z","evidence":"vitest: runnerReceipt.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：runner 生成 receipt，调用者不能注入 exit/duration/result；签名用途、key registry、有效期/撤销和 secret 边界明确。先完成 schema/attack tests，不在同任务改 rollup。
 - 验证：unknown/expired/revoked issuer、手写/tampered receipt 全 fail closed。
