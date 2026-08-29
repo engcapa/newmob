@@ -149,7 +149,7 @@ export function createWorkspaceProjectContext(
 }
 
 /**
- * §8.22.10 U5: Infer project structure directly from build descriptors.
+ * §8.22.10 U5: Project Descriptor Discovery & Inference.
  * Supports Cargo.toml, package.json, pom.xml, and build.gradle.
  */
 export interface BuildDescriptorInput {
@@ -157,33 +157,154 @@ export interface BuildDescriptorInput {
   content: string;
 }
 
-export function inferProjectStructureFromBuildFiles(
+export interface ProjectDiscoveredDescriptor {
+  path: string;
+  buildSystem: "cargo" | "npm" | "maven" | "gradle" | "plain";
+  name: string;
+  root: string;
+  rawContentSha256: string;
+  inferredExcludedRoots: readonly string[];
+}
+
+export interface ProjectDescriptorDiscoveryV1 {
+  status: "descriptor-only" | "unresolved";
+  generation: number;
+  descriptors: readonly ProjectDiscoveredDescriptor[];
+  excludedRoots: readonly string[];
+  diagnostics: readonly string[];
+}
+
+export function discoverProjectDescriptors(
   descriptors: readonly BuildDescriptorInput[],
   generation: number = 1,
-): { snapshot: ProjectStructureSnapshotV2 | null; status: "descriptor-only" | "unresolved"; diagnostics: string[] } {
+): ProjectDescriptorDiscoveryV1 {
   if (descriptors.length === 0) {
     return {
-      snapshot: null,
       status: "unresolved",
+      generation,
+      descriptors: [],
+      excludedRoots: [],
       diagnostics: ["No build descriptors found in workspace"],
     };
   }
 
-  const modules: JavaProjectModuleV1[] = [];
+  const discovered: ProjectDiscoveredDescriptor[] = [];
   const buildExcludes: string[] = [];
-  const depsByModule: Record<string, string[]> = {};
-  const facts: Record<string, ProjectStructureFact> = {};
-  const now = new Date().toISOString();
 
   for (const desc of descriptors) {
     const parentDir = desc.path.split("/").slice(0, -1).join("/") || "/";
     const fileName = desc.path.split("/").pop() ?? "";
+    const hash = sha256Hex(desc.content);
 
     if (fileName === "Cargo.toml") {
       const pkgMatch = /name\s*=\s*"([^"]+)"/.exec(desc.content);
       const modName = pkgMatch ? pkgMatch[1] : "cargo-package";
+      const excludes = [`${parentDir}/target`];
+      discovered.push({
+        path: desc.path,
+        buildSystem: "cargo",
+        name: modName,
+        root: parentDir,
+        rawContentSha256: hash,
+        inferredExcludedRoots: excludes,
+      });
+      buildExcludes.push(...excludes);
+    } else if (fileName === "package.json") {
+      try {
+        const pkg = JSON.parse(desc.content);
+        const modName = pkg.name || "node-module";
+        const excludes = [`${parentDir}/node_modules`, `${parentDir}/dist`];
+        discovered.push({
+          path: desc.path,
+          buildSystem: "npm",
+          name: modName,
+          root: parentDir,
+          rawContentSha256: hash,
+          inferredExcludedRoots: excludes,
+        });
+        buildExcludes.push(...excludes);
+      } catch {
+        // invalid JSON
+      }
+    } else if (fileName === "pom.xml") {
+      const artMatch = /<artifactId>([^<]+)<\/artifactId>/.exec(desc.content);
+      const modName = artMatch ? artMatch[1].trim() : "maven-module";
+      const excludes = [`${parentDir}/target`];
+      discovered.push({
+        path: desc.path,
+        buildSystem: "maven",
+        name: modName,
+        root: parentDir,
+        rawContentSha256: hash,
+        inferredExcludedRoots: excludes,
+      });
+      buildExcludes.push(...excludes);
+    } else if (fileName === "build.gradle" || fileName === "build.gradle.kts") {
+      const modName = parentDir.split("/").pop() || "gradle-module";
+      const excludes = [`${parentDir}/build`, `${parentDir}/.gradle`];
+      discovered.push({
+        path: desc.path,
+        buildSystem: "gradle",
+        name: modName,
+        root: parentDir,
+        rawContentSha256: hash,
+        inferredExcludedRoots: excludes,
+      });
+      buildExcludes.push(...excludes);
+    }
+  }
+
+  if (discovered.length === 0) {
+    return {
+      status: "unresolved",
+      generation,
+      descriptors: [],
+      excludedRoots: [],
+      diagnostics: ["Build descriptors present but could not be parsed into modules"],
+    };
+  }
+
+  const allExcluded = Array.from(new Set(buildExcludes)).sort();
+
+  return {
+    status: "descriptor-only",
+    generation,
+    descriptors: discovered,
+    excludedRoots: allExcluded,
+    diagnostics: [],
+  };
+}
+
+export function inferProjectStructureFromBuildFiles(
+  descriptors: readonly BuildDescriptorInput[],
+  generation: number = 1,
+): {
+  snapshot: ProjectStructureSnapshotV2 | null;
+  discovery: ProjectDescriptorDiscoveryV1;
+  status: "descriptor-only" | "unresolved";
+  diagnostics: string[];
+} {
+  const discovery = discoverProjectDescriptors(descriptors, generation);
+  if (discovery.status === "unresolved" || discovery.descriptors.length === 0) {
+    return {
+      snapshot: null,
+      discovery,
+      status: "unresolved",
+      diagnostics: [...discovery.diagnostics],
+    };
+  }
+
+  const modules: JavaProjectModuleV1[] = [];
+  const buildExcludes: string[] = [...discovery.excludedRoots];
+  const depsByModule: Record<string, string[]> = {};
+  const facts: Record<string, ProjectStructureFact> = {};
+  const now = new Date().toISOString();
+
+  for (const desc of discovery.descriptors) {
+    const parentDir = desc.root;
+    if (desc.buildSystem === "cargo") {
       modules.push({
-        id: `cargo:${modName}`,
+        id: `cargo:${desc.name}`,
         root: parentDir,
         sourceRoots: [`${parentDir}/src`],
         testRoots: [`${parentDir}/tests`],
@@ -192,34 +313,22 @@ export function inferProjectStructureFromBuildFiles(
         dependencyFingerprint: "",
         buildSystem: "plain",
       });
-      buildExcludes.push(`${parentDir}/target`);
       facts[`descriptor.${desc.path}`] = { source: "user-config", freshness: now };
-    } else if (fileName === "package.json") {
-      try {
-        const pkg = JSON.parse(desc.content);
-        const modName = pkg.name || "node-module";
-        const deps = Object.keys(pkg.dependencies || {});
-        depsByModule[`npm:${modName}`] = deps;
-        modules.push({
-          id: `npm:${modName}`,
-          root: parentDir,
-          sourceRoots: [`${parentDir}/src`],
-          testRoots: [`${parentDir}/test`, `${parentDir}/__tests__`],
-          generatedRoots: [],
-          excludedRoots: [`${parentDir}/node_modules`, `${parentDir}/dist`],
-          dependencyFingerprint: "",
-          buildSystem: "plain",
-        });
-        buildExcludes.push(`${parentDir}/node_modules`, `${parentDir}/dist`);
-        facts[`descriptor.${desc.path}`] = { source: "user-config", freshness: now };
-      } catch {
-        // invalid JSON
-      }
-    } else if (fileName === "pom.xml") {
-      const artMatch = /<artifactId>([^<]+)<\/artifactId>/.exec(desc.content);
-      const modName = artMatch ? artMatch[1].trim() : "maven-module";
+    } else if (desc.buildSystem === "npm") {
       modules.push({
-        id: `mvn:${modName}`,
+        id: `npm:${desc.name}`,
+        root: parentDir,
+        sourceRoots: [`${parentDir}/src`],
+        testRoots: [`${parentDir}/test`, `${parentDir}/__tests__`],
+        generatedRoots: [],
+        excludedRoots: [`${parentDir}/node_modules`, `${parentDir}/dist`],
+        dependencyFingerprint: "",
+        buildSystem: "plain",
+      });
+      facts[`descriptor.${desc.path}`] = { source: "user-config", freshness: now };
+    } else if (desc.buildSystem === "maven") {
+      modules.push({
+        id: `mvn:${desc.name}`,
         root: parentDir,
         sourceRoots: [`${parentDir}/src/main/java`],
         testRoots: [`${parentDir}/src/test/java`],
@@ -228,12 +337,10 @@ export function inferProjectStructureFromBuildFiles(
         dependencyFingerprint: "",
         buildSystem: "maven",
       });
-      buildExcludes.push(`${parentDir}/target`);
       facts[`descriptor.${desc.path}`] = { source: "descriptor-only", freshness: now };
-    } else if (fileName === "build.gradle" || fileName === "build.gradle.kts") {
-      const modName = parentDir.split("/").pop() || "gradle-module";
+    } else if (desc.buildSystem === "gradle") {
       modules.push({
-        id: `gradle:${modName}`,
+        id: `gradle:${desc.name}`,
         root: parentDir,
         sourceRoots: [`${parentDir}/src/main/java`, `${parentDir}/src/main/kotlin`],
         testRoots: [`${parentDir}/src/test/java`],
@@ -242,17 +349,8 @@ export function inferProjectStructureFromBuildFiles(
         dependencyFingerprint: "",
         buildSystem: "gradle",
       });
-      buildExcludes.push(`${parentDir}/build`, `${parentDir}/.gradle`);
       facts[`descriptor.${desc.path}`] = { source: "descriptor-only", freshness: now };
     }
-  }
-
-  if (modules.length === 0) {
-    return {
-      snapshot: null,
-      status: "unresolved",
-      diagnostics: ["Build descriptors present but could not be parsed into modules"],
-    };
   }
 
   const snapshot = buildProjectStructureSnapshotV2({
@@ -268,23 +366,74 @@ export function inferProjectStructureFromBuildFiles(
       ...snapshot,
       facts: { ...snapshot.facts, ...facts },
     },
+    discovery,
     status: "descriptor-only",
     diagnostics: [],
   };
 }
 
 export interface WorkspaceProjectStructureState {
-  status: "idle" | "loading" | "resolved" | "unresolved" | "descriptor-only" | "error";
+  status: "idle" | "loading" | "resolved" | "ready" | "unresolved" | "descriptor-only" | "error";
   snapshot: ProjectStructureSnapshotV2 | null;
+  discovery: ProjectDescriptorDiscoveryV1 | null;
   diagnostics: readonly string[];
   generation: number;
   lastRefreshed: number | null;
+}
+
+export type ProjectSnapshotConsumerOutcome<T> =
+  | { state: "ready"; snapshot: ProjectStructureSnapshotV2; data: T }
+  | { state: "descriptor-only"; generation: number; reason: string }
+  | { state: "stale-generation"; expectedGeneration: number; currentGeneration: number }
+  | { state: "unresolved"; diagnostics: readonly string[] };
+
+/**
+ * Validates that the project structure snapshot is ready and generation-aligned
+ * before consumer access. Prevents unready descriptor-only or stale snapshot leaks.
+ */
+export function consumeProjectReadySnapshot<T>(
+  state: WorkspaceProjectStructureState,
+  expectedGeneration: number | undefined,
+  accessor: (snapshot: ProjectStructureSnapshotV2) => T,
+): ProjectSnapshotConsumerOutcome<T> {
+  if (state.status === "descriptor-only") {
+    return {
+      state: "descriptor-only",
+      generation: state.generation,
+      reason: "Build descriptors discovered but live tooling/LSP model ingestion has not resolved ready classpath or source roots",
+    };
+  }
+  if (state.status !== "resolved" && state.status !== "ready") {
+    return {
+      state: "unresolved",
+      diagnostics: state.diagnostics,
+    };
+  }
+  if (expectedGeneration !== undefined && state.generation !== expectedGeneration) {
+    return {
+      state: "stale-generation",
+      expectedGeneration,
+      currentGeneration: state.generation,
+    };
+  }
+  if (!state.snapshot) {
+    return {
+      state: "unresolved",
+      diagnostics: ["No snapshot available in ready state"],
+    };
+  }
+  return {
+    state: "ready",
+    snapshot: state.snapshot,
+    data: accessor(state.snapshot),
+  };
 }
 
 export class WorkspaceProjectStructureStore {
   private state: WorkspaceProjectStructureState = {
     status: "idle",
     snapshot: null,
+    discovery: null,
     diagnostics: [],
     generation: 0,
     lastRefreshed: null,
@@ -300,8 +449,21 @@ export class WorkspaceProjectStructureStore {
     this.state = {
       status: result.status,
       snapshot: result.snapshot,
+      discovery: result.discovery,
       diagnostics: result.diagnostics,
       generation: nextGen,
+      lastRefreshed: Date.now(),
+    };
+    return this.getState();
+  }
+
+  setResolved(snapshot: ProjectStructureSnapshotV2): WorkspaceProjectStructureState {
+    this.state = {
+      status: "resolved",
+      snapshot,
+      discovery: this.state.discovery,
+      diagnostics: [],
+      generation: snapshot.generation,
       lastRefreshed: Date.now(),
     };
     return this.getState();
@@ -311,6 +473,7 @@ export class WorkspaceProjectStructureStore {
     this.state = {
       status: "idle",
       snapshot: null,
+      discovery: null,
       diagnostics: [],
       generation: 0,
       lastRefreshed: null,

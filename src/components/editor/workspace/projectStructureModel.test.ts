@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { JavaProjectAnalysisSnapshotV1, JavaProjectModuleV1 } from "./projectAnalysisModel";
 import {
   buildProjectStructureSnapshotV2,
+  consumeProjectReadySnapshot,
   createWorkspaceProjectContext,
+  discoverProjectDescriptors,
   findPathSourceSet,
   inferProjectStructureFromBuildFiles,
   isPathExcluded,
@@ -190,6 +192,102 @@ describe("§8.21.6 V5 projectStructureModel", () => {
       expect(state1.generation).toBe(1);
       expect(state1.snapshot?.modules[0].id).toBe("cargo:taomni-cli");
       expect(state1.lastRefreshed).not.toBeNull();
+    });
+  });
+
+  describe("§ED-PROJECT-001: Project Descriptor Discovery Isolation & Ready Snapshot Consumer Guards", () => {
+    it("discovers all four descriptor families (Cargo, npm, Maven, Gradle) without fabricating ready classpath", () => {
+      const descriptors = [
+        { path: "/workspace/rust-tool/Cargo.toml", content: '[package]\nname = "rust-tool"\nversion = "1.0.0"' },
+        { path: "/workspace/web-app/package.json", content: '{"name": "web-app", "dependencies": {"vue": "3.0"}}' },
+        { path: "/workspace/service-a/pom.xml", content: "<project><artifactId>service-a</artifactId></project>" },
+        { path: "/workspace/service-b/build.gradle", content: "// gradle script" },
+      ];
+
+      const discovery = discoverProjectDescriptors(descriptors, 4);
+      expect(discovery.status).toBe("descriptor-only");
+      expect(discovery.generation).toBe(4);
+      expect(discovery.descriptors).toHaveLength(4);
+
+      const systems = discovery.descriptors.map((d) => d.buildSystem);
+      expect(systems).toEqual(["cargo", "npm", "maven", "gradle"]);
+
+      for (const d of discovery.descriptors) {
+        expect(d.rawContentSha256).toMatch(/^[0-9a-f]{64}$/);
+        expect(d.inferredExcludedRoots.length).toBeGreaterThan(0);
+      }
+
+      // Excluded roots merged across all descriptors
+      expect(discovery.excludedRoots).toEqual([
+        "/workspace/rust-tool/target",
+        "/workspace/service-a/target",
+        "/workspace/service-b/.gradle",
+        "/workspace/service-b/build",
+        "/workspace/web-app/dist",
+        "/workspace/web-app/node_modules",
+      ]);
+    });
+
+    it("handles partial/malformed descriptors and empty descriptor sets gracefully", () => {
+      // Empty
+      const emptyDiscovery = discoverProjectDescriptors([]);
+      expect(emptyDiscovery.status).toBe("unresolved");
+      expect(emptyDiscovery.descriptors).toHaveLength(0);
+
+      // Malformed JSON package.json
+      const malformedDiscovery = discoverProjectDescriptors([
+        { path: "/workspace/broken/package.json", content: "{ invalid json" },
+      ]);
+      expect(malformedDiscovery.status).toBe("unresolved");
+      expect(malformedDiscovery.diagnostics).toContain("Build descriptors present but could not be parsed into modules");
+
+      // Mixed valid and malformed
+      const mixedDiscovery = discoverProjectDescriptors([
+        { path: "/workspace/broken/package.json", content: "{ invalid json" },
+        { path: "/workspace/valid/pom.xml", content: "<project><artifactId>valid-service</artifactId></project>" },
+      ]);
+      expect(mixedDiscovery.status).toBe("descriptor-only");
+      expect(mixedDiscovery.descriptors).toHaveLength(1);
+      expect(mixedDiscovery.descriptors[0].name).toBe("valid-service");
+    });
+
+    it("blocks consumers when snapshot is descriptor-only, stale-generation, or unresolved", () => {
+      const store = new WorkspaceProjectStructureStore();
+
+      // 1. Initial idle/unresolved state -> blocked
+      const outcome1 = consumeProjectReadySnapshot(store.getState(), undefined, (s) => s.modules);
+      expect(outcome1.state).toBe("unresolved");
+
+      // 2. Refreshed with descriptors -> status is "descriptor-only" -> blocked from ready consumption
+      store.refresh([{ path: "/workspace/pom.xml", content: "<project><artifactId>api</artifactId></project>" }]);
+      const outcome2 = consumeProjectReadySnapshot(store.getState(), 1, (s) => s.modules);
+      expect(outcome2.state).toBe("descriptor-only");
+      if (outcome2.state === "descriptor-only") {
+        expect(outcome2.reason).toContain("live tooling/LSP model ingestion has not resolved ready classpath");
+      }
+
+      // 3. Stale generation check: even if resolved, older generation expectation is blocked
+      const readySnapshot = buildProjectStructureSnapshotV2({
+        generation: 2,
+        source: "maven-model",
+        modules: [sampleModule1],
+      });
+      store.setResolved(readySnapshot);
+
+      const outcomeStale = consumeProjectReadySnapshot(store.getState(), 1, (s) => s.modules);
+      expect(outcomeStale.state).toBe("stale-generation");
+      if (outcomeStale.state === "stale-generation") {
+        expect(outcomeStale.expectedGeneration).toBe(1);
+        expect(outcomeStale.currentGeneration).toBe(2);
+      }
+
+      // 4. Valid resolved snapshot with matching generation -> allowed!
+      const outcomeReady = consumeProjectReadySnapshot(store.getState(), 2, (s) => s.modules);
+      expect(outcomeReady.state).toBe("ready");
+      if (outcomeReady.state === "ready") {
+        expect(outcomeReady.data).toHaveLength(1);
+        expect(outcomeReady.data[0].id).toBe("com.example:core");
+      }
     });
   });
 });

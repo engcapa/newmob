@@ -314,7 +314,7 @@
 - 验证：provider case + qa audit；Rename 保留独立 case。
 
 ### ED-PROJECT-001 隔离 descriptor discovery 与 ready snapshot
-<!-- ide-task {"id":"ED-PROJECT-001","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB9-A"]} -->
+<!-- ide-task {"id":"ED-PROJECT-001","status":"done","priority":"P0","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:12:17Z","baseline":"8ce970477b56f48f3c9b1a2cfd11ddf908610e64","depends_on":[],"legacy":["BB9-A"],"updated_at":"2026-08-29T12:14:21Z","evidence":"vitest: projectStructureModel.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：所有 Cargo/Node/Maven/Gradle descriptor 只产生 `ProjectDescriptorDiscoveryV1`/`descriptor-only`；不得产出 ready classpath/source roots；consumer 必须检查 status+generation。
 - 主文件：`projectStructureModel.ts`、consumer reachability/static tests。
