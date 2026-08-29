@@ -251,7 +251,7 @@
 - 验证：BOM/EOL/encoding、disk race、closed buffer、writer failure、typing race、write count=1。
 
 ### ED-SAVE-004 升级 Save behavior/native evidence
-<!-- ide-task {"id":"ED-SAVE-004","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-SAVE-003"],"legacy":["BB10-C0","BB11"]} -->
+<!-- ide-task {"id":"ED-SAVE-004","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T11:52:14Z","baseline":"33249249c767caedad7ed4fa868733bd6122405c","depends_on":["ED-SAVE-003"],"legacy":["BB10-C0","BB11"],"updated_at":"2026-08-29T11:54:19Z","evidence":"vitest: saveObservationContract.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：C0 断言真实 final bytes、dirty/saved UI、recovery/undo；native temp workspace 覆盖 UTF-8/BOM/UTF-16/Latin-1 与 LF/CRLF，不把 browser VFS 当磁盘证明。
 - 主文件：C0 YAML、native fixtures/runbook、observation contract。
