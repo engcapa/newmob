@@ -299,12 +299,227 @@ export function recentCompletionInvocations(): readonly RecordedCompletionInvoca
  * `timed-out` / `failed` never fall through to a silent primary-only insert:
  * they surface the resolve gate and wait for an explicit user choice.
  */
+/**
+ * Lifecycle of one item's completionItem/resolve round-trip (§8.19.4 / §ED-COMP-001).
+ * `timed-out` / `failed` / `unavailable` never fall through to a silent primary-only insert:
+ * they surface the resolve gate and wait for an explicit user choice.
+ */
 export type CompletionResolveState =
   | { kind: "not-required" }
   | { kind: "ready"; resolvedAt: number; hasAdditionalEdits: boolean }
   | { kind: "timed-out"; canRetry: true }
   | { kind: "failed"; canRetry: true; message: string }
+  | { kind: "unavailable"; canRetry: boolean; reason: string }
+  | { kind: "cancelled"; reason: string }
   | { kind: "stale" };
+
+/**
+ * 7 typed completion resolve outcome kinds (§ED-COMP-001 / BB7):
+ * - resolved: provider delivered full item + additionalTextEdits
+ * - not-required: item already contained complete additional edits without resolve
+ * - unavailable: resolver is missing / returned null (resolver 缺失不推导 not-required)
+ * - timeout: resolve timed out
+ * - failed: resolver threw an error
+ * - cancelled: resolve was aborted / cancelled
+ * - stale: request token identity or doc revision changed during resolve
+ */
+export type CompletionResolveOutcomeKind =
+  | "resolved"
+  | "not-required"
+  | "unavailable"
+  | "timeout"
+  | "failed"
+  | "cancelled"
+  | "stale";
+
+export type CompletionResolveOutcome =
+  | { kind: "resolved"; item: LspCompletionItem; edits: readonly LspTextEdit[] }
+  | { kind: "not-required"; item: LspCompletionItem }
+  | { kind: "unavailable"; reason: string; item: LspCompletionItem }
+  | { kind: "timeout"; durationMs: number; item: LspCompletionItem }
+  | { kind: "failed"; error: string; item: LspCompletionItem }
+  | { kind: "cancelled"; reason: string; item: LspCompletionItem }
+  | { kind: "stale"; expectedRevision: number; currentRevision: number; item: LspCompletionItem };
+
+export interface ClassifyCompletionResolveInput {
+  item: LspCompletionItem;
+  resolvedItem?: LspCompletionItem | null;
+  error?: unknown;
+  timedOut?: boolean;
+  cancelled?: boolean;
+  hasResolver: boolean;
+  isStale?: boolean;
+  tokenRevision?: number;
+  currentRevision?: number;
+}
+
+/**
+ * Pure classification of completion resolve outcomes (§ED-COMP-001).
+ * Enforces rule: "resolver 缺失不推导 not-required".
+ */
+export function classifyCompletionResolveOutcome(
+  input: ClassifyCompletionResolveInput,
+): CompletionResolveOutcome {
+  const { item } = input;
+  if (input.cancelled) {
+    return { kind: "cancelled", reason: "operation-cancelled", item };
+  }
+  if (input.isStale) {
+    return {
+      kind: "stale",
+      expectedRevision: input.tokenRevision ?? 0,
+      currentRevision: input.currentRevision ?? -1,
+      item,
+    };
+  }
+  if (input.timedOut) {
+    return { kind: "timeout", durationMs: RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS, item };
+  }
+  if (input.error !== undefined && input.error !== null) {
+    const errorMsg = input.error instanceof Error ? input.error.message : String(input.error);
+    return { kind: "failed", error: errorMsg, item };
+  }
+  if (input.resolvedItem) {
+    return {
+      kind: "resolved",
+      item: input.resolvedItem,
+      edits: input.resolvedItem.additionalTextEdits ?? [],
+    };
+  }
+  if (item.additionalTextEdits && item.additionalTextEdits.length > 0) {
+    return { kind: "not-required", item };
+  }
+  if (!input.hasResolver) {
+    // ED-COMP-001: resolver 缺失不推导 not-required
+    return { kind: "unavailable", reason: "missing-resolver", item };
+  }
+  return { kind: "unavailable", reason: "resolver-returned-null", item };
+}
+
+export interface ExecuteCompletionResolveOptions {
+  item: LspCompletionItem;
+  resolve?: (raw: unknown) => Promise<LspCompletionItem | null>;
+  token: CompletionRequestToken;
+  isStillCurrent: (token: CompletionRequestToken) => boolean;
+  timeoutMs?: number;
+  getDocumentRevision?: () => number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Executes an LSP item resolve with full typed outcome classification (§ED-COMP-001).
+ */
+export async function executeCompletionResolve(
+  options: ExecuteCompletionResolveOptions,
+): Promise<CompletionResolveOutcome> {
+  const {
+    item,
+    resolve,
+    token,
+    isStillCurrent,
+    timeoutMs = RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS,
+    getDocumentRevision,
+    signal,
+  } = options;
+
+  if (signal?.aborted) {
+    return classifyCompletionResolveOutcome({ item, hasResolver: !!resolve, cancelled: true });
+  }
+  if (!isStillCurrent(token)) {
+    return classifyCompletionResolveOutcome({
+      item,
+      hasResolver: !!resolve,
+      isStale: true,
+      tokenRevision: token.documentRevision,
+      currentRevision: getDocumentRevision?.(),
+    });
+  }
+  if (item.additionalTextEdits && item.additionalTextEdits.length > 0 && !resolve) {
+    return classifyCompletionResolveOutcome({ item, hasResolver: false });
+  }
+  if (!resolve) {
+    return classifyCompletionResolveOutcome({ item, hasResolver: false });
+  }
+
+  const startRevision = getDocumentRevision?.() ?? token.documentRevision;
+  let timeoutId: number | null = null;
+  const timeoutPromise = new Promise<{ timeout: true }>((res) => {
+    timeoutId = window.setTimeout(() => res({ timeout: true }), timeoutMs);
+  });
+
+  const abortPromise = signal
+    ? new Promise<{ aborted: true }>((res) => {
+        signal.addEventListener("abort", () => res({ aborted: true }), { once: true });
+      })
+    : null;
+
+  try {
+    const rawToResolve = item.raw ?? item;
+    const raceCompetitors: Promise<unknown>[] = [
+      resolve(rawToResolve),
+      timeoutPromise,
+    ];
+    if (abortPromise) raceCompetitors.push(abortPromise);
+
+    const raceResult = await Promise.race(raceCompetitors);
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+
+    if (signal?.aborted || (typeof raceResult === "object" && raceResult !== null && "aborted" in raceResult)) {
+      return classifyCompletionResolveOutcome({ item, hasResolver: true, cancelled: true });
+    }
+    if (typeof raceResult === "object" && raceResult !== null && "timeout" in raceResult) {
+      return classifyCompletionResolveOutcome({ item, hasResolver: true, timedOut: true });
+    }
+
+    if (!isStillCurrent(token)) {
+      return classifyCompletionResolveOutcome({
+        item,
+        hasResolver: true,
+        isStale: true,
+        tokenRevision: token.documentRevision,
+        currentRevision: getDocumentRevision?.(),
+      });
+    }
+    if (getDocumentRevision && getDocumentRevision() !== startRevision) {
+      return classifyCompletionResolveOutcome({
+        item,
+        hasResolver: true,
+        isStale: true,
+        tokenRevision: startRevision,
+        currentRevision: getDocumentRevision(),
+      });
+    }
+
+    const resolved = raceResult as LspCompletionItem | null;
+    if (!resolved) {
+      return classifyCompletionResolveOutcome({ item, hasResolver: true, resolvedItem: null });
+    }
+
+    const mergedItem: LspCompletionItem = {
+      ...item,
+      ...resolved,
+      additionalTextEdits: resolved.additionalTextEdits ?? item.additionalTextEdits,
+    };
+
+    return classifyCompletionResolveOutcome({
+      item,
+      hasResolver: true,
+      resolvedItem: mergedItem,
+    });
+  } catch (err) {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+    if (!isStillCurrent(token)) {
+      return classifyCompletionResolveOutcome({
+        item,
+        hasResolver: true,
+        isStale: true,
+        tokenRevision: token.documentRevision,
+        currentRevision: getDocumentRevision?.(),
+      });
+    }
+    return classifyCompletionResolveOutcome({ item, hasResolver: true, error: err });
+  }
+}
 
 /** Stable-enough identity for QA surfaces; providers rarely send item ids. */
 export function completionItemId(item: LspCompletionItem): string {
@@ -345,9 +560,9 @@ export function buildCompletionAcceptancePlanV2(input: {
   const additional = input.item.additionalTextEdits ?? [];
   const disposition: CompletionAcceptancePlanV2["disposition"] = input.overlapRejected
     ? "blocked-overlap"
-    : input.resolveState.kind === "stale"
+    : input.resolveState.kind === "stale" || input.resolveState.kind === "cancelled"
       ? "blocked-stale"
-      : input.resolveState.kind === "timed-out" || input.resolveState.kind === "failed"
+      : input.resolveState.kind === "timed-out" || input.resolveState.kind === "failed" || input.resolveState.kind === "unavailable"
         ? "needs-explicit-primary-only"
         : "ready";
   return {
@@ -367,8 +582,8 @@ export function buildCompletionAcceptancePlanV2(input: {
   };
 }
 
-/** Why the resolve gate opened; both mean the import edits are unavailable. */
-export type CompletionResolveGateReason = "timeout" | "failed";
+/** Why the resolve gate opened; all mean the import edits are unavailable. */
+export type CompletionResolveGateReason = "timeout" | "failed" | "unavailable";
 
 /**
  * Handed to the host UI when an acceptance needs its import/additional edits

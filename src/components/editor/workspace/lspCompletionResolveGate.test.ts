@@ -6,14 +6,17 @@ import { history, undo } from "@codemirror/commands";
 import type { LspCompletionItem, LspCompletionResult, LspDocumentStatus } from "../../../lib/editor/lsp";
 import {
   buildCompletionAcceptancePlanV2,
+  classifyCompletionResolveOutcome,
   completionItemId,
   createLspCompletionSource,
+  executeCompletionResolve,
   providerScopeFor,
   recentCompletionInvocations,
   recordBasicCompletionInvocation,
   resetBasicCompletionSession,
   resetCompletionTelemetry,
   type CompletionRequestIdentity,
+  type CompletionRequestToken,
   type CompletionResolveGateRequest,
   type LspCompletionHooks,
 } from "./lspCompletion";
@@ -424,5 +427,157 @@ describe("§8.19.4 resolve gate acceptance", () => {
     expect(gates).toHaveLength(0);
     expect(view.state.doc.toString()).toBe("import java.util.Arrays;\n\nasList");
     view.destroy();
+  });
+});
+
+describe("§ED-COMP-001: Typed Completion Resolve Outcomes", () => {
+  const token: CompletionRequestToken = {
+    workspaceId: "ws-r3",
+    fileKey: "A.java",
+    filePath: "/repo/A.java",
+    uri: "file:///repo/A.java",
+    languageId: "java",
+    documentRevision: 7,
+    lspSessionGeneration: 3,
+    requestId: "req-1",
+  };
+
+  it("classifies all 7 typed outcomes accurately", () => {
+    const item = makeItem();
+
+    // 1. resolved
+    const resolvedItem = makeItem({
+      additionalTextEdits: [{
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        newText: "import java.util.List;\n",
+      }],
+    });
+    const resolved = classifyCompletionResolveOutcome({ item, hasResolver: true, resolvedItem });
+    expect(resolved.kind).toBe("resolved");
+    if (resolved.kind === "resolved") {
+      expect(resolved.edits).toHaveLength(1);
+    }
+
+    // 2. not-required
+    const notReqItem = makeItem({
+      additionalTextEdits: [{
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        newText: "import java.util.List;\n",
+      }],
+    });
+    const notRequired = classifyCompletionResolveOutcome({ item: notReqItem, hasResolver: false });
+    expect(notRequired.kind).toBe("not-required");
+
+    // 3. unavailable (resolver 缺失不推导 not-required)
+    const missingResolver = classifyCompletionResolveOutcome({ item, hasResolver: false });
+    expect(missingResolver.kind).toBe("unavailable");
+    if (missingResolver.kind === "unavailable") {
+      expect(missingResolver.reason).toBe("missing-resolver");
+    }
+
+    const resolverReturnedNull = classifyCompletionResolveOutcome({ item, hasResolver: true, resolvedItem: null });
+    expect(resolverReturnedNull.kind).toBe("unavailable");
+    if (resolverReturnedNull.kind === "unavailable") {
+      expect(resolverReturnedNull.reason).toBe("resolver-returned-null");
+    }
+
+    // 4. timeout
+    const timeout = classifyCompletionResolveOutcome({ item, hasResolver: true, timedOut: true });
+    expect(timeout.kind).toBe("timeout");
+
+    // 5. failed
+    const failed = classifyCompletionResolveOutcome({ item, hasResolver: true, error: new Error("network down") });
+    expect(failed.kind).toBe("failed");
+    if (failed.kind === "failed") {
+      expect(failed.error).toBe("network down");
+    }
+
+    // 6. cancelled
+    const cancelled = classifyCompletionResolveOutcome({ item, hasResolver: true, cancelled: true });
+    expect(cancelled.kind).toBe("cancelled");
+
+    // 7. stale
+    const stale = classifyCompletionResolveOutcome({
+      item,
+      hasResolver: true,
+      isStale: true,
+      tokenRevision: 7,
+      currentRevision: 8,
+    });
+    expect(stale.kind).toBe("stale");
+    if (stale.kind === "stale") {
+      expect(stale.expectedRevision).toBe(7);
+      expect(stale.currentRevision).toBe(8);
+    }
+  });
+
+  it("executeCompletionResolve handles timeout, throw, null, cancel, and revision drift safely", async () => {
+    vi.useFakeTimers();
+    const item = makeItem();
+
+    // Missing resolver returns unavailable
+    const missing = await executeCompletionResolve({
+      item,
+      token,
+      isStillCurrent: () => true,
+    });
+    expect(missing.kind).toBe("unavailable");
+
+    // Throw returns failed
+    const throwResult = await executeCompletionResolve({
+      item,
+      resolve: async () => { throw new Error("lsp crashed"); },
+      token,
+      isStillCurrent: () => true,
+    });
+    expect(throwResult.kind).toBe("failed");
+
+    // Null returns unavailable
+    const nullResult = await executeCompletionResolve({
+      item,
+      resolve: async () => null,
+      token,
+      isStillCurrent: () => true,
+    });
+    expect(nullResult.kind).toBe("unavailable");
+
+    // Cancel via AbortSignal returns cancelled
+    const controller = new AbortController();
+    controller.abort();
+    const cancelResult = await executeCompletionResolve({
+      item,
+      resolve: async () => makeItem(),
+      token,
+      isStillCurrent: () => true,
+      signal: controller.signal,
+    });
+    expect(cancelResult.kind).toBe("cancelled");
+
+    // Stale revision returns stale
+    let docRev = 7;
+    const stalePromise = executeCompletionResolve({
+      item,
+      resolve: async () => {
+        docRev = 8; // User typed!
+        return makeItem();
+      },
+      token,
+      isStillCurrent: () => true,
+      getDocumentRevision: () => docRev,
+    });
+    const staleResult = await stalePromise;
+    expect(staleResult.kind).toBe("stale");
+
+    // Timeout returns timeout
+    const timeoutPromise = executeCompletionResolve({
+      item,
+      resolve: async () => new Promise<LspCompletionItem | null>(() => {}),
+      token,
+      isStillCurrent: () => true,
+      timeoutMs: 100,
+    });
+    await vi.advanceTimersByTimeAsync(150);
+    const timeoutResult = await timeoutPromise;
+    expect(timeoutResult.kind).toBe("timeout");
   });
 });

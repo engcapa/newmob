@@ -258,7 +258,7 @@
 - 验证：qa audit、native case、hash/receipt 对账；未跑平台保持 blocked。
 
 ### ED-COMP-001 定义 typed completion resolve outcome
-<!-- ide-task {"id":"ED-COMP-001","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB7"]} -->
+<!-- ide-task {"id":"ED-COMP-001","status":"done","priority":"P0","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T11:54:36Z","baseline":"a9b003af321b10ceb6b94ebb8bca04cba8f026a2","depends_on":[],"legacy":["BB7"],"updated_at":"2026-08-29T11:57:48Z","evidence":"vitest: lspCompletionResolveGate.test.ts, lspCompletion.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：resolve 区分 `resolved/not-required/unavailable/timeout/failed/cancelled/stale`；resolver 缺失不推导 not-required；非安全结果保留 popup、edit=0，提供显式降级入口。
 - 主文件：`lspCompletion.ts`、resolve gate UI/tests。
