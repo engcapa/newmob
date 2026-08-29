@@ -41,6 +41,7 @@ import {
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./CodeMirrorHost";
+import type { WorkspaceDocumentTransactionOwner } from "./workspaceDocumentTransactionOwner";
 import type { EditorAppearanceExtensionProfile } from "./editorAppearanceExtension";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type { FileCoverage } from "./coverageModel";
@@ -178,6 +179,8 @@ interface EditorGroupProps {
   onSave: (key: string) => void;
   /** §8.18.2: workspace action host owning the editor.* business actions. */
   workspaceActionHost?: WorkspaceActionHost | null;
+  /** §8.26 / ED-MULTIVIEW-002: shared document transaction owner across splits. */
+  transactionOwner?: WorkspaceDocumentTransactionOwner | null;
   onHover: (
     file: OpenFileViewModel,
     position: LspPosition,
@@ -324,6 +327,7 @@ export function EditorGroup({
   onParameterTrigger,
   onParameterInvalidate,
   onParameterEscape,
+  transactionOwner = null,
   parameterPopup = null,
   onSelectionChange,
   onViewportChange,
@@ -787,6 +791,8 @@ export function EditorGroup({
                       <CodeMirrorHost
                         key={`${activeFile.key}:edit`}
                         fileKey={activeFile.key}
+                        viewId={groupId}
+                        transactionOwner={transactionOwner}
                         clipboardWorkspaceId={workspaceInstanceId}
                         onClipboardUnavailable={onClipboardUnavailable}
                         workspaceActionHost={workspaceActionHost}
@@ -853,8 +859,10 @@ export function EditorGroup({
                     <CodeMirrorHost
                       key={activeFile.key}
                       fileKey={activeFile.key}
-                        clipboardWorkspaceId={workspaceInstanceId}
-                        onClipboardUnavailable={onClipboardUnavailable}
+                      viewId={groupId}
+                      transactionOwner={transactionOwner}
+                      clipboardWorkspaceId={workspaceInstanceId}
+                      onClipboardUnavailable={onClipboardUnavailable}
                       workspaceActionHost={workspaceActionHost}
                       path={activeFile.languagePath}
                       doc={activeFile.text}

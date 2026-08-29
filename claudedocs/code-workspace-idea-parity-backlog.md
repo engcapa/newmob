@@ -408,7 +408,7 @@
 - 验证：现状 reproduction 与 invariants、迁移/rollback/test plan 可执行。
 
 ### ED-MULTIVIEW-002 实现 shared document + undo transaction
-<!-- ide-task {"id":"ED-MULTIVIEW-002","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-MULTIVIEW-001"],"legacy":["N14.3"]} -->
+<!-- ide-task {"id":"ED-MULTIVIEW-002","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:15:31Z","baseline":"ed4dcb997fc4ea5ca1fb48a97bc3fcd688a63812","depends_on":["ED-MULTIVIEW-001"],"legacy":["N14.3"],"updated_at":"2026-08-29T12:21:03Z","evidence":"vitest: workspaceDocumentTransactionOwner.test.ts, EditorGroup.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：同文件所有 view 共享 document changes/history，另一个 view 不把全文同步当一步；LSP/dirty revision 只增一次。
 - 验证：双/三 split typing、undo/redo、completion/paste multi-edit、close/reopen view、external change。

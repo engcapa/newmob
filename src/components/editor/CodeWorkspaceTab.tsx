@@ -299,6 +299,7 @@ import {
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./workspace/CodeMirrorHost";
+import { WorkspaceDocumentTransactionOwner } from "./workspace/workspaceDocumentTransactionOwner";
 import { SurroundWithDialog } from "./workspace/SurroundWithDialog";
 import { GenerateCodeDialog } from "./workspace/GenerateCodeDialog";
 import {
@@ -1831,6 +1832,7 @@ export function CodeWorkspaceTab({
     secondary: [],
   });
   const activeEditorGroupIdRef = useRef<EditorGroupId>("primary");
+  const documentTransactionOwnerRef = useRef(new WorkspaceDocumentTransactionOwner());
   const initialOpenedKeyRef = useRef<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const treePaneRef = useRef<HTMLElement | null>(null);
@@ -13980,6 +13982,7 @@ export function CodeWorkspaceTab({
         workspaceInstanceId={workspaceInstanceId}
         visible={visible}
         workspaceActionHost={actionsController.host}
+        transactionOwner={documentTransactionOwnerRef.current}
         readOnly={workspaceResourceOperationLocked}
         softWrap={groupSoftWrap}
         appearance={groupAppearance}

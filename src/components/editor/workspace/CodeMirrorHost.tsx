@@ -7,7 +7,12 @@ import {
   useState,
   type MutableRefObject,
 } from "react";
-import { Compartment, EditorState, Prec, type Extension, type Text } from "@codemirror/state";
+import { ChangeSet, Compartment, EditorState, Prec, type Extension, type Text } from "@codemirror/state";
+import {
+  remoteTransactionAnnotation,
+  type DocumentChangeDelta,
+  type WorkspaceDocumentTransactionOwner,
+} from "./workspaceDocumentTransactionOwner";
 import {
   EditorView,
   closeHoverTooltip,
@@ -173,6 +178,10 @@ interface CodeMirrorHostProps {
   path: string;
   /** Stable buffer identity used by the workspace editor command owner. */
   fileKey?: string;
+  /** Editor view or group identifier (§8.26 / ED-MULTIVIEW-002). */
+  viewId?: string;
+  /** Shared document transaction owner (§8.26 / ED-MULTIVIEW-002). */
+  transactionOwner?: WorkspaceDocumentTransactionOwner | null;
   doc: string;
   visible: boolean;
   /**
@@ -1370,6 +1379,8 @@ function sameEditorAppearance(
 function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirrorHostProps): boolean {
   if (prev.path !== next.path) return false;
   if (prev.fileKey !== next.fileKey) return false;
+  if (prev.viewId !== next.viewId) return false;
+  if (prev.transactionOwner !== next.transactionOwner) return false;
   if (prev.doc !== next.doc) return false;
   if (prev.visible !== next.visible) return false;
   if (prev.readOnly !== next.readOnly) return false;
@@ -1407,6 +1418,8 @@ function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirror
 export const CodeMirrorHost = memo(function CodeMirrorHost({
   path,
   fileKey = path,
+  viewId,
+  transactionOwner = null,
   doc,
   visible,
   diagnostics,
@@ -1470,6 +1483,12 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const viewRef = useRef<EditorView | null>(null);
   const completionControllerRef = useRef(completionController);
   completionControllerRef.current = completionController;
+  const viewIdRef = useRef(viewId);
+  viewIdRef.current = viewId;
+  const fileKeyRef = useRef(fileKey);
+  fileKeyRef.current = fileKey;
+  const transactionOwnerRef = useRef(transactionOwner);
+  transactionOwnerRef.current = transactionOwner;
   // §8.18.2: the mount-once editor effect reads the live host through a ref so
   // editor.* actions register against the workspace controller's instance.
   const workspaceActionHostRef = useRef<WorkspaceActionHost | null>(workspaceActionHost);
@@ -2088,12 +2107,27 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            if (!applyingExternalDocRef.current) {
+            const isRemote = update.transactions.some((tr) => tr.annotation(remoteTransactionAnnotation));
+            if (!applyingExternalDocRef.current && !isRemote) {
               // onChange currently carries a full string, so one conversion is
               // unavoidable. Remember it to avoid a second full conversion in
               // the controlled-doc effect after React reflects the change.
               const nextDoc = update.state.doc.toString();
               lastDocumentTextRef.current = nextDoc;
+              if (transactionOwnerRef.current && fileKeyRef.current && viewIdRef.current) {
+                const deltas: DocumentChangeDelta[] = [];
+                update.changes.iterChanges((fromA, toA, _fromB, _toB, insertedText) => {
+                  deltas.push({ from: fromA, to: toA, insert: insertedText.toString() });
+                });
+                if (deltas.length > 0) {
+                  transactionOwnerRef.current.dispatchTransaction(
+                    fileKeyRef.current,
+                    viewIdRef.current,
+                    deltas,
+                    "user-input",
+                  );
+                }
+              }
               onChangeRef.current(
                 nextDoc,
                 lspPositionFromOffset(update.state.doc, update.state.selection.main.head),
@@ -2107,6 +2141,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
             const lastChar = inserted.slice(-1);
             if (
               !applyingExternalDocRef.current
+              && !isRemote
               && lastChar
               && signatureTriggersRef.current.includes(lastChar)
             ) {
@@ -2482,6 +2517,33 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       });
     });
   }, [completionController, buildAutocompletionExtension]);
+
+  useEffect(() => {
+    const owner = transactionOwner;
+    if (!owner || !fileKey || !viewId) return;
+
+    return owner.subscribe(fileKey, (transaction) => {
+      if (transaction.sourceViewId === viewId) return;
+      const currentView = viewRef.current;
+      if (!currentView || !currentView.dom.isConnected) return;
+
+      const changes = transaction.changes.map((c) => ({
+        from: c.from,
+        to: c.to,
+        insert: c.insert,
+      }));
+      const changeSet = ChangeSet.of(changes, currentView.state.doc.length);
+      const mappedSelection = currentView.state.selection.map(changeSet);
+
+      currentView.dispatch({
+        changes,
+        selection: mappedSelection,
+        scrollIntoView: false,
+        annotations: [remoteTransactionAnnotation.of(true)],
+      });
+      lastDocumentTextRef.current = currentView.state.doc.toString();
+    });
+  }, [transactionOwner, fileKey, viewId]);
 
   useEffect(() => {
     const view = viewRef.current;
