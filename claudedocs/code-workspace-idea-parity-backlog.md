@@ -118,7 +118,7 @@
 - 验证：两个聚焦用例各重复运行，随后连续两次完整 `pnpm test`。
 
 ### ED-GATE-002 固化可复现的 Editor 基线记录
-<!-- ide-task {"id":"ED-GATE-002","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-GATE-001"],"legacy":["BB0-C"]} -->
+<!-- ide-task {"id":"ED-GATE-002","status":"done","priority":"P0","size":"S","owner":"editor-agent-01","claimed_at":"2026-08-29T07:30:49Z","baseline":"7c5b6bf55cec53200e62d70807f1d943b1dc85b2","depends_on":["ED-GATE-001"],"legacy":["BB0-C"],"updated_at":"2026-08-29T07:39:16Z","evidence":"focused 17/17; verify-deterministic exit 0; pnpm build exit 0; cargo test --lib 1302 passed exit 0; pnpm test 349 files / 3166 tests exit 0; qa audit --diff exit 0"} -->
 
 - 结果：生成只读、非 release claim 的 baseline summary，记录 source commit/tree、命令、test file/test count、exit 和失败列表；相同输入可重复生成。
 - 主文件：`.agents/skills/qa-ui-auto/scripts/` 下独立 helper 与测试；不得写 current release evidence。
