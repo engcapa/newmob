@@ -380,7 +380,7 @@
 - 验证：unknown/expired/revoked issuer、手写/tampered receipt 全 fail closed。
 
 ### ED-REL-002 收紧 source/test-plan/bundle identity
-<!-- ide-task {"id":"ED-REL-002","status":"ready","priority":"P2","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-REL-001"],"legacy":["BB2"]} -->
+<!-- ide-task {"id":"ED-REL-002","status":"done","priority":"P2","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:52:18Z","baseline":"854536557468863f091a5b9ed8b73c39b1e4f8f8","depends_on":["ED-REL-001"],"legacy":["BB2"],"updated_at":"2026-08-29T14:53:06Z","evidence":"vitest: bundleIdentity.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：tracked mode/bytes/symlink/deleted/submodule、真实 bundle manifest、schema/scope/runner/cases/runbooks/catalog/baseline 全进入 identity；git/read/missing/untracked product input fail closed。
 - 验证：mode/deleted/symlink/git error/missing bundle/changed test plan attack matrix。
