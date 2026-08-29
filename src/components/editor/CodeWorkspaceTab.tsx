@@ -55,6 +55,7 @@ import {
   AlignHorizontalJustifyCenter,
   Maximize2,
   Square,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   workspaceListDir,
@@ -14011,6 +14012,9 @@ export function CodeWorkspaceTab({
         data-clipboard-revision={clipboardSnapshot.revision}
         data-clipboard-history-revision={clipboardSnapshot.historyRevision}
         data-clipboard-consumer-count={clipboardSnapshot.consumerCount}
+        data-tab-policy-limit={tabPolicy.limitPerLeaf}
+        data-tab-policy-order={tabPolicy.order}
+        data-reopen-stack-count={closedTabsStack.length}
         className="relative h-full w-full min-h-0 flex flex-col overflow-hidden bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)]"
       >
       <header className="h-10 shrink-0 flex items-center gap-2 overflow-x-auto px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]">
@@ -14239,6 +14243,12 @@ export function CodeWorkspaceTab({
           icon={<PanelRight className="w-3.5 h-3.5" />}
           active={rightPaneOpen && rightPaneTab === "outline"}
           onClick={() => executeWorkspaceCommand("workspace.toggleDocumentationPane")}
+        />
+        <IconButton
+          label="Editor tab policy settings"
+          testId="code-workspace-tab-policy-settings"
+          icon={<SlidersHorizontal className="w-3.5 h-3.5" />}
+          onClick={openTabPolicySettings}
         />
       </header>
 

@@ -5568,6 +5568,30 @@ controls:
     selector: '[data-testid="code-workspace-bottom-tab-terminal"]'
     kind: interactive
     optional: true
+  - id: tab-policy-settings
+    selector: '[data-testid="code-workspace-tab-policy-settings"]'
+    kind: interactive
+    optional: true
+  - id: tab-policy-dialog
+    selector: '[data-testid="workspace-tab-policy-settings-dialog"]'
+    kind: display
+    optional: true
+  - id: tab-policy-limit
+    selector: '[data-testid="workspace-tab-policy-limit"]'
+    kind: interactive
+    optional: true
+  - id: tab-policy-eviction-preview
+    selector: '[data-testid="workspace-tab-policy-eviction-preview"]'
+    kind: display
+    optional: true
+  - id: tab-policy-apply
+    selector: '[data-testid="workspace-tab-policy-apply"]'
+    kind: interactive
+    optional: true
+  - id: tab-policy-close
+    selector: '[data-testid="workspace-tab-policy-close"]'
+    kind: interactive
+    optional: true
   - id: split-down
     selector: '[data-testid="code-workspace-split-down"]'
     kind: interactive

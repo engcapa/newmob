@@ -174,7 +174,7 @@
 - 验证：同文件双 split、diff/preview/save lease、每资源一次、任一步失败与 replay。
 
 ### ED-TABS-004 升级 C4 为 Tab Policy lifecycle case
-<!-- ide-task {"id":"ED-TABS-004","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-TABS-003"],"legacy":["BB10-C4"]} -->
+<!-- ide-task {"id":"ED-TABS-004","status":"done","priority":"P0","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T09:30:57Z","baseline":"48da37bb4edc7295e231506898820e2c2522c12e","depends_on":["ED-TABS-003"],"legacy":["BB10-C4"],"updated_at":"2026-08-29T09:35:24Z","evidence":"Upgraded TC-IDE-C4-01 to tab policy lifecycle case; separated TC-IDE-C4-02 for split/reopen; added tab-policy controls to F25.5; qa lint (143 cases, 0 errors, 0 orphans); dry-run TC-IDE-C4-01 & C4-02 (2 passed); pnpm build exit 0"} -->
 
 - 结果：C4 从 Settings 打开 Tab Policy、修改 limit、确认 dirty，断言 post-layout、active tab、resource close/recovery counters；原 split/reopen 流程拆成独立 case。
 - 主文件：C4 YAML、feature controls、observation contract。

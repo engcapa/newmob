@@ -155,6 +155,12 @@
 - `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
 - `[data-testid="code-workspace-search-everywhere"]` — display [optional] — F25.5.search-everywhere
 - `[data-testid="code-workspace-bottom-tab-terminal"]` — interactive [optional] — F25.5.bottom-dock-terminal-tab
+- `[data-testid="code-workspace-tab-policy-settings"]` — interactive [optional] — F25.5.tab-policy-settings
+- `[data-testid="workspace-tab-policy-settings-dialog"]` — display [optional] — F25.5.tab-policy-dialog
+- `[data-testid="workspace-tab-policy-limit"]` — interactive [optional] — F25.5.tab-policy-limit
+- `[data-testid="workspace-tab-policy-eviction-preview"]` — display [optional] — F25.5.tab-policy-eviction-preview
+- `[data-testid="workspace-tab-policy-apply"]` — interactive [optional] — F25.5.tab-policy-apply
+- `[data-testid="workspace-tab-policy-close"]` — interactive [optional] — F25.5.tab-policy-close
 - `[data-testid="code-workspace-split-down"]` — interactive [optional] — F25.5.split-down
 - `[data-testid="code-workspace-split-close"]` — interactive [optional] — F25.5.split-close
 - `[data-testid="keymap-scheme-select"]` — interactive [optional] — F25.5.keymap-scheme-select

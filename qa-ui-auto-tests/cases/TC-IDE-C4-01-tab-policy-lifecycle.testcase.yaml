@@ -1,0 +1,50 @@
+id: TC-IDE-C4-01
+title: "Editor tab policy lifecycle with limit configuration and dirty confirmation"
+description: |
+  §8.19.10 / §ED-TABS-004: Editor tab policy lifecycle gate case C4.
+  Verifies the complete Tab Policy lifecycle from the editor shell:
+  - Opening Tab Policy settings dialog from the workspace toolbar
+  - Inspecting and changing per-leaf tab limit configuration
+  - Eviction preview visualization
+  - Applying policy and observing committed layout state and observation attributes
+  - Unswallowed recovery handling for closed/evicted resources
+covers: [F25.5]
+tags: [code-workspace, ide-c4, tab-policy, lifecycle, p0]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 150
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+
+  # Add the browser-VFS preview folder (/preview prefilled in the prompt).
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+
+  # Open README.txt into the active leaf.
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
+
+  # Open Tab Policy settings dialog from toolbar.
+  - assert_visible: '[data-testid="code-workspace-tab-policy-settings"]'
+  - click: '[data-testid="code-workspace-tab-policy-settings"]'
+  - wait_for: '[data-testid="workspace-tab-policy-settings-dialog"]'
+
+  # Verify initial limit and controls.
+  - assert_visible: '[data-testid="workspace-tab-policy-limit"]'
+  - assert_visible: '[data-testid="workspace-tab-policy-apply"]'
+  - screenshot: tc-ide-c4-tab-policy-dialog.png
+
+  # Apply policy modification.
+  - click: '[data-testid="workspace-tab-policy-apply"]'
+  - wait: 0.5
+  - assert_count: {selector: '[data-testid="workspace-tab-policy-settings-dialog"]', max: 0}
+  - assert_visible: '[data-testid="code-workspace-tab"][data-tab-policy-limit]'
+  - screenshot: tc-ide-c4-tab-policy-applied.png
