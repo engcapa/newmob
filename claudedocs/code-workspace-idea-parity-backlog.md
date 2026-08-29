@@ -414,7 +414,7 @@
 - 验证：双/三 split typing、undo/redo、completion/paste multi-edit、close/reopen view、external change。
 
 ### ED-MULTIVIEW-003 同步 shared decoration 并保留 per-view state
-<!-- ide-task {"id":"ED-MULTIVIEW-003","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-MULTIVIEW-002"],"legacy":["N14.3"]} -->
+<!-- ide-task {"id":"ED-MULTIVIEW-003","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:23:21Z","baseline":"7296ca6a382a9471c1dc0a884df42b07035645a9","depends_on":["ED-MULTIVIEW-002"],"legacy":["N14.3"],"updated_at":"2026-08-29T12:27:22Z","evidence":"vitest: workspaceMultiViewState.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：diagnostics/breakpoints/bookmarks/folds 的 document state 同步；caret/selection/scroll 保持 per-view；view close 不释放最后 document resource。
 - 验证：多 view decoration/fold/scroll、resource lease、restore。

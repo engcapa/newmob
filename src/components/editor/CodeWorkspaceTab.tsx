@@ -841,7 +841,6 @@ import {
   type JavaMainClassResolution,
 } from "../../lib/editor/dap";
 import type { DebugStackFrame } from "./workspace/dapDebugModel";
-import type { DebugBreakpointMarker } from "./workspace/debugEditorChrome";
 import type { EditorRevealTarget } from "./workspace/EditorGroup";
 import { LspMessageRequestDialog } from "./workspace/LspMessageRequestDialog";
 import { useWorkspaceLspClientEvents } from "./workspace/useWorkspaceLspClientEvents";
@@ -13257,28 +13256,6 @@ export function CodeWorkspaceTab({
   const [editingBreakpoint, setEditingBreakpoint] = useState<{ path: string; line: number } | null>(null);
   const activeFileAbsPath = activeFile ? absolutePathForOpenFile(activeFile) : null;
   const debugSessionActive = !!debug.state && debug.state.status !== "terminated";
-  const activeDebugBreakpoints = useMemo<DebugBreakpointMarker[]>(() => {
-    if (!activeFileAbsPath) return [];
-    const key = normalizeFsPath(activeFileAbsPath);
-    const list = debug.breakpoints[key] ?? debug.breakpoints[activeFileAbsPath] ?? [];
-    const runtime = debug.breakpointRuntime[key] ?? debug.breakpointRuntime[activeFileAbsPath] ?? {};
-    const muted = debug.breakpointsMuted;
-    return list.map((bp) => {
-      const enabled = bp.enabled !== false && !muted;
-      const state = runtime[bp.line];
-      // Design-time (no session) shows solid. In-session: only a confirmed
-      // `verified` binding is solid; pending/failed/not-yet-reported render as
-      // "not bound" so a red dot never implies a breakpoint that cannot hit.
-      const verified = !debugSessionActive || state?.status === "verified";
-      return {
-        line: bp.line,
-        conditional: !!(bp.condition || bp.hitCondition),
-        logpoint: !!bp.logMessage,
-        enabled,
-        verified,
-      };
-    });
-  }, [activeFileAbsPath, debug.breakpoints, debug.breakpointRuntime, debug.breakpointsMuted, debugSessionActive]);
   const activeDebugCurrentLine = useMemo<number | null>(() => {
     const loc = debug.currentLocation;
     if (!loc || !activeFileAbsPath) return null;
@@ -13286,7 +13263,6 @@ export function CodeWorkspaceTab({
   }, [activeFileAbsPath, debug.currentLocation]);
   /** The editor is showing the stopped frame: inline values + hover apply here. */
   const debugStoppedHere = debug.state?.status === "stopped" && activeDebugCurrentLine != null;
-  const activeDebugInlineValues = debugStoppedHere ? debug.frameVariables : undefined;
   const debugRunToCursorLine = useCallback((line: number) => {
     if (activeFileAbsPath) debug.runToCursor(normalizeFsPath(activeFileAbsPath), line);
   }, [activeFileAbsPath, debug]);
@@ -13975,6 +13951,34 @@ export function CodeWorkspaceTab({
       ? breadcrumbPathSegments
       : groupFile ? breadcrumbSegmentsForFile(groupFile, roots) : [];
 
+    const groupFileAbsPath = groupFile ? absolutePathForOpenFile(groupFile) : null;
+    const groupDebugBreakpoints = (() => {
+      if (!groupFileAbsPath) return undefined;
+      const key = normalizeFsPath(groupFileAbsPath);
+      const list = debug.breakpoints[key] ?? debug.breakpoints[groupFileAbsPath] ?? [];
+      const runtime = debug.breakpointRuntime[key] ?? debug.breakpointRuntime[groupFileAbsPath] ?? {};
+      const muted = debug.breakpointsMuted;
+      return list.map((bp) => {
+        const enabled = bp.enabled !== false && !muted;
+        const state = runtime[bp.line];
+        const verified = !debugSessionActive || state?.status === "verified";
+        return {
+          line: bp.line,
+          conditional: !!(bp.condition || bp.hitCondition),
+          logpoint: !!bp.logMessage,
+          enabled,
+          verified,
+        };
+      });
+    })();
+    const groupDebugCurrentLine = (() => {
+      const loc = debug.currentLocation;
+      if (!loc || !groupFileAbsPath) return null;
+      return fsPathEquals(loc.path, groupFileAbsPath) ? loc.line : null;
+    })();
+    const groupDebugStoppedHere = debug.state?.status === "stopped" && groupDebugCurrentLine != null;
+    const groupDebugInlineValues = groupDebugStoppedHere ? debug.frameVariables : undefined;
+
     return (
       <EditorGroup
         onClipboardUnavailable={setStatusMessage}
@@ -14021,11 +14025,22 @@ export function CodeWorkspaceTab({
         activeCoverage={groupFile && coverageReport ? findFileCoverage(coverageReport, absolutePathForOpenFile(groupFile) ?? groupFile.languagePath) : null}
         coverageEnabled={coverageOverlayEnabled}
         activeCodeStyle={getEffectiveCodeStyleForFile(groupFile)}
-        activeDebugBreakpoints={groupId === activeEditorGroupId ? activeDebugBreakpoints : undefined}
-        activeDebugCurrentLine={groupId === activeEditorGroupId ? activeDebugCurrentLine : null}
-        activeDebugInlineValues={groupId === activeEditorGroupId ? activeDebugInlineValues : undefined}
-        onToggleBreakpoint={groupId === activeEditorGroupId ? toggleActiveBreakpoint : undefined}
-        onEditBreakpoint={groupId === activeEditorGroupId ? editActiveBreakpoint : undefined}
+        activeDebugBreakpoints={groupDebugBreakpoints}
+        activeDebugCurrentLine={groupDebugCurrentLine}
+        activeDebugInlineValues={groupDebugInlineValues}
+        onToggleBreakpoint={(line) => {
+          if (groupFileAbsPath) debug.toggleBreakpoint(normalizeFsPath(groupFileAbsPath), line);
+        }}
+        onEditBreakpoint={(line) => {
+          if (!groupFileAbsPath) return;
+          const key = normalizeFsPath(groupFileAbsPath);
+          if (!(debug.breakpoints[key] ?? []).some((bp) => bp.line === line)) {
+            debug.toggleBreakpoint(key, line);
+          }
+          setEditingBreakpoint({ path: key, line });
+          setBottomDockTab("debug");
+          setBottomDockOpen(true);
+        }}
         debugStep={groupId === activeEditorGroupId && debugSessionActive ? debug.step : null}
         debugRunToCursor={groupId === activeEditorGroupId && debugSessionActive ? debugRunToCursorLine : null}
         debugStop={groupId === activeEditorGroupId && debugSessionActive ? debug.terminate : null}
