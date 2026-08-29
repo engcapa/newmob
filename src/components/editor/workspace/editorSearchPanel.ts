@@ -1,4 +1,6 @@
 import { SearchQuery, closeSearchPanel, findNext, findPrevious, getSearchQuery, replaceAll, replaceNext, setSearchQuery } from "@codemirror/search";
+import { EditorSelection, type EditorState } from "@codemirror/state";
+import { syntaxTree } from "@codemirror/language";
 import { EditorView, type Panel, type ViewUpdate } from "@codemirror/view";
 
 function button(label: string, text: string, onClick: () => void): HTMLButtonElement {
@@ -48,6 +50,115 @@ function matchStatus(view: EditorView, query: SearchQuery): string {
   const selection = view.state.selection.main;
   const current = matches.findIndex((match) => match.from === selection.from && match.to === selection.to);
   return current === -1 ? `${matches.length} matches` : `${current + 1} / ${matches.length}`;
+}
+
+export type SearchContextFilter = "anywhere" | "comments" | "strings" | "exclude-comments";
+
+export interface SearchFilterOptions {
+  inSelection?: boolean;
+  selectionRange?: { from: number; to: number } | null;
+  contextFilter?: SearchContextFilter;
+}
+
+/**
+ * Returns whether syntax-aware context filtering is available for the given EditorState.
+ * Only languages with an actual Lezer syntax tree parser are supported; plain-text returns false.
+ */
+export function isSyntaxFilterAvailable(state: EditorState): boolean {
+  try {
+    const tree = syntaxTree(state);
+    return tree.length > 0 && (tree.topNode.name !== "" || tree.topNode.firstChild != null);
+  } catch {
+    return false;
+  }
+}
+
+export function matchContextFilter(
+  state: EditorState,
+  from: number,
+  to: number,
+  filter: SearchContextFilter,
+): boolean {
+  if (filter === "anywhere") return true;
+  if (!isSyntaxFilterAvailable(state)) return false;
+
+  const tree = syntaxTree(state);
+  const mid = Math.floor((from + to) / 2);
+  let node: ReturnType<typeof tree.resolveInner> | null = tree.resolveInner(mid, 1);
+
+  let isComment = false;
+  let isString = false;
+
+  while (node) {
+    const name = node.name.toLowerCase();
+    if (name.includes("comment")) {
+      isComment = true;
+      break;
+    }
+    if (
+      name.includes("string")
+      || name.includes("character")
+      || (name.includes("literal") && (name.includes("str") || name.includes("char")))
+    ) {
+      isString = true;
+      break;
+    }
+    node = node.parent;
+  }
+
+  if (filter === "comments") return isComment;
+  if (filter === "strings") return isString;
+  if (filter === "exclude-comments") return !isComment;
+  return true;
+}
+
+/**
+ * Finds all matches of query satisfying inSelection and contextFilter criteria.
+ */
+export function getFilteredMatches(
+  state: EditorState,
+  query: SearchQuery,
+  options?: SearchFilterOptions,
+): Array<{ from: number; to: number }> {
+  if (!query.valid || !query.search) return [];
+  const matches: Array<{ from: number; to: number }> = [];
+  const cursor = query.getCursor(state);
+
+  const selRange = options?.inSelection && options.selectionRange ? options.selectionRange : null;
+  const context = options?.contextFilter ?? "anywhere";
+
+  for (let item = cursor.next(); !item.done; item = cursor.next()) {
+    const { from, to } = item.value;
+    if (selRange && (from < selRange.from || to > selRange.to)) {
+      continue;
+    }
+    if (context !== "anywhere" && !matchContextFilter(state, from, to, context)) {
+      continue;
+    }
+    matches.push({ from, to });
+  }
+
+  return matches;
+}
+
+/**
+ * Selects all occurrences matching the search query and filters.
+ */
+export function selectAllOccurrences(
+  view: EditorView,
+  query: SearchQuery,
+  options?: SearchFilterOptions,
+): boolean {
+  const matches = getFilteredMatches(view.state, query, options);
+  if (matches.length === 0) return false;
+
+  view.dispatch({
+    selection: EditorSelection.create(
+      matches.map((m) => EditorSelection.range(m.from, m.to)),
+    ),
+    scrollIntoView: true,
+  });
+  return true;
 }
 
 export type CasingStyle = "upper" | "lower" | "title" | "camel" | "pascal" | "other";
@@ -178,12 +289,17 @@ class WorkspaceSearchPanel implements Panel {
   readonly top = true;
 
   private query: SearchQuery;
+  private inSelection = false;
+  private contextFilter: SearchContextFilter = "anywhere";
   private readonly searchField: HTMLInputElement;
   private readonly replaceField: HTMLInputElement;
   private readonly caseButton: HTMLButtonElement;
   private readonly wordButton: HTMLButtonElement;
   private readonly regexpButton: HTMLButtonElement;
+  private readonly inSelectionButton: HTMLButtonElement;
+  private readonly contextFilterButton: HTMLButtonElement;
   private readonly preserveCaseButton: HTMLButtonElement;
+  private readonly selectAllButton: HTMLButtonElement;
   private readonly status: HTMLSpanElement;
 
   constructor(private readonly view: EditorView) {
@@ -195,7 +311,10 @@ class WorkspaceSearchPanel implements Panel {
     this.caseButton = button("Match case", "Aa", () => this.toggle("caseSensitive"));
     this.wordButton = button("Match whole word", "W", () => this.toggle("wholeWord"));
     this.regexpButton = button("Use regular expression", ".*", () => this.toggle("regexp"));
+    this.inSelectionButton = button("Find in selection", "In Sel", () => this.toggleInSelection());
+    this.contextFilterButton = button("Filter context", "Anywhere", () => this.cycleContextFilter());
     this.preserveCaseButton = button("Preserve case", "AB/ab", () => this.togglePreserveCase());
+    this.selectAllButton = button("Select all occurrences", "Select All", () => this.handleSelectAll());
     this.status = document.createElement("span");
     this.status.className = "cm-workspace-search-status";
     this.status.setAttribute("aria-live", "polite");
@@ -207,9 +326,12 @@ class WorkspaceSearchPanel implements Panel {
       this.caseButton,
       this.wordButton,
       this.regexpButton,
+      this.inSelectionButton,
+      this.contextFilterButton,
       this.status,
       button("Previous match", "↑", () => findPrevious(this.view)),
       button("Next match", "↓", () => findNext(this.view)),
+      this.selectAllButton,
       button("Close find and replace", "×", () => closeSearchPanel(this.view)),
     );
 
@@ -276,6 +398,46 @@ class WorkspaceSearchPanel implements Panel {
     const current = this.preserveCaseButton.getAttribute("aria-pressed") === "true";
     this.preserveCaseButton.setAttribute("aria-pressed", current ? "false" : "true");
     this.replaceField.focus();
+  }
+
+  private toggleInSelection(): void {
+    this.inSelection = !this.inSelection;
+    this.inSelectionButton.setAttribute("aria-pressed", String(this.inSelection));
+    this.updateStatus();
+    this.searchField.focus();
+  }
+
+  private cycleContextFilter(): void {
+    if (!isSyntaxFilterAvailable(this.view.state)) {
+      this.contextFilter = "anywhere";
+      this.contextFilterButton.textContent = "Anywhere";
+      this.contextFilterButton.setAttribute("aria-disabled", "true");
+      return;
+    }
+    const order: SearchContextFilter[] = ["anywhere", "comments", "strings", "exclude-comments"];
+    const currentIdx = order.indexOf(this.contextFilter);
+    const next = order[(currentIdx + 1) % order.length];
+    this.contextFilter = next;
+    const labels: Record<SearchContextFilter, string> = {
+      anywhere: "Anywhere",
+      comments: "In Comments",
+      strings: "In Strings",
+      "exclude-comments": "No Comments",
+    };
+    this.contextFilterButton.textContent = labels[next];
+    this.contextFilterButton.setAttribute("aria-pressed", next !== "anywhere" ? "true" : "false");
+    this.updateStatus();
+    this.searchField.focus();
+  }
+
+  private handleSelectAll(): void {
+    const sel = this.view.state.selection.main;
+    const selectionRange = this.inSelection && !sel.empty ? { from: sel.from, to: sel.to } : null;
+    selectAllOccurrences(this.view, this.query, {
+      inSelection: this.inSelection,
+      selectionRange,
+      contextFilter: this.contextFilter,
+    });
   }
 
   private handleReplaceNext(): void {

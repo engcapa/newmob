@@ -426,7 +426,7 @@
 - 验证：lower/title/upper/mixed、多行、zero-length regex 与 undo。
 
 ### ED-FIND-002 增加 selection/comments/strings 搜索过滤
-<!-- ide-task {"id":"ED-FIND-002","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-FIND-001"],"legacy":["N9.1"]} -->
+<!-- ide-task {"id":"ED-FIND-002","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:58:20Z","baseline":"d51ca2edfcdcc10d2ddc8400781349b202cef5db","depends_on":["ED-FIND-001"],"legacy":["N9.1"],"updated_at":"2026-08-29T13:16:04Z","evidence":"vitest: editorSearchPanel.test.ts, CodeMirrorHost.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：Find in Selection 与 comments/strings/exclude-comments 过滤使用可证明 syntax facts；unsupported language 显式 unavailable，不用文本猜测冒充。
 - 验证：Java/TS supported fixture、plaintext unavailable、selection change、Select All Occurrences。
