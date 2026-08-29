@@ -421,7 +421,9 @@ import {
   type WorkspaceCoverageReport,
 } from "./workspace/coverageModel";
 import {
+  findBookmarkByMnemonic,
   readWorkspaceBookmarks,
+  setMnemonicBookmark,
   toggleWorkspaceBookmark,
   writeWorkspaceBookmarks,
   type WorkspaceBookmark,
@@ -8925,6 +8927,49 @@ export function CodeWorkspaceTab({
     setBookmarks(next);
   }, [bookmarks, workspaceInstanceId]);
 
+  const jumpToMnemonicBookmark = useCallback((mnemonic: string) => {
+    const target = findBookmarkByMnemonic(bookmarks, mnemonic);
+    if (!target) {
+      setStatusMessage(`No bookmark with mnemonic '${mnemonic}' found`);
+      return;
+    }
+    void openTodoOrBookmark(target);
+    setStatusMessage(`Jumped to bookmark [${target.mnemonic}] on line ${target.line + 1}`);
+  }, [bookmarks, openTodoOrBookmark, setStatusMessage]);
+
+  const setMnemonicBookmarkAtCursor = useCallback((mnemonic: string) => {
+    const file = activeKey ? openFilesRef.current[activeKey] : null;
+    if (!file) {
+      setStatusMessage("Open a file to toggle mnemonic bookmarks");
+      return;
+    }
+    const position = editorSelectionRef.current.end;
+    const lineText = file.text.split("\n")[position.line] ?? "";
+    const label = lineText.trim() || `${file.title}:${position.line + 1}`;
+    const next = setMnemonicBookmark(
+      workspaceInstanceId,
+      {
+        fileKey: file.key,
+        pathLabel: file.subtitle || file.path,
+        line: position.line,
+        character: position.character,
+        label,
+        mnemonic,
+      },
+      bookmarks,
+    );
+    setBookmarks(next);
+    const setOnLine = next.some(
+      (item) => item.fileKey === file.key && item.line === position.line && item.mnemonic === mnemonic,
+    );
+    setStatusMessage(
+      setOnLine
+        ? `Set bookmark [${mnemonic}] on line ${position.line + 1}`
+        : `Removed bookmark on line ${position.line + 1}`,
+    );
+    openTodosPane();
+  }, [activeKey, bookmarks, openTodosPane, setStatusMessage, workspaceInstanceId]);
+
   const navigateDiagnostic = useCallback((direction: 1 | -1) => {
     const file = activeFile;
     if (!file) return;
@@ -9986,6 +10031,57 @@ export function CodeWorkspaceTab({
       keywords: ["bookmark", "mark", "line"],
       when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading,
       run: toggleBookmarkAtCursor,
+    },
+    {
+      id: "workspace.toggleBookmarkWithMnemonic",
+      title: "Toggle Bookmark with Mnemonic",
+      category: "Edit",
+      keybinding: "Ctrl+F11",
+      keywords: ["bookmark", "mnemonic", "mark", "digit"],
+      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading,
+      run: () => {
+        // Toggle next available digit mnemonic or prompt
+        const used = new Set(bookmarks.map((b) => b.mnemonic).filter(Boolean));
+        let nextDigit = "";
+        for (let d = 1; d <= 9; d++) {
+          if (!used.has(String(d))) {
+            nextDigit = String(d);
+            break;
+          }
+        }
+        if (!nextDigit && !used.has("0")) nextDigit = "0";
+        if (nextDigit) {
+          setMnemonicBookmarkAtCursor(nextDigit);
+        } else {
+          toggleBookmarkAtCursor();
+        }
+      },
+    },
+    {
+      id: "workspace.showBookmarks",
+      title: "Show Bookmarks",
+      category: "View",
+      keybinding: "Shift+F11",
+      keywords: ["bookmark", "list", "show"],
+      run: openTodosPane,
+    },
+    {
+      id: "workspace.jumpToMnemonicBookmark",
+      title: "Jump to Mnemonic Bookmark",
+      category: "View",
+      keywords: ["bookmark", "jump", "mnemonic", "go"],
+      run: () => {
+        const mnemonicBookmarks = bookmarks.filter((b) => b.mnemonic);
+        if (mnemonicBookmarks.length === 0) {
+          setStatusMessage("No mnemonic bookmarks set");
+          return;
+        }
+        if (mnemonicBookmarks.length === 1 && mnemonicBookmarks[0].mnemonic) {
+          jumpToMnemonicBookmark(mnemonicBookmarks[0].mnemonic);
+        } else {
+          openTodosPane();
+        }
+      },
     },
     {
       id: "workspace.toggleInlayHints",

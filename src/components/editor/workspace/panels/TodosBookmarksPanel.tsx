@@ -62,30 +62,54 @@ export function TodosBookmarksPanel({
             No bookmarks yet. Use “Toggle Bookmark” on the current editor line.
           </div>
         ) : (
-          <ul>
-            {bookmarks.map((item) => (
-              <li key={item.id} className="flex items-stretch">
-                <button
-                  type="button"
-                  className="min-w-0 flex-1 px-3 py-1.5 text-left hover:bg-[var(--taomni-code-active-line-bg)]"
-                  onClick={() => onOpenBookmark(item)}
-                >
-                  <span className="block truncate text-[var(--taomni-code-text)]">{item.label}</span>
-                  <span className="block truncate text-[10px] text-[var(--taomni-code-muted)]">
-                    {item.pathLabel}:{item.line + 1}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Remove bookmark ${item.label}`}
-                  className="shrink-0 px-2 text-[10px] text-[var(--taomni-code-muted)] hover:text-[var(--taomni-code-text)]"
-                  onClick={() => onRemoveBookmark(item.id)}
-                >
-                  Remove
-                </button>
-              </li>
+          <div>
+            {Array.from(
+              bookmarks.reduce((groups, item) => {
+                const groupName = item.group || (item.mnemonic ? "Mnemonic Bookmarks" : "General Bookmarks");
+                const list = groups.get(groupName) ?? [];
+                list.push(item);
+                groups.set(groupName, list);
+                return groups;
+              }, new Map<string, WorkspaceBookmark[]>()),
+            ).map(([groupName, items]) => (
+              <div key={groupName} className="mb-2">
+                <div className="bg-[var(--taomni-code-gutter-bg)] px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--taomni-code-muted)]">
+                  {groupName} ({items.length})
+                </div>
+                <ul>
+                  {items.map((item) => (
+                    <li key={item.id} className="flex items-stretch">
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-start gap-2 px-3 py-1.5 text-left hover:bg-[var(--taomni-code-active-line-bg)]"
+                        onClick={() => onOpenBookmark(item)}
+                      >
+                        {item.mnemonic && (
+                          <span className="shrink-0 rounded border border-[var(--taomni-accent)] bg-[var(--taomni-code-active-line-bg)] px-1 py-0.2 text-[9px] font-bold text-[var(--taomni-accent)]">
+                            {item.mnemonic}
+                          </span>
+                        )}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[var(--taomni-code-text)]">{item.label}</span>
+                          <span className="block truncate text-[10px] text-[var(--taomni-code-muted)]">
+                            {item.pathLabel}:{item.line + 1}
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Remove bookmark ${item.label}`}
+                        className="shrink-0 px-2 text-[10px] text-[var(--taomni-code-muted)] hover:text-[var(--taomni-code-text)]"
+                        onClick={() => onRemoveBookmark(item.id)}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ))}
-          </ul>
+          </div>
         )}
       </section>
     </div>

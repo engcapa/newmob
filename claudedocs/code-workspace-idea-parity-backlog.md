@@ -492,7 +492,7 @@
 - 验证：setting persistence、diagnostic revision、keyboard/a11y、no-provider state。
 
 ### ED-BOOKMARK-001 助记书签与分组
-<!-- ide-task {"id":"ED-BOOKMARK-001","status":"ready","priority":"P1","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["N11.3"]} -->
+<!-- ide-task {"id":"ED-BOOKMARK-001","status":"done","priority":"P1","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:35:01Z","baseline":"99ed0b142e51c61614b396022c8fb71b58851dc0","depends_on":[],"legacy":["N11.3"],"updated_at":"2026-08-29T12:39:03Z","evidence":"vitest: todoBookmarks.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：现有 line bookmark 增加数字/字母 mnemonic、冲突替换、按 mnemonic 跳转和 Bookmarks panel group；TODO 与 bookmark 分账。
 - 验证：set/replace/remove、file rename/delete、restore、keyboard-only。

@@ -10,16 +10,6 @@ export interface WorkspaceTodoItem {
   text: string;
 }
 
-export interface WorkspaceBookmark {
-  id: string;
-  fileKey: string;
-  pathLabel: string;
-  line: number;
-  character: number;
-  label: string;
-  createdAt: number;
-}
-
 export interface WorkspaceTodoFile {
   key: string;
   pathLabel: string;
@@ -126,6 +116,26 @@ export function sameWorkspaceTodoItems(
   });
 }
 
+export interface WorkspaceBookmark {
+  id: string;
+  fileKey: string;
+  pathLabel: string;
+  line: number;
+  character: number;
+  label: string;
+  mnemonic?: string | null;
+  group?: string | null;
+  createdAt: number;
+}
+
+export function isValidMnemonic(char: string): boolean {
+  return /^[0-9a-zA-Z]$/.test(char);
+}
+
+export function normalizeMnemonic(char: string): string {
+  return char.toUpperCase();
+}
+
 function bookmarksKey(workspaceInstanceId: string): string {
   return `${BOOKMARKS_PREFIX}${workspaceInstanceId}`;
 }
@@ -149,6 +159,11 @@ export function readWorkspaceBookmarks(workspaceInstanceId: string): WorkspaceBo
         && typeof item.label === "string"
         && typeof item.createdAt === "number"
       ))
+      .map((item) => ({
+        ...item,
+        mnemonic: typeof item.mnemonic === "string" ? item.mnemonic : null,
+        group: typeof item.group === "string" ? item.group : null,
+      }))
       .slice(0, 200);
   } catch {
     return [];
@@ -181,10 +196,83 @@ export function toggleWorkspaceBookmark(
         {
           id: `${candidate.fileKey}:${candidate.line}:${Date.now()}`,
           createdAt: Date.now(),
+          mnemonic: candidate.mnemonic ?? null,
+          group: candidate.group ?? (candidate.mnemonic ? "Mnemonic" : "General"),
           ...candidate,
         },
         ...current,
       ].slice(0, 200);
   writeWorkspaceBookmarks(workspaceInstanceId, next);
   return next;
+}
+
+export function setMnemonicBookmark(
+  workspaceInstanceId: string,
+  candidate: Omit<WorkspaceBookmark, "id" | "createdAt"> & { mnemonic: string },
+  current: WorkspaceBookmark[] = readWorkspaceBookmarks(workspaceInstanceId),
+): WorkspaceBookmark[] {
+  const mnemonic = normalizeMnemonic(candidate.mnemonic);
+  if (!isValidMnemonic(mnemonic)) return current;
+
+  // 1. If exact line already has this mnemonic, toggle it off
+  const sameLineExisting = current.find(
+    (item) => item.fileKey === candidate.fileKey && item.line === candidate.line,
+  );
+  if (sameLineExisting && sameLineExisting.mnemonic === mnemonic) {
+    const next = current.filter((item) => item.id !== sameLineExisting.id);
+    writeWorkspaceBookmarks(workspaceInstanceId, next);
+    return next;
+  }
+
+  // 2. Remove mnemonic collision from any other bookmark (conflict replacement)
+  const deduped = current
+    .filter((item) => item.id !== sameLineExisting?.id)
+    .map((item) => (item.mnemonic === mnemonic ? { ...item, mnemonic: null } : item));
+
+  const next: WorkspaceBookmark[] = [
+    {
+      id: `${candidate.fileKey}:${candidate.line}:${Date.now()}`,
+      createdAt: Date.now(),
+      ...candidate,
+      mnemonic,
+      group: candidate.group ?? "Mnemonic",
+    },
+    ...deduped,
+  ].slice(0, 200);
+
+  writeWorkspaceBookmarks(workspaceInstanceId, next);
+  return next;
+}
+
+export function findBookmarkByMnemonic(
+  bookmarks: readonly WorkspaceBookmark[],
+  mnemonic: string,
+): WorkspaceBookmark | null {
+  const target = normalizeMnemonic(mnemonic);
+  return bookmarks.find((item) => item.mnemonic === target) ?? null;
+}
+
+export function updateBookmarksOnPathRename(
+  bookmarks: readonly WorkspaceBookmark[],
+  oldFileKey: string,
+  newFileKey: string,
+  newPathLabel: string,
+): WorkspaceBookmark[] {
+  return bookmarks.map((item) => {
+    if (item.fileKey === oldFileKey) {
+      return {
+        ...item,
+        fileKey: newFileKey,
+        pathLabel: newPathLabel,
+      };
+    }
+    return item;
+  });
+}
+
+export function removeBookmarksForFile(
+  bookmarks: readonly WorkspaceBookmark[],
+  fileKey: string,
+): WorkspaceBookmark[] {
+  return bookmarks.filter((item) => item.fileKey !== fileKey);
 }

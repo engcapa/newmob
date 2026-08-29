@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   createOpenFileTodoScanner,
+  findBookmarkByMnemonic,
   readWorkspaceBookmarks,
+  removeBookmarksForFile,
   scanTodosInText,
   sameWorkspaceTodoItems,
+  setMnemonicBookmark,
   toggleWorkspaceBookmark,
+  updateBookmarksOnPathRename,
 } from "./todoBookmarks";
 
 describe("todoBookmarks", () => {
@@ -40,13 +44,17 @@ describe("todoBookmarks", () => {
     });
     expect(first).toHaveLength(1);
     expect(readWorkspaceBookmarks("ws")).toHaveLength(1);
-    const second = toggleWorkspaceBookmark("ws", {
-      fileKey: "root:app:a.ts",
-      pathLabel: "app / a.ts",
-      line: 3,
-      character: 0,
-      label: "entry",
-    }, first);
+    const second = toggleWorkspaceBookmark(
+      "ws",
+      {
+        fileKey: "root:app:a.ts",
+        pathLabel: "app / a.ts",
+        line: 3,
+        character: 0,
+        label: "entry",
+      },
+      first,
+    );
     expect(second).toHaveLength(0);
   });
 
@@ -69,5 +77,73 @@ describe("todoBookmarks", () => {
       { key: "a", pathLabel: "a.ts", text: "// TODO: changed" },
       { key: "b", pathLabel: "b.ts", text: "// FIXME: second" },
     ]))).toBe(true);
+  });
+
+  it("supports mnemonic bookmarks with conflict replacement", () => {
+    // Set mnemonic 1 on line 10
+    const b1 = setMnemonicBookmark("ws", {
+      fileKey: "a.ts",
+      pathLabel: "a.ts",
+      line: 10,
+      character: 0,
+      label: "line 10",
+      mnemonic: "1",
+    });
+    expect(b1).toHaveLength(1);
+    expect(b1[0].mnemonic).toBe("1");
+    expect(findBookmarkByMnemonic(b1, "1")?.line).toBe(10);
+
+    // Set mnemonic 1 on line 20 (conflict replacement: removes mnemonic from line 10)
+    const b2 = setMnemonicBookmark(
+      "ws",
+      {
+        fileKey: "a.ts",
+        pathLabel: "a.ts",
+        line: 20,
+        character: 0,
+        label: "line 20",
+        mnemonic: "1",
+      },
+      b1,
+    );
+    expect(b2).toHaveLength(2);
+    const line20 = b2.find((b) => b.line === 20);
+    const line10 = b2.find((b) => b.line === 10);
+    expect(line20?.mnemonic).toBe("1");
+    expect(line10?.mnemonic).toBeNull();
+    expect(findBookmarkByMnemonic(b2, "1")?.line).toBe(20);
+
+    // Toggling exact line with same mnemonic removes it
+    const b3 = setMnemonicBookmark(
+      "ws",
+      {
+        fileKey: "a.ts",
+        pathLabel: "a.ts",
+        line: 20,
+        character: 0,
+        label: "line 20",
+        mnemonic: "1",
+      },
+      b2,
+    );
+    expect(b3).toHaveLength(1);
+    expect(b3.find((b) => b.line === 20)).toBeUndefined();
+  });
+
+  it("updates bookmarks on file rename and file deletion", () => {
+    const initial = toggleWorkspaceBookmark("ws", {
+      fileKey: "old/path.ts",
+      pathLabel: "old/path.ts",
+      line: 5,
+      character: 0,
+      label: "entry",
+    });
+
+    const renamed = updateBookmarksOnPathRename(initial, "old/path.ts", "new/path.ts", "new/path.ts");
+    expect(renamed[0].fileKey).toBe("new/path.ts");
+    expect(renamed[0].pathLabel).toBe("new/path.ts");
+
+    const deleted = removeBookmarksForFile(renamed, "new/path.ts");
+    expect(deleted).toHaveLength(0);
   });
 });
