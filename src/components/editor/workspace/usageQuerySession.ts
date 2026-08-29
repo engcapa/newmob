@@ -376,4 +376,137 @@ export function usagesScopeOptions(
   ];
 }
 
-export type { CapabilityEvidenceScope, CapabilityEvidenceV3, UsageRole, UsageQueryV3, SemanticQueryEnvelopeV3 };
+export type UsagesGroupingMode = "file" | "module" | "usage-type" | "none";
+
+export interface UsagesGroupNode {
+  key: string;
+  label: string;
+  kind: "file" | "module" | "usage-type" | "none";
+  locations: UsageEnvelopeLocation[];
+  count: number;
+}
+
+export function hasProviderRoleInformation(locations: readonly UsageEnvelopeLocation[]): boolean {
+  return locations.some((loc) => loc.role !== "unknown");
+}
+
+export function getRoleFilterStatus(locations: readonly UsageEnvelopeLocation[]): {
+  enabled: boolean;
+  disabledReason: string | null;
+} {
+  const hasRoles = hasProviderRoleInformation(locations);
+  return {
+    enabled: hasRoles,
+    disabledReason: hasRoles
+      ? null
+      : "Provider does not classify read/write usage roles for this language",
+  };
+}
+
+export function getUsagePreviewSnippet(
+  fileText: string,
+  range: LspRange,
+): { lineText: string; lineIndex: number; highlightFrom: number; highlightTo: number } {
+  if (!fileText) {
+    return { lineText: "", lineIndex: range.start.line, highlightFrom: 0, highlightTo: 0 };
+  }
+  const lines = fileText.split("\n");
+  const lineIdx = range.start.line;
+  const lineText = lines[lineIdx] ?? "";
+  const highlightFrom = Math.min(range.start.character, lineText.length);
+  const highlightTo = range.start.line === range.end.line
+    ? Math.min(range.end.character, lineText.length)
+    : lineText.length;
+
+  return {
+    lineText,
+    lineIndex: lineIdx,
+    highlightFrom,
+    highlightTo,
+  };
+}
+
+export function groupUsages(
+  locations: readonly UsageEnvelopeLocation[],
+  mode: UsagesGroupingMode,
+  getModuleName?: (path: string | null) => string,
+): UsagesGroupNode[] {
+  if (locations.length === 0) return [];
+  if (mode === "none") {
+    return [
+      {
+        key: "all",
+        label: `All Usages (${locations.length})`,
+        kind: "none",
+        locations: [...locations],
+        count: locations.length,
+      },
+    ];
+  }
+
+  const map = new Map<string, { label: string; kind: UsagesGroupNode["kind"]; locations: UsageEnvelopeLocation[] }>();
+
+  for (const loc of locations) {
+    let key: string;
+    let label: string;
+    let kind: UsagesGroupNode["kind"];
+
+    switch (mode) {
+      case "file": {
+        key = loc.path || loc.uri;
+        const parts = key.split("/");
+        label = parts[parts.length - 1] || key;
+        kind = "file";
+        break;
+      }
+      case "module": {
+        const mod = getModuleName ? getModuleName(loc.path ?? null) : (loc.path ? loc.path.split("/")[1] || "root" : "root");
+        key = mod;
+        label = mod;
+        kind = "module";
+        break;
+      }
+      case "usage-type": {
+        key = loc.role;
+        kind = "usage-type";
+        switch (loc.role) {
+          case "read":
+            label = "Read Access";
+            break;
+          case "write":
+            label = "Write Access";
+            break;
+          case "declaration":
+            label = "Declaration";
+            break;
+          default:
+            label = "Usage";
+            break;
+        }
+        break;
+      }
+    }
+
+    let existing = map.get(key);
+    if (!existing) {
+      existing = { label, kind, locations: [] };
+      map.set(key, existing);
+    }
+    existing.locations.push(loc);
+  }
+
+  const groups: UsagesGroupNode[] = [];
+  for (const [key, val] of map.entries()) {
+    groups.push({
+      key,
+      label: val.label,
+      kind: val.kind,
+      locations: val.locations,
+      count: val.locations.length,
+    });
+  }
+
+  return groups;
+}
+
+export type { CapabilityEvidenceScope, CapabilityEvidenceV3, UsageRole, UsageQueryV3, SemanticQueryEnvelopeV3, UsageEnvelopeLocation };

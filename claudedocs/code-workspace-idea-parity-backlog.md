@@ -456,7 +456,7 @@
 - 验证：document edits invalidate、0/1/many、role unknown、keyboard loop。
 
 ### ED-USAGE-001 完成 Show/Find Usages result session
-<!-- ide-task {"id":"ED-USAGE-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-QUERY-002"],"legacy":["N13.3"]} -->
+<!-- ide-task {"id":"ED-USAGE-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:22:30Z","baseline":"8964d495c4d8ab53b8671ca438d4ca5367a92ecc","depends_on":["ED-QUERY-002"],"legacy":["N13.3"],"updated_at":"2026-08-29T13:26:11Z","evidence":"vitest: usageQuerySession.test.ts, ReferencesPanel.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：共享 session 支持 module/file/usage-type grouping、preview、pin/rerun/recent、scope；无 provider role 时 role filter disabled 并解释原因。
 - 验证：popup->tool window、pin/rerun、recent restore、stale generation、library ownership。

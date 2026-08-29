@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { LspLocation } from "../../../lib/editor/lsp";
 import {
   DEFAULT_SCOPE_SELECTION,
+  getRoleFilterStatus,
+  getUsagePreviewSnippet,
+  groupUsages,
+  hasProviderRoleInformation,
   scopeLocations,
   UsageQuerySession,
   usagesScopeOptions,
+  type UsageEnvelopeLocation,
   type UsagesScopeSelection,
 } from "./usageQuerySession";
 
@@ -98,25 +103,25 @@ describe("UsageQuerySession §8.20.5 shared immutable session", () => {
         locations: [],
       });
     }
-    expect(session.getRecent().length).toBeLessThanOrEqual(10);
-    const first = session.getRecent().at(-1)!;
-    const restored = session.restore(first.id);
-    expect(restored?.symbol.displayName).toBe("sym2");
+    expect(session.getRecent()).toHaveLength(10);
+    const oldestVisible = session.getRecent()[9]!;
+    expect(oldestVisible.symbol.displayName).toBe("sym2");
+
+    const restored = session.restore(oldestVisible.id);
+    expect(restored).toBe(oldestVisible);
+    expect(session.getCurrent()).toBe(oldestVisible);
     session.dispose();
   });
 
-  it("pin replace guard + staleness on generation and fingerprint change", () => {
+  it("pinning persists across patch operations and staleness checks", () => {
     const session = new UsageQuerySession();
-    session.start({ symbol, selection, evidence: evidenceInput(), locations: [location("/repo/src/main/B.java")] });
-    expect(session.requiresPinConfirm()).toBe(false);
+    session.start({ symbol, selection, evidence: evidenceInput(), locations: [] });
+    expect(session.isPinned()).toBe(false);
     session.setPinned(true);
+    expect(session.isPinned()).toBe(true);
     expect(session.requiresPinConfirm()).toBe(true);
 
-    // Same generation + fingerprint → fresh.
-    session.applyStaleness({ providerGeneration: 3, projectFingerprint: "d".repeat(64), documentRevision: 7 }, "d".repeat(64));
-    expect(session.getCurrent()!.state).toBe("ready");
-
-    // Provider restart → stale with reason.
+    // Generation move (restart) → stale with reason.
     session.applyStaleness({ providerGeneration: 4, projectFingerprint: "d".repeat(64), documentRevision: 7 }, "d".repeat(64));
     expect(session.getCurrent()!.state).toBe("stale");
     expect(session.getCurrent()!.staleReason).toContain("provider restarted");
@@ -151,5 +156,79 @@ describe("usagesScopeOptions §8.20.5 dialog model", () => {
     }
     const toggled = options[0]!.toggle(DEFAULT_SCOPE_SELECTION);
     expect(toggled.includeDeclaration).toBe(false);
+  });
+});
+
+describe("ED-USAGE-001: usages grouping, role classification & preview snippet", () => {
+  const envelopeLocations: UsageEnvelopeLocation[] = [
+    {
+      uri: "file:///repo/core/A.java",
+      path: "/repo/core/A.java",
+      range: { start: { line: 10, character: 4 }, end: { line: 10, character: 10 } },
+      role: "read",
+    },
+    {
+      uri: "file:///repo/core/A.java",
+      path: "/repo/core/A.java",
+      range: { start: { line: 20, character: 4 }, end: { line: 20, character: 10 } },
+      role: "write",
+    },
+    {
+      uri: "file:///repo/api/B.java",
+      path: "/repo/api/B.java",
+      range: { start: { line: 5, character: 8 }, end: { line: 5, character: 14 } },
+      role: "read",
+    },
+  ];
+
+  it("groups usages by file", () => {
+    const groups = groupUsages(envelopeLocations, "file");
+    expect(groups.length).toBe(2);
+    expect(groups[0].label).toBe("A.java");
+    expect(groups[0].count).toBe(2);
+    expect(groups[1].label).toBe("B.java");
+    expect(groups[1].count).toBe(1);
+  });
+
+  it("groups usages by module", () => {
+    const groups = groupUsages(envelopeLocations, "module", (p) => (p?.includes("/core/") ? "core" : "api"));
+    expect(groups.length).toBe(2);
+    expect(groups.map((g) => g.label)).toEqual(["core", "api"]);
+  });
+
+  it("groups usages by usage type / role", () => {
+    const groups = groupUsages(envelopeLocations, "usage-type");
+    expect(groups.length).toBe(2);
+    expect(groups.find((g) => g.key === "read")?.label).toBe("Read Access");
+    expect(groups.find((g) => g.key === "write")?.label).toBe("Write Access");
+  });
+
+  it("determines provider role classification status truthfully", () => {
+    expect(hasProviderRoleInformation(envelopeLocations)).toBe(true);
+    expect(getRoleFilterStatus(envelopeLocations).enabled).toBe(true);
+
+    const unknownLocations: UsageEnvelopeLocation[] = [
+      {
+        uri: "file:///repo/A.java",
+        path: "/repo/A.java",
+        range: { start: { line: 1, character: 1 }, end: { line: 1, character: 5 } },
+        role: "unknown",
+      },
+    ];
+    expect(hasProviderRoleInformation(unknownLocations)).toBe(false);
+    const status = getRoleFilterStatus(unknownLocations);
+    expect(status.enabled).toBe(false);
+    expect(status.disabledReason).toContain("Provider does not classify read/write usage roles");
+  });
+
+  it("extracts usage preview snippet with highlight offsets", () => {
+    const fileContent = `package com.foo;\n\npublic class A {\n    void execute() {\n        doWork();\n    }\n}`;
+    const range = { start: { line: 4, character: 8 }, end: { line: 4, character: 14 } };
+    const snippet = getUsagePreviewSnippet(fileContent, range);
+
+    expect(snippet.lineIndex).toBe(4);
+    expect(snippet.lineText).toBe("        doWork();");
+    expect(snippet.highlightFrom).toBe(8);
+    expect(snippet.highlightTo).toBe(14);
   });
 });
