@@ -392,7 +392,7 @@
 - 验证：channel/bundle/artifact/mixed-current attack tests。
 
 ### ED-REL-004 稳定 rollup 并跑一条真实 smoke transaction
-<!-- ide-task {"id":"ED-REL-004","status":"ready","priority":"P2","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-REL-003"],"legacy":["BB2"]} -->
+<!-- ide-task {"id":"ED-REL-004","status":"done","priority":"P2","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:54:34Z","baseline":"e74766baea1c771c6fc227a20bce624de2652983","depends_on":["ED-REL-003"],"legacy":["BB2"],"updated_at":"2026-08-29T14:55:25Z","evidence":"vitest: releaseRollup.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：相同 receipt 集合生成 byte-identical rollup，manifest commit 后 `--check` 仍通过；一条真实 browser smoke 形成 receipt->entry->validator->rollup->audit。
 - 验证：zero-entry 稳定 RED、source 后代 allowlist、manifest stability、真实 smoke。
