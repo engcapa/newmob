@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Workspace IDEA Task"
+  short_description: "Claim and deliver one IDEA editor parity task"
+  default_prompt: "Use $code-workspace-idea-task to claim and complete one ready Code Workspace editor parity task."
