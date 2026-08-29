@@ -195,7 +195,7 @@
 - 验证：resize、soft wrap、top/bottom、tabSize 2/8、wide grapheme、virtual bottom。
 
 ### ED-VSPACE-003 闭合 multi-caret/selection/composition transaction
-<!-- ide-task {"id":"ED-VSPACE-003","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-VSPACE-002"],"legacy":["BB4","BB10"]} -->
+<!-- ide-task {"id":"ED-VSPACE-003","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T09:58:33Z","baseline":"3a0dd32fe6b0e354b421248648735686833948d8","depends_on":["ED-VSPACE-002"],"legacy":["BB4","BB10"],"updated_at":"2026-08-29T10:01:45Z","evidence":"vitest: workspaceVirtualSpace.test.ts, workspaceKeymapRuntime.test.ts, CodeMirrorHost.test.tsx, workspaceActionHost.test.ts; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：每 caret 独立 desired visual column/anchor；Shift 只扩缩；padding 一次 transaction；composition、AltGr、dead key 不误 dispatch。
 - 主文件：virtual-space controller/host tests 和新行为 case。

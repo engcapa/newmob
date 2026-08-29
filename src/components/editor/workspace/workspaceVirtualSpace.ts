@@ -223,14 +223,15 @@ function mouse_anchorIsBehind(main: { anchor: number; head: number }): boolean {
  * default keymap (returns false).
  */
 export function virtualLineEndCommand(view: EditorView, extend: boolean): boolean {
+  if (view.composing) return false;
   const policy = view.state.facet(editorVirtualSpacePolicy);
   if (!policy.afterLineEnd && !policy.atFileBottom) return false;
   const state = view.state;
-  // Defer while any caret still has real text ahead of it: the default keymap
-  // owns the move to the (possibly soft-wrapped) boundary. This command only
-  // walks the VIRTUAL region once every head already sits at its line end.
-  const allAtEnd = state.selection.ranges.every((range) => range.head >= state.doc.lineAt(range.head).to);
-  if (!allAtEnd) return false;
+  const anyAtEndOrVirtual = state.selection.ranges.some((range) => {
+    const line = state.doc.lineAt(range.head);
+    return range.head >= line.to;
+  });
+  if (!anyAtEndOrVirtual) return false;
   const previous = state.field(virtualSpaceOverflowField, false) ?? new Map<number, number>();
   const nextOverflow = new Map(previous);
   let changed = false;
@@ -238,13 +239,23 @@ export function virtualLineEndCommand(view: EditorView, extend: boolean): boolea
   const ranges = state.selection.ranges.map((range) => {
     const headLine = state.doc.lineAt(range.head);
     const oldOverflow = previous.get(range.head) ?? 0;
-    const overflow = Math.min(oldOverflow + 1, MAX_OVERFLOW_COLUMNS);
-    nextOverflow.set(headLine.to, overflow);
-    changed = true;
-    if (!extend) return EditorSelection.cursor(headLine.to);
-    return range.anchor <= range.head
-      ? EditorSelection.range(range.anchor, headLine.to)
-      : EditorSelection.range(headLine.to, range.anchor);
+    let targetHead = headLine.to;
+    if (range.head >= headLine.to || oldOverflow > 0) {
+      const isLastLine = headLine.number === state.doc.lines;
+      const allowed = isLastLine ? policy.atFileBottom : policy.afterLineEnd;
+      if (allowed) {
+        const overflow = Math.min(oldOverflow + 1, MAX_OVERFLOW_COLUMNS);
+        nextOverflow.set(headLine.to, overflow);
+        changed = true;
+      }
+    } else {
+      targetHead = headLine.to;
+      changed = true;
+    }
+    if (!extend) return EditorSelection.cursor(targetHead);
+    return range.anchor <= targetHead
+      ? EditorSelection.range(range.anchor, targetHead)
+      : EditorSelection.range(targetHead, range.anchor);
   });
   if (!changed) return false;
 
@@ -535,20 +546,30 @@ export function virtualMoveLeftCommand(view: EditorView, extend: boolean): boole
 
   const ranges = state.selection.ranges.map((range) => {
     const overflow = next.get(range.head);
-    if (overflow == null || overflow <= 0) return range;
-    changed = true;
-    if (overflow - 1 <= 0) next.delete(range.head);
-    else next.set(range.head, overflow - 1);
-    if (!extend) return EditorSelection.cursor(range.head);
-    return range.anchor <= range.head
-      ? EditorSelection.range(range.anchor, range.head)
-      : EditorSelection.range(range.head, range.anchor);
+    let targetHead = range.head;
+    if (overflow != null && overflow > 0) {
+      changed = true;
+      if (overflow - 1 <= 0) next.delete(range.head);
+      else next.set(range.head, overflow - 1);
+    } else {
+      const line = state.doc.lineAt(range.head);
+      if (range.head > line.from) {
+        targetHead = range.head - 1;
+        changed = true;
+      }
+    }
+
+    if (!extend) return EditorSelection.cursor(targetHead);
+    return range.anchor <= targetHead
+      ? EditorSelection.range(range.anchor, targetHead)
+      : EditorSelection.range(targetHead, range.anchor);
   });
 
   if (!changed) return false;
   view.dispatch({
     selection: EditorSelection.create(ranges, state.selection.mainIndex),
     effects: setVirtualOverflow.of(next),
+    scrollIntoView: true,
   });
   return true;
 }
@@ -559,8 +580,11 @@ export function virtualMoveRightCommand(view: EditorView, extend: boolean): bool
   if (!policy.afterLineEnd && !policy.atFileBottom) return false;
   const state = view.state;
   const previous = state.field(virtualSpaceOverflowField, false) ?? new Map<number, number>();
-  const allAtEnd = state.selection.ranges.every((range) => range.head >= state.doc.lineAt(range.head).to);
-  if (!allAtEnd) return false;
+  const anyAtEndOrVirtual = state.selection.ranges.some((range) => {
+    const line = state.doc.lineAt(range.head);
+    return range.head >= line.to || (previous.get(range.head) ?? 0) > 0;
+  });
+  if (!anyAtEndOrVirtual) return false;
 
   const next = new Map(previous);
   let changed = false;
@@ -568,24 +592,38 @@ export function virtualMoveRightCommand(view: EditorView, extend: boolean): bool
   const ranges = state.selection.ranges.map((range) => {
     const headLine = state.doc.lineAt(range.head);
     const oldOverflow = previous.get(range.head) ?? 0;
-    const overflow = Math.min(oldOverflow + 1, MAX_OVERFLOW_COLUMNS);
-    next.set(headLine.to, overflow);
-    changed = true;
-    if (!extend) return EditorSelection.cursor(headLine.to);
-    return range.anchor <= range.head
-      ? EditorSelection.range(range.anchor, headLine.to)
-      : EditorSelection.range(headLine.to, range.anchor);
+    let targetHead = range.head;
+    if (range.head >= headLine.to || oldOverflow > 0) {
+      const isLastLine = headLine.number === state.doc.lines;
+      const allowed = isLastLine ? policy.atFileBottom : policy.afterLineEnd;
+      if (allowed) {
+        const overflow = Math.min(oldOverflow + 1, MAX_OVERFLOW_COLUMNS);
+        next.set(headLine.to, overflow);
+        targetHead = headLine.to;
+        changed = true;
+      }
+    } else {
+      targetHead = Math.min(headLine.to, range.head + 1);
+      changed = true;
+    }
+
+    if (!extend) return EditorSelection.cursor(targetHead);
+    return range.anchor <= targetHead
+      ? EditorSelection.range(range.anchor, targetHead)
+      : EditorSelection.range(targetHead, range.anchor);
   });
 
   if (!changed) return false;
   view.dispatch({
     selection: EditorSelection.create(ranges, state.selection.mainIndex),
     effects: setVirtualOverflow.of(next),
+    scrollIntoView: true,
   });
   return true;
 }
 
-export function virtualHomeCommand(view: EditorView): boolean {
+export function virtualHomeCommand(view: EditorView, extend: boolean = false): boolean {
+  if (view.composing) return false;
   const field = view.state.field(virtualSpaceOverflowField, false);
   if (!field || field.size === 0) return false;
   const state = view.state;
@@ -594,7 +632,10 @@ export function virtualHomeCommand(view: EditorView): boolean {
     const match = /^\s*/.exec(line.text);
     const indentCol = match ? match[0].length : 0;
     const target = range.head === line.from + indentCol ? line.from : line.from + indentCol;
-    return EditorSelection.cursor(target);
+    if (!extend) return EditorSelection.cursor(target);
+    return range.anchor <= target
+      ? EditorSelection.range(range.anchor, target)
+      : EditorSelection.range(target, range.anchor);
   });
   view.dispatch({
     selection: EditorSelection.create(ranges, state.selection.mainIndex),

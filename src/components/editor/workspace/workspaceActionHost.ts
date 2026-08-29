@@ -955,7 +955,7 @@ export class WorkspaceActionHost {
     if (this.disposed) {
       return { kind: "rejected", reason: "stale-owner" };
     }
-    if (context.composing || event.isComposing === true) {
+    if (context.composing || event.isComposing === true || event.key === "Process" || event.key === "Unidentified") {
       return { kind: "rejected", reason: "composing" };
     }
     if (event.key === "Dead" || context.deadKey) {
