@@ -432,7 +432,7 @@
 - 验证：Java/TS supported fixture、plaintext unavailable、selection change、Select All Occurrences。
 
 ### ED-FIND-003 建立 Find in Files scope/file-mask 模型
-<!-- ide-task {"id":"ED-FIND-003","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-PROJECT-005"],"legacy":["N9.2"]} -->
+<!-- ide-task {"id":"ED-FIND-003","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:18:37Z","baseline":"426206edd51c522476ff226feaf2fde80f979912","depends_on":["ED-PROJECT-005"],"legacy":["N9.2"],"updated_at":"2026-08-29T14:19:25Z","evidence":"vitest: findInFilesScopeModel.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：Project/Module/Directory/Recently viewed/custom scope 与 file mask 独立于 include/exclude glob；module scope 只用 ready facts。
 - 验证：多 root/module、missing facts、recent scope、cancel/stale search。
