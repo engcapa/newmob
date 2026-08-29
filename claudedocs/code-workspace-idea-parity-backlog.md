@@ -216,7 +216,7 @@
 - 验证：mounted 两入口、resolve retry/failure visible、stale zero apply。
 
 ### ED-ACTION-003 迁移 Problems、context menu 与 Save plan-only
-<!-- ide-task {"id":"ED-ACTION-003","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-ACTION-002"],"legacy":["BB5","BB6"]} -->
+<!-- ide-task {"id":"ED-ACTION-003","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T10:20:51Z","baseline":"6aa7019e9706fe29a9905c218cefaa9a5d55406f","depends_on":["ED-ACTION-002"],"legacy":["BB5","BB6"],"updated_at":"2026-08-29T10:23:58Z","evidence":"vitest: codeActionProviderAdapter.test.ts, intentionSession.test.ts, saveNormalizationPipeline.test.ts; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：Problems、editor context menu 和 save organize-imports 不再直接组合 request/resolve/run；`mode: plan-only` 的 live edit/write/history 均为 0。
 - 主文件：入口 owner、canonical adapter、save integration tests。

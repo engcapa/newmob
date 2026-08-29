@@ -4941,33 +4941,57 @@ export function CodeWorkspaceTab({
                 start: { line: 0, character: 0 },
                 end: { line: textToProcess.split("\n").length, character: 0 },
               };
-              const { actions } = await requestCodeActions(
-                { ...file, text: textToProcess },
-                wholeFileRange,
-                [],
-                ["source.organizeImports"],
-              );
-              if (actions.length > 0) {
-                const action = actions[0];
-                let edit = action.edit;
-                if (!edit && action.command) {
-                  const descriptor = lspDescriptorForFile(file);
-                  if (descriptor) {
-                    const resolved = await lspCodeActionResolve(descriptor, action).catch(() => null);
-                    if (resolved?.action?.edit) {
-                      edit = resolved.action.edit;
-                    }
-                  }
-                }
-                if (edit && edit.documentEdits && edit.documentEdits.length > 0) {
-                  const edits = edit.documentEdits[0].edits;
-                  if (edits && edits.length > 0) {
-                    return applyLspTextEditsToString(textToProcess, edits);
-                  }
+              const descriptor = lspDescriptorForFile(file);
+              if (!descriptor) return null;
+
+              const context: CodeActionContextIdentity = {
+                document: {
+                  uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath ?? file.key,
+                  revision: file.documentRevision,
+                  languageId: lspFilesRef.current[file.key]?.status?.languageId ?? descriptor.languageId ?? "plaintext",
+                },
+                provider: {
+                  id: descriptor.languageId === "java" || !descriptor.languageId ? "jdtls" : descriptor.languageId,
+                  version: null,
+                  generation: lspSessionGeneration(),
+                  projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+                  trusted: true,
+                },
+                range: wholeFileRange,
+                diagnostics: [],
+                only: ["source.organizeImports"],
+              };
+
+              const client: CodeActionProviderClient = {
+                requestCodeActions: async (params) => {
+                  const result = await lspCodeActions(
+                    descriptor,
+                    params.range,
+                    [],
+                    params.context.only ? [...params.context.only] : undefined,
+                  );
+                  return result.actions;
+                },
+                resolveCodeAction: async (act) => {
+                  if (!act.raw) return null;
+                  const res = await lspCodeActionResolve(descriptor, act.raw);
+                  return res.action;
+                },
+              };
+
+              const planResult = await canonicalCodeActionServiceRef.current!.planAction(context, client, {
+                only: ["source.organizeImports"],
+              });
+
+              if (planResult.plan?.edit?.documentEdits && planResult.plan.edit.documentEdits.length > 0) {
+                const edits = planResult.plan.edit.documentEdits[0]!.edits;
+                if (edits && edits.length > 0) {
+                  return applyLspTextEditsToString(textToProcess, edits);
                 }
               }
             } catch (err) {
               formatError = errorMessage(err);
+              return null;
             }
             return null;
           },

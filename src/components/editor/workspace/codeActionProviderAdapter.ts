@@ -459,4 +459,72 @@ export class CanonicalCodeActionService {
 
     return { state: "resolved", plan };
   }
+
+  /**
+   * Plan-only execution mode (§ED-ACTION-003).
+   * Retrieves and resolves code actions (e.g. organizeImports) into an immutable plan
+   * without applying any live buffer mutations, disk writes, or undo history entries.
+   */
+  async planAction(
+    context: CodeActionContextIdentity,
+    client: CodeActionProviderClient,
+    options: {
+      only?: readonly string[];
+      timeoutMs?: number;
+      allowedCommands?: readonly string[];
+    } = {},
+  ): Promise<PlanOnlyCodeActionResult> {
+    const reqContext = options.only ? { ...context, only: options.only } : context;
+    const reqRes = await this.requestCandidates(reqContext, client, { timeoutMs: options.timeoutMs });
+
+    if (reqRes.state !== "ready" || reqRes.actions.length === 0) {
+      return {
+        plan: null,
+        outcome: {
+          state: "unresolved",
+          reason: reqRes.state === "unsupported" ? reqRes.reason : reqRes.state === "failed" ? reqRes.message : "No actions returned",
+          retryable: reqRes.state === "timeout",
+        },
+        effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0 },
+      };
+    }
+
+    // Pick first matching or preferred action
+    const providerAction = reqRes.actions.find((a) => a.action.isPreferred) ?? reqRes.actions[0]!;
+    const candidate: CodeActionCandidate = {
+      id: computeStableActionId(providerAction.action, context.provider.id),
+      title: providerAction.action.title,
+      kind: providerAction.action.kind ?? "",
+      isPreferred: providerAction.action.isPreferred,
+      disabledReason: providerAction.disabledReason,
+      resolveRequired: Boolean(providerAction.action.raw && typeof providerAction.action.raw === "object" && "data" in providerAction.action.raw),
+      rawAction: providerAction.action,
+      evidence: providerAction.evidence,
+    };
+
+    const resolveOutcome = await this.resolvePlan(
+      candidate,
+      context,
+      client,
+      context.document.revision,
+      context.provider.generation,
+      { timeoutMs: options.timeoutMs, allowedCommands: options.allowedCommands },
+    );
+
+    return {
+      plan: resolveOutcome.state === "resolved" ? resolveOutcome.plan : null,
+      outcome: resolveOutcome,
+      effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0 },
+    };
+  }
+}
+
+export interface PlanOnlyCodeActionResult {
+  plan: ImmutableCodeActionPlan | null;
+  outcome: CodeActionResolveOutcome;
+  effectCounters: {
+    liveEdits: 0;
+    diskWrites: 0;
+    historyEntries: 0;
+  };
 }
