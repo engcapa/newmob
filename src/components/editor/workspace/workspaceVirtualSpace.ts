@@ -360,21 +360,81 @@ export const desiredVisualColumnField = StateField.define<readonly number[]>({
   },
 });
 
-function computeViewportLineDelta(view: EditorView, direction: "up" | "down" | "pageUp" | "pageDown"): number {
-  if (direction === "up") return -1;
-  if (direction === "down") return 1;
-  const dir = direction === "pageUp" ? -1 : 1;
-  if (view.dom && view.dom.clientHeight > 0) {
-    const lineHeight = view.defaultLineHeight || 20;
-    const linesPerPage = Math.max(1, Math.floor(view.dom.clientHeight / lineHeight) - 1);
-    return dir * linesPerPage;
+/**
+ * Check whether CodeMirror line block and viewport geometry are ready.
+ * Geometry is ready when viewport height and line height are positive non-zero numbers
+ * and line block lookup methods are available.
+ */
+export function isEditorGeometryReady(view: EditorView): boolean {
+  if (!view.dom || !view.scrollDOM) return false;
+  const viewportHeight = view.scrollDOM.clientHeight || view.dom.clientHeight;
+  const lineHeight = view.defaultLineHeight;
+  return viewportHeight > 0 && lineHeight > 0 && typeof view.lineBlockAt === "function" && typeof view.lineBlockAtHeight === "function";
+}
+
+export interface TargetVisualBlock {
+  from: number;
+  to: number;
+}
+
+/**
+ * Locate target visual block based on real display geometry, supporting soft wrapping,
+ * dynamic line height, and viewport height.
+ */
+export function resolveTargetVisualBlock(
+  view: EditorView,
+  head: number,
+  direction: "up" | "down" | "pageUp" | "pageDown",
+): TargetVisualBlock | null {
+  const state = view.state;
+  const currentLine = state.doc.lineAt(head);
+
+  if (isEditorGeometryReady(view)) {
+    try {
+      const currentBlock = view.lineBlockAt(head);
+      if (direction === "up") {
+        const targetBlock = view.lineBlockAtHeight(currentBlock.top - 1);
+        return { from: targetBlock.from, to: targetBlock.to };
+      }
+      if (direction === "down") {
+        const targetBlock = view.lineBlockAtHeight(currentBlock.bottom + 1);
+        return { from: targetBlock.from, to: targetBlock.to };
+      }
+      const viewportHeight = view.scrollDOM.clientHeight || view.dom.clientHeight;
+      const pageDistance = Math.max(view.defaultLineHeight, viewportHeight - view.defaultLineHeight);
+      if (direction === "pageUp") {
+        const targetY = Math.max(0, currentBlock.top - pageDistance);
+        const targetBlock = view.lineBlockAtHeight(targetY);
+        return { from: targetBlock.from, to: targetBlock.to };
+      }
+      if (direction === "pageDown") {
+        const maxContentHeight = Math.max(currentBlock.bottom, view.contentHeight || (state.doc.lines * view.defaultLineHeight));
+        const targetY = Math.min(maxContentHeight - 1, currentBlock.top + pageDistance);
+        const targetBlock = view.lineBlockAtHeight(targetY);
+        return { from: targetBlock.from, to: targetBlock.to };
+      }
+    } catch {
+      // Fall through to non-geometry fallback
+    }
   }
-  return dir * 15;
+
+  // When geometry is NOT ready:
+  // For Page movement: return null so caller yields to default handler without guessing fixed 15 lines (§ED-VSPACE-002).
+  if (direction === "pageUp" || direction === "pageDown") {
+    return null;
+  }
+
+  // Single line fallback (line arithmetic):
+  const delta = direction === "up" ? -1 : 1;
+  const targetLineNumber = Math.min(state.doc.lines, Math.max(1, currentLine.number + delta));
+  const targetLine = state.doc.line(targetLineNumber);
+  return { from: targetLine.from, to: targetLine.to };
 }
 
 /**
  * Vertical movement (Up / Down / PageUp / PageDown) with per-caret desired visual column.
- * Unified across single and multi-caret, respecting tab/CJK/emoji visual widths and virtual space policy.
+ * Unified across single and multi-caret, respecting real display geometry, soft wrap,
+ * tab/CJK/emoji visual widths and virtual space policy.
  */
 export function virtualVerticalMoveCommand(
   view: EditorView,
@@ -385,47 +445,51 @@ export function virtualVerticalMoveCommand(
   const state = view.state;
   const tabWidth = state.tabSize;
   const desired = state.field(desiredVisualColumnField, false) ?? [];
-  const lineDelta = computeViewportLineDelta(view, direction);
+
+  // For PageUp / PageDown without ready geometry, yield to default handler (§ED-VSPACE-002)
+  if ((direction === "pageUp" || direction === "pageDown") && !isEditorGeometryReady(view)) {
+    return false;
+  }
 
   let changed = false;
   const nextRanges: ReturnType<typeof EditorSelection.cursor>[] = [];
   const nextOverflow = new Map<number, number>();
   const nextDesired: number[] = [];
 
-  state.selection.ranges.forEach((range, idx) => {
+  for (let idx = 0; idx < state.selection.ranges.length; idx++) {
+    const range = state.selection.ranges[idx];
     const currentLine = state.doc.lineAt(range.head);
-    const targetLineNumber = Math.min(state.doc.lines, Math.max(1, currentLine.number + lineDelta));
-    if (targetLineNumber === currentLine.number && (direction === "up" || direction === "down")) {
-      nextRanges.push(range);
-      nextDesired.push(desired[idx] ?? (
-        visualColumnFor(currentLine.text, range.head - currentLine.from, tabWidth)
-        + virtualOverflowAt(state, range.head)
-      ));
-      return;
-    }
+    const targetBlock = resolveTargetVisualBlock(view, range.head, direction);
+    if (!targetBlock) return false;
 
-    changed = true;
-    const targetLine = state.doc.line(targetLineNumber);
+    const targetPhysLine = state.doc.lineAt(targetBlock.from);
+    const isEndOfPhysLine = targetBlock.to === targetPhysLine.to;
+    const isLastLine = targetPhysLine.number === state.doc.lines;
+    const allowed = isLastLine ? policy.atFileBottom : policy.afterLineEnd;
+
     const desiredCol = desired[idx] ?? (
       visualColumnFor(currentLine.text, range.head - currentLine.from, tabWidth)
       + virtualOverflowAt(state, range.head)
     );
     nextDesired.push(desiredCol);
 
-    const lineVisualWidth = visualColumnFor(targetLine.text, targetLine.length, tabWidth);
-    const isLastLine = targetLine.number === state.doc.lines;
-    const allowed = isLastLine ? policy.atFileBottom : policy.afterLineEnd;
+    const blockText = state.sliceDoc(targetBlock.from, targetBlock.to);
+    const blockVisualWidth = visualColumnFor(blockText, blockText.length, tabWidth);
 
     let targetHead: number;
-    if (desiredCol > lineVisualWidth) {
-      targetHead = targetLine.to;
-      if (allowed) {
-        const overflow = Math.min(desiredCol - lineVisualWidth, MAX_OVERFLOW_COLUMNS);
+    if (desiredCol > blockVisualWidth) {
+      targetHead = targetBlock.to;
+      if (allowed && isEndOfPhysLine) {
+        const overflow = Math.min(desiredCol - blockVisualWidth, MAX_OVERFLOW_COLUMNS);
         nextOverflow.set(targetHead, overflow);
       }
     } else {
-      const docCol = documentColumnForVisualColumn(targetLine.text, desiredCol, tabWidth);
-      targetHead = targetLine.from + docCol;
+      const docCol = documentColumnForVisualColumn(blockText, desiredCol, tabWidth);
+      targetHead = targetBlock.from + docCol;
+    }
+
+    if (targetHead !== range.head || virtualOverflowAt(state, range.head) !== (nextOverflow.get(targetHead) ?? 0)) {
+      changed = true;
     }
 
     if (extend) {
@@ -437,7 +501,7 @@ export function virtualVerticalMoveCommand(
     } else {
       nextRanges.push(EditorSelection.cursor(targetHead));
     }
-  });
+  }
 
   if (!changed) return false;
 

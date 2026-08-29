@@ -7,6 +7,7 @@ import {
   documentColumnForVisualColumn,
   measureVisualPositions,
   setVirtualHead,
+  setVirtualOverflow,
   virtualBackspaceCommand,
   virtualDeleteCommand,
   virtualEnterCommand,
@@ -17,11 +18,16 @@ import {
   virtualMoveLeftCommand,
   virtualMoveRightCommand,
   virtualOverflowAt,
+  virtualPageDown,
+  virtualPageUp,
   virtualSelectDown,
+  virtualSelectPageDown,
+  virtualSelectPageUp,
   virtualSpaceClickHandler,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
   virtualTabCommand,
+  isEditorGeometryReady,
   VirtualSpaceController,
   VIRTUAL_SPACE_KNOWN_GAPS,
 } from "./workspaceVirtualSpace";
@@ -458,6 +464,226 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       expect(result2.kind).toBe("rejected");
       await Promise.resolve();
       expect(commandRunCount).toBe(0); // Zero dispatch to editor!
+    });
+  });
+
+  describe("§ED-VSPACE-002: Real Display Geometry Page & Vertical Movement", () => {
+    it("isEditorGeometryReady detects unready vs ready geometry", () => {
+      const view = new EditorView({
+        state: EditorState.create({ doc: "hello\nworld", extensions: [POLICY] }),
+      });
+      // Headless / jsdom view without layout geometry:
+      expect(isEditorGeometryReady(view)).toBe(false);
+
+      // With mock layout geometry:
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      expect(isEditorGeometryReady(view)).toBe(true);
+    });
+
+    it("yields to default handler (returns false) for PageUp/PageDown when geometry is not ready", () => {
+      const view = new EditorView({
+        state: EditorState.create({ doc: "line1\nline2\nline3", extensions: [POLICY] }),
+      });
+      expect(isEditorGeometryReady(view)).toBe(false);
+
+      // Without geometry, PageUp/PageDown does NOT use fake 15-line fallback, but returns false
+      expect(virtualPageDown(view)).toBe(false);
+      expect(virtualPageUp(view)).toBe(false);
+      expect(virtualSelectPageDown(view)).toBe(false);
+      expect(virtualSelectPageUp(view)).toBe(false);
+    });
+
+    it("performs real geometry PageDown and PageUp based on viewport height and line height", () => {
+      const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n");
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: lines,
+          extensions: [virtualSpaceOverflowField, desiredVisualColumnField, POLICY],
+        }),
+      });
+
+      // Mock 20px line height, 200px viewport -> 9 lines per page jump (200/20 - 1 = 9 lines)
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      Object.defineProperty(view, "contentHeight", { value: 1000, configurable: true });
+
+      // Mock lineBlockAt and lineBlockAtHeight based on 20px line height:
+      (view as any).lineBlockAt = (pos: number) => {
+        const line = view.state.doc.lineAt(pos);
+        const top = (line.number - 1) * 20;
+        return {
+          from: line.from,
+          to: line.to,
+          top,
+          bottom: top + 20,
+          height: 20,
+          type: 0,
+        };
+      };
+      (view as any).lineBlockAtHeight = (height: number) => {
+        const lineNum = Math.min(view.state.doc.lines, Math.max(1, Math.floor(height / 20) + 1));
+        const line = view.state.doc.line(lineNum);
+        const top = (line.number - 1) * 20;
+        return {
+          from: line.from,
+          to: line.to,
+          top,
+          bottom: top + 20,
+          height: 20,
+          type: 0,
+        };
+      };
+
+      // Caret on Line 1 offset 0
+      view.dispatch({ selection: EditorSelection.cursor(0) });
+      expect(virtualPageDown(view)).toBe(true);
+
+      // Should land on Line 10 (1 + 9)
+      const head1 = view.state.selection.main.head;
+      const line1 = view.state.doc.lineAt(head1);
+      expect(line1.number).toBe(10);
+
+      // PageDown again -> Line 19
+      expect(virtualPageDown(view)).toBe(true);
+      const head2 = view.state.selection.main.head;
+      expect(view.state.doc.lineAt(head2).number).toBe(19);
+
+      // PageUp -> back to Line 10
+      expect(virtualPageUp(view)).toBe(true);
+      const head3 = view.state.selection.main.head;
+      expect(view.state.doc.lineAt(head3).number).toBe(10);
+    });
+
+    it("dynamically adapts page jump distance upon viewport resize", () => {
+      const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n");
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: lines,
+          extensions: [virtualSpaceOverflowField, desiredVisualColumnField, POLICY],
+        }),
+      });
+
+      // Initial viewport 200px (9 lines)
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      Object.defineProperty(view, "contentHeight", { value: 1000, configurable: true });
+
+      (view as any).lineBlockAt = (pos: number) => {
+        const line = view.state.doc.lineAt(pos);
+        const top = (line.number - 1) * 20;
+        return { from: line.from, to: line.to, top, bottom: top + 20, height: 20, type: 0 };
+      };
+      (view as any).lineBlockAtHeight = (height: number) => {
+        const lineNum = Math.min(view.state.doc.lines, Math.max(1, Math.floor(height / 20) + 1));
+        const line = view.state.doc.line(lineNum);
+        const top = (line.number - 1) * 20;
+        return { from: line.from, to: line.to, top, bottom: top + 20, height: 20, type: 0 };
+      };
+
+      // Resize viewport to 400px (400 - 20 = 380px = 19 lines jump)
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 400, configurable: true });
+
+      view.dispatch({ selection: EditorSelection.cursor(0) });
+      expect(virtualPageDown(view)).toBe(true);
+
+      // Should land on Line 20 (1 + 19)
+      const head = view.state.selection.main.head;
+      expect(view.state.doc.lineAt(head).number).toBe(20);
+    });
+
+    it("navigates visual line blocks in soft-wrapped text and clamps before line-end virtual space", () => {
+      // Physical doc with 1 long line: "0123456789ABCDEFGHIJ"
+      const doc = "0123456789ABCDEFGHIJ";
+      const view = new EditorView({
+        state: EditorState.create({
+          doc,
+          extensions: [virtualSpaceOverflowField, desiredVisualColumnField, POLICY],
+        }),
+      });
+
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      Object.defineProperty(view, "contentHeight", { value: 40, configurable: true });
+
+      // Soft wrapped into 2 visual blocks: block 1 (0..10), block 2 (10..20)
+      (view as any).lineBlockAt = (pos: number) => {
+        if (pos < 10) {
+          return { from: 0, to: 10, top: 0, bottom: 20, height: 20, type: 0 };
+        }
+        return { from: 10, to: 20, top: 20, bottom: 40, height: 20, type: 0 };
+      };
+      (view as any).lineBlockAtHeight = (height: number) => {
+        if (height < 20) {
+          return { from: 0, to: 10, top: 0, bottom: 20, height: 20, type: 0 };
+        }
+        return { from: 10, to: 20, top: 20, bottom: 40, height: 20, type: 0 };
+      };
+
+      // Moving down from block 1 to block 2
+      view.dispatch({ selection: EditorSelection.cursor(3) });
+      expect(virtualMoveDown(view)).toBe(true);
+      expect(view.state.selection.main.head).toBe(13); // offset 10 + 3 in block 2
+    });
+
+    it("handles top and bottom boundaries and preserves virtual overflow at file bottom", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "first line\nlast line",
+          extensions: [virtualSpaceOverflowField, desiredVisualColumnField, POLICY],
+        }),
+      });
+
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      Object.defineProperty(view, "contentHeight", { value: 40, configurable: true });
+
+      (view as any).lineBlockAt = (pos: number) => {
+        const line = view.state.doc.lineAt(pos);
+        const top = (line.number - 1) * 20;
+        return { from: line.from, to: line.to, top, bottom: top + 20, height: 20, type: 0 };
+      };
+      (view as any).lineBlockAtHeight = (height: number) => {
+        const lineNum = Math.min(2, Math.max(1, Math.floor(height / 20) + 1));
+        const line = view.state.doc.line(lineNum);
+        const top = (line.number - 1) * 20;
+        return { from: line.from, to: line.to, top, bottom: top + 20, height: 20, type: 0 };
+      };
+
+      // Caret at top line 1
+      view.dispatch({ selection: EditorSelection.cursor(0) });
+      expect(virtualPageUp(view)).toBe(false); // already at top boundary
+
+      // Caret at bottom line with desired column 30 (line length 9 -> overflow 21)
+      view.dispatch({ selection: EditorSelection.cursor(11) }); // "last line" start
+      // Place desired visual column 30
+      view.dispatch({
+        selection: EditorSelection.cursor(20),
+        effects: [setVirtualOverflow.of(new Map([[20, 21]]))],
+      });
+      expect(virtualOverflowAt(view.state, 20)).toBe(21);
+
+      // PageDown at bottom boundary preserves caret at file bottom and retains virtual overflow
+      expect(virtualPageDown(view)).toBe(false);
+      expect(view.state.selection.main.head).toBe(20);
+    });
+
+    it("respects tabSize 2 vs tabSize 8 and wide CJK/Emoji characters in vertical navigation", () => {
+      // In tabSize 2: "\tfoo" has "\t" (width 2) + "foo" (width 3) = visual col 5
+      expect(visualColumnOf("\tfoo", 4, 2)).toBe(5);
+
+      // In tabSize 8: "\tfoo" has "\t" (width 8) + "foo" (width 3) = visual col 11
+      expect(visualColumnOf("\tfoo", 4, 8)).toBe(11);
+
+      // CJK "你好" has 2 chars, each width 2 -> visual width 4
+      expect(visualColumnOf("你好", 2, 4)).toBe(4);
+      // Emoji "🚀" (astral code point, string length 2) -> visual width 2
+      expect(visualColumnOf("🚀", 2, 4)).toBe(2);
     });
   });
 });

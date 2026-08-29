@@ -188,7 +188,7 @@
 - 验证：menu/palette/keymap 同 definition，同一按键一次 dispatch，非 owner focus zero dispatch。
 
 ### ED-VSPACE-002 使用真实 display geometry 实现 Page movement
-<!-- ide-task {"id":"ED-VSPACE-002","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-VSPACE-001"],"legacy":["BB4"]} -->
+<!-- ide-task {"id":"ED-VSPACE-002","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T09:52:12Z","baseline":"f0a036138144874f57f2ccaacad0abb87b5b4ebb","depends_on":["ED-VSPACE-001"],"legacy":["BB4"],"updated_at":"2026-08-29T09:58:19Z","evidence":"vitest: workspaceVirtualSpace.test.ts, workspaceKeymapRuntime.test.ts, CodeMirrorHost.test.tsx; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：读取 CodeMirror line blocks、viewport rectangle 和实际 line height；soft wrap 按 visual block；geometry 未 ready 返回 unavailable 并交回默认 handler；删除固定 15 行 fallback。
 - 主文件：virtual-space geometry adapter、CodeMirror host、tests。
