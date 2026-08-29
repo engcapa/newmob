@@ -402,7 +402,7 @@
 这些任务来自 IDEA 公开工作流与旧文档长期 gap，已按当前代码重新去重。它们可以与 P0 不冲突的 owner 并行，但不能用来补偿 G0 红项。同一 priority 的主产品顺序为 shared multi-view、Find/Replace、Navigation/Usages、Editor Banner、File Templates；其余独立能力随后按文档顺序推荐。
 
 ### ED-MULTIVIEW-001 设计 shared document transaction owner
-<!-- ide-task {"id":"ED-MULTIVIEW-001","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["N14.3"]} -->
+<!-- ide-task {"id":"ED-MULTIVIEW-001","status":"done","priority":"P0","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:14:41Z","baseline":"3cb5c459bdc5dd43c4872702380e18c7a44b6585","depends_on":[],"legacy":["N14.3"],"updated_at":"2026-08-29T12:15:17Z","evidence":"adr: adr-shared-document-transaction-owner.md; qa-ui-auto lint"} -->
 
 - 结果：独立 ADR 明确同文件多 split 的 document/undo/redo/dirty/LSP authority、per-view selection/scroll/fold，以及从当前全文同步的迁移步骤；不在本任务改 production。
 - 验证：现状 reproduction 与 invariants、迁移/rollback/test plan 可执行。
