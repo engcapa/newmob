@@ -928,6 +928,55 @@ export function matchCompletionQuery(label: string, query: string): { tier: Comp
   return { tier: 5, score: 0 };
 }
 
+export interface CompletionCandidateIdentity {
+  candidateId: string;
+  rawResponseIndex: number;
+  workspaceId: string;
+  fileKey: string;
+  documentRevision: number;
+  lspSessionGeneration: number;
+  policyRevision: number;
+}
+
+export interface CompletionCandidatePair {
+  identity: CompletionCandidateIdentity;
+  rawItem: LspCompletionItem;
+  completion: Completion;
+  matchTier: CompletionMatchTier;
+  matchScore: number;
+}
+
+/**
+ * Pure comparator for completion candidate pairs (§ED-COMP-002).
+ * Rule 1: Match tier is the primary sort key (Tier 1 < Tier 2 < Tier 3 < Tier 4 < Tier 5).
+ * Rule 2: If sortMode is alphabetical, compare labels.
+ * Rule 3: For provider-relevance within the same tier, strictly preserve provider order (rawResponseIndex).
+ */
+export function compareCandidatePairs(
+  a: CompletionCandidatePair,
+  b: CompletionCandidatePair,
+  sortMode: CompletionSortMode = "provider-relevance",
+): number {
+  if (sortMode === "alphabetical") {
+    return a.completion.label.localeCompare(b.completion.label);
+  }
+
+  // 1. Primary sort key: Match tier
+  if (a.matchTier !== b.matchTier) {
+    return a.matchTier - b.matchTier;
+  }
+
+  // 2. Explicit boost differences (e.g. prioritized symbols)
+  const boostA = a.completion.boost ?? 0;
+  const boostB = b.completion.boost ?? 0;
+  if (boostA !== boostB) {
+    return boostB - boostA;
+  }
+
+  // 3. Default tie-breaker within same tier: strictly preserve provider order (rawResponseIndex)
+  return a.identity.rawResponseIndex - b.identity.rawResponseIndex;
+}
+
 export function compareCompletionCandidates(
   a: Completion,
   b: Completion,
@@ -1911,9 +1960,11 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     }
 
     const typed = word ? word.text : "";
+    const query = word ? context.state.doc.sliceString(word.from, context.pos) : "";
     const rawItems = result.items;
-    const mapped: Completion[] = [];
-    const mappedItems: LspCompletionItem[] = [];
+    const pairs: CompletionCandidatePair[] = [];
+    const policyRev = hooks.controller?.getRevision?.() ?? 1;
+
     // The server response is already relevance ordered. Mapping more entries
     // than the popup can consume only allocates closures/documentation helpers
     // on the renderer thread, which is especially visible for jdtls lists.
@@ -1981,7 +2032,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
           }
         : undefined;
       const showDoc = policy.documentation.enabled;
-      mapped.push({
+      const completion: Completion = {
         label,
         displayLabel,
         sortText: item.sortText ?? undefined,
@@ -2005,18 +2056,35 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             hooks.onResolveGate,
             policy.excludedSymbols,
           ),
+      };
+
+      const match = matchCompletionQuery(label, query);
+      const candidateId = `${token.workspaceId}:${token.fileKey}:cand-${i}:${item.label}`;
+      const candidateIdentity: CompletionCandidateIdentity = {
+        candidateId,
+        rawResponseIndex: i,
+        workspaceId: token.workspaceId,
+        fileKey: token.fileKey,
+        documentRevision: token.documentRevision,
+        lspSessionGeneration: token.lspSessionGeneration,
+        policyRevision: policyRev,
+      };
+
+      pairs.push({
+        identity: candidateIdentity,
+        rawItem: item,
+        completion,
+        matchTier: match.tier,
+        matchScore: isPrioritized ? match.score + 500 : match.score,
       });
-      mappedItems.push(item);
     }
     if (context.aborted) return null;
 
-    // §8.22.7 U2-E: IDEA heuristic ranking vs alphabetical vs provider relevance
-    const query = word ? context.state.doc.sliceString(word.from, context.pos) : "";
-    if (policy.sortMode === "alphabetical") {
-      mapped.sort((a, b) => a.label.localeCompare(b.label));
-    } else {
-      mapped.sort((a, b) => compareCompletionCandidates(a, b, query, policy.sortMode));
-    }
+    // §ED-COMP-002: Sort atomic candidate pairs — never splits raw and mapped pairs
+    pairs.sort((a, b) => compareCandidatePairs(a, b, policy.sortMode));
+
+    const mapped = pairs.map((p) => p.completion);
+    const mappedItems = pairs.map((p) => p.rawItem);
 
     // Prefer textEdit start when every item shares the same replace range so
     // CM's client-side filtering aligns with the server's replace span.

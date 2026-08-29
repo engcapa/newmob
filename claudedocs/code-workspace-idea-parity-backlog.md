@@ -265,7 +265,7 @@
 - 验证：throw/null/timeout/missing resolver/cancel/stale，popup 和 selection 保留。
 
 ### ED-COMP-002 冻结 candidate/session/provider identity 与排序
-<!-- ide-task {"id":"ED-COMP-002","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-COMP-001"],"legacy":["BB7"]} -->
+<!-- ide-task {"id":"ED-COMP-002","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T11:58:06Z","baseline":"63b3472e151b9c57eed6bfa76a604585aa818824","depends_on":["ED-COMP-001"],"legacy":["BB7"],"updated_at":"2026-08-29T12:01:56Z","evidence":"vitest: lspCompletion.test.ts, lspCompletionResolveGate.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：stable candidate id 映射 raw response index；冻结 document/session/provider/policy/project generation；match tier 为第一排序键，同 tier 默认保持 provider order。
 - 主文件：completion controller/mapping/preferences tests。
