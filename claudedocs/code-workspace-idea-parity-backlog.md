@@ -474,7 +474,7 @@
 - 验证：多 banner priority、file switch、action failure、focus/a11y、layout no-overlap。
 
 ### ED-TEMPLATE-001 File and Code Templates 最小 Java 切片
-<!-- ide-task {"id":"ED-TEMPLATE-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-PROJECT-005"],"legacy":["N11.1"]} -->
+<!-- ide-task {"id":"ED-TEMPLATE-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:17:20Z","baseline":"8d26e480d960827963cb7fd6203c901d7e2566f8","depends_on":["ED-PROJECT-005"],"legacy":["N11.1"],"updated_at":"2026-08-29T14:18:13Z","evidence":"vitest: fileTemplateModel.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：New Class/Interface/Record 使用可编辑模板、package/source-root facts 和安全变量；创建为一次 resource transaction。
 - 验证：valid/invalid name、package path、existing file conflict、undo/recovery、untrusted template variable。
