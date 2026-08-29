@@ -319,7 +319,7 @@ import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
 import { isTauriRuntime } from "../../lib/runtime";
 import { useMountedRef } from "../../hooks/useMountedRef";
-import { fallbackWordHighlights } from "./workspace/lspIntelligenceChrome";
+import { fallbackWordHighlights, wordAt } from "./workspace/lspIntelligenceChrome";
 import {
   inlayHintsEnabledForLanguage,
   readWorkspaceIntelligencePreferences,
@@ -428,6 +428,13 @@ import {
   writeWorkspaceBookmarks,
   type WorkspaceBookmark,
 } from "./workspace/todoBookmarks";
+import {
+  createOccurrenceSession,
+  formatOccurrenceStatus,
+  isOccurrenceSessionValid,
+  stepOccurrence,
+  type OccurrenceHighlightSession,
+} from "./workspace/occurrenceHighlightModel";
 import { useDeferredOpenFileTodos } from "./workspace/useDeferredOpenFileTodos";
 import { type QuickDocContent } from "./workspace/referenceDocumentation";
 import {
@@ -1720,6 +1727,7 @@ export function CodeWorkspaceTab({
     primary: false,
     secondary: false,
   });
+  const [occurrenceSession, setOccurrenceSession] = useState<OccurrenceHighlightSession | null>(null);
   const [referencesResult, setReferencesResult] = useState<ReferencesResultState>({
     loading: false,
     origin: null,
@@ -5918,6 +5926,14 @@ export function CodeWorkspaceTab({
   ]);
 
   useEffect(() => {
+    if (!occurrenceSession) return;
+    const currentRev = activeFile ? (lspDocumentEpochRef.current[activeFile.key] ?? 0) : -1;
+    if (!activeFile || !isOccurrenceSessionValid(occurrenceSession, activeFile.key, currentRev)) {
+      setOccurrenceSession(null);
+    }
+  }, [activeFile, occurrenceSession]);
+
+  useEffect(() => {
     const groupId = activeEditorGroupId;
     const file = activeFile;
     if (!file || file.loading || activeFileIsLarge || !activeInlayHintsEnabled || !activeCapabilities?.inlayHint) {
@@ -8981,6 +8997,80 @@ export function CodeWorkspaceTab({
     }));
   }, [activeEditorGroupId]);
 
+  const highlightUsagesInFile = useCallback(async () => {
+    const file = activeFile;
+    if (!file) return;
+    const position = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
+    const descriptor = lspDescriptorForFile(file);
+    const rev = lspDocumentEpochRef.current[file.key] ?? 0;
+    const lines = file.text.split("\n");
+    let offset = 0;
+    for (let l = 0; l < Math.min(position.line, lines.length); l += 1) {
+      offset += lines[l].length + 1;
+    }
+    offset += Math.min(position.character, lines[position.line]?.length ?? 0);
+    const token = wordAt(file.text, offset);
+    const word = token?.word || "symbol";
+
+    let highlights: LspDocumentHighlight[] = [];
+    if (activeCapabilities?.documentHighlight && descriptor && activeLspDocumentIsSynced) {
+      try {
+        const result = await lspDocumentHighlights(descriptor, position);
+        highlights = result.highlights;
+      } catch {
+        highlights = fallbackWordHighlights(file.text, position);
+      }
+    } else {
+      highlights = fallbackWordHighlights(file.text, position);
+    }
+
+    if (highlights.length === 0) {
+      setStatusMessage(`No occurrences found for "${word}"`);
+      setOccurrenceSession(null);
+      return;
+    }
+
+    const session = createOccurrenceSession(file.key, rev, word, highlights, position);
+    setOccurrenceSession(session);
+    setHighlightsByGroup((current) => ({
+      ...current,
+      [activeEditorGroupId]: highlights,
+    }));
+    setStatusMessage(formatOccurrenceStatus(session));
+  }, [
+    activeCapabilities?.documentHighlight,
+    activeEditorGroupId,
+    activeFile,
+    activeLspDocumentIsSynced,
+    cursorPositions,
+    lspDescriptorForFile,
+    setStatusMessage,
+  ]);
+
+  const navigateOccurrence = useCallback((direction: "next" | "previous") => {
+    if (!occurrenceSession || !activeFile || occurrenceSession.fileKey !== activeFile.key) {
+      setStatusMessage("No active occurrence highlight session");
+      return;
+    }
+    const { session: nextSession, current } = stepOccurrence(occurrenceSession, direction);
+    setOccurrenceSession(nextSession);
+    if (current) {
+      revealEditorLocation(activeFile.key, current.range);
+    }
+    setStatusMessage(formatOccurrenceStatus(nextSession));
+  }, [activeFile, occurrenceSession, revealEditorLocation, setStatusMessage]);
+
+  const clearHighlightUsages = useCallback(() => {
+    if (!occurrenceSession) return false;
+    setOccurrenceSession(null);
+    setHighlightsByGroup((current) => ({
+      ...current,
+      [activeEditorGroupId]: [],
+    }));
+    setStatusMessage("Occurrence highlights cleared");
+    return true;
+  }, [activeEditorGroupId, occurrenceSession, setStatusMessage]);
+
   const navigateDiagnostic = useCallback((direction: 1 | -1) => {
     const file = activeFile;
     if (!file) return;
@@ -10102,6 +10192,42 @@ export function CodeWorkspaceTab({
       keywords: ["navbar", "navigation", "bar", "breadcrumbs", "jump"],
       when: (context) => context.focus === "editor" && !!activeFile,
       run: activateNavigationBar,
+    },
+    {
+      id: "workspace.highlightUsagesInFile",
+      title: "Highlight Usages in File",
+      category: "Navigate",
+      keybinding: "Ctrl+Shift+F7",
+      keywords: ["highlight", "usages", "occurrences", "symbol"],
+      when: (context) => context.focus === "editor" && !!activeFile,
+      run: highlightUsagesInFile,
+    },
+    {
+      id: "workspace.nextOccurrence",
+      title: "Next Highlighted Occurrence",
+      category: "Navigate",
+      keybinding: "Ctrl+Alt+Down",
+      keywords: ["next", "occurrence", "highlight"],
+      when: (context) => context.focus === "editor" && !!occurrenceSession,
+      run: () => navigateOccurrence("next"),
+    },
+    {
+      id: "workspace.previousOccurrence",
+      title: "Previous Highlighted Occurrence",
+      category: "Navigate",
+      keybinding: "Ctrl+Alt+Up",
+      keywords: ["previous", "occurrence", "highlight"],
+      when: (context) => context.focus === "editor" && !!occurrenceSession,
+      run: () => navigateOccurrence("previous"),
+    },
+    {
+      id: "workspace.clearHighlightUsages",
+      title: "Clear Highlight Usages",
+      category: "Navigate",
+      keybinding: "Escape",
+      keywords: ["clear", "highlight", "escape"],
+      when: (context) => context.focus === "editor" && !!occurrenceSession,
+      run: clearHighlightUsages,
     },
     {
       id: "workspace.toggleInlayHints",

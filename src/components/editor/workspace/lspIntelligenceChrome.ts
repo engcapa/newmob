@@ -175,7 +175,7 @@ export function createLspIntelligenceChrome(
   ];
 }
 
-function wordAt(text: string, offset: number): { from: number; to: number; word: string } | null {
+export function wordAt(text: string, offset: number): { from: number; to: number; word: string } | null {
   const isWord = (char: string) => /[\p{L}\p{N}_$]/u.test(char);
   if (!text || offset < 0 || offset > text.length) return null;
   let from = Math.min(offset, text.length - 1);

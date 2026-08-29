@@ -450,7 +450,7 @@
 - 验证：多 root、file/symbol、focus restore、unavailable provider、keymap conflict。
 
 ### ED-NAV-002 补显式 Highlight Usages 与 occurrence 导航
-<!-- ide-task {"id":"ED-NAV-002","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-QUERY-002"],"legacy":["N13.4"]} -->
+<!-- ide-task {"id":"ED-NAV-002","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:43:48Z","baseline":"dcb5b3de55367897fd89f313c60ecad902feb0bc","depends_on":["ED-QUERY-002"],"legacy":["N13.4"],"updated_at":"2026-08-29T12:46:40Z","evidence":"vitest: occurrenceHighlightModel.test.ts, CodeMirrorHost.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：显式 Highlight Usages、Esc clear、next/previous occurrence；read/write 只有 provider 分类时区分，否则显示 unknown。
 - 验证：document edits invalidate、0/1/many、role unknown、keyboard loop。
