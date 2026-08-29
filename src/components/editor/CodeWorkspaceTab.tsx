@@ -910,6 +910,10 @@ import {
   executeBoundedAsyncQueue,
   planWorkspaceRestore,
 } from "./workspace/workspaceRestoreModel";
+import {
+  planCleanup,
+  planRearrange,
+} from "./workspace/rearrangeCleanupWorkflow";
 
 export function CodeWorkspaceTab({
   tabId,
@@ -9717,6 +9721,47 @@ export function CodeWorkspaceTab({
       keywords: ["organize imports", "clean imports", "sort imports"],
       when: () => !!activeFile,
       run: () => void optimizeImports(),
+    },
+    {
+      id: "workspace.rearrangeCode",
+      title: "Rearrange Code",
+      category: "Code",
+      keywords: ["rearrange", "members", "order", "declarations", "structure"],
+      when: () => !!activeFile,
+      run: () => {
+        if (!activeFile) return;
+        const decision = planRearrange({
+          scope: "file",
+          targetPath: activeFile.path ?? activeFile.key,
+          languageId: activeFile.languageId ?? null,
+          readOnly: !!activeFile.readOnly,
+          hasSelection: false,
+          capabilities: { rearrangeSupported: false },
+        });
+        if (decision.kind === "unavailable") {
+          setStatusMessage(decision.reason);
+        }
+      },
+    },
+    {
+      id: "workspace.codeCleanup",
+      title: "Code Cleanup...",
+      category: "Code",
+      keywords: ["cleanup", "inspect", "batch", "optimize", "profile"],
+      when: () => !!activeFile,
+      run: () => {
+        if (!activeFile) return;
+        const decision = planCleanup({
+          scope: "file",
+          targetPath: activeFile.path ?? activeFile.key,
+          languageId: activeFile.languageId ?? null,
+          readOnly: !!activeFile.readOnly,
+          capabilities: { cleanupSupported: false },
+        });
+        if (decision.kind === "unavailable") {
+          setStatusMessage(decision.reason);
+        }
+      },
     },
     {
       id: "workspace.navigateBack",

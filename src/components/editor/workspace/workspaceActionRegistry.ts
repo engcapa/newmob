@@ -704,6 +704,22 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     keywords: ["import", "organize", "unused"],
   },
   {
+    id: "workspace.rearrangeCode",
+    title: "Rearrange Code",
+    description: "Rearrange code declarations and members according to arrangement rules",
+    category: "Edit",
+    provenance: "provider",
+    keywords: ["rearrange", "members", "order", "declarations", "structure"],
+  },
+  {
+    id: "workspace.codeCleanup",
+    title: "Code Cleanup...",
+    description: "Run batch cleanup profiles (unused imports, redundant code, style fixes) across selected scope",
+    category: "Edit",
+    provenance: "provider",
+    keywords: ["cleanup", "inspect", "batch", "optimize", "profile"],
+  },
+  {
     id: "workspace.parameterInfo",
     title: "Parameter Info",
     description: "Show active method or function signature and parameters",

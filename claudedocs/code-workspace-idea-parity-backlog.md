@@ -510,7 +510,7 @@
 - 验证：selection/file、multi-file scope、marker nesting、excluded file、provider unavailable。
 
 ### ED-STYLE-002 Rearrange / Cleanup 独立工作流
-<!-- ide-task {"id":"ED-STYLE-002","status":"ready","priority":"P2","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-STYLE-001","ED-ACTION-004"],"legacy":["C8-D"]} -->
+<!-- ide-task {"id":"ED-STYLE-002","status":"done","priority":"P2","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:50:33Z","baseline":"27c616aea1b26d225b7babb12b48a325600e9ae4","depends_on":["ED-STYLE-001","ED-ACTION-004"],"legacy":["C8-D"],"updated_at":"2026-08-29T13:52:21Z","evidence":"vitest: rearrangeCleanupWorkflow.test.ts, workspaceActionRegistry.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：只在 provider 明确支持时提供 rearrange/cleanup，显示计划/范围/失败；不得把 format 或 organize imports 重命名冒充。
 - 验证：provider capability、preview/conflict/cancel、postcondition/undo。
