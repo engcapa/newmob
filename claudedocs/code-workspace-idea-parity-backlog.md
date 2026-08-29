@@ -538,7 +538,7 @@
 - 验证：render/reconfigure counters、typing/parent rerender regression、before/after samples。
 
 ### ED-PERF-002 收敛隐藏 workspace 的 Git/LSP 后台活动
-<!-- ide-task {"id":"ED-PERF-002","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["PERF-3.3","PERF-3.4"]} -->
+<!-- ide-task {"id":"ED-PERF-002","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:34:13Z","baseline":"2ef75f6087eb4b3a13ebe3a7aae7340bc8a8a9c3","depends_on":[],"legacy":["PERF-3.3","PERF-3.4"],"updated_at":"2026-08-29T13:46:39Z","evidence":"vitest: lsp.test.ts, useWorkspaceGitSnapshots.test.tsx, useWorkspaceLspSession.test.tsx; qa-ui-auto lint; vite build"} -->
 
 - 结果：Git polling 仅可见 workspace、同 repo cache/in-flight dedupe；LSP detect 应用级 cache、按需触发和手动 refresh。
 - 验证：fake timers、3 workspace/同 repo、hide/show、slow request/cancel、call counts。

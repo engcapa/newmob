@@ -122,4 +122,35 @@ describe("useWorkspaceGitSnapshots", () => {
     expect(result.current.gitRoots).toEqual([]);
     expect(gitMocks.gitSnapshot).not.toHaveBeenCalled();
   });
+
+  it("ED-PERF-002: pauses polling when visible is false and resumes on visible true", async () => {
+    const onError = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ visible }) => useWorkspaceGitSnapshots({ roots, onError, visible }),
+      { initialProps: { visible: false } },
+    );
+
+    await waitFor(() => expect(result.current.gitRootsLoading).toBe(false));
+    expect(result.current.gitRoots).toEqual([detectedRoot]);
+    expect(gitMocks.gitSnapshot).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(gitMocks.gitSnapshot).not.toHaveBeenCalled();
+
+      rerender({ visible: true });
+      expect(gitMocks.gitSnapshot).toHaveBeenCalledTimes(1);
+      await Promise.resolve();
+
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(gitMocks.gitSnapshot).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

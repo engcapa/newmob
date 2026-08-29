@@ -273,10 +273,42 @@ export function lspListPresets(): Promise<LspServerPreset[]> {
   return invoke<LspServerPreset[]>("lsp_list_presets");
 }
 
+let lspDetectCache: { key: string; time: number; data: LspServerStatus[] } | null = null;
+let lspDetectInFlight: { key: string; promise: Promise<LspServerStatus[]> } | null = null;
+const LSP_DETECT_CACHE_TTL_MS = 60_000;
+
+export function clearLspDetectCache(): void {
+  lspDetectCache = null;
+  lspDetectInFlight = null;
+}
+
 /** Detect installed language servers. Pass `javaHome` to probe jdtls with a configured JDK. */
-export function lspDetectServers(options?: { javaHome?: string | null }): Promise<LspServerStatus[]> {
+export function lspDetectServers(options?: { javaHome?: string | null; forceRefresh?: boolean }): Promise<LspServerStatus[]> {
   const javaHome = options?.javaHome?.trim() || null;
-  return invoke<LspServerStatus[]>("lsp_detect_servers", { javaHome });
+  const key = javaHome ?? "";
+
+  if (!options?.forceRefresh) {
+    if (lspDetectCache && lspDetectCache.key === key && Date.now() - lspDetectCache.time < LSP_DETECT_CACHE_TTL_MS) {
+      return Promise.resolve(lspDetectCache.data);
+    }
+    if (lspDetectInFlight && lspDetectInFlight.key === key) {
+      return lspDetectInFlight.promise;
+    }
+  }
+
+  const promise = invoke<LspServerStatus[]>("lsp_detect_servers", { javaHome })
+    .then((statuses) => {
+      lspDetectCache = { key, time: Date.now(), data: statuses };
+      return statuses;
+    })
+    .finally(() => {
+      if (lspDetectInFlight?.key === key) {
+        lspDetectInFlight = null;
+      }
+    });
+
+  lspDetectInFlight = { key, promise };
+  return promise;
 }
 
 /** Apply the configured JDK for jdtls globally in the backend process. */

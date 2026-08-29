@@ -1672,6 +1672,7 @@ export function CodeWorkspaceTab({
   } = useWorkspaceGitSnapshots({
     roots,
     onError: setStatusMessage,
+    visible,
   });
   const [revealTarget, setRevealTarget] = useState<EditorRevealTarget | null>(null);
   // Editor keys whose library sources are being fetched (drives the button spinner).
