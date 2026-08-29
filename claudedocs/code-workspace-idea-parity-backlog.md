@@ -132,7 +132,7 @@
 - 验证：重复 id、任意 detach 顺序、双 workspace 同路径、幂等 detach、last-root release。
 
 ### ED-CLIP-002 接入真实 clipboard permission epoch
-<!-- ide-task {"id":"ED-CLIP-002","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-CLIP-001"],"legacy":["BB1"]} -->
+<!-- ide-task {"id":"ED-CLIP-002","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T08:38:19Z","baseline":"f6cbe75a9f659c5107d213f96eb7e0c1691bcac1","depends_on":["ED-CLIP-001"],"legacy":["BB1"],"updated_at":"2026-08-29T08:43:33Z","evidence":"focused 45/45; CodeMirrorHost 27/27; CodeWorkspaceTab 78/78; pnpm build exit 0; qa audit --diff exit 0; unrun: native clipboard OS backend matrix (ED-CLIP-004/BB11)"} -->
 
 - 结果：root owner 使用 native/web permission adapter；system read/write 在 await 前后重验 session/policy/permission generation；denied 与 mid-await change 返回 typed 结果，系统 effect 为 0。
 - 主文件：`workspaceClipboardSession.ts`、`workspaceEditorCommands.ts`、clipboard adapter 与测试。

@@ -1,5 +1,12 @@
 import { createContext, useContext } from "react";
 import type { ClipboardSourceEol } from "./workspaceEditorCommands";
+import { isTauriRuntime } from "../../../lib/runtime";
+import {
+  probeClipboardCapabilities,
+  readTextResult,
+  writeText,
+  type ClipboardTextReadResult,
+} from "../../../lib/clipboard";
 
 /**
  * Workspace-scoped clipboard session (§8.17.6 N9.3/N14.4, upgraded §8.18.4 P0-C3).
@@ -277,13 +284,101 @@ export interface ClipboardConsumerLease {
   detach(): "detached" | "already-detached";
 }
 
+export type ClipboardPermissionState = "unknown" | "granted" | "denied";
+
+export interface ClipboardPermissionAdapter {
+  queryPermission(): Promise<ClipboardPermissionState>;
+  subscribe?(listener: (permission: ClipboardPermissionState) => void): () => void;
+}
+
+export interface GuardedClipboardIO {
+  writeText?: (text: string) => Promise<void>;
+  readTextResult?: () => Promise<ClipboardTextReadResult>;
+}
+
+export type GuardedSystemWriteResult =
+  | { outcome: "success"; systemEffect: 1 }
+  | { outcome: "denied"; systemEffect: 0 }
+  | { outcome: "stale-generation"; baseGeneration: number; currentGeneration: number; systemEffect: 0 }
+  | { outcome: "unavailable" | "error"; error?: string; systemEffect: 0 };
+
+export type GuardedSystemReadResult =
+  | { outcome: "success"; text: string; systemEffect: 1 }
+  | { outcome: "denied"; systemEffect: 0; fallbackSession: EditorClipboardSession | null }
+  | { outcome: "stale-generation"; baseGeneration: number; currentGeneration: number; systemEffect: 0; fallbackSession: EditorClipboardSession | null }
+  | { outcome: "unavailable" | "error"; error?: string; systemEffect: 0; fallbackSession: EditorClipboardSession | null };
+
+export function createWebClipboardPermissionAdapter(): ClipboardPermissionAdapter {
+  return {
+    async queryPermission(): Promise<ClipboardPermissionState> {
+      if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+        return "unknown";
+      }
+      try {
+        const status = await navigator.permissions.query({ name: "clipboard-read" as PermissionName });
+        if (status.state === "granted") return "granted";
+        if (status.state === "denied") return "denied";
+        return "unknown";
+      } catch {
+        return "unknown";
+      }
+    },
+    subscribe(listener: (permission: ClipboardPermissionState) => void): () => void {
+      if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+        return () => {};
+      }
+      let active = true;
+      let cleanup: (() => void) | null = null;
+      navigator.permissions
+        .query({ name: "clipboard-read" as PermissionName })
+        .then((status) => {
+          if (!active) return;
+          const handler = () => {
+            if (status.state === "granted") listener("granted");
+            else if (status.state === "denied") listener("denied");
+            else listener("unknown");
+          };
+          status.addEventListener("change", handler);
+          cleanup = () => status.removeEventListener("change", handler);
+        })
+        .catch(() => {});
+      return () => {
+        active = false;
+        cleanup?.();
+      };
+    },
+  };
+}
+
+export function createNativeClipboardPermissionAdapter(): ClipboardPermissionAdapter {
+  return {
+    async queryPermission(): Promise<ClipboardPermissionState> {
+      if (!isTauriRuntime()) return "unknown";
+      try {
+        const caps = await probeClipboardCapabilities();
+        if (caps) return "granted";
+        return "unknown";
+      } catch {
+        return "unknown";
+      }
+    },
+  };
+}
+
+export function createDefaultClipboardPermissionAdapter(): ClipboardPermissionAdapter {
+  if (isTauriRuntime()) {
+    return createNativeClipboardPermissionAdapter();
+  }
+  return createWebClipboardPermissionAdapter();
+}
+
 export interface WorkspaceClipboardSnapshotV3 {
   readonly payloadRevision: number;
   readonly historyRevision: number;
   readonly policyRevision: number;
   readonly permissionGeneration: number;
   readonly lifecycleRevision: number;
-  readonly permission: "unknown" | "granted" | "denied";
+  readonly permission: ClipboardPermissionState;
   readonly consumers: readonly { token: string; id: string; kind: string }[];
   /** Backwards-compatibility alias for payloadRevision */
   readonly revision: number;
@@ -314,8 +409,12 @@ export interface WorkspaceClipboardHandle {
   setHistoryLimits(maxItems: number, maxTotalBytes: number): void;
   historyLimits(): { maxItems: number; maxTotalBytes: number };
   historyExclusion(): ClipboardHistoryExclusion;
-  setPermission(permission: "unknown" | "granted" | "denied"): void;
-  permission(): "unknown" | "granted" | "denied";
+  setPermission(permission: ClipboardPermissionState): void;
+  permission(): ClipboardPermissionState;
+  attachPermissionAdapter(adapter: ClipboardPermissionAdapter): () => void;
+  syncPermission(adapter?: ClipboardPermissionAdapter): Promise<ClipboardPermissionState>;
+  writeSystemClipboard(text: string, io?: GuardedClipboardIO): Promise<GuardedSystemWriteResult>;
+  readSystemClipboard(io?: GuardedClipboardIO): Promise<GuardedSystemReadResult>;
 }
 
 export const WorkspaceClipboardSessionContext = createContext<WorkspaceClipboardHandle | null>(null);
@@ -366,7 +465,10 @@ function getOrCreateSlot(workspaceInstanceId: string): WorkspaceSlotState {
  * instance: the last `release()` clears and deletes the slot immediately, so
  * closing a workspace cannot leak its clipboard payload (§8.18.4/§8.27.2 lifecycle).
  */
-export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceClipboardHandle {
+export function acquireClipboardStore(
+  workspaceInstanceId: string,
+  options?: { permissionAdapter?: ClipboardPermissionAdapter },
+): WorkspaceClipboardHandle {
   const slot = getOrCreateSlot(workspaceInstanceId);
   slot.rootAcquisitions += 1;
   let handleReleased = false;
@@ -570,7 +672,97 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
       const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
       return current.permission;
     },
+    attachPermissionAdapter: (adapter: ClipboardPermissionAdapter) => {
+      void handle.syncPermission(adapter);
+      if (typeof adapter.subscribe === "function") {
+        return adapter.subscribe((perm) => {
+          handle.setPermission(perm);
+        });
+      }
+      return () => {};
+    },
+    syncPermission: async (adapter?: ClipboardPermissionAdapter) => {
+      const activeAdapter = adapter ?? createDefaultClipboardPermissionAdapter();
+      try {
+        const perm = await activeAdapter.queryPermission();
+        handle.setPermission(perm);
+        return perm;
+      } catch {
+        return handle.permission();
+      }
+    },
+    writeSystemClipboard: async (text: string, io?: GuardedClipboardIO): Promise<GuardedSystemWriteResult> => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      if (current.permission === "denied") {
+        return { outcome: "denied", systemEffect: 0 };
+      }
+      const baseGeneration = current.permissionGeneration;
+      const writeFn = io?.writeText ?? writeText;
+      try {
+        await writeFn(text);
+      } catch (err) {
+        return {
+          outcome: "unavailable",
+          error: err instanceof Error ? err.message : String(err),
+          systemEffect: 0,
+        };
+      }
+      const postSlot = slotStatesByWorkspace.get(workspaceInstanceId);
+      if (!postSlot || postSlot.permissionGeneration !== baseGeneration) {
+        return {
+          outcome: "stale-generation",
+          baseGeneration,
+          currentGeneration: postSlot ? postSlot.permissionGeneration : -1,
+          systemEffect: 0,
+        };
+      }
+      if (postSlot.permission === "denied") {
+        return { outcome: "denied", systemEffect: 0 };
+      }
+      return { outcome: "success", systemEffect: 1 };
+    },
+    readSystemClipboard: async (io?: GuardedClipboardIO): Promise<GuardedSystemReadResult> => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      if (current.permission === "denied") {
+        return { outcome: "denied", systemEffect: 0, fallbackSession: current.store.read() };
+      }
+      const baseGeneration = current.permissionGeneration;
+      const readFn = io?.readTextResult ?? readTextResult;
+      let res: ClipboardTextReadResult;
+      try {
+        res = await readFn();
+      } catch (err) {
+        const postSlot = slotStatesByWorkspace.get(workspaceInstanceId) ?? current;
+        return {
+          outcome: "error",
+          error: err instanceof Error ? err.message : String(err),
+          systemEffect: 0,
+          fallbackSession: postSlot.store.read(),
+        };
+      }
+      const postSlot = slotStatesByWorkspace.get(workspaceInstanceId);
+      if (!postSlot || postSlot.permissionGeneration !== baseGeneration) {
+        return {
+          outcome: "stale-generation",
+          baseGeneration,
+          currentGeneration: postSlot ? postSlot.permissionGeneration : -1,
+          systemEffect: 0,
+          fallbackSession: postSlot ? postSlot.store.read() : null,
+        };
+      }
+      if (postSlot.permission === "denied") {
+        return { outcome: "denied", systemEffect: 0, fallbackSession: postSlot.store.read() };
+      }
+      if (!res.ok) {
+        return { outcome: "unavailable", systemEffect: 0, fallbackSession: postSlot.store.read() };
+      }
+      return { outcome: "success", text: res.text, systemEffect: 1 };
+    },
   };
+
+  if (options?.permissionAdapter) {
+    handle.attachPermissionAdapter(options.permissionAdapter);
+  }
 
   return handle;
 }

@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CLIPBOARD_HISTORY_MAX_ITEMS,
   acquireClipboardStore,
   clipboardStoreForWorkspace,
+  createDefaultClipboardPermissionAdapter,
+  createNativeClipboardPermissionAdapter,
+  createWebClipboardPermissionAdapter,
   planPaste,
   resetWorkspaceClipboardStores,
+  type ClipboardPermissionAdapter,
+  type ClipboardPermissionState,
 } from "./workspaceClipboardSession";
 
 describe("workspaceClipboardSession (§8.17.6 step 1)", () => {
@@ -465,6 +470,213 @@ describe("ED-CLIP-001 consumer lease token ownership & accounting", () => {
     expect(fresh.getSnapshot().consumerCount).toBe(0);
 
     fresh.release();
+    resetWorkspaceClipboardStores();
+  });
+});
+
+describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write", () => {
+  it("attaches a permission adapter, queries initial state, and subscribes to changes", async () => {
+    resetWorkspaceClipboardStores();
+    let currentPerm: ClipboardPermissionState = "unknown";
+    let listenerFn: ((perm: ClipboardPermissionState) => void) | null = null;
+
+    const mockAdapter: ClipboardPermissionAdapter = {
+      queryPermission: vi.fn(async () => currentPerm),
+      subscribe: vi.fn((listener) => {
+        listenerFn = listener;
+        return () => {
+          listenerFn = null;
+        };
+      }),
+    };
+
+    const handle = acquireClipboardStore("ws-perm-adapter", { permissionAdapter: mockAdapter });
+    await Promise.resolve();
+
+    expect(handle.permission()).toBe("unknown");
+    expect(handle.getSnapshot().permissionGeneration).toBe(1);
+
+    // Simulate adapter emitting "granted"
+    listenerFn!("granted");
+    expect(handle.permission()).toBe("granted");
+    expect(handle.getSnapshot().permissionGeneration).toBe(2);
+
+    // Emitting same "granted" does not bump generation
+    listenerFn!("granted");
+    expect(handle.getSnapshot().permissionGeneration).toBe(2);
+
+    // Emitting "denied" bumps generation
+    listenerFn!("denied");
+    expect(handle.permission()).toBe("denied");
+    expect(handle.getSnapshot().permissionGeneration).toBe(3);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("handles createWebClipboardPermissionAdapter and createNativeClipboardPermissionAdapter safely", async () => {
+    const webAdapter = createWebClipboardPermissionAdapter();
+    const nativeAdapter = createNativeClipboardPermissionAdapter();
+    const defaultAdapter = createDefaultClipboardPermissionAdapter();
+
+    const webRes = await webAdapter.queryPermission();
+    expect(["unknown", "granted", "denied"]).toContain(webRes);
+
+    const nativeRes = await nativeAdapter.queryPermission();
+    expect(["unknown", "granted", "denied"]).toContain(nativeRes);
+
+    const defRes = await defaultAdapter.queryPermission();
+    expect(["unknown", "granted", "denied"]).toContain(defRes);
+  });
+
+  it("writeSystemClipboard: returns denied with systemEffect: 0 when permission is denied", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-write-denied");
+    handle.setPermission("denied");
+
+    const mockWriter = vi.fn(async () => {});
+    const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
+
+    expect(result.outcome).toBe("denied");
+    expect(result.systemEffect).toBe(0);
+    expect(mockWriter).not.toHaveBeenCalled();
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("writeSystemClipboard: detects permission change mid-await and returns stale-generation with systemEffect: 0", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-write-stale");
+    handle.setPermission("granted");
+    expect(handle.getSnapshot().permissionGeneration).toBe(2);
+
+    const mockWriter = vi.fn(async () => {
+      // Simulate external permission change during async IO
+      handle.setPermission("denied");
+    });
+
+    const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
+
+    expect(result.outcome).toBe("stale-generation");
+    expect(result.systemEffect).toBe(0);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("writeSystemClipboard: returns unavailable with systemEffect: 0 when IO fails", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-write-fail");
+    handle.setPermission("granted");
+
+    const mockWriter = vi.fn(async () => {
+      throw new Error("Clipboard write failed");
+    });
+
+    const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
+
+    expect(result.outcome).toBe("unavailable");
+    expect(result.systemEffect).toBe(0);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("writeSystemClipboard: returns success with systemEffect: 1 on valid write", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-write-ok");
+    handle.setPermission("granted");
+
+    const mockWriter = vi.fn(async () => {});
+    const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
+
+    expect(result.outcome).toBe("success");
+    expect(result.systemEffect).toBe(1);
+    expect(mockWriter).toHaveBeenCalledWith("hello");
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("readSystemClipboard: returns denied with systemEffect: 0 and fallbackSession when denied", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-read-denied");
+    handle.write({ sourceViewId: null, plainText: "fallback text", rectangular: false, sourceEol: "lf" });
+    handle.setPermission("denied");
+
+    const mockReader = vi.fn(async () => ({ ok: true, text: "system text" }));
+    const result = await handle.readSystemClipboard({ readTextResult: mockReader });
+
+    expect(result.outcome).toBe("denied");
+    expect(result.systemEffect).toBe(0);
+    if (result.outcome === "denied") {
+      expect(result.fallbackSession?.plainText).toBe("fallback text");
+    }
+    expect(mockReader).not.toHaveBeenCalled();
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("readSystemClipboard: detects permission change mid-await and returns stale-generation", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-read-stale");
+    handle.write({ sourceViewId: null, plainText: "fallback text", rectangular: false, sourceEol: "lf" });
+    handle.setPermission("granted");
+
+    const mockReader = vi.fn(async () => {
+      // Permission changed mid-await
+      handle.setPermission("denied");
+      return { ok: true, text: "system text" };
+    });
+
+    const result = await handle.readSystemClipboard({ readTextResult: mockReader });
+
+    expect(result.outcome).toBe("stale-generation");
+    expect(result.systemEffect).toBe(0);
+    if (result.outcome === "stale-generation") {
+      expect(result.fallbackSession?.plainText).toBe("fallback text");
+    }
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("readSystemClipboard: returns unavailable with fallbackSession when reader returns ok: false", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-read-unavail");
+    handle.write({ sourceViewId: null, plainText: "fallback text", rectangular: false, sourceEol: "lf" });
+    handle.setPermission("unknown");
+
+    const mockReader = vi.fn(async () => ({ ok: false, text: "" }));
+    const result = await handle.readSystemClipboard({ readTextResult: mockReader });
+
+    expect(result.outcome).toBe("unavailable");
+    expect(result.systemEffect).toBe(0);
+    if (result.outcome === "unavailable") {
+      expect(result.fallbackSession?.plainText).toBe("fallback text");
+    }
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("readSystemClipboard: returns success with text and systemEffect: 1 on valid read", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-read-ok");
+    handle.setPermission("granted");
+
+    const mockReader = vi.fn(async () => ({ ok: true, text: "remote-clip" }));
+    const result = await handle.readSystemClipboard({ readTextResult: mockReader });
+
+    expect(result.outcome).toBe("success");
+    if (result.outcome === "success") {
+      expect(result.text).toBe("remote-clip");
+    }
+    expect(result.systemEffect).toBe(1);
+
+    handle.release();
     resetWorkspaceClipboardStores();
   });
 });

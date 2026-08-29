@@ -393,6 +393,31 @@ function writeEditorSelectionToClipboard(view: EditorView): boolean {
   const payload = editorClipboardPayload(view.state);
   if (!payload) return false;
   const context = clipboardContextByView.get(view);
+  const handle = context?.handle;
+  if (handle) {
+    void handle.writeSystemClipboard(payload.plainText).then((res) => {
+      if (!view.dom.isConnected) return;
+      if (res.outcome === "success") {
+        rememberEditorClipboardPayload(view, payload);
+      } else if (res.outcome === "denied") {
+        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        context?.onUnavailable(
+          "System clipboard access denied — copy kept for in-workspace paste only",
+        );
+      } else if (res.outcome === "stale-generation") {
+        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        context?.onUnavailable(
+          "Clipboard permission changed during copy — copy kept for in-workspace paste only",
+        );
+      } else {
+        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        context?.onUnavailable(
+          "System clipboard unavailable — copy kept for in-workspace paste only",
+        );
+      }
+    });
+    return true;
+  }
   void writeText(payload.plainText)
     .then(() => {
       if (view.dom.isConnected) rememberEditorClipboardPayload(view, payload);
@@ -415,6 +440,53 @@ function pasteSystemClipboard(view: EditorView): boolean {
   const docAtRequest = view.state.doc;
   const selectionAtRequest = view.state.selection;
   const context = clipboardContextByView.get(view);
+  const handle = context?.handle;
+
+  if (handle) {
+    void handle.readSystemClipboard().then((result) => {
+      if (
+        !view.dom.isConnected
+        || view.composing
+        || view.state.doc !== docAtRequest
+        || !view.state.selection.eq(selectionAtRequest, true)
+      ) {
+        return;
+      }
+      if (result.outcome === "success") {
+        pasteEditorClipboardPayload(
+          view,
+          payloadForSystemClipboardText(view, result.text),
+        );
+        view.focus();
+      } else {
+        const session = result.fallbackSession;
+        if (session) {
+          pasteEditorClipboardPayload(view, {
+            plainText: session.plainText,
+            segments: session.segments ?? undefined,
+            sourceEol: session.sourceEol,
+            rectangular: session.rectangular,
+          });
+          const reasonMsg = result.outcome === "denied"
+            ? "System clipboard access denied — pasted from in-workspace session slot instead"
+            : result.outcome === "stale-generation"
+            ? "Clipboard permission changed during read — pasted from in-workspace session slot instead"
+            : "System clipboard access denied — pasted from in-workspace session slot instead";
+          context?.onUnavailable(reasonMsg);
+          view.focus();
+        } else {
+          const reasonMsg = result.outcome === "denied"
+            ? "System clipboard access denied and no in-workspace clipboard session available"
+            : result.outcome === "stale-generation"
+            ? "Clipboard permission changed during read and no in-workspace clipboard session available"
+            : "System clipboard access denied and no in-workspace clipboard session available";
+          context?.onUnavailable(reasonMsg);
+        }
+      }
+    }).catch(() => {});
+    return true;
+  }
+
   void readTextResult()
     .then((result) => {
       if (
@@ -467,6 +539,38 @@ function pasteAsPlainText(view: EditorView): boolean {
   if (view.composing || view.state.readOnly) return false;
   const docAtRequest = view.state.doc;
   const context = clipboardContextByView.get(view);
+  const handle = context?.handle;
+
+  if (handle) {
+    void handle.readSystemClipboard().then((result) => {
+      if (!view.dom.isConnected || view.composing || view.state.doc !== docAtRequest) return;
+      const text = result.outcome === "success" ? result.text : result.fallbackSession?.plainText ?? "";
+      if (!text) {
+        context?.onUnavailable(
+          result.outcome === "success"
+            ? "Nothing to paste"
+            : result.outcome === "denied"
+            ? "System clipboard access denied and no in-workspace clipboard session available"
+            : "System clipboard access denied and no in-workspace clipboard session available",
+        );
+        return;
+      }
+      const ranges = [...view.state.selection.ranges].sort((a, b) => a.from - b.from);
+      view.dispatch({
+        changes: ranges.map((range) => ({ from: range.from, to: range.to, insert: text })),
+        userEvent: "input.paste.plain",
+        scrollIntoView: true,
+      });
+      if (result.outcome !== "success" && result.fallbackSession) {
+        context?.onUnavailable(
+          "System clipboard access denied — pasted from in-workspace session slot as plain text",
+        );
+      }
+      view.focus();
+    }).catch(() => {});
+    return true;
+  }
+
   void readTextResult()
     .then((result) => {
       if (!view.dom.isConnected || view.composing || view.state.doc !== docAtRequest) return;
@@ -504,6 +608,37 @@ function cutSystemClipboard(view: EditorView): boolean {
   const docAtRequest = view.state.doc;
   const selectionAtRequest = view.state.selection;
   const context = clipboardContextByView.get(view);
+  const handle = context?.handle;
+
+  if (handle) {
+    void handle.writeSystemClipboard(payload.plainText).then((res) => {
+      if (
+        !view.dom.isConnected
+        || view.composing
+        || view.state.doc !== docAtRequest
+        || !view.state.selection.eq(selectionAtRequest, true)
+      ) {
+        return;
+      }
+      if (res.outcome === "success") {
+        rememberEditorClipboardPayload(view, payload);
+        cutEditorSelections(view);
+        view.focus();
+      } else {
+        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        cutEditorSelections(view);
+        const reasonMsg = res.outcome === "denied"
+          ? "System clipboard access denied — cut kept for in-workspace paste only"
+          : res.outcome === "stale-generation"
+          ? "Clipboard permission changed during cut — cut kept for in-workspace paste only"
+          : "System clipboard unavailable — cut kept for in-workspace paste only";
+        context?.onUnavailable(reasonMsg);
+        view.focus();
+      }
+    });
+    return true;
+  }
+
   void writeText(payload.plainText)
     .then(() => {
       if (

@@ -308,6 +308,7 @@ import { copyReferenceCandidates } from "./workspace/workspaceCopyReference";
 import { ClipboardHistoryPopup } from "./workspace/ClipboardHistoryPopup";
 import {
   acquireClipboardStore,
+  createDefaultClipboardPermissionAdapter,
   type EditorClipboardSession,
   WorkspaceClipboardSessionContext,
 } from "./workspace/workspaceClipboardSession";
@@ -976,10 +977,12 @@ export function CodeWorkspaceTab({
     setTabPolicySettingsOpen(true);
   }, []);
 
-  // §8.26.2 AA1: Root workspace clipboard session handle
+  // §8.26.2 AA1: Root workspace clipboard session handle with permission adapter (§8.27.2 BB1 / ED-CLIP-002)
   const clipboardHandle = useMemo(() => acquireClipboardStore(workspaceInstanceId), [workspaceInstanceId]);
   useEffect(() => {
+    const detachAdapter = clipboardHandle.attachPermissionAdapter(createDefaultClipboardPermissionAdapter());
     return () => {
+      detachAdapter();
       clipboardHandle.release();
     };
   }, [clipboardHandle]);
