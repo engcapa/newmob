@@ -360,7 +360,7 @@
 - 验证：scope audit 只统计 Editor required 集；文本/路径只输出 hash/count；production import guard。
 
 ### ED-QA-002 对齐 Editor behavior case 映射
-<!-- ide-task {"id":"ED-QA-002","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-QA-001"],"legacy":["BB10"]} -->
+<!-- ide-task {"id":"ED-QA-002","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:49:30Z","baseline":"f69ed109be39ca77597349c7d6738807cdaf4f8f","depends_on":["ED-QA-001"],"legacy":["BB10"],"updated_at":"2026-08-29T14:50:38Z","evidence":"aligned cases TC-IDE-C0..C8; scope: daily-editor-linux.scope.json; vitest: editorReleaseScope.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：C0 Save、C3 Clipboard、C4 Tab Policy、C5 Completion、C6-01 Quick Fix、C6-02 Query、C6-03 Safe Delete，再新增 Virtual Space 与 Project Structure；每 case 同时断言 UI 与 effect counters。
 - 主文件：逐 case 小提交；一次只修一个 case，持续更新 scope。

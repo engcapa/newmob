@@ -21,7 +21,7 @@
       "id": "C0-save-pipeline",
       "name": "Save Pipeline",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C0-01-save-pipeline",
+      "testcaseId": "TC-IDE-C0-01",
       "controls": ["editor.save", "editor.save-all"],
       "requiredEffects": [
         "atomic-disk-write",
@@ -36,7 +36,7 @@
       "id": "C3-clipboard-session",
       "name": "Clipboard Session",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C3-01-clipboard-multicaret",
+      "testcaseId": "TC-IDE-C3-01",
       "controls": ["editor.copy", "editor.cut", "editor.paste", "editor.paste-history"],
       "requiredEffects": [
         "workspace-session-broadcast",
@@ -51,7 +51,7 @@
       "id": "C4-tab-policy",
       "name": "Tab Policy & Layout",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C4-01-tab-policy-lifecycle",
+      "testcaseId": "TC-IDE-C4-01",
       "controls": ["editor.tab-close", "editor.tab-pin", "editor.tab-split"],
       "requiredEffects": [
         "layout-revision-increment",
@@ -65,7 +65,7 @@
       "id": "C5-completion",
       "name": "Code Completion",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C5-01-completion-resolve",
+      "testcaseId": "TC-IDE-C5-01",
       "controls": ["editor.autocomplete-popup", "editor.autocomplete-item"],
       "requiredEffects": [
         "tier-sorted-candidates",
@@ -76,29 +76,29 @@
       "providerRequirement": "lsp-completion-provider"
     },
     {
-      "id": "C6-01-quick-fix",
-      "name": "Quick Fix & Intentions",
+      "id": "C6-01-usages",
+      "name": "Show & Find Usages",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C6-01-quick-fix-execution",
-      "controls": ["editor.intention-lightbulb", "editor.quick-fix-menu"],
+      "testcaseId": "TC-IDE-C6-01",
+      "controls": ["editor.find-references", "editor.usages-panel"],
       "requiredEffects": [
-        "diagnostic-matched-actions",
-        "clean-execution-pipeline",
-        "single-undo-restoration"
+        "usages-session-created",
+        "role-filtered-honest-results",
+        "pin-rerun-isolation"
       ],
       "requiredLayers": ["unit", "browser"],
-      "providerRequirement": "lsp-code-action-provider"
+      "providerRequirement": "lsp-semantic-query-host"
     },
     {
       "id": "C6-02-semantic-query",
       "name": "Semantic Navigation Query",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C6-02-semantic-query-cancellation",
+      "testcaseId": "TC-IDE-C6-02",
       "controls": [
         "editor.goto-definition",
         "editor.goto-declaration",
         "editor.goto-implementation",
-        "editor.find-references"
+        "editor.hierarchy-view"
       ],
       "requiredEffects": [
         "envelope-wrapped-dispatch",
@@ -113,7 +113,7 @@
       "id": "C6-03-safe-delete",
       "name": "Safe Delete Protection",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C6-03-safe-delete-disabled",
+      "testcaseId": "TC-IDE-C6-03",
       "controls": ["editor.safe-delete"],
       "requiredEffects": [
         "fail-closed-disabled-state",
@@ -124,33 +124,49 @@
       "providerRequirement": "destructive-refactoring-guard"
     },
     {
+      "id": "C6-04-rename-refactor",
+      "name": "Rename & Refactor Preview",
+      "priority": "P0",
+      "testcaseId": "TC-IDE-C6-04",
+      "controls": ["editor.rename", "editor.refactoring-preview"],
+      "requiredEffects": [
+        "multi-file-workspace-edit",
+        "preview-exclusion-supported",
+        "read-only-library-guard",
+        "single-undo-transaction"
+      ],
+      "requiredLayers": ["unit", "browser", "native"],
+      "providerRequirement": "lsp-refactoring-engine"
+    },
+    {
       "id": "C7-project-structure",
       "name": "Project Structure Model",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C7-01-project-descriptor-discovery",
+      "testcaseId": "TC-IDE-C7-02",
       "controls": ["editor.project-tree", "editor.source-roots"],
       "requiredEffects": [
         "descriptor-only-discovery",
-        "no-unverified-classpath-fabrication",
-        "consumer-generation-guard"
+        "fingerprint-cache-lifecycle",
+        "consumer-generation-guard",
+        "fail-closed-untrusted-state"
       ],
       "requiredLayers": ["unit", "browser"],
       "providerRequirement": "project-descriptor-scanner"
     },
     {
-      "id": "C8-multiview-transaction",
-      "name": "Shared Document & Multiview",
+      "id": "C8-virtual-space",
+      "name": "Virtual Space Navigation",
       "priority": "P0",
-      "testcaseId": "TC-IDE-C8-01-shared-document-sync",
-      "controls": ["editor.split-horizontal", "editor.split-vertical"],
+      "testcaseId": "TC-IDE-C8-01",
+      "controls": ["editor.virtual-space-toggle", "editor.virtual-space-caret"],
       "requiredEffects": [
-        "incremental-delta-broadcasting",
-        "remote-transaction-echo-suppression",
-        "per-view-selection-mapping",
-        "single-document-revision-bump"
+        "past-line-end-caret-placement",
+        "column-preserving-vertical-navigation",
+        "minimal-padding-insertion-on-input",
+        "rectangle-selection-support"
       ],
       "requiredLayers": ["unit", "browser"],
-      "providerRequirement": "workspace-document-transaction-owner"
+      "providerRequirement": "workspace-virtual-space-engine"
     }
   ]
 }

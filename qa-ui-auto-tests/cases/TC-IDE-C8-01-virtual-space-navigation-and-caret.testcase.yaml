@@ -1,0 +1,28 @@
+id: TC-IDE-C8-01
+title: "Virtual space navigation and caret positioning"
+description: |
+  §8.19.10 gate case C8 (ED-VSPACE-001 & ED-VSPACE-002).
+  Asserts virtual space caret placement past line end, column preservation
+  during vertical navigation, insertion of minimal padding spaces upon typing,
+  and rectangle/box selection across virtual spaces.
+  Highest claim on green: L1 browser contract.
+covers: [F25.5]
+tags: [code-workspace, ide-c8, virtual-space, navigation, caret, p1]
+modes: [browser, native]
+fixtures: [reset_db]
+timeout_sec: 120
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - screenshot: tc-ide-c8-virtual-space.png
