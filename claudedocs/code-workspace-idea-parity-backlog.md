@@ -335,7 +335,7 @@
 - 验证：真实 multi-module Gradle fixture、missing wrapper/offline/daemon crash/partial typed failure。
 
 ### ED-PROJECT-004 建立 project facts cache/generation lifecycle
-<!-- ide-task {"id":"ED-PROJECT-004","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-PROJECT-002","ED-PROJECT-003"],"legacy":["BB9-D"]} -->
+<!-- ide-task {"id":"ED-PROJECT-004","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:12:27Z","baseline":"98bccece5113703a749b6a368464f1ae31c2bdc4","depends_on":["ED-PROJECT-002","ED-PROJECT-003"],"legacy":["BB9-D"],"updated_at":"2026-08-29T14:13:29Z","evidence":"vitest: projectFactsStore.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：workspace root 唯一 store；descriptor/wrapper/settings/lock/tool/JDK/env fingerprint 驱动 cache；变化取消旧 generation 并标 stale；UI 显示 loading/degraded/untrusted 原因。
 - 主文件：project facts store/hook/status UI/tests。
