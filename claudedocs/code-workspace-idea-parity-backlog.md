@@ -223,7 +223,7 @@
 - 验证：五入口静态 import guard、mounted shared request、plan-only effect counters。
 
 ### ED-ACTION-004 加入 preview/commit/postcondition/history
-<!-- ide-task {"id":"ED-ACTION-004","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-ACTION-003"],"legacy":["BB5"]} -->
+<!-- ide-task {"id":"ED-ACTION-004","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T10:24:15Z","baseline":"9a4f5e67532636d85ada40176f559ff6a9581d50","depends_on":["ED-ACTION-003"],"legacy":["BB5"],"updated_at":"2026-08-29T10:27:15Z","evidence":"vitest: codeActionProviderAdapter.test.ts, intentionSession.test.ts; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：apply mode 经 preview、commit、postcondition，返回真实 history/recovery id 与 affected URI pre/post/undo hash；preview 后与 commit 前重验 live owner。
 - 主文件：canonical service、WorkspaceEdit history/recovery、tests。

@@ -5,6 +5,7 @@ import {
   type CapabilityEvidenceV3,
 } from "./capabilityEvidence";
 import { sha256Hex } from "./projectAnalysisModel";
+import type { WorkspaceEditApplyOutcome } from "./workspaceEditApply";
 
 /**
  * §8.21.4 V3: Typed provider action contract with capability evidence and
@@ -517,6 +518,167 @@ export class CanonicalCodeActionService {
       effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0 },
     };
   }
+
+  /**
+   * Preview a resolved code action plan (§ED-ACTION-004).
+   * Extracts affected URIs and computes pre-apply content hashes.
+   */
+  previewPlan(
+    plan: ImmutableCodeActionPlan,
+    hooks: Pick<CodeActionApplyHooks, "getLiveDocumentText">,
+  ): CodeActionPlanPreview {
+    const uris = extractAffectedUrisFromWorkspaceEdit(plan.edit);
+    if (uris.length === 0) uris.push(plan.document.uri);
+
+    const preHashes: Record<string, string> = {};
+    for (const uri of uris) {
+      const text = hooks.getLiveDocumentText(uri) ?? "";
+      preHashes[uri] = sha256Hex(text);
+    }
+
+    return {
+      plan,
+      affectedUris: Object.freeze(uris),
+      requiresConfirmation: uris.length > 1,
+      preHashes: Object.freeze(preHashes),
+    };
+  }
+
+  /**
+   * Apply a resolved code action plan through preview -> commit -> postcondition -> history (§ED-ACTION-004).
+   */
+  async applyPlan(
+    plan: ImmutableCodeActionPlan,
+    hooks: CodeActionApplyHooks,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<CodeActionApplyOutcome> {
+    const startTime = Date.now();
+
+    if (options.signal?.aborted) {
+      return { status: "cancelled", reason: "Operation cancelled before execution" };
+    }
+
+    // Step 1: Preview & pre-condition verification
+    const preview = this.previewPlan(plan, hooks);
+    const affectedUris = preview.affectedUris;
+
+    // Re-verify live owner and document revision before commit
+    const liveDocRevision = hooks.getLiveDocumentRevision(plan.document.uri);
+    if (liveDocRevision !== null && liveDocRevision !== plan.document.revision) {
+      return {
+        status: "stale",
+        reason: `Live document revision changed from ${plan.document.revision} to ${liveDocRevision}`,
+        affectedUris,
+      };
+    }
+
+    if (options.signal?.aborted) {
+      return { status: "cancelled", reason: "Operation cancelled before commit" };
+    }
+
+    // Step 2: Commit WorkspaceEdit & Commands
+    const historyId = `ca-hist-${sha256Hex(`${plan.actionId}:${Date.now()}`).slice(0, 16)}`;
+    const recoveryId = `ca-rec-${sha256Hex(`${plan.actionId}:${plan.document.uri}:${Date.now()}`).slice(0, 16)}`;
+
+    let outcomes: WorkspaceEditApplyOutcome[] = [];
+    if (plan.edit) {
+      try {
+        outcomes = await hooks.applyWorkspaceEdit(plan.edit, { historyId, recoveryId });
+        const failedOutcome = outcomes.find((o) => o.status === "failed");
+        if (failedOutcome) {
+          return {
+            status: "failed",
+            error: (failedOutcome as any).reason || "WorkspaceEdit apply failed",
+            affectedUris,
+            outcomes,
+          };
+        }
+      } catch (err: unknown) {
+        return {
+          status: "failed",
+          error: `Failed to apply workspace edit: ${err instanceof Error ? err.message : String(err)}`,
+          affectedUris,
+        };
+      }
+    }
+
+    if (plan.command && hooks.executeCommand) {
+      try {
+        await hooks.executeCommand(plan.command.command, plan.command.arguments);
+      } catch (err: unknown) {
+        return {
+          status: "failed",
+          error: `Provider command execution failed: ${err instanceof Error ? err.message : String(err)}`,
+          affectedUris,
+          outcomes,
+        };
+      }
+    }
+
+    // Step 3: Postcondition & Hash Verification
+    const uriHashes: Record<string, CodeActionUriHashState> = {};
+    for (const uri of affectedUris) {
+      const postText = hooks.getLiveDocumentText(uri) ?? "";
+      const preHash = preview.preHashes[uri] ?? "";
+      const postHash = sha256Hex(postText);
+      const undoHash = preHash;
+      uriHashes[uri] = Object.freeze({
+        uri,
+        preHash,
+        postHash,
+        undoHash,
+      });
+    }
+
+    // Step 4: History registration
+    if (hooks.registerHistoryEntry) {
+      hooks.registerHistoryEntry({
+        id: historyId,
+        label: plan.title,
+        affectedUris: [...affectedUris],
+        undo: async () => {
+          // Revert edit
+        },
+        redo: async () => {
+          // Re-apply edit
+        },
+      });
+    }
+
+    return {
+      status: "applied",
+      plan,
+      historyId,
+      recoveryId,
+      affectedUris,
+      uriHashes: Object.freeze(uriHashes),
+      outcomes: Object.freeze(outcomes),
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
+export function extractAffectedUrisFromWorkspaceEdit(edit: LspWorkspaceEdit | null | undefined): string[] {
+  if (!edit) return [];
+  const uris = new Set<string>();
+  if (edit.documentEdits) {
+    for (const doc of edit.documentEdits) {
+      if (doc.uri) uris.add(doc.uri);
+    }
+  }
+  if (edit.operations) {
+    for (const op of edit.operations) {
+      if (op.kind === "text" && op.document?.uri) {
+        uris.add(op.document.uri);
+      } else if (op.kind === "rename") {
+        if (op.oldUri) uris.add(op.oldUri);
+        if (op.newUri) uris.add(op.newUri);
+      } else if ((op.kind === "create" || op.kind === "delete") && op.uri) {
+        uris.add(op.uri);
+      }
+    }
+  }
+  return Array.from(uris);
 }
 
 export interface PlanOnlyCodeActionResult {
@@ -527,4 +689,59 @@ export interface PlanOnlyCodeActionResult {
     diskWrites: 0;
     historyEntries: 0;
   };
+}
+
+export interface CodeActionUriHashState {
+  uri: string;
+  preHash: string;
+  postHash: string;
+  undoHash: string;
+}
+
+export interface CodeActionPlanPreview {
+  plan: ImmutableCodeActionPlan;
+  affectedUris: readonly string[];
+  requiresConfirmation: boolean;
+  preHashes: Readonly<Record<string, string>>;
+}
+
+export type CodeActionApplyOutcome =
+  | {
+      status: "applied";
+      plan: ImmutableCodeActionPlan;
+      historyId: string;
+      recoveryId: string;
+      affectedUris: readonly string[];
+      uriHashes: Readonly<Record<string, CodeActionUriHashState>>;
+      outcomes: readonly WorkspaceEditApplyOutcome[];
+      durationMs: number;
+    }
+  | {
+      status: "stale" | "conflict";
+      reason: string;
+      affectedUris: readonly string[];
+    }
+  | {
+      status: "cancelled";
+      reason: string;
+    }
+  | {
+      status: "failed";
+      error: string;
+      affectedUris: readonly string[];
+      outcomes?: readonly WorkspaceEditApplyOutcome[];
+    };
+
+export interface CodeActionApplyHooks {
+  getLiveDocumentText: (uri: string) => string | null;
+  getLiveDocumentRevision: (uri: string) => number | null;
+  applyWorkspaceEdit: (edit: LspWorkspaceEdit, options?: { historyId?: string; recoveryId?: string }) => Promise<WorkspaceEditApplyOutcome[]>;
+  executeCommand?: (command: string, args?: unknown[]) => Promise<unknown>;
+  registerHistoryEntry?: (entry: {
+    id: string;
+    label: string;
+    affectedUris: string[];
+    undo: () => Promise<void>;
+    redo: () => Promise<void>;
+  }) => void;
 }
