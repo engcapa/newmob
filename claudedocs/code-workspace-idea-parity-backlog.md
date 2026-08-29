@@ -367,7 +367,7 @@
 - 验证：每次 qa audit/dry-run/run；scope 0 broken/orphan/missing/shallow。
 
 ### ED-QA-003 Linux packaged/provider/perf/a11y/IDEA matrix
-<!-- ide-task {"id":"ED-QA-003","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-QA-002","ED-CLIP-004","ED-TABS-004","ED-VSPACE-003","ED-SAVE-004","ED-COMP-004","ED-QUERY-004","ED-PROJECT-005"],"legacy":["BB11"]} -->
+<!-- ide-task {"id":"ED-QA-003","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:58:02Z","baseline":"fe757f9d19b490c54cf96ff6d098d5ce333c4287","depends_on":["ED-QA-002","ED-CLIP-004","ED-TABS-004","ED-VSPACE-003","ED-SAVE-004","ED-COMP-004","ED-QUERY-004","ED-PROJECT-005"],"legacy":["BB11"],"updated_at":"2026-08-29T14:58:39Z","evidence":"vitest: capabilityMatrixAudit.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：按 capability 逐格运行 packaged Linux、真实 jdtls/Maven/Gradle、5 轮 perf raw samples、keyboard/focus/name-role-state/200%/screen-reader、IME/AltGr/dead key，并与 IDEA 相同 fixture 对录。
 - 主文件：native manifest/runbooks/evidence；不修改 production 功能来迁就 runner。
