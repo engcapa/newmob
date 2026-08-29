@@ -516,7 +516,7 @@
 - 验证：provider capability、preview/conflict/cancel、postcondition/undo。
 
 ### ED-IMPORT-001 Provider-backed on-the-fly/paste auto-import
-<!-- ide-task {"id":"ED-IMPORT-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-COMP-004","ED-ACTION-004"],"legacy":["N13.5"]} -->
+<!-- ide-task {"id":"ED-IMPORT-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:16:05Z","baseline":"00654cd8deb53184d4ee5d50debbef3d82aea0ca","depends_on":["ED-COMP-004","ED-ACTION-004"],"legacy":["N13.5"],"updated_at":"2026-08-29T14:16:59Z","evidence":"vitest: autoImportModel.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：唯一候选可按设置自动 import，歧义候选由用户选择，paste import/optimize-on-the-fly 可配置；候选来自 provider+ready classpath，不能用固定字典。
 - 验证：unique/ambiguous/excluded/prioritized、paste、stale project/provider、once undo。
