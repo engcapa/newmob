@@ -462,7 +462,7 @@
 - 验证：popup->tool window、pin/rerun、recent restore、stale generation、library ownership。
 
 ### ED-USAGE-002 增加 provider usage role/completeness evidence
-<!-- ide-task {"id":"ED-USAGE-002","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-USAGE-001","ED-PROJECT-005"],"legacy":["W4","BB8"]} -->
+<!-- ide-task {"id":"ED-USAGE-002","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:20:43Z","baseline":"5091612cdc8650f692db60038e0eba27f7e586b6","depends_on":["ED-USAGE-001","ED-PROJECT-005"],"legacy":["W4","BB8"],"updated_at":"2026-08-29T14:21:22Z","evidence":"vitest: providerUsageEvidence.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：Java fixture 记录 read/write/declaration/unknown、workspace/library/decompiled/external 与 completeness；UI 不从文本推断角色。
 - 验证：真实 jdtls/tooling fixture、partial results、provider restart。
