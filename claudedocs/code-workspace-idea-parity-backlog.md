@@ -209,7 +209,7 @@
 - 验证：timeout/throw/null/malformed、stale generations、stable action identity、command-only allowlist。
 
 ### ED-ACTION-002 迁移 lightbulb 与 Alt+Enter
-<!-- ide-task {"id":"ED-ACTION-002","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-ACTION-001"],"legacy":["BB5"]} -->
+<!-- ide-task {"id":"ED-ACTION-002","status":"done","priority":"P0","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T10:08:44Z","baseline":"b9b2d1c8a0024d7951efab03e8cb38db375850c2","depends_on":["ED-ACTION-001"],"legacy":["BB5"],"updated_at":"2026-08-29T10:20:33Z","evidence":"vitest: intentionSession.test.ts, codeActionProviderAdapter.test.ts, codeActionExecution.test.ts; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：lightbulb 和 Alt+Enter 只构造 context 并调用 canonical service；两入口共享同 request/action/result，旧 direct imports 被静态测试禁止。
 - 主文件：`CodeWorkspaceTab.tsx` 对应 owner 区域、intention session/tests。

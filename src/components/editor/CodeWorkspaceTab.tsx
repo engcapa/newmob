@@ -379,6 +379,11 @@ import {
   candidateFromProviderAction,
   IntentionSession,
 } from "./workspace/intentionSession";
+import {
+  CanonicalCodeActionService,
+  type CodeActionContextIdentity,
+  type CodeActionProviderClient,
+} from "./workspace/codeActionProviderAdapter";
 import type { MenuItem } from "../ContextMenu";
 import {
   transformWorkspaceResourceExpandedDirKeys,
@@ -7927,29 +7932,58 @@ export function CodeWorkspaceTab({
     if (!descriptor) return { actions: [], semanticToken: null };
     const buildToken = semanticIndex.beginBuild("language-server");
     try {
-      const result = await lspCodeActions(
-        descriptor,
+      const context: CodeActionContextIdentity = {
+        document: {
+          uri: descriptor.documentUri ?? lspFilesRef.current[live.key]?.status?.uri ?? descriptor.filePath ?? live.key,
+          revision: live.documentRevision,
+          languageId: lspFilesRef.current[live.key]?.status?.languageId ?? descriptor.languageId ?? "plaintext",
+        },
+        provider: {
+          id: descriptor.languageId === "java" || !descriptor.languageId ? "jdtls" : descriptor.languageId,
+          version: null,
+          generation: lspSessionGeneration(),
+          projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+          trusted: true,
+        },
         range,
-        diagnostics.map((item) => ({
-          range: item.range,
-          severity: item.severity,
-          code: item.code,
-          source: item.source,
-          message: item.message,
-          tags: item.tags,
-          relatedInformation: item.relatedInformation,
-          codeDescription: item.codeDescription ? { href: item.codeDescription } : undefined,
-          data: item.data,
-        })),
-        only,
-      );
-      updateLspStatusForFile(live, result.status);
+        diagnostics,
+        only: only.length > 0 ? only : undefined,
+      };
+
+      const client: CodeActionProviderClient = {
+        requestCodeActions: async (params) => {
+          const result = await lspCodeActions(
+            descriptor,
+            params.range,
+            params.context.diagnostics.map((item) => ({
+              range: item.range,
+              severity: item.severity,
+              code: item.code,
+              source: item.source,
+              message: item.message,
+              tags: item.tags,
+              relatedInformation: item.relatedInformation,
+              codeDescription: item.codeDescription ? { href: item.codeDescription } : undefined,
+              data: item.data,
+            })),
+            params.context.only ? [...params.context.only] : undefined,
+          );
+          updateLspStatusForFile(live, result.status);
+          return result.actions;
+        },
+      };
+
+      const serviceRes = await canonicalCodeActionServiceRef.current!.requestCandidates(context, client);
+      const rawActions: LspCodeAction[] = serviceRes.state === "ready"
+        ? serviceRes.actions.map((pa) => pa.action)
+        : [];
+
       const completion = semanticIndex.finishQuery(buildToken, {
         kind: semanticQuery ? "refactor" : "code-action",
-        resultCount: result.actions.length,
+        resultCount: rawActions.length,
       });
       return completion.accepted
-        ? { actions: result.actions, semanticToken: buildToken }
+        ? { actions: rawActions, semanticToken: buildToken }
         : { actions: [], semanticToken: null };
     } catch (error) {
       semanticIndex.failBuild(buildToken, errorMessage(error));
@@ -7958,6 +7992,8 @@ export function CodeWorkspaceTab({
   }, [
     ensureWorkspaceSemanticDocumentsSynced,
     lspDescriptorForFile,
+    lspSessionGeneration,
+    projectAnalysisSnapshot?.projectFingerprint,
     semanticIndex.beginBuild,
     semanticIndex.current,
     semanticIndex.failBuild,
@@ -7971,6 +8007,8 @@ export function CodeWorkspaceTab({
   // stable ids; resolve state and disabled reasons live here, not in UI copies.
   const intentionSessionRef = useRef<IntentionSession | null>(null);
   if (!intentionSessionRef.current) intentionSessionRef.current = new IntentionSession();
+  const canonicalCodeActionServiceRef = useRef<CanonicalCodeActionService | null>(null);
+  if (!canonicalCodeActionServiceRef.current) canonicalCodeActionServiceRef.current = new CanonicalCodeActionService();
   useEffect(() => () => intentionSessionRef.current?.dispose(), []);
   // Diagnostics whose provider suppression edit applied successfully
   // ("Suppressed in source"); distinct from local hide (profile suppressions).
@@ -8025,25 +8063,92 @@ export function CodeWorkspaceTab({
         const descriptor = lspDescriptorForFile(file);
         if (descriptor) {
           markIntentionResolve("resolving");
-          try {
-            // §8.20.4: resolve timeout keeps the frozen candidates and marks
-            // the failure retryable instead of dropping the popup's options.
-            const resolved = await Promise.race([
-              lspCodeActionResolve(descriptor, raw),
-              new Promise<never>((_, rejectTimeout) => window.setTimeout(
-                () => rejectTimeout(new Error(`resolve timed out after ${INTENTION_RESOLVE_TIMEOUT_MS}ms`)),
-                INTENTION_RESOLVE_TIMEOUT_MS,
-              )),
-            ]);
-            updateLspStatusForFile(file, resolved.status);
-            if (resolved.action) executableAction = resolved.action;
-            markIntentionResolve("resolved");
-          } catch (error) {
-            // A server may advertise data but not implement resolve. Keep the
-            // original action usable and make the fallback + Retry visible.
-            const message = `Code action resolve failed: ${errorMessage(error)} — you can retry`;
-            markIntentionResolve("failed", errorMessage(error));
-            setStatusMessage(message);
+          const candidate = intentionCandidateId
+            ? intentionSessionRef.current?.getCandidate(intentionCandidateId)
+            : null;
+          const context: CodeActionContextIdentity = {
+            document: {
+              uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath ?? file.key,
+              revision: file.documentRevision,
+              languageId: lspFilesRef.current[file.key]?.status?.languageId ?? descriptor.languageId ?? "plaintext",
+            },
+            provider: {
+              id: descriptor.languageId === "java" || !descriptor.languageId ? "jdtls" : descriptor.languageId,
+              version: null,
+              generation: lspSessionGeneration(),
+              projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+              trusted: true,
+            },
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+            diagnostics: [],
+          };
+          const client: CodeActionProviderClient = {
+            requestCodeActions: async () => [action],
+            resolveCodeAction: async (act) => {
+              if (!descriptor || !act.raw) return null;
+              const res = await lspCodeActionResolve(descriptor, act.raw);
+              updateLspStatusForFile(file, res.status);
+              return res.action;
+            },
+          };
+
+          if (candidate) {
+            const resolveOutcome = await canonicalCodeActionServiceRef.current!.resolvePlan(
+              { ...candidate, rawAction: action },
+              context,
+              client,
+              file.documentRevision,
+              lspSessionGeneration(),
+              { timeoutMs: INTENTION_RESOLVE_TIMEOUT_MS },
+            );
+            if (resolveOutcome.state === "stale") {
+              markIntentionResolve("failed", resolveOutcome.reason);
+              const message = `Code action became stale: ${resolveOutcome.reason}`;
+              setStatusMessage(message);
+              return { ok: false, message };
+            }
+            if (resolveOutcome.state === "rejected") {
+              markIntentionResolve("failed", `Rejected: ${resolveOutcome.reason}`);
+              const message = `Code action rejected: ${resolveOutcome.reason}`;
+              setStatusMessage(message);
+              return { ok: false, message };
+            }
+            if (resolveOutcome.state === "unresolved") {
+              const message = `Code action resolve failed: ${resolveOutcome.reason} — you can retry`;
+              markIntentionResolve("failed", resolveOutcome.reason);
+              setStatusMessage(message);
+            } else if (resolveOutcome.state === "resolved") {
+              markIntentionResolve("resolved");
+              executableAction = {
+                ...action,
+                title: resolveOutcome.plan.title,
+                kind: resolveOutcome.plan.kind,
+                edit: resolveOutcome.plan.edit,
+                command: resolveOutcome.plan.command?.command ?? null,
+                commandArguments: resolveOutcome.plan.command?.arguments ?? null,
+              };
+            }
+          } else {
+            try {
+              // §8.20.4: resolve timeout keeps the frozen candidates and marks
+              // the failure retryable instead of dropping the popup's options.
+              const resolved = await Promise.race([
+                lspCodeActionResolve(descriptor, raw),
+                new Promise<never>((_, rejectTimeout) => window.setTimeout(
+                  () => rejectTimeout(new Error(`resolve timed out after ${INTENTION_RESOLVE_TIMEOUT_MS}ms`)),
+                  INTENTION_RESOLVE_TIMEOUT_MS,
+                )),
+              ]);
+              updateLspStatusForFile(file, resolved.status);
+              if (resolved.action) executableAction = resolved.action;
+              markIntentionResolve("resolved");
+            } catch (error) {
+              // A server may advertise data but not implement resolve. Keep the
+              // original action usable and make the fallback + Retry visible.
+              const message = `Code action resolve failed: ${errorMessage(error)} — you can retry`;
+              markIntentionResolve("failed", errorMessage(error));
+              setStatusMessage(message);
+            }
           }
         }
       }

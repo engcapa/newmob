@@ -170,7 +170,7 @@ export interface DocumentIdentity {
 
 export interface ProviderIdentity {
   id: string;
-  version?: string;
+  version?: string | null;
   generation: number;
   projectFingerprint: string;
   trusted?: boolean;
@@ -188,11 +188,12 @@ export interface CodeActionCandidate {
   id: string;
   title: string;
   kind: string;
-  isPreferred: boolean;
+  isPreferred?: boolean;
+  preferred?: boolean;
   disabledReason: string | null;
   resolveRequired: boolean;
   rawAction: LspCodeAction;
-  evidence: CapabilityEvidenceV3;
+  evidence?: CapabilityEvidenceV3 | null;
 }
 
 export interface ImmutableCodeActionPlan {
@@ -203,7 +204,7 @@ export interface ImmutableCodeActionPlan {
   provider: ProviderIdentity;
   edit: LspWorkspaceEdit | null;
   command: { command: string; arguments?: unknown[] } | null;
-  evidence: CapabilityEvidenceV3;
+  evidence: CapabilityEvidenceV3 | null;
   createdAt: number;
 }
 
@@ -452,7 +453,7 @@ export class CanonicalCodeActionService {
       provider: Object.freeze({ ...provider }),
       edit: effectiveEdit ? Object.freeze(JSON.parse(JSON.stringify(effectiveEdit))) : null,
       command: effectiveCommand ? Object.freeze({ ...effectiveCommand }) : null,
-      evidence: candidate.evidence,
+      evidence: candidate.evidence ?? null,
       createdAt: Date.now(),
     });
 
