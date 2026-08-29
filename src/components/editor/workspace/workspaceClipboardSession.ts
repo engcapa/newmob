@@ -435,6 +435,8 @@ interface WorkspaceSlotState {
   listeners: Set<(snapshot: WorkspaceClipboardSnapshotV3) => void>;
   rootAcquisitions: number;
   leaseSeq: number;
+  cachedSnapshot: WorkspaceClipboardSnapshotV3 | null;
+  cachedRevision: number;
 }
 
 const slotStatesByWorkspace = new Map<string, WorkspaceSlotState>();
@@ -454,6 +456,8 @@ function getOrCreateSlot(workspaceInstanceId: string): WorkspaceSlotState {
       listeners: new Set(),
       rootAcquisitions: 0,
       leaseSeq: 0,
+      cachedSnapshot: null,
+      cachedRevision: -1,
     };
     slotStatesByWorkspace.set(workspaceInstanceId, slot);
   }
@@ -475,7 +479,18 @@ export function acquireClipboardStore(
 
   const getSnapshot = (): WorkspaceClipboardSnapshotV3 => {
     const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
-    return buildWorkspaceClipboardSnapshot(current);
+    const combinedRevision =
+      current.payloadRevision +
+      current.historyRevision +
+      current.policyRevision +
+      current.permissionGeneration +
+      current.lifecycleRevision +
+      current.consumers.size;
+    if (!current.cachedSnapshot || current.cachedRevision !== combinedRevision) {
+      current.cachedSnapshot = buildWorkspaceClipboardSnapshot(current);
+      current.cachedRevision = combinedRevision;
+    }
+    return current.cachedSnapshot;
   };
 
   const notify = () => {

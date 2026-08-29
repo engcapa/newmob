@@ -967,16 +967,16 @@ export function CodeWorkspaceTab({
   const tabPolicyRef = useRef(tabPolicy);
   tabPolicyRef.current = tabPolicy;
   const [tabPolicyRevision, setTabPolicyRevision] = useState(0);
-  // §8.26.3 AA2: Monotonic layout revision and base revision for tab policy transactions
-  const [layoutRevision, setLayoutRevision] = useState(0);
-  const layoutRevisionRef = useRef(layoutRevision);
-  layoutRevisionRef.current = layoutRevision;
+  // §8.26.3 AA2: Monotonic layout revision and base revision for tab policy transactions (§ED-TABS-001)
+  const layoutRevision = useCodeWorkspaceStore(
+    (state) => state.byInstanceId[workspaceInstanceId]?.layoutRevision ?? 0,
+  );
   const [baseLayoutRevision, setBaseLayoutRevision] = useState(0);
 
   const openTabPolicySettings = useCallback(() => {
-    setBaseLayoutRevision(layoutRevisionRef.current);
+    setBaseLayoutRevision(selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).layoutRevision);
     setTabPolicySettingsOpen(true);
-  }, []);
+  }, [workspaceInstanceId]);
 
   // §8.26.2 AA1: Root workspace clipboard session handle with permission adapter (§8.27.2 BB1 / ED-CLIP-002)
   const clipboardHandle = useMemo(() => acquireClipboardStore(workspaceInstanceId), [workspaceInstanceId]);
@@ -13973,6 +13973,7 @@ export function CodeWorkspaceTab({
       <div
         ref={rootRef}
         data-testid="code-workspace-tab"
+        data-layout-revision={layoutRevision}
         data-clipboard-revision={clipboardSnapshot.revision}
         data-clipboard-history-revision={clipboardSnapshot.historyRevision}
         data-clipboard-consumer-count={clipboardSnapshot.consumerCount}
@@ -14983,8 +14984,8 @@ export function CodeWorkspaceTab({
               openFiles: openFilesRef.current,
               mruFileKeys: mruFileKeysRef.current,
               baseLayoutRevision: baseLayoutRevision,
-              currentLayoutRevision: layoutRevisionRef.current,
-              getLiveLayoutRevision: () => layoutRevisionRef.current,
+              currentLayoutRevision: currentUi.layoutRevision,
+              getLiveLayoutRevision: () => selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).layoutRevision,
               confirmDirtyClose: async (dirtyKeys) => {
                 const names = dirtyKeys.map((k) => openFilesRef.current[k]?.title ?? k).join(", ");
                 return window.confirm(`The following files have unsaved changes:\n${names}\n\nApply tab limit policy and discard changes?`);
@@ -14997,11 +14998,13 @@ export function CodeWorkspaceTab({
                 });
               },
               commitAtomicUpdate: ({ nextGroups, policy }) => {
-                useCodeWorkspaceStore.getState().patchInstance(workspaceInstanceId, { editorGroups: nextGroups as typeof currentUi.editorGroups });
+                useCodeWorkspaceStore.getState().patchInstance(workspaceInstanceId, {
+                  editorGroups: nextGroups as typeof currentUi.editorGroups,
+                  layoutRevision: currentUi.layoutRevision + 1,
+                });
                 setTabPolicy(policy);
                 tabPolicyRef.current = policy;
                 setTabPolicyRevision((r) => r + 1);
-                setLayoutRevision((r) => r + 1);
 
                 const persistableGroups = Object.fromEntries(
                   (Object.entries(nextGroups) as Array<[EditorGroupId, typeof currentUi.editorGroups.primary]>)

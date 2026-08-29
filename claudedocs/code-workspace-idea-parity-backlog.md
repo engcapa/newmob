@@ -153,7 +153,7 @@
 - 验证：qa audit、dry-run、browser case；native permission 步骤未跑时保持对应格 blocked。
 
 ### ED-TABS-001 把 layout revision 收归 workspace store
-<!-- ide-task {"id":"ED-TABS-001","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB3"]} -->
+<!-- ide-task {"id":"ED-TABS-001","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T09:05:31Z","baseline":"d2e2665042bdbb8fbe9fca4d9a269fd7978665ac","depends_on":[],"legacy":["BB3"],"updated_at":"2026-08-29T09:18:58Z","evidence":"vitest layout & workspace tests (138/138 passed); pnpm build exit 0; qa lint (142 files, 0 errors, 0 orphans); audit --diff exit 0"} -->
 
 - 结果：`layoutRevision` 成为 workspace-instance store 单一真值；open/close/move/pin/preview/split/unsplit/resize/policy eviction 全部经 reducer 递增；删除 component-local 真值。
 - 主文件：`codeWorkspaceStore.ts`、`CodeWorkspaceTab.tsx`、layout/store tests。
