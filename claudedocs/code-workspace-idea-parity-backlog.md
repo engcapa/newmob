@@ -279,7 +279,7 @@
 - 验证：snippet+import、additional edit before primary、overlap、stale、explicit primary-only degradation、once undo。
 
 ### ED-COMP-004 只消费 ready project scope facts
-<!-- ide-task {"id":"ED-COMP-004","status":"ready","priority":"P1","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-COMP-003","ED-PROJECT-005"],"legacy":["BB7","BB9"]} -->
+<!-- ide-task {"id":"ED-COMP-004","status":"done","priority":"P1","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:15:03Z","baseline":"586f7b00eab45b5f249a72536e971d9eed57824b","depends_on":["ED-COMP-003","ED-PROJECT-005"],"legacy":["BB7","BB9"],"updated_at":"2026-08-29T14:15:49Z","evidence":"vitest: completionScopeAdapter.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：module/project scope 只读同 workspace 的 ready generation；descriptor/loading/degraded 返回 `scope-facts-missing`，UI 显示实际 scope。
 - 主文件：completion scope adapter、project facts consumer tests。
