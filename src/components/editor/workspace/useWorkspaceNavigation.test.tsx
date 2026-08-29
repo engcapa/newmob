@@ -4,6 +4,7 @@ import { useCodeWorkspaceStore } from "../../../stores/codeWorkspaceStore";
 import type { CodeWorkspaceFileRef, CodeWorkspaceRootInfo } from "../../../types";
 import type { OpenFileState } from "./codeWorkspaceModel";
 import { useWorkspaceNavigation } from "./useWorkspaceNavigation";
+import { WorkspaceSemanticQueryHost } from "./workspaceSemanticQueryHost";
 
 const roots: CodeWorkspaceRootInfo[] = [{
   id: "root-1",
@@ -308,5 +309,78 @@ describe("useWorkspaceNavigation", () => {
     expect(setRecentEntries).toHaveBeenLastCalledWith([
       expect.objectContaining({ key: "root:root-1:src/first.ts", ref: first }),
     ]);
+  });
+
+  describe("§ED-QUERY-002: Semantic Query Routing & Navigation History Invariants", () => {
+    it("handles 0/1/many typed query outcomes and only records history upon actual jump", async () => {
+      const fileA: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/A.ts" };
+      const fileB: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/B.ts" };
+      const openFilesRef = { current: {
+        "root:root-1:src/A.ts": openState(fileA),
+        "root:root-1:src/B.ts": openState(fileB),
+      } };
+      const openFile = vi.fn(async () => {});
+      const revealLocation = vi.fn();
+      const { result } = renderHook(() => useWorkspaceNavigation({
+        workspaceInstanceId: "workspace-1",
+        activeKey: "root:root-1:src/A.ts",
+        roots,
+        flatFiles: {},
+        visible: false,
+        rootsRef: { current: roots },
+        looseFilesRef: { current: [] },
+        openFilesRef,
+        loadFlatFiles: vi.fn(async () => {}),
+        openFile,
+        revealLocation,
+        setSearchEverywhereMode: vi.fn(),
+        setSearchEverywhereOpen: vi.fn(),
+        setRecentEntries: vi.fn(),
+        setRecentFilesOpen: vi.fn(),
+      }));
+
+      const host = new WorkspaceSemanticQueryHost();
+
+      // 1. 0 results: query yields 0 items, status message shown, NO history recorded
+      const res0 = await host.executeEnvelope({
+        kind: "definitions",
+        identity: { uri: "file:///repo/src/A.ts", position: { line: 5, character: 2 } },
+        fetcher: async () => [],
+      });
+      expect(res0.status).toBe("success");
+      expect(res0.items).toHaveLength(0);
+      // History remains empty
+      expect(result.current.navCan.back).toBe(false);
+
+      // 2. Failed / cancelled / stale: query errors, NO history recorded
+      const resFailed = await host.executeEnvelope({
+        kind: "typeDefinitions",
+        identity: { uri: "file:///repo/src/A.ts", position: { line: 5, character: 2 } },
+        fetcher: async () => { throw new Error("LSP failure"); },
+      });
+      expect(resFailed.status).toBe("error");
+      expect(result.current.navCan.back).toBe(false);
+
+      // 3. 1 result: jumps to target location, records origin location in history
+      const res1 = await host.executeEnvelope({
+        kind: "definitions",
+        identity: { uri: "file:///repo/src/A.ts", position: { line: 5, character: 2 } },
+        fetcher: async () => [{ uri: "file:///repo/src/B.ts", path: "src/B.ts", range: { start: { line: 12, character: 0 }, end: { line: 12, character: 5 } } }],
+      });
+      expect(res1.status).toBe("success");
+      expect(res1.items).toHaveLength(1);
+
+      // Simulate jump on 1 result: origin recorded, then destination recorded
+      act(() => {
+        result.current.recordNavigationLocation(fileA, { line: 5, character: 2 });
+        result.current.recordNavigationLocation(fileB, { line: 12, character: 0 }, { replaceSameFile: false });
+      });
+      expect(result.current.navCan.back).toBe(true);
+
+      // Navigate back recovers origin location in A.ts
+      act(() => result.current.navigateHistory(-1));
+      expect(openFile).toHaveBeenCalledWith(fileA);
+      expect(revealLocation).toHaveBeenCalledWith("root:root-1:src/A.ts", { line: 5, character: 2 });
+    });
   });
 });

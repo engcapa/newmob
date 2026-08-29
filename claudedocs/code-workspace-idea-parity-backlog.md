@@ -293,7 +293,7 @@
 - 验证：真实参数、transport cancel、四阶段 live guard、captured revision closure 被测试禁止。
 
 ### ED-QUERY-002 迁移 definition/declaration/type/implementation/references
-<!-- ide-task {"id":"ED-QUERY-002","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-QUERY-001"],"legacy":["BB8"]} -->
+<!-- ide-task {"id":"ED-QUERY-002","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:07:48Z","baseline":"6f4f9bea4ca87e8364342dfc889a08f9c5ee17ce","depends_on":["ED-QUERY-001"],"legacy":["BB8"],"updated_at":"2026-08-29T12:11:54Z","evidence":"vitest: useWorkspaceNavigation.test.tsx, workspaceSemanticQueryHost.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：五类 query 全部经同 host；0/1/many 结果 typed；preview 不写 history，成功 open/reveal 后才写。
 - 主文件：`CodeWorkspaceTab.tsx` query owner、navigation/history tests。

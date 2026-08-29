@@ -1815,6 +1815,7 @@ export function CodeWorkspaceTab({
   const replayWorkspaceEncodingRef = useRef<Map<string, { encoding: string; bom: boolean; eol?: "lf" | "crlf" | "cr" }> | null>(null);
   const goToDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const peekDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
+  const goToDeclarationRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToTypeDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToImplementationRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const renameSymbolRef = useRef<() => Promise<void>>(async () => {});
@@ -11383,23 +11384,27 @@ export function CodeWorkspaceTab({
     async (file: OpenFileState, position: LspPosition) => {
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return false;
-      // Record the origin code focus before jumping (IDEA Navigate Back).
-      recordNavigationLocation(file.ref, position);
       try {
-        const queryRes = await semanticQueryHostRef.current.execute(
-          "definitions",
-          file.path,
-          position,
-          async () => {
+        const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
+          kind: "definitions",
+          identity: {
+            workspaceId: workspaceInstanceId,
+            fileKey: file.key,
+            uri: descriptor.documentUri ?? descriptor.filePath,
+            position,
+            documentRevision: file.documentRevision,
+            lspSessionGeneration: lspSessionGeneration(),
+          },
+          fetcher: async () => {
             const result = await lspDefinition(descriptor, position);
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          {
-            generation: file.documentRevision,
-            getLiveGeneration: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+          guards: {
+            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+            getLiveLspGeneration: () => lspSessionGeneration(),
           },
-        );
+        });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
@@ -11407,13 +11412,16 @@ export function CodeWorkspaceTab({
           setStatusMessage(queryRes.error ?? "No definition found");
           return false;
         }
+        if (queryRes.items.length === 1) {
+          recordNavigationLocation(file.ref, position);
+        }
         return navigateLocations("Definitions", queryRes.items, "No definition found");
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
       }
     },
-    [lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
+    [lspDescriptorForFile, lspSessionGeneration, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
   );
 
   const peekDefinition = useCallback(
@@ -11421,20 +11429,26 @@ export function CodeWorkspaceTab({
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return false;
       try {
-        const queryRes = await semanticQueryHostRef.current.execute(
-          "definitions",
-          file.path,
-          position,
-          async () => {
+        const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
+          kind: "definitions",
+          identity: {
+            workspaceId: workspaceInstanceId,
+            fileKey: file.key,
+            uri: descriptor.documentUri ?? descriptor.filePath,
+            position,
+            documentRevision: file.documentRevision,
+            lspSessionGeneration: lspSessionGeneration(),
+          },
+          fetcher: async () => {
             const result = await lspDefinition(descriptor, position);
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          {
-            generation: file.documentRevision,
-            getLiveGeneration: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+          guards: {
+            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+            getLiveLspGeneration: () => lspSessionGeneration(),
           },
-        );
+        });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
@@ -11449,7 +11463,56 @@ export function CodeWorkspaceTab({
         return false;
       }
     },
-    [lspDescriptorForFile, setLocationPeek, setStatusMessage, updateLspStatusForFile],
+    [lspDescriptorForFile, lspSessionGeneration, setLocationPeek, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
+  );
+
+  const goToDeclaration = useCallback(
+    async (file: OpenFileState, position: LspPosition) => {
+      const descriptor = lspDescriptorForFile(file);
+      if (!descriptor) return false;
+      const caps = lspFilesRef.current[file.key]?.status?.capabilities;
+      if (caps && caps.declaration === false) {
+        setStatusMessage("Go to declaration is not supported by this language server");
+        return false;
+      }
+      try {
+        const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
+          kind: "declarations",
+          identity: {
+            workspaceId: workspaceInstanceId,
+            fileKey: file.key,
+            uri: descriptor.documentUri ?? descriptor.filePath,
+            position,
+            documentRevision: file.documentRevision,
+            lspSessionGeneration: lspSessionGeneration(),
+          },
+          fetcher: async () => {
+            const result = await lspDefinition(descriptor, position);
+            updateLspStatusForFile(file, result.status);
+            return result.locations;
+          },
+          guards: {
+            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+            getLiveLspGeneration: () => lspSessionGeneration(),
+          },
+        });
+        if (queryRes.status === "stale" || queryRes.status === "cancelled") {
+          return false;
+        }
+        if (queryRes.status === "unavailable" || queryRes.status === "error") {
+          setStatusMessage(queryRes.error ?? "No declaration found");
+          return false;
+        }
+        if (queryRes.items.length === 1) {
+          recordNavigationLocation(file.ref, position);
+        }
+        return navigateLocations("Declarations", queryRes.items, "No declaration found");
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+        return false;
+      }
+    },
+    [lspDescriptorForFile, lspSessionGeneration, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
   );
 
   const goToTypeDefinition = useCallback(
@@ -11461,22 +11524,27 @@ export function CodeWorkspaceTab({
         setStatusMessage("Type definition is not supported by this language server");
         return false;
       }
-      recordNavigationLocation(file.ref, position);
       try {
-        const queryRes = await semanticQueryHostRef.current.execute(
-          "typeDefinitions",
-          file.path,
-          position,
-          async () => {
+        const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
+          kind: "typeDefinitions",
+          identity: {
+            workspaceId: workspaceInstanceId,
+            fileKey: file.key,
+            uri: descriptor.documentUri ?? descriptor.filePath,
+            position,
+            documentRevision: file.documentRevision,
+            lspSessionGeneration: lspSessionGeneration(),
+          },
+          fetcher: async () => {
             const result = await lspTypeDefinition(descriptor, position);
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          {
-            generation: file.documentRevision,
-            getLiveGeneration: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+          guards: {
+            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+            getLiveLspGeneration: () => lspSessionGeneration(),
           },
-        );
+        });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
@@ -11484,13 +11552,16 @@ export function CodeWorkspaceTab({
           setStatusMessage(queryRes.error ?? "No type definition found");
           return false;
         }
+        if (queryRes.items.length === 1) {
+          recordNavigationLocation(file.ref, position);
+        }
         return navigateLocations("Type definitions", queryRes.items, "No type definition found");
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
       }
     },
-    [lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
+    [lspDescriptorForFile, lspSessionGeneration, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
   );
 
   const goToImplementation = useCallback(
@@ -11502,22 +11573,27 @@ export function CodeWorkspaceTab({
         setStatusMessage("Go to implementation is not supported by this language server");
         return false;
       }
-      recordNavigationLocation(file.ref, position);
       try {
-        const queryRes = await semanticQueryHostRef.current.execute(
-          "implementations",
-          file.path,
-          position,
-          async () => {
+        const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
+          kind: "implementations",
+          identity: {
+            workspaceId: workspaceInstanceId,
+            fileKey: file.key,
+            uri: descriptor.documentUri ?? descriptor.filePath,
+            position,
+            documentRevision: file.documentRevision,
+            lspSessionGeneration: lspSessionGeneration(),
+          },
+          fetcher: async () => {
             const result = await lspImplementation(descriptor, position);
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          {
-            generation: file.documentRevision,
-            getLiveGeneration: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+          guards: {
+            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
+            getLiveLspGeneration: () => lspSessionGeneration(),
           },
-        );
+        });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
@@ -11525,16 +11601,20 @@ export function CodeWorkspaceTab({
           setStatusMessage(queryRes.error ?? "No implementation found");
           return false;
         }
+        if (queryRes.items.length === 1) {
+          recordNavigationLocation(file.ref, position);
+        }
         return navigateLocations("Implementations", queryRes.items, "No implementation found");
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
       }
     },
-    [lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
+    [lspDescriptorForFile, lspSessionGeneration, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
   );
   goToDefinitionRef.current = goToDefinition;
   peekDefinitionRef.current = peekDefinition;
+  goToDeclarationRef.current = goToDeclaration;
   goToTypeDefinitionRef.current = goToTypeDefinition;
   goToImplementationRef.current = goToImplementation;
 

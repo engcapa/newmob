@@ -50,6 +50,7 @@ export interface LspCapabilitySummary {
   signatureHelp: boolean;
   hover: boolean;
   definition: boolean;
+  declaration?: boolean;
   typeDefinition: boolean;
   implementation: boolean;
   references: boolean;
