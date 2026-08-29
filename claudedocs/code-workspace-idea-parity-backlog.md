@@ -111,7 +111,7 @@
 ## 6. P0 正确性与 Daily Editor 闭环
 
 ### ED-GATE-001 稳定当前前端回归基线
-<!-- ide-task {"id":"ED-GATE-001","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB0-A"]} -->
+<!-- ide-task {"id":"ED-GATE-001","status":"done","priority":"P0","size":"S","owner":"editor-agent-01","claimed_at":"2026-08-29T06:00:36Z","baseline":"af361ebf3bb9f855847d23cb45ed84ac4b40fe3f","depends_on":[],"legacy":["BB0-A"],"updated_at":"2026-08-29T06:19:02Z","evidence":"focused useDeferredGitLineChanges 3/3; SettingsPanel 16/16; 2x full pnpm test 349 files / 3166 tests exit 0; pnpm build exit 0; cargo test --lib 1302 passed exit 0; qa audit --diff exit 0"} -->
 
 - 结果：隔离 Settings appearance 与 Code Workspace Git gutter 的首轮时序失败；连续两次干净 `pnpm test` 结果一致，失败时保留 root cause，不延长 timeout 或删除断言。
 - 主文件：对应失败测试和实际 owner；不要把 Settings 与 Editor 根因混在一个提交。

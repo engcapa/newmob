@@ -61,4 +61,31 @@ describe("useDeferredGitLineChanges", () => {
     act(() => vi.runAllTimers());
     expect(buildChanges).toHaveBeenCalledTimes(1);
   });
+
+  it("does not restart debounce timer on equivalent source rerenders to prevent starvation", () => {
+    vi.useFakeTimers();
+    const buildChanges = vi.fn(() => changed);
+    const source = {
+      key: "main.rs",
+      sourceKey: "head-1",
+      headText: "before",
+      bufferText: "first",
+    };
+    const { rerender } = renderHook(
+      ({ sources }) => useDeferredGitLineChanges(sources, { delayMs: 100, buildChanges }),
+      { initialProps: { sources: [source] } },
+    );
+
+    // Unrelated re-renders pass new array references with identical content at 50ms and 80ms
+    act(() => vi.advanceTimersByTime(50));
+    rerender({ sources: [{ ...source }] });
+    act(() => vi.advanceTimersByTime(30));
+    rerender({ sources: [{ ...source }] });
+
+    // At 100ms from initial render, the debounce timer should fire (not delayed by rerenders)
+    act(() => vi.advanceTimersByTime(20));
+    act(() => vi.runOnlyPendingTimers());
+    expect(buildChanges).toHaveBeenCalledTimes(1);
+    expect(buildChanges).toHaveBeenCalledWith("before", "first");
+  });
 });
