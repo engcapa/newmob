@@ -139,7 +139,7 @@
 - 验证：granted/denied/unknown、permission mid-await、same-value 不增 generation、workspace fallback 可见且不伪称系统成功。
 
 ### ED-CLIP-003 建立真实跨 split copy/paste/undo mounted test
-<!-- ide-task {"id":"ED-CLIP-003","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-CLIP-001"],"legacy":["BB1","BB10-C3"]} -->
+<!-- ide-task {"id":"ED-CLIP-003","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T08:43:48Z","baseline":"e456d20284d23069db78ee6143c4ad41fb7f9d70","depends_on":["ED-CLIP-001"],"legacy":["BB1","BB10-C3"],"updated_at":"2026-08-29T08:58:07Z","evidence":"focused CodeWorkspaceTab 80/80; clipboard 45/45; CodeMirrorHost 27/27; pnpm build exit 0; qa audit --diff exit 0; unrun: native clipboard OS backend matrix (ED-CLIP-004/BB11)"} -->
 
 - 结果：mounted `CodeWorkspaceTab` 创建两个真实 CodeMirror leaf，从 A copy、B paste，断言文本/selection/consumer lease，单次 undo 恢复 B；同文件双 split 与不同文件双 split 都覆盖。
 - 主文件：`CodeWorkspaceTab.test.tsx`、必要的 test seam；production 只修测试暴露的最小问题。

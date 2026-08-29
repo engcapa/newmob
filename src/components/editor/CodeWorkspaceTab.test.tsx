@@ -27,8 +27,11 @@ import {
   navigationHistoryTracker,
   WorkspaceLocationController,
 } from "./workspace/navigationHistoryModel";
+import { EditorSelection } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { undo } from "@codemirror/commands";
 import { globalEditorConfigResolver } from "./workspace/editorConfigResolver";
-import { acquireClipboardStore } from "./workspace/workspaceClipboardSession";
+import { acquireClipboardStore, resetWorkspaceClipboardStores } from "./workspace/workspaceClipboardSession";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceListDir: vi.fn(),
@@ -140,11 +143,16 @@ vi.mock("../../lib/runtime", async (importOriginal) => ({
   isTauriRuntime: () => runtimeState.tauri,
 }));
 
-const clipboardMocks = vi.hoisted(() => ({
-  readText: vi.fn(async () => ""),
-  readTextResult: vi.fn(async () => ({ ok: true, text: "" })),
-  writeText: vi.fn(async () => {}),
-}));
+const clipboardMocks = vi.hoisted(() => {
+  let inMemoryClipboard = "";
+  return {
+    readText: vi.fn(async () => inMemoryClipboard),
+    readTextResult: vi.fn(async () => ({ ok: true, text: inMemoryClipboard })),
+    writeText: vi.fn(async (text: string) => {
+      inMemoryClipboard = text;
+    }),
+  };
+});
 
 const settingsNavigationMocks = vi.hoisted(() => ({
   openSettingsSection: vi.fn(),
@@ -5415,6 +5423,253 @@ end_of_record
 
       expect(store.read()?.plainText).toBe("copied-across-split");
       store.release();
+    });
+
+    it("ED-CLIP-003: cross-split multi-caret copy in primary and paste in secondary with single undo (different files)", async () => {
+      resetWorkspaceClipboardStores();
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-clip-split-diff",
+        workspaceInstanceId: "instance-clip-split-diff",
+        name: "Different Files Split",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "folder" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => (
+        path === "src/util.ts" || path === "/repo/app/src/util.ts"
+          ? file("src/util.ts", "let a = 0;\nlet b = 0;\n")
+          : file("src/main.ts", "const x = 10;\nconst y = 20;\n")
+      ));
+
+      window.localStorage.setItem("taomni.codeWorkspace.layout.v1.instance-clip-split-diff", JSON.stringify({
+        version: 1,
+        splitOrientation: "vertical",
+        activeEditorGroupId: "primary",
+        editorGroups: {
+          primary: {
+            openOrder: ["root:app:src/main.ts"],
+            activeKey: "root:app:src/main.ts",
+            previewKey: null,
+            pinnedKeys: [],
+          },
+          secondary: {
+            openOrder: ["root:app:src/util.ts"],
+            activeKey: "root:app:src/util.ts",
+            previewKey: null,
+            pinnedKeys: [],
+          },
+        },
+      }));
+
+      const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+      const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+        registrationRef.current = next;
+      });
+
+      const { unmount } = renderWorkspace(workspace, { onCommandsChange });
+      await screen.findByTitle("app / src/main.ts");
+      await screen.findByTitle("app / src/util.ts");
+
+      const panes = screen.getAllByTestId("code-workspace-editor-pane");
+      const primaryPane = panes.find((p) => p.getAttribute("data-editor-group-id") === "primary");
+      const secondaryPane = panes.find((p) => p.getAttribute("data-editor-group-id") === "secondary");
+      const primaryEditor = primaryPane?.querySelector<HTMLElement>(".cm-editor");
+      const secondaryEditor = secondaryPane?.querySelector<HTMLElement>(".cm-editor");
+
+      expect(primaryEditor).not.toBeNull();
+      expect(secondaryEditor).not.toBeNull();
+      const primaryView = EditorView.findFromDOM(primaryEditor!);
+      const secondaryView = EditorView.findFromDOM(secondaryEditor!);
+      expect(primaryView).not.toBeNull();
+      expect(secondaryView).not.toBeNull();
+
+      // Assert consumer lease count: both splits hold active leases with distinct tokens
+      const store = acquireClipboardStore("instance-clip-split-diff");
+      const snap = store.getSnapshot();
+      expect(snap.consumerCount).toBe(2);
+      expect(snap.consumers[0].token).not.toBe(snap.consumers[1].token);
+
+      // Select 2 segments in primary view (src/main.ts)
+      primaryView!.dispatch({
+        selection: EditorSelection.create([
+          EditorSelection.range(0, 13), // "const x = 10;"
+          EditorSelection.range(14, 27), // "const y = 20;"
+        ], 0),
+      });
+
+      // Focus primary pane and execute copy
+      fireEvent.mouseDown(primaryPane!);
+      await waitFor(() => expect(
+        selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-clip-split-diff").activeEditorGroupId,
+      ).toBe("primary"));
+      await waitFor(() => expect(
+        registrationRef.current?.items.find((item) => item.id === "workspace.editor.copy")?.enabled,
+      ).toBe(true));
+
+      await act(async () => {
+        await registrationRef.current?.executeAction("workspace.editor.copy");
+      });
+
+      // Assert copied payload in workspace session
+      const session = store.read();
+      expect(session).not.toBeNull();
+      expect(session?.segments).toEqual(["const x = 10;", "const y = 20;"]);
+      expect(session?.plainText).toBe("const x = 10;\nconst y = 20;");
+
+      // Place 2 carets in secondary view (src/util.ts)
+      secondaryView!.dispatch({
+        selection: EditorSelection.create([
+          EditorSelection.cursor(0), // before "let a = 0;"
+          EditorSelection.cursor(11), // before "let b = 0;"
+        ], 0),
+      });
+
+      // Focus secondary pane and execute paste
+      fireEvent.mouseDown(secondaryPane!);
+      await waitFor(() => expect(
+        selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-clip-split-diff").activeEditorGroupId,
+      ).toBe("secondary"));
+      await waitFor(() => expect(
+        registrationRef.current?.items.find((item) => item.id === "workspace.editor.paste")?.enabled,
+      ).toBe(true));
+
+      await act(async () => {
+        await registrationRef.current?.executeAction("workspace.editor.paste");
+      });
+
+      // Assert target text in secondary view has distributed segments
+      await waitFor(() => {
+        expect(secondaryView!.state.doc.toString()).toBe("const x = 10;let a = 0;\nconst y = 20;let b = 0;\n");
+      });
+
+      // Single undo restores pre-paste state
+      undo(secondaryView!);
+      await waitFor(() => {
+        expect(secondaryView!.state.doc.toString()).toBe("let a = 0;\nlet b = 0;\n");
+      });
+
+      store.release();
+      unmount();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // After workspace unmount, consumer leases and slot are cleaned up
+      const afterStore = acquireClipboardStore("instance-clip-split-diff");
+      expect(afterStore.getSnapshot().consumerCount).toBe(0);
+      expect(afterStore.read()).toBeNull();
+      afterStore.release();
+      resetWorkspaceClipboardStores();
+    });
+
+    it("ED-CLIP-003: cross-split copy/paste with same-file dual split under StrictMode", async () => {
+      resetWorkspaceClipboardStores();
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-clip-split-same",
+        workspaceInstanceId: "instance-clip-split-same",
+        name: "Same File Split",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "folder" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, _path: string) => (
+        file("src/main.ts", "line1: alpha\nline2: beta\nline3: gamma\n")
+      ));
+
+      window.localStorage.setItem("taomni.codeWorkspace.layout.v1.instance-clip-split-same", JSON.stringify({
+        version: 1,
+        splitOrientation: "vertical",
+        activeEditorGroupId: "primary",
+        editorGroups: {
+          primary: {
+            openOrder: ["root:app:src/main.ts"],
+            activeKey: "root:app:src/main.ts",
+            previewKey: null,
+            pinnedKeys: [],
+          },
+          secondary: {
+            openOrder: ["root:app:src/main.ts"],
+            activeKey: "root:app:src/main.ts",
+            previewKey: null,
+            pinnedKeys: [],
+          },
+        },
+      }));
+
+      const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+      const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+        registrationRef.current = next;
+      });
+
+      const { unmount } = render(
+        <StrictMode>
+          <CodeWorkspaceTab
+            tabId="code-strict-split"
+            workspace={workspace}
+            onCommandsChange={onCommandsChange}
+          />
+        </StrictMode>,
+      );
+      await screen.findAllByTitle("app / src/main.ts");
+
+      const panes = screen.getAllByTestId("code-workspace-editor-pane");
+      const primaryPane = panes.find((p) => p.getAttribute("data-editor-group-id") === "primary");
+      const secondaryPane = panes.find((p) => p.getAttribute("data-editor-group-id") === "secondary");
+      const primaryEditor = primaryPane?.querySelector<HTMLElement>(".cm-editor");
+      const secondaryEditor = secondaryPane?.querySelector<HTMLElement>(".cm-editor");
+
+      const primaryView = EditorView.findFromDOM(primaryEditor!);
+      const secondaryView = EditorView.findFromDOM(secondaryEditor!);
+      expect(primaryView).not.toBeNull();
+      expect(secondaryView).not.toBeNull();
+
+      const store = acquireClipboardStore("instance-clip-split-same");
+      expect(store.getSnapshot().consumerCount).toBe(2);
+
+      // Select line 1 in primary view
+      primaryView!.dispatch({
+        selection: EditorSelection.range(0, 12), // "line1: alpha"
+      });
+
+      fireEvent.mouseDown(primaryPane!);
+      await waitFor(() => expect(
+        registrationRef.current?.items.find((item) => item.id === "workspace.editor.copy")?.enabled,
+      ).toBe(true));
+
+      await act(async () => {
+        await registrationRef.current?.executeAction("workspace.editor.copy");
+      });
+
+      expect(store.read()?.plainText).toBe("line1: alpha");
+
+      // Select line 3 in secondary view and paste
+      secondaryView!.dispatch({
+        selection: EditorSelection.range(25, 37), // "line3: gamma"
+      });
+
+      fireEvent.mouseDown(secondaryPane!);
+      await waitFor(() => expect(
+        registrationRef.current?.items.find((item) => item.id === "workspace.editor.paste")?.enabled,
+      ).toBe(true));
+
+      await act(async () => {
+        await registrationRef.current?.executeAction("workspace.editor.paste");
+      });
+
+      await waitFor(() => {
+        expect(secondaryView!.state.doc.toString()).toBe("line1: alpha\nline2: beta\nline1: alpha\n");
+      });
+
+      // Undo in secondary view
+      undo(secondaryView!);
+      await waitFor(() => {
+        expect(secondaryView!.state.doc.toString()).toBe("line1: alpha\nline2: beta\nline3: gamma\n");
+      });
+
+      store.release();
+      unmount();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      resetWorkspaceClipboardStores();
     });
   });
 });
