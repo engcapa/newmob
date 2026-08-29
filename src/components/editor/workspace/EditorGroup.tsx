@@ -138,6 +138,7 @@ interface EditorGroupProps {
   activeCapabilities: LspCapabilitySummary | null;
   activeLspSyncing: boolean;
   lspStatusPill: ReactNode;
+  highlightingWidget?: ReactNode;
   breadcrumbs: ReactNode;
   breadcrumbsPlacement?: "top" | "bottom";
   editorBanners?: EditorBannerItem[];
@@ -280,6 +281,7 @@ export function EditorGroup({
   activeCapabilities,
   activeLspSyncing,
   lspStatusPill,
+  highlightingWidget,
   breadcrumbs,
   breadcrumbsPlacement = "top",
   editorBanners = [],
@@ -712,6 +714,7 @@ export function EditorGroup({
                   {activeFile.loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--taomni-code-muted)]" />}
                   {activeLspSyncing && <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--taomni-code-muted)]" />}
                   {lspStatusPill}
+                  {highlightingWidget}
                 </div>
                 {isMarkdownPath(activeFile.languagePath) && (
                   <div className="flex items-center gap-0.5">

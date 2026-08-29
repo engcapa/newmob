@@ -486,7 +486,7 @@
 - 验证：edit/render toggle、sanitization、broken link/image、large doc、unsupported language。
 
 ### ED-CHROME-001 Per-file highlighting widget
-<!-- ide-task {"id":"ED-CHROME-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["N10.2"]} -->
+<!-- ide-task {"id":"ED-CHROME-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:51:06Z","baseline":"b277b63d2f2f8c215b8c86a2a8cfb8efa0f6a292","depends_on":[],"legacy":["N10.2"],"updated_at":"2026-08-29T12:53:52Z","evidence":"vitest: highlightingLevelModel.test.ts, HighlightingWidget.test.tsx, EditorGroup.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：editor widget 显示 error/warning count、上下跳转、None/Syntax/All Problems 和 profile entry；准确标示 provider scope。
 - 验证：setting persistence、diagnostic revision、keyboard/a11y、no-provider state。

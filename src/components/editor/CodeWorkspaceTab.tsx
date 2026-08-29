@@ -439,6 +439,12 @@ import {
   selectActiveBanners,
   type EditorBannerItem,
 } from "./workspace/editorBannerModel";
+import {
+  readHighlightingLevel,
+  writeHighlightingLevel,
+  type HighlightingLevel,
+} from "./workspace/highlightingLevelModel";
+import { HighlightingWidget } from "./workspace/HighlightingWidget";
 import { useDeferredOpenFileTodos } from "./workspace/useDeferredOpenFileTodos";
 import { type QuickDocContent } from "./workspace/referenceDocumentation";
 import {
@@ -1733,6 +1739,16 @@ export function CodeWorkspaceTab({
   });
   const [occurrenceSession, setOccurrenceSession] = useState<OccurrenceHighlightSession | null>(null);
   const [dismissedBannerIds, setDismissedBannerIds] = useState<Set<string>>(new Set());
+  const [fileHighlightingLevels, setFileHighlightingLevels] = useState<Record<string, HighlightingLevel>>({});
+
+  const getFileHighlightingLevel = useCallback((fileKey: string): HighlightingLevel => {
+    return fileHighlightingLevels[fileKey] ?? readHighlightingLevel(workspaceInstanceId, fileKey);
+  }, [fileHighlightingLevels, workspaceInstanceId]);
+
+  const setFileHighlightingLevel = useCallback((fileKey: string, level: HighlightingLevel) => {
+    writeHighlightingLevel(workspaceInstanceId, fileKey, level);
+    setFileHighlightingLevels((prev) => ({ ...prev, [fileKey]: level }));
+  }, [workspaceInstanceId]);
   const [referencesResult, setReferencesResult] = useState<ReferencesResultState>({
     loading: false,
     origin: null,
@@ -14185,7 +14201,11 @@ export function CodeWorkspaceTab({
     const groupFile = group.activeKey ? openFiles[group.activeKey] ?? null : null;
     const groupLspState = group.activeKey ? lspFiles[group.activeKey] ?? null : null;
     const groupPath = groupFile ? inspectionPathForFileKey(groupFile.key) : undefined;
-    const groupDiagnostics = displayDiagnosticsFor(groupLspState?.diagnostics, groupPath);
+    const groupHighlightingLevel = groupFile ? getFileHighlightingLevel(groupFile.key) : "all";
+    const groupDiagnosticsRaw = displayDiagnosticsFor(groupLspState?.diagnostics, groupPath);
+    const groupDiagnostics = groupHighlightingLevel === "none" || groupHighlightingLevel === "syntax"
+      ? []
+      : groupDiagnosticsRaw;
     const groupCapabilities = groupLspState?.status?.capabilities ?? null;
     const groupMarkdownMode = groupFile && isMarkdownPath(groupFile.languagePath)
       ? markdownModes[groupFile.key] ?? "edit"
@@ -14361,6 +14381,18 @@ export function CodeWorkspaceTab({
             onOpenSettings={() => openLanguageServersSettings(groupLspState?.status?.presetId)}
           />
         )}
+        highlightingWidget={groupFile ? (
+          <HighlightingWidget
+            diagnostics={groupDiagnosticsRaw}
+            level={groupHighlightingLevel}
+            onChangeLevel={(lvl) => setFileHighlightingLevel(groupFile.key, lvl)}
+            providerName={groupLspState?.status?.displayName}
+            providerActive={!!groupLspState?.status?.active}
+            onNavigateNextError={() => navigateDiagnostic(1)}
+            onNavigatePrevError={() => navigateDiagnostic(-1)}
+            onOpenSettings={() => openLanguageServersSettings(groupLspState?.status?.presetId)}
+          />
+        ) : null}
         breadcrumbs={showGroupBreadcrumbs && groupFile ? (
           <Breadcrumbs
             pathSegments={groupBreadcrumbSegments}
