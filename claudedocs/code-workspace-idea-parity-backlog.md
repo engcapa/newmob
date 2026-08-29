@@ -202,7 +202,7 @@
 - 验证：多 caret、短行、一次 undo、browser case；Linux IME 留 native matrix。
 
 ### ED-ACTION-001 定义 canonical Code Action service 核心
-<!-- ide-task {"id":"ED-ACTION-001","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB5"]} -->
+<!-- ide-task {"id":"ED-ACTION-001","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T10:02:00Z","baseline":"178c75df23de9b17f6abf4a351e2dda7e975b099","depends_on":[],"legacy":["BB5"],"updated_at":"2026-08-29T10:08:26Z","evidence":"vitest: codeActionProviderAdapter.test.ts, codeActionExecution.test.ts; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：唯一 service 实现 `capability -> request -> stable id -> resolve -> immutable plan`，带 typed failure 和 document/diagnostic/provider/project/trust identity；unknown/plaintext 不默认 Java。
 - 主文件：`codeActionProviderAdapter.ts` 及测试；暂不迁移所有 UI 入口。
