@@ -386,6 +386,9 @@ import {
   transformWorkspaceResourceTreeSelection,
   type WorkspaceResourceUiChange,
 } from "./workspace/workspaceResourceState";
+import {
+  WorkspaceResourceRecoveryCoordinator,
+} from "./workspace/workspaceResourceRecoveryCoordinator";
 import { buildReplaceWorkspaceEdit } from "./workspace/buildReplaceEdits";
 import { BottomDock } from "./workspace/panels/BottomDock";
 import {
@@ -1863,6 +1866,9 @@ export function CodeWorkspaceTab({
 
   const resolvedCodeStylesRef = useRef<Record<string, ResolvedCodeStyle>>({});
   const saveTransactionRegistryRef = useRef<SaveTransactionRegistry>(new SaveTransactionRegistry());
+  const resourceRecoveryCoordinatorRef = useRef<WorkspaceResourceRecoveryCoordinator>(
+    new WorkspaceResourceRecoveryCoordinator(workspaceInstanceId),
+  );
   const workspaceStyleControllerRef = useRef<WorkspaceStyleController>(
     createWorkspaceStyleController({
       workspaceId: workspaceInstanceId,
@@ -1876,8 +1882,12 @@ export function CodeWorkspaceTab({
   // Unmount drops every live transaction owner so in-flight writers discard
   // their writeback/watcher/LSP side effects instead of resurrecting state.
   useEffect(() => {
+    resourceRecoveryCoordinatorRef.current = new WorkspaceResourceRecoveryCoordinator(workspaceInstanceId);
     const registry = saveTransactionRegistryRef.current;
-    return () => registry.discardWorkspace(workspaceInstanceId);
+    return () => {
+      registry.discardWorkspace(workspaceInstanceId);
+      resourceRecoveryCoordinatorRef.current.dispose();
+    };
   }, [workspaceInstanceId]);
 
   const rootsFingerprint = roots.map((r) => `${r.id}:${r.path}`).join("|");
@@ -5279,49 +5289,73 @@ export function CodeWorkspaceTab({
       const lastUsedMap = new Map(mruFileKeysRef.current.map((k, idx) => [k, 1_000_000 - idx]));
       closeLayoutTabInLeaf(workspaceInstanceId, groupId, key, tabPolicyRef.current, lastUsedMap);
       if (usedByOtherGroup) return;
-      // Transaction owner hand-off: any in-flight save for this buffer must
-      // discard its writeback/watcher/LSP side effects from here on.
-      saveTransactionRegistryRef.current.discardFile(workspaceInstanceId, key, `Buffer ${file?.subtitle ?? key} was closed`);
-      if (file) {
-        closeLspDocument(file);
-        // §8.18.5 reopen stack: session-only, capped, never persisted.
-        // §8.19.6: capture structured relocation evidence so a later reopen
-        // can find the closest surviving editor even after splits close.
-        const closedTree = currentUi.layoutTreeV2;
-        const closedLeaf = findLeafNode(closedTree, groupId);
-        setClosedTabsStack((stack) => pushClosedTab(stack, {
-          fileIdentity: workspaceFileIdentity(file.ref),
-          ref: file.ref,
-          title: file.title,
-          subtitle: file.subtitle,
-          leafPath: [groupId],
-          closedAt: Date.now(),
-          location: {
-            leafId: groupId,
-            treeRoute: buildReopenTreeRoute(closedTree, groupId),
-            siblingFileKeys: (closedLeaf?.openFileKeys ?? []).filter((entryKey) => entryKey !== key),
-          },
-        }));
+
+      const coordinator = resourceRecoveryCoordinatorRef.current;
+      const closedTree = currentUi.layoutTreeV2;
+      const closedLeaf = findLeafNode(closedTree, groupId);
+
+      const outcome = await coordinator.executeResourceCleanup(key, {
+        didClose: () => {
+          if (file) closeLspDocument(file);
+        },
+        watcher: () => {
+          const pending = pendingExternalFileEventsRef.current.get(key);
+          if (pending) {
+            window.clearTimeout(pending.timer);
+            pendingExternalFileEventsRef.current.delete(key);
+          }
+        },
+        buffer: () => {
+          saveTransactionRegistryRef.current.discardFile(
+            workspaceInstanceId,
+            key,
+            `Buffer ${file?.subtitle ?? key} was closed`,
+          );
+          setOpenFiles((current) => {
+            if (!(key in current)) return current;
+            const next = { ...current };
+            delete next[key];
+            return next;
+          });
+          setMarkdownModes((current) => {
+            if (!(key in current)) return current;
+            const next = { ...current };
+            delete next[key];
+            return next;
+          });
+          setLspFiles((current) => {
+            if (!(key in current)) return current;
+            const next = { ...current };
+            delete next[key];
+            return next;
+          });
+        },
+        history: () => {
+          if (file) {
+            setClosedTabsStack((stack) =>
+              pushClosedTab(stack, {
+                fileIdentity: workspaceFileIdentity(file.ref),
+                ref: file.ref,
+                title: file.title,
+                subtitle: file.subtitle,
+                leafPath: [groupId],
+                closedAt: Date.now(),
+                location: {
+                  leafId: groupId,
+                  treeRoute: buildReopenTreeRoute(closedTree, groupId),
+                  siblingFileKeys: (closedLeaf?.openFileKeys ?? []).filter((entryKey) => entryKey !== key),
+                },
+              }),
+            );
+          }
+        },
+      });
+
+      if (outcome.status === "committed-with-recovery") {
+        setStatusMessage(outcome.message);
       }
-      setOpenFiles((current) => {
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      setMarkdownModes((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      setLspFiles((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
     },
-    [activeEditorGroupId, closeLspDocument, updateEditorGroup, workspaceInstanceId],
+    [activeEditorGroupId, closeLspDocument, closeLayoutTabInLeaf, workspaceInstanceId],
   );
   closeFileRef.current = closeFile;
 
@@ -14990,11 +15024,68 @@ export function CodeWorkspaceTab({
                 const names = dirtyKeys.map((k) => openFilesRef.current[k]?.title ?? k).join(", ");
                 return window.confirm(`The following files have unsaved changes:\n${names}\n\nApply tab limit policy and discard changes?`);
               },
-              onEvictClosedFile: (evictedKey) => {
-                setOpenFiles((prev) => {
-                  const next = { ...prev };
-                  delete next[evictedKey];
-                  return next;
+              onEvictClosedFile: async (evictedKey) => {
+                const file = openFilesRef.current[evictedKey];
+                const coordinator = resourceRecoveryCoordinatorRef.current;
+                const currentUiNow = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+                const currentTree = currentUiNow.layoutTreeV2;
+                const activeLeaf = findLeafNode(currentTree, activeEditorGroupId);
+
+                await coordinator.executeResourceCleanup(evictedKey, {
+                  didClose: () => {
+                    if (file) closeLspDocument(file);
+                  },
+                  watcher: () => {
+                    const pending = pendingExternalFileEventsRef.current.get(evictedKey);
+                    if (pending) {
+                      window.clearTimeout(pending.timer);
+                      pendingExternalFileEventsRef.current.delete(evictedKey);
+                    }
+                  },
+                  buffer: () => {
+                    saveTransactionRegistryRef.current.discardFile(
+                      workspaceInstanceId,
+                      evictedKey,
+                      `Buffer ${file?.subtitle ?? evictedKey} was evicted`,
+                    );
+                    setOpenFiles((prev) => {
+                      if (!(evictedKey in prev)) return prev;
+                      const next = { ...prev };
+                      delete next[evictedKey];
+                      return next;
+                    });
+                    setMarkdownModes((prev) => {
+                      if (!(evictedKey in prev)) return prev;
+                      const next = { ...prev };
+                      delete next[evictedKey];
+                      return next;
+                    });
+                    setLspFiles((prev) => {
+                      if (!(evictedKey in prev)) return prev;
+                      const next = { ...prev };
+                      delete next[evictedKey];
+                      return next;
+                    });
+                  },
+                  history: () => {
+                    if (file) {
+                      setClosedTabsStack((stack) =>
+                        pushClosedTab(stack, {
+                          fileIdentity: workspaceFileIdentity(file.ref),
+                          ref: file.ref,
+                          title: file.title,
+                          subtitle: file.subtitle,
+                          leafPath: [activeEditorGroupId],
+                          closedAt: Date.now(),
+                          location: {
+                            leafId: activeEditorGroupId,
+                            treeRoute: buildReopenTreeRoute(currentTree, activeEditorGroupId),
+                            siblingFileKeys: (activeLeaf?.openFileKeys ?? []).filter((k) => k !== evictedKey),
+                          },
+                        }),
+                      );
+                    }
+                  },
                 });
               },
               commitAtomicUpdate: ({ nextGroups, policy }) => {

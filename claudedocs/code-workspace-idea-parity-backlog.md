@@ -167,7 +167,7 @@
 - 验证：dirty/non-dirty、confirm 期间变化、cancel zero effect、stale zero commit、持久化失败 recovery。
 
 ### ED-TABS-003 建立 view/resource recovery coordinator
-<!-- ide-task {"id":"ED-TABS-003","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-TABS-002"],"legacy":["BB3"]} -->
+<!-- ide-task {"id":"ED-TABS-003","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T09:25:31Z","baseline":"07a351be2be924a3452b68aca70f517a110a4b28","depends_on":["ED-TABS-002"],"legacy":["BB3"],"updated_at":"2026-08-29T09:30:19Z","evidence":"workspaceResourceRecoveryCoordinator.test.ts (5/5 passed); all tab policy tests (78/78 passed); full CodeWorkspaceTab suite (80/80 passed); pnpm build exit 0; qa lint (142 files, 0 errors, 0 orphans); audit --diff exit 0"} -->
 
 - 结果：最后一个 view lease 释放后按 `didClose -> watcher -> buffer -> history` 执行；cleanup failure 返回 `committed-with-recovery` 并可幂等重放，不能吞错后返回 applied。
 - 主文件：resource state/recovery coordinator、CodeWorkspaceTab owner、测试。
