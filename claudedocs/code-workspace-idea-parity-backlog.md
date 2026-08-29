@@ -300,7 +300,7 @@
 - 验证：0/1/many、cancel/stale/failed history=0、Back 恢复来源位置。
 
 ### ED-QUERY-003 迁移 Call/Type Hierarchy prepare 与 expand
-<!-- ide-task {"id":"ED-QUERY-003","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-QUERY-001"],"legacy":["BB8"]} -->
+<!-- ide-task {"id":"ED-QUERY-003","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:27:40Z","baseline":"670b30c37c743f7de6c4480dcfc27302228df284","depends_on":["ED-QUERY-001"],"legacy":["BB8"],"updated_at":"2026-08-29T12:29:32Z","evidence":"vitest: hierarchyQueryModel.test.ts, HierarchyPanel.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：hierarchy prepare/expand 经 host，保留 opaque node identity、siblings、direction、completeness 和 partial error；旧 generation expand 不更新 UI。
 - 主文件：Hierarchy panel/model、query host adapter/tests。

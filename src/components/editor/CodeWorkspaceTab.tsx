@@ -410,10 +410,11 @@ import {
 } from "./workspace/panels/ProblemsPanel";
 import { FindInFilesPanel } from "./workspace/panels/FindInFilesPanel";
 import { DocumentationPane } from "./workspace/panels/DocumentationPane";
+import { HierarchyPanel } from "./workspace/panels/HierarchyPanel";
 import {
-  HierarchyPanel,
+  executeHierarchyPrepare,
   type HierarchyRootState,
-} from "./workspace/panels/HierarchyPanel";
+} from "./workspace/hierarchyQueryModel";
 import { TodosBookmarksPanel } from "./workspace/panels/TodosBookmarksPanel";
 import { CoveragePanel } from "./workspace/panels/CoveragePanel";
 import {
@@ -5672,20 +5673,40 @@ export function CodeWorkspaceTab({
     }
     try {
       const position = cursorPositions[activeEditorGroupId] ?? editorSelectionRef.current.start;
-      const result = mode === "call"
-        ? await lspPrepareCallHierarchy(descriptor, position)
-        : await lspPrepareTypeHierarchy(descriptor, position);
-      updateLspStatusForFile(file, result.status);
-      const item = result.items[0];
-      if (!item) {
+      const fileKey = file.key;
+      const docRevision = openFilesRef.current[fileKey]?.revision ?? 0;
+      const lspGen = lspSessionGeneration();
+
+      const prepareResult = await executeHierarchyPrepare(
+        semanticQueryHostRef.current,
+        descriptor,
+        position,
+        mode,
+        {
+          workspaceId: workspaceInstanceId,
+          fileKey,
+          documentRevision: docRevision,
+          lspSessionGeneration: lspGen,
+          projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+          guards: {
+            getLiveDocumentRevision: () => openFilesRef.current[fileKey]?.revision ?? 0,
+            getLiveLspGeneration: () => lspSessionGeneration(),
+          },
+        },
+      );
+
+      if (prepareResult.cancelled) return;
+      updateLspStatusForFile(file, prepareResult.status);
+
+      const root = prepareResult.root;
+      if (!root) {
         setStatusMessage(`No ${mode} hierarchy is available at the cursor`);
         return;
       }
-      const root: HierarchyRootState = { descriptor, item };
       hierarchyProvenanceRef.current = {
         ...hierarchyProvenanceRef.current,
         [mode]: {
-          generation: lspSessionGeneration(),
+          generation: lspGen,
           projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
         },
       };
@@ -14819,6 +14840,8 @@ export function CodeWorkspaceTab({
                 })()}
                 onRerunStale={() => void openHierarchy("call")}
                 onOpenLocation={(location) => void openLspLocation(location)}
+                queryHost={semanticQueryHostRef.current}
+                liveLspGeneration={lspSessionGeneration}
                 onStatus={(status) => {
                   if (activeFile) updateLspStatusForFile(activeFile, status);
                 }}
@@ -14849,6 +14872,8 @@ export function CodeWorkspaceTab({
                 })()}
                 onRerunStale={() => void openHierarchy("type")}
                 onOpenLocation={(location) => void openLspLocation(location)}
+                queryHost={semanticQueryHostRef.current}
+                liveLspGeneration={lspSessionGeneration}
                 onStatus={(status) => {
                   if (activeFile) updateLspStatusForFile(activeFile, status);
                 }}
