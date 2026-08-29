@@ -438,7 +438,7 @@
 - 验证：多 root/module、missing facts、recent scope、cancel/stale search。
 
 ### ED-FIND-004 增加 Replace in Files preview/exclude/commit
-<!-- ide-task {"id":"ED-FIND-004","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-FIND-003"],"legacy":["N9.2"]} -->
+<!-- ide-task {"id":"ED-FIND-004","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:19:42Z","baseline":"5530f571a4bb3363861caccfda0296df3e2991b3","depends_on":["ED-FIND-003"],"legacy":["N9.2"],"updated_at":"2026-08-29T14:20:26Z","evidence":"vitest: replaceInFilesModel.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：逐项 preview/exclude，使用 WorkspaceEdit transaction、conflict/revision guard 和一次 undo；禁止直接 Replace All 后只报数量。
 - 验证：multi-file、exclude、disk/open dirty conflict、cancel、undo/recovery。
