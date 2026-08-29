@@ -208,12 +208,15 @@ describe("saveNormalizationPipeline", () => {
     expect(result.importsOrganized).toBe(true);
     expect(result.whitespaceTrimmed).toBe(true);
     expect(result.stages.map((s) => ({ stage: s.stage, status: s.status }))).toEqual([
-      { stage: "format", status: "executed" },
-      { stage: "organize-imports", status: "executed" },
-      { stage: "normalization", status: "executed" },
+      { stage: "format", status: "applied" },
+      { stage: "organize-imports", status: "applied" },
+      { stage: "trim", status: "applied" },
+      { stage: "final-newline", status: "disabled" },
+      { stage: "eol", status: "disabled" },
+      { stage: "charset-bom", status: "disabled" },
     ]);
-    expect(result.stages[0].beforeHash).toBeDefined();
-    expect(result.stages[0].afterHash).toBeDefined();
+    expect(result.stages[0]!.beforeHash).toBeDefined();
+    expect(result.stages[0]!.afterHash).toBeDefined();
     expect(result.text).toBe("import A;\n/* formatted */\nconst x = 1;\n");
   });
 
@@ -247,7 +250,7 @@ describe("saveNormalizationPipeline", () => {
     expect(organizeImportsFn).not.toHaveBeenCalled();
     expect(result.stages[0]).toMatchObject({ stage: "format", status: "failed" });
     expect(result.stages[1]).toMatchObject({ stage: "organize-imports", status: "skipped-prior-failure" });
-    expect(result.stages[2]).toMatchObject({ stage: "normalization", status: "executed" });
+    expect(result.stages[2]).toMatchObject({ stage: "trim", status: "applied" });
     // User text preserved with safe whitespace trimming, never dropped!
     expect(result.text).toBe("const draft = 42;\n");
   });
@@ -374,6 +377,118 @@ describe("saveNormalizationPipeline", () => {
       expect(result.whitespaceTrimmed).toBe(true);
       expect(result.newlineAdjusted).toBe(true);
       expect(result.text).toBe("import A;\n// Formatted\nconst hello = 'world';\n");
+    });
+  });
+
+  describe("§ED-SAVE-001: Six-Stage Immutable Save Plan", () => {
+    it("freezes text, document, disk, policy, style, provider, project, and encoding identity into immutable plan", async () => {
+      const style: EffectiveCodeStyle = {
+        tabSize: 4,
+        indentSize: 4,
+        continuationIndent: 8,
+        insertSpaces: true,
+        trimTrailingWhitespace: true,
+        insertFinalNewline: true,
+        endOfLine: "lf",
+        charset: "utf-8",
+        source: "editorconfig",
+        label: "Spaces: 4",
+      };
+
+      const result = await runSaveNormalizationPipeline({
+        text: "class App {\t\n}\n\n",
+        codeStyle: style,
+        filePath: "/repo/src/App.java",
+        documentIdentity: {
+          uri: "file:///repo/src/App.java",
+          path: "/repo/src/App.java",
+          revision: 7,
+          languageId: "java",
+        },
+        diskIdentity: {
+          mtimeMs: 1700000000000,
+          sizeBytes: 120,
+          exists: true,
+          sha256: "hash-disk-1",
+        },
+        providerIdentity: {
+          id: "jdtls",
+          generation: 3,
+        },
+        projectIdentity: {
+          fingerprint: "fp-save-plan-1",
+          rootUri: "file:///repo",
+        },
+        savePolicy: {
+          format: { enabled: true, source: "scheme" },
+          organizeImports: { enabled: true, source: "scheme" },
+          exclusions: { patterns: [], formatterMarkers: true, source: "scheme" },
+          unsupported: [],
+        },
+        formatFn: async (t) => `/* fmt */\n${t}`,
+        organizeImportsFn: async (t) => `import java.util.*;\n${t}`,
+      });
+
+      expect(result.plan).toBeDefined();
+      expect(result.plan.planId).toMatch(/^save-plan-/);
+      expect(result.plan.identity.document?.uri).toBe("file:///repo/src/App.java");
+      expect(result.plan.identity.document?.revision).toBe(7);
+      expect(result.plan.identity.disk?.exists).toBe(true);
+      expect(result.plan.identity.provider?.id).toBe("jdtls");
+      expect(result.plan.identity.project?.fingerprint).toBe("fp-save-plan-1");
+      expect(result.plan.identity.encoding?.charset).toBe("UTF-8");
+
+      // Verify all 6 stages present in exact order
+      expect(result.plan.stages.map((s) => s.stage)).toEqual([
+        "format",
+        "organize-imports",
+        "trim",
+        "final-newline",
+        "eol",
+        "charset-bom",
+      ]);
+
+      // Every stage has valid SHA-256 beforeHash and afterHash
+      for (const stage of result.plan.stages) {
+        expect(stage.beforeHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(stage.afterHash).toMatch(/^[a-f0-9]{64}$/);
+      }
+
+      expect(result.plan.disposition).toBe("ready");
+      expect(result.plan.finalHash).toBe(result.plan.stages[5]!.afterHash);
+    });
+
+    it("isolates encoding failure to single failed stage with zero live buffer effect", async () => {
+      const style: EffectiveCodeStyle = {
+        tabSize: 2,
+        indentSize: 2,
+        continuationIndent: 4,
+        insertSpaces: true,
+        charset: "latin1",
+        source: "editorconfig",
+        label: "Spaces: 2",
+      };
+
+      const initialText = "const emoji = '🚀';\n"; // Contains non-Latin1 emoji!
+      const result = await runSaveNormalizationPipeline({
+        text: initialText,
+        codeStyle: style,
+      });
+
+      expect(result.encodingError).toBe(true);
+      // Zero live buffer effect: text returned strictly equals initialText
+      expect(result.text).toBe(initialText);
+
+      // Verify stages: only stage 6 (charset-bom) is failed
+      expect(result.stages.map((s) => ({ stage: s.stage, status: s.status }))).toEqual([
+        { stage: "format", status: "disabled" },
+        { stage: "organize-imports", status: "disabled" },
+        { stage: "trim", status: "disabled" },
+        { stage: "final-newline", status: "disabled" },
+        { stage: "eol", status: "disabled" },
+        { stage: "charset-bom", status: "failed" },
+      ]);
+      expect(result.plan.disposition).toBe("failed");
     });
   });
 });

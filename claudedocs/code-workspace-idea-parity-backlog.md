@@ -230,7 +230,7 @@
 - 验证：multi-file edit、conflict/cancel/stale、undo hash、provider failed visible。
 
 ### ED-SAVE-001 建立六阶段 immutable save plan
-<!-- ide-task {"id":"ED-SAVE-001","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB6"]} -->
+<!-- ide-task {"id":"ED-SAVE-001","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T11:36:34Z","baseline":"44158c922cde66daaea2a6390b8b856ed6d0b36e","depends_on":[],"legacy":["BB6"],"updated_at":"2026-08-29T11:40:26Z","evidence":"vitest: saveNormalizationPipeline.test.ts, workspaceStyleController.test.ts; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：冻结 text/document/disk/policy/style/provider/project/encoding identity；阶段固定为 format、organize-imports、trim、final-newline、eol、charset-bom，每段记录 typed status/reason 和 SHA-256。
 - 主文件：`saveNormalizationPipeline.ts`、`workspaceStyleController.ts` 及 tests。
