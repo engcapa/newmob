@@ -14,7 +14,10 @@ import {
   writeCodeStyleSchemeStore,
 } from "./workspaceCodeStyleSchemes";
 import {
+  buildFormatPlan,
   containsDisabledFormatterMarker,
+  filterFormattingRanges,
+  isFormatScopeSupported,
   isPathExcluded,
   resolveEffectiveSavePolicy,
 } from "./workspaceCodeStyleScheme";
@@ -170,4 +173,72 @@ describe("§8.19.9 R8-D1 code style scheme store", () => {
     expect(containsDisabledFormatterMarker("hello\n// @formatter:off\nworld")).toBe(true);
     expect(containsDisabledFormatterMarker("hello\n// @formatter:off\n// @formatter:on\nworld")).toBe(false);
   });
+
+  describe("ED-STYLE-001: reformat scopes, exclusions & formatter markers", () => {
+    const fullCapabilities = {
+      formatting: true,
+      rangeFormatting: true,
+      rearrangeSupported: true,
+      cleanupSupported: true,
+    };
+
+    it("verifies format scope support including module facts dependency", () => {
+      expect(isFormatScopeSupported("selection")).toBe(true);
+      expect(isFormatScopeSupported("file")).toBe(true);
+      expect(isFormatScopeSupported("directory")).toBe(true);
+      expect(isFormatScopeSupported("module", false)).toBe(false);
+      expect(isFormatScopeSupported("module", true)).toBe(true);
+    });
+
+    it("builds multi-file format plan with exclusions and read-only files", () => {
+      const plan = buildFormatPlan({
+        scope: "directory",
+        targets: [
+          "/repo/src/A.ts",
+          "/repo/dist/bundle.js",
+          "/repo/src/readonly.ts",
+        ],
+        excludedByPattern: ["**/dist/**"],
+        readOnlyPaths: new Set(["/repo/src/readonly.ts"]),
+        capabilities: fullCapabilities,
+      });
+
+      expect(plan.state).toBe("ready");
+      expect(plan.stages.map((s) => s.kind)).toEqual(["format", "rearrange", "cleanup"]);
+      expect(plan.excluded).toHaveLength(2);
+      expect(plan.excluded[0]).toEqual({ uri: "/repo/dist/bundle.js", reason: "pattern" });
+      expect(plan.excluded[1]).toEqual({ uri: "/repo/src/readonly.ts", reason: "read-only" });
+    });
+
+    it("filters formatting ranges honoring @formatter:off ... @formatter:on markers", () => {
+      const text = [
+        "line 0",
+        "// @formatter:off",
+        "line 2 unformatted",
+        "line 3 unformatted",
+        "// @formatter:on",
+        "line 5 formatted",
+        "/* @formatter:off */",
+        "line 7 unformatted",
+      ].join("\n");
+
+      // Whole file with markers
+      const ranges = filterFormattingRanges(text, null, true);
+      expect(ranges).toEqual([
+        { startLine: 0, endLine: 0 },
+        { startLine: 5, endLine: 5 },
+      ]);
+
+      // Selection intersection with markers
+      const selectionRanges = filterFormattingRanges(text, { startLine: 4, endLine: 7 }, true);
+      expect(selectionRanges).toEqual([
+        { startLine: 5, endLine: 5 },
+      ]);
+
+      // When honorMarkers is false, full range is returned
+      const allRanges = filterFormattingRanges(text, { startLine: 0, endLine: 7 }, false);
+      expect(allRanges).toEqual([{ startLine: 0, endLine: 7 }]);
+    });
+  });
 });
+

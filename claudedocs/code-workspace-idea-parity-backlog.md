@@ -504,7 +504,7 @@
 - 验证：encoding/EOL、selection, binary/large unavailable、apply/copy action、a11y。
 
 ### ED-STYLE-001 Reformat scope/marker/exclusion
-<!-- ide-task {"id":"ED-STYLE-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-SAVE-003"],"legacy":["C8-D"]} -->
+<!-- ide-task {"id":"ED-STYLE-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:27:05Z","baseline":"795fbe39c723c90245d391ecabebe44110a2148b","depends_on":["ED-SAVE-003"],"legacy":["C8-D"],"updated_at":"2026-08-29T13:29:43Z","evidence":"vitest: workspaceCodeStyleSchemes.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：selection/file/directory/module scope 与 formatter markers/exclusions 分层；module 依赖 ready facts；preview 后统一 commit/undo。
 - 验证：selection/file、multi-file scope、marker nesting、excluded file、provider unavailable。
