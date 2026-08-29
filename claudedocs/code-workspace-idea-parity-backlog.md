@@ -286,7 +286,7 @@
 - 验证：document/module/project/provider-reported、stale project generation、双 root。
 
 ### ED-QUERY-001 完整传递 semantic query envelope 与 cancel
-<!-- ide-task {"id":"ED-QUERY-001","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["BB8"]} -->
+<!-- ide-task {"id":"ED-QUERY-001","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:04:08Z","baseline":"bf3dadd42bc5916f16c7ca4d7e28add3b55ec5a6","depends_on":[],"legacy":["BB8"],"updated_at":"2026-08-29T12:07:29Z","evidence":"vitest: workspaceSemanticQueryHost.test.ts, semanticQueryEnvelope.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：host/adapter 消费 uri/position/document/provider/project generation/request id；fetcher 与 transport 共享 AbortSignal 和 protocol request id；unmount/file-close/restart `cancelAll`。
 - 主文件：`workspaceSemanticQueryHost.ts`、LSP adapter/hooks/tests。
