@@ -550,7 +550,7 @@
 - 验证：20-40 tabs、multi-leaf、failure/fast switch、large file degradation、before/after TTI。
 
 ### ED-PERF-004 buffer authority 迁移设计
-<!-- ide-task {"id":"ED-PERF-004","status":"ready","priority":"P2","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-MULTIVIEW-001"],"legacy":["PERF-5"]} -->
+<!-- ide-task {"id":"ED-PERF-004","status":"done","priority":"P2","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:49:55Z","baseline":"ff8da3e06381e604227d83c9e375501517787f0e","depends_on":["ED-MULTIVIEW-001"],"legacy":["PERF-5"],"updated_at":"2026-08-29T13:50:17Z","evidence":"adr: claudedocs/adr-buffer-authority-migration.md; 1MB/5MB baselines and phased plan defined"} -->
 
 - 结果：独立 ADR 定义 CodeMirror live buffer、React/store snapshot、incremental LSP、Git/semantic scheduling 和迁移/rollback；不在本任务改 production。
 - 验证：1MB/5MB current baseline、invariants、phased test plan。
