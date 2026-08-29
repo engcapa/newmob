@@ -160,7 +160,7 @@
 - 验证：每类 mutation 的 revision、no-op 不递增、两个 workspace 隔离、fresh restore。
 
 ### ED-TABS-002 原子化 Tab Policy plan/commit
-<!-- ide-task {"id":"ED-TABS-002","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-TABS-001"],"legacy":["BB3"]} -->
+<!-- ide-task {"id":"ED-TABS-002","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T09:19:17Z","baseline":"1c183f3aa6c88b98455d523150cef8fb0bcc603b","depends_on":["ED-TABS-001"],"legacy":["BB3"],"updated_at":"2026-08-29T09:25:18Z","evidence":"vitest tab policy suite (22/22 passed); all tab policy tests (73/73 passed); full CodeWorkspaceTab suite (80/80 passed); pnpm build exit 0; qa lint (142 files, 0 errors, 0 orphans); audit --diff exit 0"} -->
 
 - 结果：`TabPolicyPlan` 冻结 pre/post image、dirty keys、view/resource ids 和 base revisions；confirm 后同步重验；store 一次提交 layout+policy+snapshot 并返回 typed receipt。
 - 主文件：`workspaceTabPolicy.ts`、store、Settings dialog/controller 与测试。

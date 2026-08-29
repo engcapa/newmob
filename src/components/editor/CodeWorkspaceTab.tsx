@@ -15017,6 +15017,7 @@ export function CodeWorkspaceTab({
                     }]),
                 ) as typeof currentUi.editorGroups;
 
+                let persistenceIssue: string | null = null;
                 writeWorkspaceLayoutSnapshot(workspaceInstanceId, snapshotFromWorkspaceUi({
                   bottomDockOpen,
                   bottomDockTab,
@@ -15031,8 +15032,15 @@ export function CodeWorkspaceTab({
                   layoutTreeV2: currentUi.layoutTreeV2,
                   tabPolicy: policy,
                 }), {
-                  onIssue: (message) => setStatusMessage(message),
+                  onIssue: (message) => {
+                    persistenceIssue = message;
+                    setStatusMessage(message);
+                  },
                 });
+                return {
+                  persisted: persistenceIssue === null,
+                  persistenceIssue,
+                };
               },
             }).then((result) => {
               setStatusMessage(result.message);
