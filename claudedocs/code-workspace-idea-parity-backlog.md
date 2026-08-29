@@ -444,7 +444,7 @@
 - 验证：multi-file、exclude、disk/open dirty conflict、cancel、undo/recovery。
 
 ### ED-NAV-001 增加 Navigation Bar 键盘工作流
-<!-- ide-task {"id":"ED-NAV-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["N13.2"]} -->
+<!-- ide-task {"id":"ED-NAV-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:39:21Z","baseline":"d22a7031309c0980654407340204838b0f5f76a5","depends_on":[],"legacy":["N13.2"],"updated_at":"2026-08-29T12:43:33Z","evidence":"vitest: navigationBarModel.test.ts, Breadcrumbs.test.tsx; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：Alt+Home 打开工程/符号 breadcrumbs 式导航，逐级键盘浏览并打开；与当前 editor Breadcrumbs 分账。
 - 验证：多 root、file/symbol、focus restore、unavailable provider、keymap conflict。

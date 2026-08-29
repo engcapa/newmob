@@ -206,4 +206,31 @@ describe("Breadcrumbs", () => {
     fireEvent.click(appBtn!);
     expect(screen.getByTestId("code-workspace-breadcrumb-popup")).toBeTruthy();
   });
+
+  it("supports keyboard navigation when activeNavigationBar is enabled", () => {
+    const onCloseNavigationBar = vi.fn();
+    render(
+      <Breadcrumbs
+        pathSegments={[
+          { label: "repo", path: "", kind: "root" },
+          { label: "src", path: "src", kind: "directory" },
+          { label: "App.tsx", path: "src/App.tsx", kind: "file" },
+        ]}
+        symbols={symbols}
+        position={{ line: 7, character: 1 }}
+        activeNavigationBar={true}
+        onCloseNavigationBar={onCloseNavigationBar}
+      />,
+    );
+
+    const nav = breadcrumbNav();
+    // Navigate with Left arrow
+    fireEvent.keyDown(nav, { key: "ArrowLeft" });
+    const focused = nav.querySelector("[data-focused='true']");
+    expect(focused).toBeTruthy();
+
+    // Escape closes navigation bar
+    fireEvent.keyDown(nav, { key: "Escape" });
+    expect(onCloseNavigationBar).toHaveBeenCalledTimes(1);
+  });
 });

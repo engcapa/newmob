@@ -1259,6 +1259,15 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     keywords: ["bookmark", "list", "show"],
   },
   {
+    id: "workspace.activateNavigationBar",
+    title: "Jump to Navigation Bar",
+    description: "Focus and navigate the project and symbol navigation bar",
+    category: "Navigate",
+    keybinding: "Alt+Home",
+    provenance: "local",
+    keywords: ["navbar", "navigation", "bar", "breadcrumbs", "jump"],
+  },
+  {
     id: "workspace.toggleInlayHints",
     title: "Toggle Inlay Hints",
     description: "Show or hide parameter names and type inlay hints",

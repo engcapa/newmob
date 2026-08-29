@@ -11,6 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import { ChevronRight, File, Folder, Hash, MoreHorizontal } from "lucide-react";
 import type { LspDocumentSymbol, LspPosition } from "../../../lib/editor/lsp";
+import { navigateSegments } from "./navigationBarModel";
 
 export interface BreadcrumbPathSegment {
   label: string;
@@ -59,6 +60,9 @@ interface BreadcrumbsProps {
    */
   onPathClick?: (segment: BreadcrumbPathSegment) => void;
   onSymbolClick?: (symbol: LspDocumentSymbol) => void;
+  /** When activated via Alt+Home / workspace.activateNavigationBar, keyboard arrow navigation is enabled. */
+  activeNavigationBar?: boolean;
+  onCloseNavigationBar?: () => void;
 }
 
 type OpenPopup =
@@ -462,6 +466,8 @@ export function Breadcrumbs({
   pathActionsForSegment,
   onPathClick,
   onSymbolClick,
+  activeNavigationBar = false,
+  onCloseNavigationBar,
 }: BreadcrumbsProps) {
   const symbolChain = symbolChainAtPosition(symbols, position);
   const navRef = useRef<HTMLElement | null>(null);
@@ -470,6 +476,7 @@ export function Breadcrumbs({
   const [popup, setPopup] = useState<OpenPopup | null>(null);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [navBarFocusedIndex, setNavBarFocusedIndex] = useState<number | null>(null);
   const loadGenerationRef = useRef(0);
 
   const fullItems = useMemo<BreadcrumbItem[]>(() => [
@@ -481,6 +488,15 @@ export function Breadcrumbs({
     [pathSegments, symbolChain],
   );
   const visibleItems = collapsed ? compactItems : fullItems;
+
+  useEffect(() => {
+    if (activeNavigationBar) {
+      setNavBarFocusedIndex(visibleItems.length > 0 ? visibleItems.length - 1 : 0);
+      navRef.current?.focus();
+    } else {
+      setNavBarFocusedIndex(null);
+    }
+  }, [activeNavigationBar, visibleItems.length]);
 
   useLayoutEffect(() => {
     const updateCollapsedState = () => {
@@ -609,11 +625,45 @@ export function Breadcrumbs({
     void openPathPopup(segment, anchorEl);
   }, [loadPathChildren, openPathPopup, pathActionsForSegment]);
 
+  const handleNavKeyDown = useCallback((event: ReactKeyboardEvent) => {
+    if (!activeNavigationBar && navBarFocusedIndex === null) return;
+    if (popup) return;
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      setNavBarFocusedIndex((prev) => navigateSegments(prev ?? visibleItems.length - 1, visibleItems.length, "left"));
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      setNavBarFocusedIndex((prev) => navigateSegments(prev ?? 0, visibleItems.length, "right"));
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setNavBarFocusedIndex(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setNavBarFocusedIndex(visibleItems.length - 1);
+    } else if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      const currentIdx = navBarFocusedIndex ?? visibleItems.length - 1;
+      const currentItem = visibleItems[currentIdx];
+      if (!currentItem) return;
+      const targetBtn = navRef.current?.querySelector<HTMLElement>(`[data-nav-index="${currentIdx}"]`);
+      if (targetBtn) {
+        if (currentItem.type === "path") void openPathPopup(currentItem.value, targetBtn);
+        if (currentItem.type === "symbol") openSymbolPopup(currentItem.value, targetBtn);
+      }
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setNavBarFocusedIndex(null);
+      onCloseNavigationBar?.();
+    }
+  }, [activeNavigationBar, navBarFocusedIndex, onCloseNavigationBar, openPathPopup, openSymbolPopup, popup, visibleItems]);
+
   const renderItems = (items: BreadcrumbItem[], compact: boolean, interactive: boolean) => items.map((item, index) => {
     const path = item.type === "path" ? item.value : null;
     const symbol = item.type === "symbol" ? item.value : null;
     const label = path?.label ?? symbol?.name ?? "";
     const flexible = compact && (path?.kind === "file" || !!symbol);
+    const isFocused = navBarFocusedIndex === index;
     const icon = path?.kind === "root" || path?.kind === "directory" ? (
       <Folder className="h-3 w-3 shrink-0 text-[#d59d32]" />
     ) : path?.kind === "file" ? (
@@ -631,9 +681,12 @@ export function Breadcrumbs({
           {interactive ? (
             <button
               type="button"
-              className="inline-flex h-5 items-center rounded px-1 hover:bg-[var(--taomni-code-active-line-bg)] hover:text-[var(--taomni-code-text)]"
+              className={`inline-flex h-5 items-center rounded px-1 hover:bg-[var(--taomni-code-active-line-bg)] hover:text-[var(--taomni-code-text)] ${
+                isFocused ? "ring-1 ring-[var(--taomni-accent)] bg-[var(--taomni-code-active-line-bg)]" : ""
+              }`}
               aria-label="Hidden breadcrumb segments"
               data-testid="code-workspace-breadcrumb-collapsed"
+              data-nav-index={index}
               onClick={(event) => {
                 if (item.hiddenPaths.length > 0) {
                   openCollapsedPopup(item.hiddenPaths, event.currentTarget);
@@ -665,8 +718,12 @@ export function Breadcrumbs({
         {interactive ? (
           <button
             type="button"
-            className={`inline-flex h-5 min-w-0 items-center gap-1 rounded px-1 hover:bg-[var(--taomni-code-active-line-bg)] hover:text-[var(--taomni-code-text)] ${flexible ? "flex-1" : ""}`}
+            className={`inline-flex h-5 min-w-0 items-center gap-1 rounded px-1 hover:bg-[var(--taomni-code-active-line-bg)] hover:text-[var(--taomni-code-text)] ${
+              flexible ? "flex-1" : ""
+            } ${isFocused ? "ring-1 ring-[var(--taomni-accent)] bg-[var(--taomni-code-active-line-bg)]" : ""}`}
             aria-haspopup="listbox"
+            data-nav-index={index}
+            data-focused={isFocused ? "true" : undefined}
             data-testid={path
               ? `code-workspace-breadcrumb-path-${path.kind}`
               : "code-workspace-breadcrumb-symbol"}
@@ -692,9 +749,11 @@ export function Breadcrumbs({
   return (
     <nav
       ref={navRef}
+      tabIndex={activeNavigationBar ? 0 : -1}
+      onKeyDown={handleNavKeyDown}
       aria-label="Editor breadcrumbs"
       data-testid="code-workspace-breadcrumbs"
-      className="relative flex h-7 shrink-0 items-center overflow-hidden border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2 text-[11px] text-[var(--taomni-code-muted)]"
+      className="relative flex h-7 shrink-0 items-center overflow-hidden border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2 text-[11px] text-[var(--taomni-code-muted)] outline-none"
     >
       <div
         ref={fullPathMeasureRef}

@@ -1716,6 +1716,10 @@ export function CodeWorkspaceTab({
     primary: [],
     secondary: [],
   });
+  const [navigationBarActiveByGroup, setNavigationBarActiveByGroup] = useState<Record<EditorGroupId, boolean>>({
+    primary: false,
+    secondary: false,
+  });
   const [referencesResult, setReferencesResult] = useState<ReferencesResultState>({
     loading: false,
     origin: null,
@@ -8970,6 +8974,13 @@ export function CodeWorkspaceTab({
     openTodosPane();
   }, [activeKey, bookmarks, openTodosPane, setStatusMessage, workspaceInstanceId]);
 
+  const activateNavigationBar = useCallback(() => {
+    setNavigationBarActiveByGroup((prev) => ({
+      ...prev,
+      [activeEditorGroupId]: true,
+    }));
+  }, [activeEditorGroupId]);
+
   const navigateDiagnostic = useCallback((direction: 1 | -1) => {
     const file = activeFile;
     if (!file) return;
@@ -10082,6 +10093,15 @@ export function CodeWorkspaceTab({
           openTodosPane();
         }
       },
+    },
+    {
+      id: "workspace.activateNavigationBar",
+      title: "Jump to Navigation Bar",
+      category: "Navigate",
+      keybinding: "Alt+Home",
+      keywords: ["navbar", "navigation", "bar", "breadcrumbs", "jump"],
+      when: (context) => context.focus === "editor" && !!activeFile,
+      run: activateNavigationBar,
     },
     {
       id: "workspace.toggleInlayHints",
@@ -14057,11 +14077,13 @@ export function CodeWorkspaceTab({
       highContrast: editorAppearanceProfile.highContrast,
       virtualSpace: editorAppearanceProfile.virtualSpace,
     };
-    const showGroupBreadcrumbs = editorAppearanceProfile.breadcrumbs.visible
+    const showGroupBreadcrumbs = (
+      editorAppearanceProfile.breadcrumbs.visible
       && matchesBreadcrumbLanguage(
         groupLanguageId,
         editorAppearanceProfile.breadcrumbs.languages,
-      );
+      )
+    ) || navigationBarActiveByGroup[groupId];
     const groupBreadcrumbSegments = groupId === activeEditorGroupId
       ? breadcrumbPathSegments
       : groupFile ? breadcrumbSegmentsForFile(groupFile, roots) : [];
@@ -14194,6 +14216,8 @@ export function CodeWorkspaceTab({
               }
             }}
             onSymbolClick={(symbol) => revealEditorLocation(groupFile.key, symbol.selectionRange)}
+            activeNavigationBar={navigationBarActiveByGroup[groupId]}
+            onCloseNavigationBar={() => setNavigationBarActiveByGroup((prev) => ({ ...prev, [groupId]: false }))}
           />
         ) : null}
         breadcrumbsPlacement={editorAppearanceProfile.breadcrumbs.placement}
