@@ -506,6 +506,7 @@ pub fn run() {
             workspace::workspace_rename_path,
             workspace::workspace_apply_resource_operation,
             workspace_tooling::maven::workspace_ingest_maven_project,
+            workspace_tooling::gradle::workspace_ingest_gradle_project,
             local_history::history_snapshot,
             local_history::history_list,
             local_history::history_read,

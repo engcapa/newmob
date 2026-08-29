@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   workspaceIngestMavenProject,
+  workspaceIngestGradleProject,
   type MavenToolingRequest,
   type MavenToolingResult,
+  type GradleToolingRequest,
+  type GradleToolingResult,
 } from "./workspaceTooling";
 
 const coreMocks = vi.hoisted(() => ({
@@ -11,7 +14,7 @@ const coreMocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => coreMocks);
 
-describe("ED-PROJECT-002: workspaceTooling IPC bridge", () => {
+describe("ED-PROJECT-002: workspaceTooling Maven IPC bridge", () => {
   it("invokes workspace_ingest_maven_project command with request payload", async () => {
     const mockResult: MavenToolingResult = {
       status: "ready",
@@ -58,5 +61,55 @@ describe("ED-PROJECT-002: workspaceTooling IPC bridge", () => {
     expect(res.status).toBe("ready");
     expect(res.modules).toHaveLength(1);
     expect(res.provenance?.toolKind).toBe("mvnw");
+  });
+});
+
+describe("ED-PROJECT-003: workspaceTooling Gradle IPC bridge", () => {
+  it("invokes workspace_ingest_gradle_project command with request payload", async () => {
+    const mockResult: GradleToolingResult = {
+      status: "ready",
+      modules: [
+        {
+          id: ":app",
+          name: "app",
+          root: "/repo/app",
+          buildFile: "/repo/app/build.gradle",
+          sourceRoots: ["/repo/app/src/main/java"],
+          testRoots: ["/repo/app/src/test/java"],
+          resourceRoots: ["/repo/app/src/main/resources"],
+          outputDir: "/repo/app/build/classes/java/main",
+          dependencies: ["project(:core)"],
+          classpath: ["project(:core)"],
+        },
+      ],
+      provenance: {
+        toolKind: "gradlew",
+        toolVersion: null,
+        javaHome: "/opt/jdk21",
+        javaVersion: null,
+        argv: ["/repo/gradlew", "--offline", "projects"],
+        cwd: "/repo",
+        settingsHash: "def5678",
+        resolvedAt: "2026-08-29T12:00:00Z",
+      },
+      errorMessage: null,
+    };
+
+    coreMocks.invoke.mockResolvedValue(mockResult);
+
+    const request: GradleToolingRequest = {
+      workspaceRoot: "/repo",
+      trusted: true,
+      javaHome: "/opt/jdk21",
+      offline: true,
+    };
+
+    const res = await workspaceIngestGradleProject(request);
+
+    expect(coreMocks.invoke).toHaveBeenCalledWith("workspace_ingest_gradle_project", { request });
+    expect(res).toEqual(mockResult);
+    expect(res.status).toBe("ready");
+    expect(res.modules).toHaveLength(1);
+    expect(res.provenance?.toolKind).toBe("gradlew");
   });
 });

@@ -328,7 +328,7 @@
 - 验证：真实 multi-module Maven fixture、offline/auth/timeout/malformed 不返回空 ready。
 
 ### ED-PROJECT-003 可信 Gradle tooling ingestion
-<!-- ide-task {"id":"ED-PROJECT-003","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-PROJECT-001"],"legacy":["BB9-C"]} -->
+<!-- ide-task {"id":"ED-PROJECT-003","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:04:44Z","baseline":"ec92d645fc9cb6b50ca4e854a947ba4ffdea5c48","depends_on":["ED-PROJECT-001"],"legacy":["BB9-C"],"updated_at":"2026-08-29T14:11:51Z","evidence":"cargo test: workspace_tooling (6 tests pass); vitest: workspaceTooling.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：trust 批准后 wrapper 优先，通过 Tooling API 或受控 init script 获取 modules/source sets/classpath；记录完整 provenance；untrusted process=0。
 - 主文件：Rust workspace tooling 独立模块、IPC types/tests；不修改 Maven owner。
