@@ -544,7 +544,7 @@
 - 验证：fake timers、3 workspace/同 repo、hide/show、slow request/cancel、call counts。
 
 ### ED-PERF-003 首屏优先 restore 与 active-file diff
-<!-- ide-task {"id":"ED-PERF-003","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":[],"legacy":["PERF-4.1","PERF-4.2"]} -->
+<!-- ide-task {"id":"ED-PERF-003","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:47:04Z","baseline":"176959071464ee24e236dfd1d88d269ef00ce31a","depends_on":[],"legacy":["PERF-4.1","PERF-4.2"],"updated_at":"2026-08-29T13:49:39Z","evidence":"vitest: workspaceRestoreModel.test.ts, workspaceLayoutPersistence.test.ts, workspaceTabPolicy.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：restore 先读每 leaf active file，其他 tab lazy；并发 2-4；line diff 只算可见文件并按 path/HEAD/text version cache。
 - 验证：20-40 tabs、multi-leaf、failure/fast switch、large file degradation、before/after TTI。

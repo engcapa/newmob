@@ -906,6 +906,10 @@ import {
   type WorkspaceSemanticIndexBuildToken,
 } from "./workspace/workspaceSemanticIndex";
 import { useWorkspaceSemanticIndex } from "./workspace/useWorkspaceSemanticIndex";
+import {
+  executeBoundedAsyncQueue,
+  planWorkspaceRestore,
+} from "./workspace/workspaceRestoreModel";
 
 export function CodeWorkspaceTab({
   tabId,
@@ -2858,23 +2862,32 @@ export function CodeWorkspaceTab({
         } else {
           if (initialOpenedKeyRef.current === `restored:${workspaceInstanceId}`) return;
           initialOpenedKeyRef.current = `restored:${workspaceInstanceId}`;
-          const groupEntries = Object.entries(snapshot.editorGroups) as Array<[EditorGroupId, PersistedEditorGroup]>;
-          for (const [groupId, group] of groupEntries) {
-            if (!group) continue;
-            for (const key of group.openOrder) {
-              const ref = fileRefFromFileKey(key, looseFiles);
-              if (!ref) continue;
-              void openFile(ref, {
-                groupId,
-                preview: group.previewKey === key,
-              });
-            }
-            if (group.activeKey && group.openOrder.includes(group.activeKey)) {
-              updateEditorGroup(groupId, (g) => ({ ...g, activeKey: group.activeKey }));
-            }
+          const plan = planWorkspaceRestore(snapshot, looseFiles);
+
+          // 1. Immediately open active tabs in each leaf so first screen interactive time (TTI) is minimal
+          for (const target of plan.activeTargets) {
+            void openFile(target.ref, {
+              groupId: target.groupId,
+              preview: target.preview,
+            });
+            updateEditorGroup(target.groupId, (g) => ({ ...g, activeKey: target.key }));
           }
-          if (snapshot.activeEditorGroupId) {
-            activateEditorGroup(snapshot.activeEditorGroupId);
+
+          // Restore active group selection
+          if (plan.activeGroupId) {
+            activateEditorGroup(plan.activeGroupId);
+          }
+
+          // 2. Open background tabs with bounded concurrency (3) to avoid I/O bottlenecks
+          if (plan.backgroundTargets.length > 0) {
+            void executeBoundedAsyncQueue(
+              plan.backgroundTargets,
+              (target) => openFile(target.ref, {
+                groupId: target.groupId,
+                preview: target.preview,
+              }),
+              3,
+            );
           }
           return;
         }
