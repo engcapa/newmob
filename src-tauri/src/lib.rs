@@ -47,6 +47,7 @@ mod workspace;
 mod workspace_execution;
 mod workspace_fs;
 mod workspace_search;
+pub mod workspace_tooling;
 mod wsl;
 
 use state::AppState;
@@ -504,6 +505,7 @@ pub fn run() {
             workspace::workspace_delete_path,
             workspace::workspace_rename_path,
             workspace::workspace_apply_resource_operation,
+            workspace_tooling::maven::workspace_ingest_maven_project,
             local_history::history_snapshot,
             local_history::history_list,
             local_history::history_read,

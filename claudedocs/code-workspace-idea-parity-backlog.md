@@ -321,7 +321,7 @@
 - 验证：各种 descriptor、partial/malformed、旧 snapshot consumer 被阻断。
 
 ### ED-PROJECT-002 可信 Maven tooling ingestion
-<!-- ide-task {"id":"ED-PROJECT-002","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-PROJECT-001"],"legacy":["BB9-B"]} -->
+<!-- ide-task {"id":"ED-PROJECT-002","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T13:53:02Z","baseline":"a3f8efd7292fdb3e50d1c933c54ab66bc856f297","depends_on":["ED-PROJECT-001"],"legacy":["BB9-B"],"updated_at":"2026-08-29T14:04:18Z","evidence":"cargo test: workspace_tooling::maven (3 tests pass); vitest: workspaceTooling.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：trust 批准后 wrapper 优先，读取 effective model；backend 记录 tool/JDK/version/argv/cwd/hash/modules/source sets/classpath/dependency/provenance；untrusted process=0。
 - 主文件：Rust workspace tooling 独立模块、IPC types/tests；不顺手实现 Gradle。
