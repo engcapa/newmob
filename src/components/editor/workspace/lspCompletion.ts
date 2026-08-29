@@ -1381,7 +1381,7 @@ export function lspSnippetSessionInvalidator(): Extension {
   });
 }
 
-interface PlannedChange {
+export interface PlannedChange {
   from: number;
   to: number;
   insert: string;
@@ -1407,7 +1407,7 @@ function strictOffsetFromLspPosition(doc: Text, position: LspPosition): number |
  * additional edits (e.g. an import) that landed before the primary span.
  * `offsetWithinInsert` may equal `insert.length` for the cursor-at-end case.
  */
-function postImageAnchor(
+export function postImageAnchor(
   changes: PlannedChange[],
   primary: PlannedChange,
   offsetWithinInsert: number,
@@ -1422,7 +1422,7 @@ function postImageAnchor(
   return primary.from + offsetWithinInsert + delta;
 }
 
-interface PlanningChanges {
+export interface PlanningChanges {
   list: PlannedChange[];
   ok: boolean;
 }
@@ -1433,7 +1433,7 @@ interface PlanningChanges {
  * ranges never partially apply: the entire completion is rejected and the
  * invalid-additional-edits diagnostic is reported.
  */
-function planCompletionChanges(
+export function planCompletionChanges(
   view: EditorView,
   primary: PlannedChange,
   additionalEdits: LspTextEdit[],
@@ -1463,14 +1463,14 @@ function planCompletionChanges(
   return { list: ok ? list : [primary], ok };
 }
 
-function commitLspCompletion(
+export function commitLspCompletion(
   view: EditorView,
   item: LspCompletionItem,
   from: number,
   to: number,
   token: CompletionRequestToken,
   isStillCurrent: (token: CompletionRequestToken) => boolean,
-  reportDiagnostic: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
+  reportDiagnostic?: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
   excludedSymbols?: readonly SymbolPatternRule[],
 ): boolean {
   if (!isStillCurrent(token)) {

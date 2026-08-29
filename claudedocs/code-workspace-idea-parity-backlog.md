@@ -272,7 +272,7 @@
 - 验证：sorting 不拆 raw/mapped pair，0/1/many、incomplete/truncated、双 workspace、live policy change。
 
 ### ED-COMP-003 原子 acceptance 与一次 undo
-<!-- ide-task {"id":"ED-COMP-003","status":"ready","priority":"P0","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-COMP-002"],"legacy":["BB7","BB10-C5"]} -->
+<!-- ide-task {"id":"ED-COMP-003","status":"done","priority":"P0","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T12:02:12Z","baseline":"ba0ea1bcb9d2dba058c898c536c22fbe1eefb57b","depends_on":["ED-COMP-002"],"legacy":["BB7","BB10-C5"],"updated_at":"2026-08-29T12:03:51Z","evidence":"vitest: lspCompletionResolveGate.test.ts, lspCompletion.test.ts; qa-ui-auto lint; pnpm build"} -->
 
 - 结果：resolve 后重验 unique/range/snippet/overlap；primary + additional edits 一次 transaction；snippet+import 也一次 undo；failure 不隐式丢 import。
 - 主文件：completion acceptance/CodeMirror integration/tests。

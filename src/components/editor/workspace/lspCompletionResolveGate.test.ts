@@ -7,9 +7,11 @@ import type { LspCompletionItem, LspCompletionResult, LspDocumentStatus } from "
 import {
   buildCompletionAcceptancePlanV2,
   classifyCompletionResolveOutcome,
+  commitLspCompletion,
   completionItemId,
   createLspCompletionSource,
   executeCompletionResolve,
+  planCompletionChanges,
   providerScopeFor,
   recentCompletionInvocations,
   recordBasicCompletionInvocation,
@@ -579,5 +581,105 @@ describe("§ED-COMP-001: Typed Completion Resolve Outcomes", () => {
     await vi.advanceTimersByTimeAsync(150);
     const timeoutResult = await timeoutPromise;
     expect(timeoutResult.kind).toBe("timeout");
+  });
+});
+
+describe("§ED-COMP-003: Atomic Acceptance & Single Undo", () => {
+  const token: CompletionRequestToken = {
+    workspaceId: "ws-r3",
+    fileKey: "A.java",
+    filePath: "/repo/A.java",
+    uri: "file:///repo/A.java",
+    languageId: "java",
+    documentRevision: 7,
+    lspSessionGeneration: 3,
+    requestId: "req-1",
+  };
+
+  it("plans changes and detects overlapping or out-of-order edits with zero mutation", () => {
+    const view = mountView("class App {\n  void main() {\n    Lis\n  }\n}");
+    const primary = { from: 31, to: 34, insert: "List" };
+
+    // Valid non-overlapping import edit at line 0
+    const validEdit = {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+      newText: "import java.util.List;\n",
+    };
+    const validPlan = planCompletionChanges(view, primary, [validEdit]);
+    expect(validPlan.ok).toBe(true);
+    expect(validPlan.list).toHaveLength(2);
+    expect(validPlan.list[0].from).toBe(0); // import first
+    expect(validPlan.list[1].from).toBe(31); // primary second
+
+    // Overlapping edit colliding with primary span
+    const overlappingEdit = {
+      range: { start: { line: 2, character: 3 }, end: { line: 2, character: 6 } },
+      newText: "List",
+    };
+    const badPlan = planCompletionChanges(view, primary, [overlappingEdit]);
+    expect(badPlan.ok).toBe(false);
+    view.destroy();
+  });
+
+  it("commits snippet with preceding auto-import in exactly one dispatch and reverts in exactly one undo", () => {
+    const view = mountView("class App {\n  void main() {\n    Lis\n  }\n}");
+    const initialDoc = view.state.doc.toString();
+    const item = makeItem({
+      label: "List",
+      insertText: "List<${1:String}>",
+      insertTextFormat: 2,
+      textEdit: null,
+      additionalTextEdits: [{
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        newText: "import java.util.List;\n",
+      }],
+    });
+
+    const dispatchSpy = vi.spyOn(view, "dispatch");
+    const diagnostics: string[] = [];
+    const committed = commitLspCompletion(
+      view,
+      item,
+      31,
+      34,
+      token,
+      () => true,
+      (diag) => diagnostics.push(diag),
+    );
+
+    expect(committed).toBe(true);
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toHaveLength(0);
+
+    const docAfter = view.state.doc.toString();
+    expect(docAfter).toContain("import java.util.List;\nclass App");
+    expect(docAfter).toContain("List<String>");
+
+    // Exactly one undo reverts everything back to initial document
+    undo(view);
+    expect(view.state.doc.toString()).toBe(initialDoc);
+    view.destroy();
+  });
+
+  it("rejects stale token without any document dispatch", () => {
+    const view = mountView("class App {\n  void main() {\n    Lis\n  }\n}");
+    const initialDoc = view.state.doc.toString();
+    const item = makeItem({ label: "List" });
+    const diagnostics: string[] = [];
+
+    const committed = commitLspCompletion(
+      view,
+      item,
+      31,
+      34,
+      token,
+      () => false, // Token is stale!
+      (diag) => diagnostics.push(diag),
+    );
+
+    expect(committed).toBe(false);
+    expect(diagnostics).toContain("identity-mismatch");
+    expect(view.state.doc.toString()).toBe(initialDoc);
+    view.destroy();
   });
 });
