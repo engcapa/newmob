@@ -475,22 +475,7 @@ export function acquireClipboardStore(
 
   const getSnapshot = (): WorkspaceClipboardSnapshotV3 => {
     const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
-    const consumerList = Array.from(current.consumers.values());
-    return {
-      payloadRevision: current.payloadRevision,
-      historyRevision: current.historyRevision,
-      policyRevision: current.policyRevision,
-      permissionGeneration: current.permissionGeneration,
-      lifecycleRevision: current.lifecycleRevision,
-      permission: current.permission,
-      consumers: consumerList,
-      revision: current.payloadRevision,
-      history: current.store.historyEntries(),
-      exclusion: current.store.historyExclusion(),
-      isHistoryEnabled: current.store.isHistoryEnabled(),
-      limits: current.store.historyLimits(),
-      consumerCount: current.consumers.size,
-    };
+    return buildWorkspaceClipboardSnapshot(current);
   };
 
   const notify = () => {
@@ -780,3 +765,38 @@ export function clipboardStoreForWorkspace(workspaceId: string): WorkspaceClipbo
 export function resetWorkspaceClipboardStores(): void {
   slotStatesByWorkspace.clear();
 }
+
+function buildWorkspaceClipboardSnapshot(slot: WorkspaceSlotState): WorkspaceClipboardSnapshot {
+  return {
+    payloadRevision: slot.payloadRevision,
+    historyRevision: slot.historyRevision,
+    policyRevision: slot.policyRevision,
+    permissionGeneration: slot.permissionGeneration,
+    lifecycleRevision: slot.lifecycleRevision,
+    permission: slot.permission,
+    consumers: Array.from(slot.consumers.values()),
+    revision: slot.payloadRevision,
+    history: slot.store.historyEntries(),
+    exclusion: slot.store.historyExclusion(),
+    isHistoryEnabled: slot.store.isHistoryEnabled(),
+    limits: slot.store.historyLimits(),
+    consumerCount: slot.consumers.size,
+  };
+}
+
+if (typeof window !== "undefined") {
+  (window as unknown as { __taomniClipboardObserve?: (workspaceInstanceId?: string) => unknown }).__taomniClipboardObserve = (
+    workspaceInstanceId?: string,
+  ) => {
+    if (!workspaceInstanceId) {
+      const all: Record<string, WorkspaceClipboardSnapshot> = {};
+      for (const [id, slot] of slotStatesByWorkspace) {
+        all[id] = buildWorkspaceClipboardSnapshot(slot);
+      }
+      return all;
+    }
+    const slot = slotStatesByWorkspace.get(workspaceInstanceId);
+    return slot ? buildWorkspaceClipboardSnapshot(slot) : null;
+  };
+}
+

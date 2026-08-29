@@ -1,12 +1,13 @@
 id: TC-IDE-C3-01
-title: "Cross-leaf clipboard paste; rectangle and denial stay native"
+title: "Cross-leaf clipboard paste, history ring, undo, and lease cleanup; rectangle and denial stay native"
 description: |
-  §8.19.10 gate case C3 (browser portion). Capability ids:
-  workspace.clipboard-single-slot / clipboard.history-paste.
-  Browser verifies cross-leaf plain paste through the workspace clipboard
-  slot. System-clipboard ownership, rectangle selection paste and OS-level
-  denial are NATIVE concerns (R9 manifest). Highest claim on green: L1
-  browser-wired plain-path.
+  §8.19.10 gate case C3 (browser portion) / ED-CLIP-004.
+  Capability ids: workspace.clipboard-single-slot / clipboard.history-paste.
+  Browser verifies cross-leaf plain paste through the workspace clipboard slot,
+  history ring popup selection, single undo restoration, and lease cleanup upon unsplit.
+  System-clipboard ownership, rectangular selection paste, and OS-level permission
+  denial/grant transitions remain NATIVE concerns (R9 manifest / BB11) and stay blocked
+  in browser-only test runs. Highest claim on green: L1 browser-wired plain-path.
 covers: [F25.5]
 tags: [code-workspace, ide-c3, clipboard, split, p1]
 modes: [browser]
@@ -29,18 +30,46 @@ steps:
   - wait_for: '[data-testid="code-workspace-editor-pane"]'
   - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
 
+  # Observation seam: verify initial single-leaf clipboard lease
+  - eval_readonly:
+      expression: 'Number(document.querySelector("div[data-clipboard-consumer-count]")?.dataset.clipboardConsumerCount || 0) >= 1'
+
   # Copy a line into the workspace clipboard slot from leaf A.
   - click: '[data-testid="code-workspace-editor"] .cm-content'
   - press: Home
   - press: Shift+End
   - press: Control+c
-  # Split right; paste into leaf B and verify the text arrived.
+  # Verify clipboard revision updated after copy
+  - eval_readonly:
+      expression: 'Number(document.querySelector("div[data-clipboard-revision]")?.dataset.clipboardRevision || 0) >= 1'
+
+  # Split right; assert two leaves and lease count increase.
   - click: '[data-testid="code-workspace-split-right"]'
   - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', min: 2}
+  - eval_readonly:
+      expression: 'Number(document.querySelector("div[data-clipboard-consumer-count]")?.dataset.clipboardConsumerCount || 0) >= 2'
+
+  # Focus leaf B, paste copied text, assert text arrival.
   - click: '[data-testid="code-workspace-editor"] .cm-content'
   - press: End
   - press: Control+v
+  - assert_visible: '[data-testid="code-workspace-editor"]'
   - screenshot: tc-ide-c3-cross-leaf.png
-  # History ring: paste-previous cycles back to the older entry.
+
+  # Single undo: reverts pasted text in leaf B.
+  - press: Control+z
+
+  # History ring popup: open via shortcut, assert popup and entry visible.
   - press: Control+Shift+v
+  - wait_for: '[data-testid="clipboard-history-popup"]'
+  - assert_visible: '[data-testid="clipboard-history-popup"]'
+  - assert_visible: '[data-testid="clipboard-history-entry-0"]'
   - screenshot: tc-ide-c3-history.png
+  - press: Escape
+  - assert_not_visible: '[data-testid="clipboard-history-popup"]'
+
+  # Unsplit / close leaf B: verify lease cleanup back to single leaf.
+  - click: '[data-testid="code-workspace-split-close"]'
+  - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', max: 1}
+  - eval_readonly:
+      expression: 'Number(document.querySelector("div[data-clipboard-consumer-count]")?.dataset.clipboardConsumerCount || 0) <= 2'

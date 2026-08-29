@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type ReactNode,
 } from "react";
@@ -979,6 +980,11 @@ export function CodeWorkspaceTab({
 
   // §8.26.2 AA1: Root workspace clipboard session handle with permission adapter (§8.27.2 BB1 / ED-CLIP-002)
   const clipboardHandle = useMemo(() => acquireClipboardStore(workspaceInstanceId), [workspaceInstanceId]);
+  const clipboardSnapshot = useSyncExternalStore(
+    clipboardHandle.subscribe,
+    clipboardHandle.getSnapshot,
+    clipboardHandle.getSnapshot,
+  );
   useEffect(() => {
     const detachAdapter = clipboardHandle.attachPermissionAdapter(createDefaultClipboardPermissionAdapter());
     return () => {
@@ -13967,6 +13973,9 @@ export function CodeWorkspaceTab({
       <div
         ref={rootRef}
         data-testid="code-workspace-tab"
+        data-clipboard-revision={clipboardSnapshot.revision}
+        data-clipboard-history-revision={clipboardSnapshot.historyRevision}
+        data-clipboard-consumer-count={clipboardSnapshot.consumerCount}
         className="relative h-full w-full min-h-0 flex flex-col overflow-hidden bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)]"
       >
       <header className="h-10 shrink-0 flex items-center gap-2 overflow-x-auto px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]">

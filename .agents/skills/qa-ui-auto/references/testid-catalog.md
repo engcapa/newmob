@@ -149,6 +149,7 @@
 - `[data-testid="code-workspace-tree-add-folder"]` — interactive [optional] — F25.5.tree-add-folder
 - `[data-testid="code-workspace-tree-file"]` — interactive [optional] — F25.5.tree-file-row
 - `[data-testid="code-workspace-editor-pane"]` — display — F25.5.editor-pane
+- `[data-testid="code-workspace-editor"]` — display [optional] — F25.5.editor-host
 - `[data-testid="code-workspace-editor-tab-strip"]` — display [optional] — F25.5.editor-tab-strip
 - `[data-testid="code-workspace-editor"] .cm-content` — interactive [optional] — F25.5.editor-content
 - `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
@@ -168,6 +169,10 @@
 - `[data-testid="problems-scope-project"]` — interactive [optional] — F25.5.problems-scope-project
 - `[data-testid="problems-full-project-note"]` — display [optional] — F25.5.problems-full-project-note
 - `[data-testid="keymap-settings-close"]` — interactive [optional] — F25.5.keymap-settings-close
+- `[data-testid="clipboard-history-popup"]` — display [optional] — F25.5.clipboard-history-popup
+- `[data-testid="clipboard-history-search"]` — interactive [optional] — F25.5.clipboard-history-search
+- `[data-testid="clipboard-history-entry-0"]` — interactive [optional] — F25.5.clipboard-history-entry-0
+- `[data-testid="clipboard-history-close"]` — interactive [optional] — F25.5.clipboard-history-close
 
 ## code-workspace/execution (F25.1)
 

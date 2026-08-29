@@ -146,7 +146,7 @@
 - 验证：StrictMode、multi-caret segments、workspace close lease cleanup、一次 undo。
 
 ### ED-CLIP-004 升级 C3 为行为型 clipboard case
-<!-- ide-task {"id":"ED-CLIP-004","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-CLIP-002","ED-CLIP-003"],"legacy":["BB10-C3","BB11"]} -->
+<!-- ide-task {"id":"ED-CLIP-004","status":"done","priority":"P0","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T08:58:27Z","baseline":"83b805b9717bde5bb18351d0d0e28142dfbf6101","depends_on":["ED-CLIP-002","ED-CLIP-003"],"legacy":["BB10-C3","BB11"],"updated_at":"2026-08-29T09:05:12Z","evidence":"qa lint 142/142; TC-IDE-C3-01 dry-run passed; audit --diff exit 0; focused clipboard 72/72; pnpm build exit 0; unrun: native permission matrix & OS level denial (R9 manifest / BB11)"} -->
 
 - 结果：`TC-IDE-C3-01` 不再只按键+截图；断言目标文本、history selection、payload/history revision、lease cleanup 和 undo。OS permission 格保留 native，并明确层级。
 - 主文件：C3 YAML、F25 controls/catalog、只读 observation seam。

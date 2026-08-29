@@ -5524,13 +5524,14 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, KeymapSettingsDialog]
+components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, KeymapSettingsDialog, ClipboardHistoryPopup]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
   - src/components/editor/workspace/EditorGroup.tsx
   - src/components/editor/workspace/FileTreePane.tsx
   - src/components/editor/workspace/TabSwitcher.tsx
   - src/components/editor/workspace/KeymapSettingsDialog.tsx
+  - src/components/editor/workspace/ClipboardHistoryPopup.tsx
 controls:
   - id: tree-add-folder
     selector: '[data-testid="code-workspace-tree-add-folder"]'
@@ -5543,6 +5544,10 @@ controls:
   - id: editor-pane
     selector: '[data-testid="code-workspace-editor-pane"]'
     kind: display
+  - id: editor-host
+    selector: '[data-testid="code-workspace-editor"]'
+    kind: display
+    optional: true       # CodeMirror host container inside pane
   - id: editor-tab-strip
     selector: '[data-testid="code-workspace-editor-tab-strip"]'
     kind: display
@@ -5622,6 +5627,22 @@ controls:
     selector: '[data-testid="keymap-settings-close"]'
     kind: interactive
     optional: true       # inside the keymap settings dialog
+  - id: clipboard-history-popup
+    selector: '[data-testid="clipboard-history-popup"]'
+    kind: display
+    optional: true       # §8.19.5 Clipboard history ring popup
+  - id: clipboard-history-search
+    selector: '[data-testid="clipboard-history-search"]'
+    kind: interactive
+    optional: true
+  - id: clipboard-history-entry-0
+    selector: '[data-testid="clipboard-history-entry-0"]'
+    kind: interactive
+    optional: true
+  - id: clipboard-history-close
+    selector: '[data-testid="clipboard-history-close"]'
+    kind: interactive
+    optional: true
 -->
 
 - 编辑器工作台的壳层控件：文件树（add-folder/open-file 行）、编辑器 pane/tab-strip/.cm-content、底部 dock 的 terminal tab、split down/close、Ctrl+Tab Switcher 弹层与 Keymap 设置面。
