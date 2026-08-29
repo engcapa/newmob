@@ -362,4 +362,70 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => 
       }
     });
   });
+
+  describe("ED-REF-001: Multi-file rename, dirty conflicts, and library guards", () => {
+    it("builds multi-file rename plan and blocks on dirty buffer conflict", () => {
+      const multiFileEdit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            textDocument: { uri: "file:///workspace/core/User.java", version: 1 },
+            edits: [{ range: { start: { line: 5, character: 13 }, end: { line: 5, character: 17 } }, newText: "Account" }],
+          },
+          {
+            textDocument: { uri: "file:///workspace/app/UserService.java", version: 2 },
+            edits: [{ range: { start: { line: 12, character: 8 }, end: { line: 12, character: 12 } }, newText: "Account" }],
+          },
+        ],
+      };
+
+      const plan = buildRefactorPlan({
+        actionId: "rename-user-account",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit: multiFileEdit,
+        roots: [{ path: "/workspace" }],
+        openFiles: {
+          "/workspace/core/User.java": { revision: 1, documentRevision: 1, diskHash: "hash-user" },
+          "/workspace/app/UserService.java": { revision: 2, documentRevision: 3, diskHash: "hash-service" }, // Revision mismatch (dirty)
+        },
+        conflicts: [
+          {
+            severity: "error",
+            message: "File '/workspace/app/UserService.java' has unsaved buffer edits",
+            location: null,
+            source: "derived",
+          },
+        ],
+      });
+
+      const gate = refactorApplyGate(plan);
+      expect(gate.allowed).toBe(false);
+      expect(gate.reason).toContain("unsaved buffer edits");
+      expect(gate.blockingConflicts).toHaveLength(1);
+    });
+
+    it("hard blocks when refactoring touches read-only jar library", () => {
+      const libraryEdit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            textDocument: { uri: "jar:file:///root/.m2/repository/com/google/guava/guava.jar!/ImmutableList.class", version: null },
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } }, newText: "List" }],
+          },
+        ],
+      };
+
+      const plan = buildRefactorPlan({
+        actionId: "rename-library",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit: libraryEdit,
+        roots: [{ path: "/workspace" }],
+      });
+
+      const gate = refactorApplyGate(plan);
+      expect(gate.allowed).toBe(false);
+      expect(gate.reason).toContain("read-only library resource");
+    });
+  });
 });
+

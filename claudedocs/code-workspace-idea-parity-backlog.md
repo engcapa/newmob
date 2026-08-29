@@ -522,7 +522,7 @@
 - 验证：unique/ambiguous/excluded/prioritized、paste、stale project/provider、once undo。
 
 ### ED-REF-001 Rename/refactor completeness 与 conflict 闭环
-<!-- ide-task {"id":"ED-REF-001","status":"ready","priority":"P1","size":"M","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-ACTION-004","ED-PROJECT-005","ED-USAGE-002"],"legacy":["W5","BB5"]} -->
+<!-- ide-task {"id":"ED-REF-001","status":"done","priority":"P1","size":"M","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T14:21:37Z","baseline":"da77a15226c5cf92a08b1aa8df7168f246a6a3aa","depends_on":["ED-ACTION-004","ED-PROJECT-005","ED-USAGE-002"],"legacy":["W5","BB5"],"updated_at":"2026-08-29T14:22:59Z","evidence":"vitest: refactorPlan.test.ts; qa-ui-auto lint; vite build"} -->
 
 - 结果：Rename 与 provider refactor 记录 coverage/completeness/library ownership、preview exclude/conflict、postcondition/history/undo；Safe Delete 无 dedicated provider coverage 时继续 fail closed。
 - 验证：真实 jdtls multi-file rename、dirty conflict、library/read-only、restart/stale、undo hash。

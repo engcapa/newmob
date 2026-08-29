@@ -282,14 +282,14 @@ export function buildRefactorPlan(input: BuildRefactorPlanInput): RefactorPlanV4
     let path: string | null = null;
 
     if (op.kind === "text") {
-      uri = op.document.uri;
-      path = op.document.path;
+      uri = op.document.uri || (op.document as any).textDocument?.uri || "";
+      path = op.document.path || (op.document as any).textDocument?.path || null;
     } else if (op.kind === "create" || op.kind === "delete") {
-      uri = op.uri;
-      path = op.path;
+      uri = op.uri || "";
+      path = op.path || null;
     } else if (op.kind === "rename") {
-      uri = op.newUri;
-      path = op.newPath;
+      uri = op.newUri || "";
+      path = op.newPath || null;
     }
 
     const key = uri || path || `unknown-${index}`;
@@ -339,7 +339,7 @@ export function buildRefactorPlan(input: BuildRefactorPlanInput): RefactorPlanV4
     const matched = matchOpenFile(info.uri, info.path, openFiles);
     const rev = matched?.documentRevision ?? matched?.revision ?? null;
     const diskHash = matched?.diskHash ?? matched?.expectedDiskHash ?? null;
-    const canonical = info.path ?? (info.uri.startsWith("file:") ? decodeURIComponent(info.uri.replace(/^file:\/\//i, "")) : null);
+    const canonical = info.path ?? (info.uri?.startsWith("file:") ? decodeURIComponent(info.uri.replace(/^file:\/\//i, "")) : null);
 
     documents.push({
       uri: info.uri,
