@@ -308,6 +308,7 @@ import {
 import { filterGenerateCodeActions } from "./workspace/workspaceSemanticEditing";
 import { copyReferenceCandidates } from "./workspace/workspaceCopyReference";
 import { ClipboardHistoryPopup } from "./workspace/ClipboardHistoryPopup";
+import { validateAndApplyOrganizeImportsPlan } from "./workspace/saveOrganizeImportsAdapter";
 import {
   acquireClipboardStore,
   createDefaultClipboardPermissionAdapter,
@@ -4983,11 +4984,18 @@ export function CodeWorkspaceTab({
                 only: ["source.organizeImports"],
               });
 
-              if (planResult.plan?.edit?.documentEdits && planResult.plan.edit.documentEdits.length > 0) {
-                const edits = planResult.plan.edit.documentEdits[0]!.edits;
-                if (edits && edits.length > 0) {
-                  return applyLspTextEditsToString(textToProcess, edits);
-                }
+              const validation = validateAndApplyOrganizeImportsPlan(
+                textToProcess,
+                context.document.uri,
+                planResult.plan,
+              );
+
+              if (validation.valid && validation.transformedText !== null) {
+                return validation.transformedText;
+              }
+              if (!validation.valid && validation.status === "failed") {
+                formatError = validation.reason ?? "Organize imports validation failed";
+                throw new Error(formatError);
               }
             } catch (err) {
               formatError = errorMessage(err);

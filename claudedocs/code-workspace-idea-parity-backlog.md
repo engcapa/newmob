@@ -237,7 +237,7 @@
 - 验证：每 stage applied/unavailable/failed/stale，encoding failure 只产生一个 failed stage，live buffer effect 0。
 
 ### ED-SAVE-002 通过 Code Action plan-only 执行 organize imports
-<!-- ide-task {"id":"ED-SAVE-002","status":"ready","priority":"P0","size":"S","owner":null,"claimed_at":null,"baseline":null,"depends_on":["ED-SAVE-001","ED-ACTION-003"],"legacy":["BB6"]} -->
+<!-- ide-task {"id":"ED-SAVE-002","status":"done","priority":"P0","size":"S","owner":"idea-parity-loop-agy","claimed_at":"2026-08-29T11:40:41Z","baseline":"c670ad58c38c573cd46fd733bcbc4dbb879b97db","depends_on":["ED-SAVE-001","ED-ACTION-003"],"legacy":["BB6"],"updated_at":"2026-08-29T11:42:51Z","evidence":"vitest: saveOrganizeImportsAdapter.test.ts, saveNormalizationPipeline.test.ts; pnpm build; qa-ui-auto lint"} -->
 
 - 结果：organize imports 只调用 canonical service `plan-only`；校验 URI/version/range/overlap；command-only 或不可统一提交的 multi-file edit 返回 typed unavailable。
 - 主文件：save pipeline adapter、tests。
