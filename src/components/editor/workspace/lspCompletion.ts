@@ -1608,6 +1608,17 @@ function applyLspCompletion(
   const revisionAtAccept = getDocumentRevision?.();
   const docAtAccept = view.state.doc;
 
+  const runResolve = (resolver: CompletionItemResolver | undefined): Promise<CompletionResolveOutcome> => (
+    executeCompletionResolve({
+      item,
+      resolve: resolver ? () => resolver() : undefined,
+      token,
+      isStillCurrent,
+      timeoutMs: RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS,
+      getDocumentRevision,
+    })
+  );
+
   // §8.19.4 resolve gate: a timeout/failure keeps the chosen item visible and
   // waits for an explicit Retry or Insert-without-import choice. Nothing is
   // inserted until the user picks; stale/overlap blocks stay hard no-ops.
@@ -1647,29 +1658,22 @@ function applyLspCompletion(
       settled = true;
       return "unavailable";
     }
-    let resolved: LspCompletionItem | null;
-    try {
-      // Fresh round-trip: bypasses the info-panel's memoized promise so a
-      // failed first attempt gets a real second chance.
-      resolved = await resolve();
-    } catch {
-      return "unavailable";
-    }
+    const outcome = await runResolve(resolve);
     if (settled) return "unavailable";
-    if (!isStillCurrent(token) || view.state.doc !== docAtAccept) {
-      reportDiagnostic?.("identity-mismatch", "resolve-retry");
+    if (outcome.kind === "stale" || outcome.kind === "cancelled") {
+      reportDiagnostic?.("identity-mismatch", `resolve-retry-${outcome.kind}`);
       settled = true;
       return "unavailable";
     }
-    if (!resolved) return "unavailable";
+    if (outcome.kind !== "resolved" && outcome.kind !== "not-required") return "unavailable";
+    if (!guardCurrent()) {
+      settled = true;
+      return "unavailable";
+    }
     settled = true;
     const committed = commitLspCompletion(
       view,
-      {
-        ...item,
-        ...resolved,
-        additionalTextEdits: resolved.additionalTextEdits ?? item.additionalTextEdits,
-      },
+      outcome.item,
       from,
       to,
       token,
@@ -1696,7 +1700,9 @@ function applyLspCompletion(
       reason,
       message: reason === "timeout"
         ? "Auto-import unavailable — provider resolve timed out"
-        : "Auto-import unavailable — provider resolve failed",
+        : reason === "unavailable"
+          ? "Auto-import unavailable — provider resolve is unavailable"
+          : "Auto-import unavailable — provider resolve failed",
       retry: retryResolve,
       insertWithoutImport,
       dismiss: () => {
@@ -1705,46 +1711,35 @@ function applyLspCompletion(
     });
   };
 
-  let timeoutId: number | null = null;
-  const timeout = new Promise<{ kind: "timeout" }>((resolveTimeout) => {
-    timeoutId = window.setTimeout(
-      () => resolveTimeout({ kind: "timeout" }),
-      RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS,
-    );
-  });
-  void Promise.race([
-    resolve().then((resolved) => ({ kind: "resolved" as const, resolved })),
-    timeout,
-  ])
+  void runResolve(resolve)
     .then((outcome) => {
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-      if (!isStillCurrent(token)) {
-        reportDiagnostic?.("identity-mismatch", "resolve");
-        return;
-      }
-      if (
-        view.state.doc !== docAtAccept
-        || (getDocumentRevision && revisionAtAccept !== undefined && getDocumentRevision() !== revisionAtAccept)
-      ) {
-        reportDiagnostic?.("additional-edit-unavailable", "revision-changed");
+      if (settled) return;
+      if (outcome.kind === "stale" || outcome.kind === "cancelled") {
+        reportDiagnostic?.("identity-mismatch", `resolve-${outcome.kind}`);
+        settled = true;
         return;
       }
       if (outcome.kind === "timeout") {
         presentGate("timeout", "resolve-timeout");
         return;
       }
-      const resolved = outcome.resolved;
-      if (!resolved) {
-        presentGate("failed", "resolve-empty");
+      if (outcome.kind === "failed") {
+        presentGate("failed", "resolve-failed");
         return;
       }
+      if (outcome.kind === "unavailable") {
+        presentGate("unavailable", `resolve-${outcome.reason}`);
+        return;
+      }
+      if (outcome.kind !== "resolved" && outcome.kind !== "not-required") return;
+      if (!guardCurrent()) {
+        settled = true;
+        return;
+      }
+      settled = true;
       commitLspCompletion(
         view,
-        {
-          ...item,
-          ...resolved,
-          additionalTextEdits: resolved.additionalTextEdits ?? item.additionalTextEdits,
-        },
+        outcome.item,
         from,
         to,
         token,
@@ -1754,9 +1749,9 @@ function applyLspCompletion(
       );
     })
     .catch(() => {
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-      if (!isStillCurrent(token) || view.state.doc !== docAtAccept) {
-        reportDiagnostic?.("identity-mismatch", "resolve");
+      if (settled) return;
+      if (!guardCurrent()) {
+        settled = true;
         return;
       }
       presentGate("failed", "resolve-failed");

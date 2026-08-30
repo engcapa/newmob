@@ -293,6 +293,23 @@ describe("§8.19.4 resolve gate acceptance", () => {
     view.destroy();
   });
 
+  it("distinguishes a null resolve result as unavailable", async () => {
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => null,
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(gates).toHaveLength(1);
+    expect(gates[0].reason).toBe("unavailable");
+    expect(view.state.doc.toString()).toBe("\nasL");
+    view.destroy();
+  });
+
   it("retry performs a fresh resolve and lands import + primary as one dispatch/one undo", async () => {
     const view = mountView("\nasL");
     const originalDoc = view.state.doc.toString();
