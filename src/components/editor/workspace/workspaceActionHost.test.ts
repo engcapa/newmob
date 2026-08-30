@@ -285,6 +285,41 @@ describe("WorkspaceActionHost (N0.1)", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("restores the surviving split view action after registrations unmount out of order", async () => {
+    const host = new WorkspaceActionHost({ workspaceId: "ws-split-actions" });
+    const runPrimary = vi.fn(() => ({ kind: "applied" as const }));
+    const runSecondary = vi.fn(() => ({ kind: "applied" as const }));
+    const primary = {
+      id: "editor.undo",
+      title: "Undo",
+      category: "Edit" as const,
+      provenance: "local" as const,
+      run: runPrimary,
+    };
+    const secondary = { ...primary, run: runSecondary };
+
+    const disposePrimary = host.registerActions([primary]);
+    const disposeSecondary = host.registerActions([secondary]);
+
+    await expect(host.execute("editor.undo")).resolves.toMatchObject({ kind: "applied" });
+    expect(runSecondary).toHaveBeenCalledOnce();
+    expect(runPrimary).not.toHaveBeenCalled();
+
+    disposeSecondary();
+    await expect(host.execute("editor.undo")).resolves.toMatchObject({ kind: "applied" });
+    expect(runPrimary).toHaveBeenCalledOnce();
+
+    disposePrimary();
+    await expect(host.execute("editor.undo")).resolves.toMatchObject({ kind: "failed" });
+
+    const disposeAgain = host.registerActions([secondary]);
+    const disposeOlder = host.registerActions([primary]);
+    disposeOlder();
+    await expect(host.execute("editor.undo")).resolves.toMatchObject({ kind: "applied" });
+    expect(runSecondary).toHaveBeenCalledTimes(2);
+    disposeAgain();
+  });
+
   it("reports deterministic binding conflicts with the first registered action as winner", () => {
     const host = new WorkspaceActionHost({
       workspaceId: "ws-binding-conflicts",

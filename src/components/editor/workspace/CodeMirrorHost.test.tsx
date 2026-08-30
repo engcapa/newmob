@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
 import { EditorSelection } from "@codemirror/state";
@@ -7,6 +7,7 @@ import { EditorView } from "@codemirror/view";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import { virtualSpaceOverflowField } from "./workspaceVirtualSpace";
 import { WorkspaceActionHost } from "./workspaceActionHost";
+import { WorkspaceDocumentTransactionOwner } from "./workspaceDocumentTransactionOwner";
 
 function renderEditor(
   doc: string,
@@ -735,6 +736,152 @@ describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", 
     view!.dispatch({ selection: { anchor: 5 } });
     await waitFor(() => {
       expect(onFoldProvenanceChange).toHaveBeenCalledWith("explicit-comment");
+    });
+  });
+});
+
+describe("§8.26 ED-MULTIVIEW-002 shared document host wiring", () => {
+  afterEach(() => cleanup());
+
+  function sharedProps(
+    owner: WorkspaceDocumentTransactionOwner,
+    viewId: string,
+    doc: string,
+    onChange: ComponentProps<typeof CodeMirrorHost>["onChange"],
+    workspaceActionHost?: WorkspaceActionHost,
+  ): ComponentProps<typeof CodeMirrorHost> {
+    return {
+      path: "src/shared.ts",
+      fileKey: "shared.ts",
+      viewId,
+      transactionOwner: owner,
+      documentRevision: 0,
+      doc,
+      visible: true,
+      diagnostics: [],
+      reveal: null,
+      onChange,
+      onSave: vi.fn(),
+      onHover: vi.fn(async () => null),
+      onDefinition: vi.fn(async () => false),
+      onReferences: vi.fn(async () => undefined),
+      getCompletionIdentity: () => null,
+      onCompletionDiagnostic: vi.fn(),
+      ...(workspaceActionHost ? { workspaceActionHost } : {}),
+    };
+  }
+
+  it("broadcasts one incremental edit and preserves the sibling selection", () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    const initial = "hello world";
+    const primaryOnChange = vi.fn();
+    const secondaryOnChange = vi.fn();
+    const rendered = render(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, primaryOnChange)} />
+        <CodeMirrorHost {...sharedProps(owner, "secondary", initial, secondaryOnChange)} />
+      </div>,
+    );
+    const views = [...rendered.container.querySelectorAll<HTMLElement>(".cm-editor")]
+      .map((element) => EditorView.findFromDOM(element)!);
+    const primary = views[0]!;
+    const secondary = views[1]!;
+    const transactions: Array<{ sourceViewId: string; changes: readonly { from: number; to: number; insert: string }[] }> = [];
+    const unsubscribe = owner.subscribe("shared.ts", (transaction) => {
+      transactions.push(transaction);
+    });
+
+    secondary.dispatch({ selection: { anchor: initial.length } });
+    primary.dispatch({ changes: { from: 0, to: 0, insert: "say " } });
+
+    expect(primary.state.doc.toString()).toBe("say hello world");
+    expect(secondary.state.doc.toString()).toBe("say hello world");
+    expect(secondary.state.selection.main.head).toBe(initial.length + 4);
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0]?.sourceViewId).toBe("primary");
+    expect(transactions[0]?.changes).toEqual([{ from: 0, to: 0, insert: "say " }]);
+    expect(primaryOnChange).toHaveBeenCalledTimes(1);
+    expect(secondaryOnChange).not.toHaveBeenCalled();
+    expect(owner.getHistoryState("shared.ts")).toMatchObject({ canUndo: true, undoDepth: 1 });
+    unsubscribe();
+  });
+
+  it("routes undo and redo through the shared owner for both mounted views", async () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    const actionHost = new WorkspaceActionHost({ workspaceId: "ws-shared-history" });
+    const initial = "hello";
+    const rendered = render(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, vi.fn(), actionHost)} />
+        <CodeMirrorHost {...sharedProps(owner, "secondary", initial, vi.fn(), actionHost)} />
+      </div>,
+    );
+    const views = [...rendered.container.querySelectorAll<HTMLElement>(".cm-editor")]
+      .map((element) => EditorView.findFromDOM(element)!);
+    const primary = views[0]!;
+    const secondary = views[1]!;
+    primary.dispatch({ changes: { from: initial.length, to: initial.length, insert: "!" } });
+    expect(primary.state.doc.toString()).toBe("hello!");
+    expect(secondary.state.doc.toString()).toBe("hello!");
+
+    await act(async () => {
+      const result = await actionHost.execute("workspace.undo", { focus: "editor", hasActiveFile: true });
+      expect(result.kind).toBe("applied");
+    });
+    expect(primary.state.doc.toString()).toBe(initial);
+    expect(secondary.state.doc.toString()).toBe(initial);
+    expect(owner.getHistoryState("shared.ts")).toMatchObject({ canUndo: false, canRedo: true });
+
+    await act(async () => {
+      const result = await actionHost.execute("workspace.redo", { focus: "editor", hasActiveFile: true });
+      expect(result.kind).toBe("applied");
+    });
+    expect(primary.state.doc.toString()).toBe("hello!");
+    expect(secondary.state.doc.toString()).toBe("hello!");
+    expect(owner.getHistoryState("shared.ts")).toMatchObject({ canUndo: true, canRedo: false });
+  });
+
+  it("retains canonical text and history after a non-final unmount, then cleans up finally", () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    const initial = "hello";
+    const rendered = render(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, vi.fn())} />
+        <CodeMirrorHost {...sharedProps(owner, "secondary", initial, vi.fn())} />
+      </div>,
+    );
+    const primary = EditorView.findFromDOM(rendered.container.querySelectorAll<HTMLElement>(".cm-editor")[0]!);
+    primary!.dispatch({ changes: { from: 0, to: 0, insert: "say " } });
+    expect(owner.getDocument("shared.ts")).toBe("say hello");
+
+    // Unmount only the secondary host; the first lease keeps the document alive.
+    rendered.rerender(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, vi.fn())} />
+      </div>,
+    );
+    expect(owner.getDocument("shared.ts")).toBe("say hello");
+    expect(owner.getHistoryState("shared.ts").canUndo).toBe(true);
+
+    rendered.rerender(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, vi.fn())} />
+        <CodeMirrorHost {...sharedProps(owner, "secondary", initial, vi.fn())} />
+      </div>,
+    );
+    const reopenedViews = [...rendered.container.querySelectorAll<HTMLElement>(".cm-editor")]
+      .map((element) => EditorView.findFromDOM(element)!);
+    expect(reopenedViews).toHaveLength(2);
+    expect(reopenedViews[1]!.state.doc.toString()).toBe("say hello");
+    expect(owner.getHistoryState("shared.ts").canUndo).toBe(true);
+
+    rendered.unmount();
+    expect(owner.getDocument("shared.ts")).toBeNull();
+    expect(owner.getHistoryState("shared.ts")).toEqual({
+      canUndo: false,
+      canRedo: false,
+      undoDepth: 0,
+      redoDepth: 0,
     });
   });
 });

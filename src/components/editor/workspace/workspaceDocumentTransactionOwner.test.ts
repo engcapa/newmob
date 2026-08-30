@@ -11,6 +11,7 @@ import {
 describe("§8.26 / ED-MULTIVIEW-002: WorkspaceDocumentTransactionOwner", () => {
   it("manages subscriptions and increments document revision monotonically", () => {
     const owner = new WorkspaceDocumentTransactionOwner();
+    owner.initializeDocument("file-1", "", 0);
     expect(owner.getRevision("file-1")).toBe(0);
 
     const received: DocumentTransaction[] = [];
@@ -25,7 +26,8 @@ describe("§8.26 / ED-MULTIVIEW-002: WorkspaceDocumentTransactionOwner", () => {
       "user-input",
     );
 
-    expect(tr1.revision).toBe(1);
+    expect(tr1).not.toBeNull();
+    expect(tr1!.revision).toBe(1);
     expect(owner.getRevision("file-1")).toBe(1);
     expect(received).toHaveLength(1);
     expect(received[0].sourceViewId).toBe("primary");
@@ -47,6 +49,7 @@ describe("§8.26 / ED-MULTIVIEW-002: WorkspaceDocumentTransactionOwner", () => {
   it("coordinates incremental delta between two simulated CodeMirror views with echo suppression", () => {
     const owner = new WorkspaceDocumentTransactionOwner();
     const initialText = "function hello() {\n  return 42;\n}\n";
+    owner.initializeDocument("main.ts", initialText);
 
     // Setup View 1 (Primary Split)
     const state1 = EditorState.create({ doc: initialText });
@@ -111,6 +114,7 @@ describe("§8.26 / ED-MULTIVIEW-002: WorkspaceDocumentTransactionOwner", () => {
   it("handles multi-split multi-edit completion without corrupting sibling caret mapping", () => {
     const owner = new WorkspaceDocumentTransactionOwner();
     const doc = "import java.util.List;\n\nclass App {\n  List items;\n}\n";
+    owner.initializeDocument("App.java", doc);
 
     const view1 = new EditorView({ state: EditorState.create({ doc }) });
     const view2 = new EditorView({ state: EditorState.create({ doc }) });
@@ -147,5 +151,73 @@ describe("§8.26 / ED-MULTIVIEW-002: WorkspaceDocumentTransactionOwner", () => {
 
     view1.destroy();
     view2.destroy();
+  });
+
+  it("keeps one undo ledger across views and releases it only after the final lease", () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    owner.acquireView("main.ts", "primary", "hello");
+    expect(owner.acquireView("main.ts", "secondary", "stale")).toBe("hello");
+
+    const transactions: DocumentTransaction[] = [];
+    const unsubscribe = owner.subscribe("main.ts", (transaction) => {
+      transactions.push(transaction);
+    });
+
+    const edit = owner.dispatchTransaction(
+      "main.ts",
+      "primary",
+      [{ from: 5, to: 5, insert: " world" }],
+      "user-input",
+    );
+    expect(edit?.changes).toEqual([{ from: 5, to: 5, insert: " world" }]);
+    expect(owner.getDocument("main.ts")).toBe("hello world");
+    expect(owner.getHistoryState("main.ts")).toMatchObject({ canUndo: true, undoDepth: 1 });
+
+    const undo = owner.undo("main.ts", "secondary");
+    expect(undo?.sourceViewId).toBe("secondary");
+    expect(undo?.origin).toBe("undo");
+    expect(owner.getDocument("main.ts")).toBe("hello");
+    expect(owner.getHistoryState("main.ts")).toMatchObject({ canRedo: true, redoDepth: 1 });
+
+    const redo = owner.redo("main.ts", "primary");
+    expect(redo?.sourceViewId).toBe("primary");
+    expect(owner.getDocument("main.ts")).toBe("hello world");
+    expect(owner.getHistoryState("main.ts")).toMatchObject({ canUndo: true, canRedo: false });
+    expect(transactions.map((transaction) => transaction.origin)).toEqual([
+      "user-input",
+      "undo",
+      "redo",
+    ]);
+
+    expect(owner.releaseView("main.ts", "primary")).toBe(false);
+    expect(owner.getDocument("main.ts")).toBe("hello world");
+    expect(owner.getHistoryState("main.ts").canUndo).toBe(true);
+    expect(owner.releaseView("main.ts", "secondary")).toBe(true);
+    expect(owner.getDocument("main.ts")).toBeNull();
+    expect(owner.getHistoryState("main.ts")).toEqual({
+      canUndo: false,
+      canRedo: false,
+      undoDepth: 0,
+      redoDepth: 0,
+    });
+    unsubscribe();
+  });
+
+  it("rejects a stale or malformed delta without changing document or history", () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    owner.initializeDocument("main.ts", "hello");
+
+    expect(owner.dispatchTransaction(
+      "main.ts",
+      "primary",
+      [{ from: 99, to: 99, insert: "!" }],
+    )).toBeNull();
+    expect(owner.dispatchTransaction(
+      "main.ts",
+      "primary",
+      [{ from: 1, to: 4, insert: "i", deleted: "wrong" }],
+    )).toBeNull();
+    expect(owner.getDocument("main.ts")).toBe("hello");
+    expect(owner.getHistoryState("main.ts")).toMatchObject({ canUndo: false, canRedo: false });
   });
 });

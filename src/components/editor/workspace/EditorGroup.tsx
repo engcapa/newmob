@@ -186,6 +186,8 @@ interface EditorGroupProps {
   workspaceActionHost?: WorkspaceActionHost | null;
   /** §8.26 / ED-MULTIVIEW-002: shared document transaction owner across splits. */
   transactionOwner?: WorkspaceDocumentTransactionOwner | null;
+  /** Current buffer revision used to seed the shared document owner. */
+  documentRevision?: number;
   onHover: (
     file: OpenFileViewModel,
     position: LspPosition,
@@ -336,6 +338,7 @@ export function EditorGroup({
   onParameterInvalidate,
   onParameterEscape,
   transactionOwner = null,
+  documentRevision = 0,
   parameterPopup = null,
   onSelectionChange,
   onViewportChange,
@@ -803,6 +806,7 @@ export function EditorGroup({
                         fileKey={activeFile.key}
                         viewId={groupId}
                         transactionOwner={transactionOwner}
+                        documentRevision={activeFile.documentRevision ?? documentRevision}
                         clipboardWorkspaceId={workspaceInstanceId}
                         onClipboardUnavailable={onClipboardUnavailable}
                         workspaceActionHost={workspaceActionHost}
@@ -871,6 +875,7 @@ export function EditorGroup({
                       fileKey={activeFile.key}
                       viewId={groupId}
                       transactionOwner={transactionOwner}
+                      documentRevision={activeFile.documentRevision ?? documentRevision}
                       clipboardWorkspaceId={workspaceInstanceId}
                       onClipboardUnavailable={onClipboardUnavailable}
                       workspaceActionHost={workspaceActionHost}

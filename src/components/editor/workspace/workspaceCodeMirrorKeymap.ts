@@ -82,6 +82,17 @@ function runViaHandlers(
   return commandResult(handlers.runEditorCommand(command));
 }
 
+function runSharedHistoryOrLocal(
+  handlers: EditorHostActionHandlers,
+  shared: (() => boolean | undefined) | undefined,
+  local: (view: EditorView) => boolean,
+): ActionResult {
+  const handled = shared?.();
+  return handled === undefined
+    ? runViaHandlers(handlers, local)
+    : commandResult(handled);
+}
+
 /** Options for the editor-scoped adapter. */
 export interface CodeMirrorActionKeymapOptions {
   /** Only these action ids are dispatched inside the editor surface. */
@@ -157,6 +168,9 @@ export interface EditorHostActionHandlers {
    * migration channel for the previously inline keymap business bindings).
    */
   runEditorCommand(command: (view: EditorView) => boolean): boolean;
+  /** Shared document history owner; undefined keeps standalone CM history. */
+  undo?(): boolean | undefined;
+  redo?(): boolean | undefined;
 }
 
 function editorAction(input: {
@@ -396,7 +410,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       secondary: ["Meta+z"],
       keywords: ["history", "undo"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, undo),
+      run: async () => runSharedHistoryOrLocal(handlers, handlers.undo, undo),
     }),
     editorAction({
       id: "workspace.redo",
@@ -406,7 +420,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       secondary: ["Meta+Shift+z"],
       keywords: ["history", "redo"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, redo),
+      run: async () => runSharedHistoryOrLocal(handlers, handlers.redo, redo),
     }),
     editorAction({
       id: "editor.find",

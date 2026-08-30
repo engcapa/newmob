@@ -324,6 +324,9 @@ export class WorkspaceActionHost {
   private readonly onExecuted?: (actionId: string, result: ActionResult) => void;
 
   private actions = new Map<string, WorkspaceActionDefinition>();
+  /** Layered registrations let split views unmount in either order. */
+  private actionLayers = new Map<string, Array<{ token: symbol; action: WorkspaceActionDefinition }>>();
+  private actionLayerBases = new Map<string, WorkspaceActionDefinition | undefined>();
   private commands = new Map<string, WorkspaceCommand>();
   private inFlightActions = new Set<string>();
   private generation = 0;
@@ -371,6 +374,8 @@ export class WorkspaceActionHost {
     this.inFlightActions.clear();
     this.registeredViewIds.clear();
     this.actions.clear();
+    this.actionLayers.clear();
+    this.actionLayerBases.clear();
     this.commands.clear();
   }
 
@@ -449,28 +454,55 @@ export class WorkspaceActionHost {
 
   registerAction(action: WorkspaceActionDefinition): () => void {
     if (this.disposed) return () => {};
-    this.actions.set(action.id, action);
+    const token = Symbol(`action:${action.id}`);
+    this.pushActionLayer(action, token);
     this.generation += 1;
-    return () => {
-      if (this.actions.get(action.id) !== action) return;
-      this.actions.delete(action.id);
-      this.generation += 1;
-    };
+    return () => this.removeActionLayer(action.id, token);
   }
 
   registerActions(actions: readonly WorkspaceActionDefinition[]): () => void {
     if (this.disposed) return () => {};
-    for (const action of actions) this.actions.set(action.id, action);
+    const token = Symbol("actions");
+    for (const action of actions) this.pushActionLayer(action, token);
     this.generation += 1;
     return () => {
       let changed = false;
       for (const action of actions) {
-        if (this.actions.get(action.id) !== action) continue;
-        this.actions.delete(action.id);
-        changed = true;
+        changed = this.removeActionLayer(action.id, token, false) || changed;
       }
       if (changed) this.generation += 1;
     };
+  }
+
+  private pushActionLayer(action: WorkspaceActionDefinition, token: symbol): void {
+    let layers = this.actionLayers.get(action.id);
+    if (!layers) {
+      layers = [];
+      this.actionLayers.set(action.id, layers);
+      this.actionLayerBases.set(action.id, this.actions.get(action.id));
+    }
+    layers.push({ token, action });
+    this.actions.set(action.id, action);
+  }
+
+  private removeActionLayer(actionId: string, token: symbol, bumpGeneration = true): boolean {
+    const layers = this.actionLayers.get(actionId);
+    if (!layers) return false;
+    const index = layers.findIndex((layer) => layer.token === token);
+    if (index < 0) return false;
+    const wasCurrent = this.actions.get(actionId) === layers[layers.length - 1]?.action;
+    layers.splice(index, 1);
+    if (layers.length > 0) {
+      if (wasCurrent) this.actions.set(actionId, layers[layers.length - 1]!.action);
+    } else {
+      this.actionLayers.delete(actionId);
+      const base = this.actionLayerBases.get(actionId);
+      this.actionLayerBases.delete(actionId);
+      if (base) this.actions.set(actionId, base);
+      else this.actions.delete(actionId);
+    }
+    if (bumpGeneration) this.generation += 1;
+    return true;
   }
 
   registerCommands(commands: readonly WorkspaceCommand[]): () => void {

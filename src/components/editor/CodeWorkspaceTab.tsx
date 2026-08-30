@@ -11430,7 +11430,9 @@ export function CodeWorkspaceTab({
       const dispatchResult = actionsController.dispatchKeydownV2({
         event,
         workspaceId: workspaceInstanceId,
-        targetViewId: activeEditorCommandOwner()?.fileKey ?? null,
+        // CodeMirrorHost registers each split by its stable leaf/view id;
+        // fileKey is shared by split views and cannot identify a live view.
+        targetViewId: activeEditorCommandOwner() ? activeEditorGroupIdRef.current : null,
       });
       if (
         dispatchResult.kind === "rejected"

@@ -7,10 +7,20 @@ import {
   useState,
   type MutableRefObject,
 } from "react";
-import { ChangeSet, Compartment, EditorState, Prec, type Extension, type Text } from "@codemirror/state";
+import {
+  ChangeSet,
+  Compartment,
+  EditorState,
+  Prec,
+  Transaction,
+  type Extension,
+  type Text,
+  type TransactionSpec,
+} from "@codemirror/state";
 import {
   remoteTransactionAnnotation,
   type DocumentChangeDelta,
+  type DocumentTransaction,
   type WorkspaceDocumentTransactionOwner,
 } from "./workspaceDocumentTransactionOwner";
 import {
@@ -182,6 +192,8 @@ interface CodeMirrorHostProps {
   viewId?: string;
   /** Shared document transaction owner (§8.26 / ED-MULTIVIEW-002). */
   transactionOwner?: WorkspaceDocumentTransactionOwner | null;
+  /** Store revision used when the first view creates the canonical document. */
+  documentRevision?: number;
   doc: string;
   visible: boolean;
   /**
@@ -320,6 +332,8 @@ export interface EditorCommandTarget {
 }
 
 const editorClipboardPayloadByView = new WeakMap<EditorView, EditorClipboardPayload>();
+
+let nextEditorHostViewId = 0;
 
 // Clipboard helpers close over host props through this per-view registry
 // (bound at mount) so the module-level helpers stay pure and testable.
@@ -1384,6 +1398,7 @@ function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirror
   if (prev.fileKey !== next.fileKey) return false;
   if (prev.viewId !== next.viewId) return false;
   if (prev.transactionOwner !== next.transactionOwner) return false;
+  if (prev.documentRevision !== next.documentRevision) return false;
   if (prev.doc !== next.doc) return false;
   if (prev.visible !== next.visible) return false;
   if (prev.readOnly !== next.readOnly) return false;
@@ -1418,11 +1433,80 @@ function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirror
   return true;
 }
 
+function documentReplacementChange(currentText: string, nextText: string): DocumentChangeDelta | null {
+  if (currentText === nextText) return null;
+
+  let prefix = 0;
+  const maxPrefix = Math.min(currentText.length, nextText.length);
+  while (prefix < maxPrefix && currentText[prefix] === nextText[prefix]) prefix += 1;
+
+  let suffix = 0;
+  const maxSuffix = Math.min(currentText.length - prefix, nextText.length - prefix);
+  while (
+    suffix < maxSuffix
+    && currentText[currentText.length - suffix - 1] === nextText[nextText.length - suffix - 1]
+  ) {
+    suffix += 1;
+  }
+
+  const deleted = currentText.slice(prefix, currentText.length - suffix);
+  return {
+    from: prefix,
+    to: currentText.length - suffix,
+    insert: nextText.slice(prefix, nextText.length - suffix),
+    ...(deleted ? { deleted } : {}),
+  };
+}
+
+function applySharedTransactionToView(view: EditorView, transaction: DocumentTransaction): boolean {
+  if (transaction.changes.length === 0) return false;
+  const changes = transaction.changes.map(({ from, to, insert }) => ({ from, to, insert }));
+  let changeSet: ChangeSet;
+  try {
+    changeSet = ChangeSet.of(changes, view.state.doc.length);
+  } catch {
+    return false;
+  }
+  view.dispatch({
+    changes,
+    selection: view.state.selection.map(changeSet),
+    scrollIntoView: false,
+    annotations: [
+      remoteTransactionAnnotation.of(true),
+      Transaction.addToHistory.of(false),
+    ],
+  });
+  return true;
+}
+
+function applyDocumentSnapshotToView(view: EditorView, nextText: string): boolean {
+  const change = documentReplacementChange(view.state.doc.toString(), nextText);
+  if (!change) return false;
+  const changes = [{ from: change.from, to: change.to, insert: change.insert }];
+  let changeSet: ChangeSet;
+  try {
+    changeSet = ChangeSet.of(changes, view.state.doc.length);
+  } catch {
+    return false;
+  }
+  view.dispatch({
+    changes,
+    selection: view.state.selection.map(changeSet),
+    scrollIntoView: false,
+    annotations: [
+      remoteTransactionAnnotation.of(true),
+      Transaction.addToHistory.of(false),
+    ],
+  } satisfies TransactionSpec);
+  return true;
+}
+
 export const CodeMirrorHost = memo(function CodeMirrorHost({
   path,
   fileKey = path,
   viewId,
   transactionOwner = null,
+  documentRevision = 0,
   doc,
   visible,
   diagnostics = EMPTY_DIAGNOSTICS,
@@ -1486,8 +1570,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const viewRef = useRef<EditorView | null>(null);
   const completionControllerRef = useRef(completionController);
   completionControllerRef.current = completionController;
-  const viewIdRef = useRef(viewId);
-  viewIdRef.current = viewId;
+  const fallbackViewIdRef = useRef<string | null>(null);
+  if (fallbackViewIdRef.current === null) {
+    nextEditorHostViewId += 1;
+    fallbackViewIdRef.current = `cm-view-${nextEditorHostViewId}`;
+  }
+  const editorViewId = viewId ?? fallbackViewIdRef.current;
+  const viewIdRef = useRef(editorViewId);
+  viewIdRef.current = editorViewId;
   const fileKeyRef = useRef(fileKey);
   fileKeyRef.current = fileKey;
   const transactionOwnerRef = useRef(transactionOwner);
@@ -1560,6 +1650,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const applyingExternalDocRef = useRef(false);
   /** Mirrors the last full text sent through onChange or applied from props. */
   const lastDocumentTextRef = useRef(doc);
+  /** Last controlled prop snapshot; distinguishes stale lag from a real reload. */
+  const lastPropDocumentTextRef = useRef(doc);
   const lastSelectionRef = useRef<{ from: number; to: number } | null>(null);
   const selectionEmitTimerRef = useRef<number | null>(null);
   const renderedDiagnosticsRef = useRef(diagnostics);
@@ -1760,7 +1852,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
 
   useEffect(() => {
     if (!hostRef.current) return;
-    const initialDoc = EditorState.create({ doc }).doc;
+    const owner = transactionOwnerRef.current;
+    const sharedFileKey = fileKeyRef.current;
+    const sharedViewId = viewIdRef.current;
+    const initialDocumentText = owner && sharedFileKey
+      ? owner.acquireView(sharedFileKey, sharedViewId, doc, documentRevision)
+      : doc;
+    lastDocumentTextRef.current = initialDocumentText;
+    const initialDoc = EditorState.create({ doc: initialDocumentText }).doc;
     // §8.19.4 resolve gate banner: anchored to the caret at presentation time.
     // The gate request's own closures re-verify identity/doc before acting, so
     // a stale banner is inert — this only decides where it shows.
@@ -1881,7 +1980,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
             ),
         }),
         crosshairCursor(),
-        history(),
+        ...(owner && sharedFileKey ? [] : [history()]),
         // §8.19.8 treeRevision source for semantic-edit evidence envelopes.
         treeRevisionField,
         // §8.19.5 / §8.21.3 Virtual Space: overflow tracking, typing materialization,
@@ -2126,7 +2225,13 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
               if (transactionOwnerRef.current && fileKeyRef.current && viewIdRef.current) {
                 const deltas: DocumentChangeDelta[] = [];
                 update.changes.iterChanges((fromA, toA, _fromB, _toB, insertedText) => {
-                  deltas.push({ from: fromA, to: toA, insert: insertedText.toString() });
+                  const deleted = update.startState.doc.sliceString(fromA, toA);
+                  deltas.push({
+                    from: fromA,
+                    to: toA,
+                    insert: insertedText.toString(),
+                    ...(deleted ? { deleted } : {}),
+                  });
                 });
                 if (deltas.length > 0) {
                   transactionOwnerRef.current.dispatchTransaction(
@@ -2189,6 +2294,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     const actionHost = workspaceActionHostRef.current;
     let unregisterEditorActions: (() => void) | null = null;
     let bridgeRegistration: { dispose(): void } | null = null;
+    let legacyBridgeRegistration: { dispose(): void } | null = null;
     if (actionHost && !actionHost.isDisposed()) {
       // Handlers close over this mount's view instance; the registration is
       // removed in cleanup so a remount re-binds against the fresh view.
@@ -2220,13 +2326,48 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           || escapeEditorSelections(view)
           || (onParameterEscapeRef.current?.() ?? false),
         runEditorCommand: (command) => command(view),
+        undo: () => {
+          const currentOwner = transactionOwnerRef.current;
+          if (!currentOwner) return undefined;
+          if (view.state.readOnly || view.composing) return false;
+          if (currentOwner.getDocument(fileKeyRef.current) !== view.state.doc.toString()) return false;
+          const transaction = currentOwner.undo(fileKeyRef.current, viewIdRef.current);
+          if (!transaction || !applySharedTransactionToView(view, transaction)) return false;
+          onChangeRef.current(
+            view.state.doc.toString(),
+            lspPositionFromOffset(view.state.doc, view.state.selection.main.head),
+            view.state.selection.main.head,
+          );
+          return true;
+        },
+        redo: () => {
+          const currentOwner = transactionOwnerRef.current;
+          if (!currentOwner) return undefined;
+          if (view.state.readOnly || view.composing) return false;
+          if (currentOwner.getDocument(fileKeyRef.current) !== view.state.doc.toString()) return false;
+          const transaction = currentOwner.redo(fileKeyRef.current, viewIdRef.current);
+          if (!transaction || !applySharedTransactionToView(view, transaction)) return false;
+          onChangeRef.current(
+            view.state.doc.toString(),
+            lspPositionFromOffset(view.state.doc, view.state.selection.main.head),
+            view.state.selection.main.head,
+          );
+          return true;
+        },
       }));
       // §8.19.2 EditorActionBridge: register this mounted view so keyboard
       // dispatch knows the live view set; unmount releases it.
-      bridgeRegistration = new EditorActionBridge(actionHost).registerView(fileKey);
+      bridgeRegistration = new EditorActionBridge(actionHost).registerView(sharedViewId);
+      // Standalone consumers historically passed fileKey as their dispatch
+      // target without a viewId. Keep that alias outside the shared-owner
+      // identity path while production split views use the unique id above.
+      if (!viewId && fileKey !== sharedViewId) {
+        legacyBridgeRegistration = new EditorActionBridge(actionHost).registerView(fileKey);
+      }
     }
 
     return () => {
+      legacyBridgeRegistration?.dispose();
       bridgeRegistration?.dispose();
       unregisterEditorActions?.();
       clearPendingSelectionEmit();
@@ -2235,6 +2376,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       clipboardContextByView.delete(view);
       view.destroy();
       viewRef.current = null;
+      if (owner && sharedFileKey) owner.releaseView(sharedFileKey, sharedViewId);
     };
   }, []);
 
@@ -2546,46 +2688,72 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
 
   useEffect(() => {
     const owner = transactionOwner;
-    if (!owner || !fileKey || !viewId) return;
+    if (!owner || !fileKey) return;
 
     return owner.subscribe(fileKey, (transaction) => {
-      if (transaction.sourceViewId === viewId) return;
+      if (transaction.sourceViewId === editorViewId) return;
       const currentView = viewRef.current;
       if (!currentView || !currentView.dom.isConnected) return;
-
-      const changes = transaction.changes.map((c) => ({
-        from: c.from,
-        to: c.to,
-        insert: c.insert,
-      }));
-      const changeSet = ChangeSet.of(changes, currentView.state.doc.length);
-      const mappedSelection = currentView.state.selection.map(changeSet);
-
-      currentView.dispatch({
-        changes,
-        selection: mappedSelection,
-        scrollIntoView: false,
-        annotations: [remoteTransactionAnnotation.of(true)],
-      });
-      lastDocumentTextRef.current = currentView.state.doc.toString();
+      if (applySharedTransactionToView(currentView, transaction)) {
+        lastDocumentTextRef.current = currentView.state.doc.toString();
+      }
     });
-  }, [transactionOwner, fileKey, viewId]);
+  }, [transactionOwner, fileKey, editorViewId]);
 
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const previousPropDocument = lastPropDocumentTextRef.current;
+    lastPropDocumentTextRef.current = doc;
+
+    const owner = transactionOwnerRef.current;
+    if (owner && fileKeyRef.current) {
+      const canonical = owner.getDocument(fileKeyRef.current);
+      if (canonical !== null) {
+        const currentText = view.state.doc.toString();
+        if (doc === canonical) {
+          // The controlled snapshot caught up with the shared owner. If a
+          // remote transaction raced this effect, repair only the changed
+          // range and preserve the view's selection.
+          if (currentText !== canonical) {
+            applyingExternalDocRef.current = true;
+            try {
+              applyDocumentSnapshotToView(view, canonical);
+            } finally {
+              applyingExternalDocRef.current = false;
+            }
+          }
+          lastDocumentTextRef.current = view.state.doc.toString();
+          return;
+        }
+        if (previousPropDocument !== doc) {
+          // A changed prop is an external/store snapshot. Make it one shared
+          // transaction so every split sees the same replacement and history
+          // remains owned by the canonical document.
+          const transaction = owner.replaceDocument(
+            fileKeyRef.current,
+            viewIdRef.current,
+            doc,
+            "external-disk",
+          );
+          if (transaction) applySharedTransactionToView(view, transaction);
+          lastDocumentTextRef.current = view.state.doc.toString();
+          return;
+        }
+        if (currentText === canonical || lastDocumentTextRef.current === canonical) {
+          // React may still expose the previous store value while a live
+          // editor edit is buffered. The shared owner is authoritative.
+          lastDocumentTextRef.current = currentText;
+          return;
+        }
+      }
+    }
+
     if (lastDocumentTextRef.current === doc) return;
     applyingExternalDocRef.current = true;
     try {
-      lastDocumentTextRef.current = doc;
-      const currentSelection = view.state.selection;
-      const clampedAnchor = Math.min(currentSelection.main.anchor, doc.length);
-      const clampedHead = Math.min(currentSelection.main.head, doc.length);
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: doc },
-        selection: { anchor: clampedAnchor, head: clampedHead },
-        scrollIntoView: false,
-      });
+      applyDocumentSnapshotToView(view, doc);
+      lastDocumentTextRef.current = view.state.doc.toString();
     } finally {
       applyingExternalDocRef.current = false;
     }
