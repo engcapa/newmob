@@ -153,6 +153,15 @@
 - `[data-testid="code-workspace-editor-tab-strip"]` — display [optional] — F25.5.editor-tab-strip
 - `[data-testid="code-workspace-editor"] .cm-content` — interactive [optional] — F25.5.editor-content
 - `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
+- `[data-testid="project-facts-status-badge"]` — display [optional] — F25.5.project-facts-status-badge
+- `[data-testid="project-facts-discovery-status"]` — display [optional] — F25.5.project-facts-discovery-status
+- `[data-testid="project-facts-refresh-btn"]` — interactive [optional] — F25.5.project-facts-refresh
+- `[data-testid="project-facts-loading-icon"]` — display [optional] — F25.5.project-facts-loading-icon
+- `[data-testid="project-facts-ready-icon"]` — display [optional] — F25.5.project-facts-ready-icon
+- `[data-testid="project-facts-untrusted-icon"]` — display [optional] — F25.5.project-facts-untrusted-icon
+- `[data-testid="project-facts-stale-icon"]` — display [optional] — F25.5.project-facts-stale-icon
+- `[data-testid="project-facts-failed-icon"]` — display [optional] — F25.5.project-facts-failed-icon
+- `[data-testid="code-workspace-tree-new-file"]` — interactive [optional] — F25.5.tree-new-file
 - `[data-testid="code-workspace-search-everywhere"]` — display [optional] — F25.5.search-everywhere
 - `[data-testid="code-workspace-bottom-tab-terminal"]` — interactive [optional] — F25.5.bottom-dock-terminal-tab
 - `[data-testid="code-workspace-tab-policy-settings"]` — interactive [optional] — F25.5.tab-policy-settings

@@ -1,0 +1,46 @@
+id: TC-IDE-C7-03
+title: "Project descriptor discovery stays separate from ready facts"
+description: |
+  ED-PROJECT-001 browser slice. Creates a real browser-VFS Maven descriptor
+  through the Code Workspace UI, refreshes the production facts/discovery
+  status, and asserts that descriptor discovery is visible while browser-only
+  tooling remains an explicit failed/unresolved facts state rather than Ready.
+  Browser VFS proves UI routing and typed unavailable truth only; it does not
+  prove native Maven ingestion.
+covers: [F25.5]
+tags: [code-workspace, ide-c7, project-structure, facts-cache, p0]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 120
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-new-file"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill:
+      selector: '[data-testid="text-input-dialog-input"]'
+      value: pom.xml
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-editor"] .cm-content'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - type: '<project><artifactId>qa-project</artifactId></project>'
+  - press: Control+s
+  - wait_for: '[data-testid="project-facts-status-badge"]'
+  - click: '[data-testid="project-facts-refresh-btn"]'
+  - assert_text:
+      selector: '[data-testid="project-facts-discovery-status"]'
+      contains: Maven Discovered
+      timeout_sec: 15
+  - assert_text:
+      selector: '[data-testid="project-facts-status-badge"]'
+      contains: Facts Failed
+      timeout_sec: 15
+  - assert_not_visible: '[data-testid="project-facts-ready-icon"]'

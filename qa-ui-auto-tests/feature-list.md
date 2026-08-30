@@ -5524,9 +5524,10 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, KeymapSettingsDialog, ClipboardHistoryPopup]
+components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/ProjectFactsStatusBadge.tsx
   - src/components/editor/workspace/EditorGroup.tsx
   - src/components/editor/workspace/FileTreePane.tsx
   - src/components/editor/workspace/TabSwitcher.tsx
@@ -5560,6 +5561,42 @@ controls:
     selector: '[data-testid="code-workspace-file-status"]'
     kind: display
     optional: true       # dirty/saved indicator on the active tab strip
+  - id: project-facts-status-badge
+    selector: '[data-testid="project-facts-status-badge"]'
+    kind: display
+    optional: true       # mounted when a workspace root has facts or descriptor state
+  - id: project-facts-discovery-status
+    selector: '[data-testid="project-facts-discovery-status"]'
+    kind: display
+    optional: true       # Maven/Gradle discovery state inside the facts badge
+  - id: project-facts-refresh
+    selector: '[data-testid="project-facts-refresh-btn"]'
+    kind: interactive
+    optional: true       # mounted after facts or descriptor discovery starts
+  - id: project-facts-loading-icon
+    selector: '[data-testid="project-facts-loading-icon"]'
+    kind: display
+    optional: true
+  - id: project-facts-ready-icon
+    selector: '[data-testid="project-facts-ready-icon"]'
+    kind: display
+    optional: true
+  - id: project-facts-untrusted-icon
+    selector: '[data-testid="project-facts-untrusted-icon"]'
+    kind: display
+    optional: true
+  - id: project-facts-stale-icon
+    selector: '[data-testid="project-facts-stale-icon"]'
+    kind: display
+    optional: true
+  - id: project-facts-failed-icon
+    selector: '[data-testid="project-facts-failed-icon"]'
+    kind: display
+    optional: true
+  - id: tree-new-file
+    selector: '[data-testid="code-workspace-tree-new-file"]'
+    kind: interactive
+    optional: true       # enabled when a workspace root is available
   - id: search-everywhere
     selector: '[data-testid="code-workspace-search-everywhere"]'
     kind: display

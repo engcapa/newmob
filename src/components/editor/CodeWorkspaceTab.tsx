@@ -480,6 +480,8 @@ import {
   type ReferenceSessionContext,
 } from "./workspace/referenceInfoSession";
 import { useWorkspaceProjectAnalysis } from "./workspace/useWorkspaceProjectAnalysis";
+import { useProjectFacts } from "../../hooks/useProjectFacts";
+import { useProjectDescriptorDiscovery } from "../../hooks/useProjectDescriptorDiscovery";
 import {
   DEFAULT_SCOPE_SELECTION,
   libraryUriClassifierForRoots,
@@ -497,6 +499,7 @@ import { type RecentFileEntry } from "./workspace/RecentFilesPopup";
 import { EditorGroup } from "./workspace/EditorGroup";
 import { WorkspacePopupsHost } from "./workspace/WorkspacePopupsHost";
 import { WorkspaceSdkStatus } from "./workspace/WorkspaceSdkStatus";
+import { ProjectFactsStatusBadge } from "./workspace/ProjectFactsStatusBadge";
 import { WorkspaceBuildRunToolsDialog } from "./workspace/WorkspaceBuildRunToolsDialog";
 import { WorkspaceIntelligenceSettingsDialog } from "./workspace/WorkspaceIntelligenceSettingsDialog";
 import { WorkspaceEditorAppearanceSettingsDialog } from "./workspace/WorkspaceEditorAppearanceSettingsDialog";
@@ -1659,6 +1662,19 @@ export function CodeWorkspaceTab({
   const [columnSelectionMode, setColumnSelectionMode] = useState(false);
   const [treeFontSize, setTreeFontSizeState] = useState(() => readCodeWorkspaceTreeFontSize());
   const [roots, setRoots] = useState<CodeWorkspaceRootInfo[]>(() => initialRoots(workspace));
+  const projectFactsRoot = roots[0]?.path ?? "";
+  const projectFacts = useProjectFacts(projectFactsRoot, {
+    autoFetch: visible,
+  });
+  const projectDescriptorDiscovery = useProjectDescriptorDiscovery(projectFactsRoot, {
+    autoRefresh: visible,
+  });
+  const refreshProjectFacts = useCallback(() => {
+    void Promise.allSettled([
+      projectFacts.refresh(),
+      projectDescriptorDiscovery.refresh(),
+    ]);
+  }, [projectDescriptorDiscovery.refresh, projectFacts.refresh]);
   const [looseFiles, setLooseFiles] = useState<CodeWorkspaceLooseFileInfo[]>(() => initialLooseFiles(workspace));
   const {
     directories,
@@ -14850,6 +14866,18 @@ export function CodeWorkspaceTab({
           </span>
         )}
         <WorkspaceSdkStatus roots={roots} />
+        {projectFactsRoot && (
+          <ProjectFactsStatusBadge
+            status={projectFacts.status}
+            discoveryStatus={projectDescriptorDiscovery.status}
+            discovery={projectDescriptorDiscovery.discovery}
+            discoveryReason={projectDescriptorDiscovery.reason}
+            reason={projectFacts.reason}
+            generation={projectFacts.generation}
+            isStale={projectFacts.isStale}
+            onRefresh={refreshProjectFacts}
+          />
+        )}
         <div className="flex-1" />
         {/* Project tree collapse lives on the tree toolbar / collapsed rail — avoid a
             second top-bar toggle that duplicates the panel-local control. */}

@@ -16,6 +16,7 @@ import type {
   LspDocumentStatus,
   LspServerStatus,
 } from "../../lib/editor/lsp";
+import type { ProjectDescriptorDiscoveryState } from "../../hooks/useProjectDescriptorDiscovery";
 import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile, WorkspaceWriteAck } from "../../lib/editor/workspace";
 import { CodeWorkspaceTab, extractContextSnippet } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
@@ -156,6 +157,53 @@ const clipboardMocks = vi.hoisted(() => {
 
 const settingsNavigationMocks = vi.hoisted(() => ({
   openSettingsSection: vi.fn(),
+}));
+
+const projectFactsMock = vi.hoisted(() => {
+  const state = {
+    status: "idle" as "idle" | "loading" | "ready" | "degraded" | "untrusted" | "failed",
+    reason: null as string | null,
+    generation: 0,
+    isStale: false,
+  };
+  const refresh = vi.fn(async () => undefined);
+  return {
+    state,
+    refresh,
+    useProjectFacts: vi.fn((workspaceRoot: string, _options?: unknown) => ({
+      workspaceRoot,
+      ...state,
+      fingerprint: null,
+      structure: null,
+      provenance: null,
+      abortController: null,
+      refresh,
+      invalidate: vi.fn(),
+    })),
+  };
+});
+
+vi.mock("../../hooks/useProjectFacts", () => ({
+  useProjectFacts: projectFactsMock.useProjectFacts,
+}));
+
+const descriptorDiscoveryMock = vi.hoisted(() => {
+  const refresh = vi.fn(async () => undefined);
+  const state: ProjectDescriptorDiscoveryState = {
+    status: "idle",
+    discovery: null,
+    reason: null,
+    refresh,
+  };
+  return {
+    state,
+    refresh,
+    useProjectDescriptorDiscovery: vi.fn(() => state),
+  };
+});
+
+vi.mock("../../hooks/useProjectDescriptorDiscovery", () => ({
+  useProjectDescriptorDiscovery: descriptorDiscoveryMock.useProjectDescriptorDiscovery,
 }));
 
 vi.mock("../../lib/clipboard", () => clipboardMocks);
@@ -441,6 +489,17 @@ describe("CodeWorkspaceTab", () => {
       codeWorkspaceByTab: {},
     });
     useCodeWorkspaceStore.setState({ byInstanceId: {} });
+    projectFactsMock.state.status = "idle";
+    projectFactsMock.state.reason = null;
+    projectFactsMock.state.generation = 0;
+    projectFactsMock.state.isStale = false;
+    projectFactsMock.refresh.mockReset().mockResolvedValue(undefined);
+    projectFactsMock.useProjectFacts.mockClear();
+    descriptorDiscoveryMock.state.status = "idle";
+    descriptorDiscoveryMock.state.discovery = null;
+    descriptorDiscoveryMock.state.reason = null;
+    descriptorDiscoveryMock.refresh.mockReset().mockResolvedValue(undefined);
+    descriptorDiscoveryMock.useProjectDescriptorDiscovery.mockClear();
     localHistoryMocks.historySnapshot.mockReset().mockResolvedValue(null);
     workspaceMocks.workspaceListDir.mockReset();
     workspaceMocks.workspaceCompactChain.mockReset();
@@ -660,6 +719,53 @@ describe("CodeWorkspaceTab", () => {
     workspaceActionRegistry.clear();
     navigationHistoryTracker.clear();
     globalEditorConfigResolver.clearAll();
+  });
+
+  it("mounts project facts for the workspace root and routes status refresh to the store", async () => {
+    projectFactsMock.state.status = "loading";
+    projectFactsMock.state.reason = "Loading project build facts...";
+    projectFactsMock.state.generation = 4;
+    descriptorDiscoveryMock.state.status = "descriptor-only";
+    descriptorDiscoveryMock.state.discovery = {
+      status: "descriptor-only",
+      generation: 1,
+      descriptors: [{
+        path: "/repo/app/pom.xml",
+        buildSystem: "maven",
+        name: "app",
+        root: "/repo/app",
+        rawContentSha256: "descriptor-hash",
+        inferredExcludedRoots: ["/repo/app/target"],
+      }],
+      excludedRoots: ["/repo/app/target"],
+      diagnostics: [],
+    };
+
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-project-facts",
+      workspaceInstanceId: "instance-project-facts",
+      name: "Project Facts",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+    };
+
+    renderWorkspace(workspace);
+
+    expect(await screen.findByTestId("project-facts-status-badge")).toHaveTextContent("Maven Discovered");
+    expect(await screen.findByTestId("project-facts-status-badge")).toHaveTextContent("Loading Facts");
+    expect(projectFactsMock.useProjectFacts).toHaveBeenCalledWith(
+      "/repo/app",
+      expect.objectContaining({ autoFetch: true }),
+    );
+    expect(descriptorDiscoveryMock.useProjectDescriptorDiscovery).toHaveBeenCalledWith(
+      "/repo/app",
+      { autoRefresh: true },
+    );
+
+    fireEvent.click(screen.getByTestId("project-facts-refresh-btn"));
+    expect(projectFactsMock.refresh).toHaveBeenCalledTimes(1);
+    expect(descriptorDiscoveryMock.refresh).toHaveBeenCalledTimes(1);
   });
 
   it("keeps command registration stable across unrelated parent rerenders", async () => {

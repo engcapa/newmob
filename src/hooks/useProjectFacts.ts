@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useProjectFactsStore, type FetchProjectFactsOptions, type WorkspaceProjectFactsEntry } from "../stores/projectFactsStore";
 
 export interface UseProjectFactsOptions extends Partial<FetchProjectFactsOptions> {
@@ -6,7 +6,21 @@ export interface UseProjectFactsOptions extends Partial<FetchProjectFactsOptions
 }
 
 export function useProjectFacts(workspaceRoot: string, options?: UseProjectFactsOptions) {
-  const entry = useProjectFactsStore((state) => state.getWorkspaceFacts(workspaceRoot));
+  const storedEntry = useProjectFactsStore((state) => state.workspaces[workspaceRoot]);
+  const entry = useMemo<WorkspaceProjectFactsEntry>(
+    () => storedEntry ?? {
+      workspaceRoot,
+      generation: 0,
+      status: "idle",
+      reason: null,
+      fingerprint: null,
+      structure: null,
+      provenance: null,
+      isStale: false,
+      abortController: null,
+    },
+    [storedEntry, workspaceRoot],
+  );
   const fetchProjectFacts = useProjectFactsStore((state) => state.fetchProjectFacts);
   const invalidateStore = useProjectFactsStore((state) => state.invalidate);
 
