@@ -1,3 +1,4 @@
+import { fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   RenderedDocWidget,
@@ -27,6 +28,9 @@ describe("ED-DOC-001: renderedDocCommentsExtension", () => {
     expect(btn).not.toBeNull();
     btn?.click();
     expect(onToggleRaw).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(dom.querySelector(".cm-rendered-doc-body")!);
+    expect(onToggleRaw).toHaveBeenCalledTimes(2);
   });
 
   it("builds decoration sets when enabled on supported languages", () => {

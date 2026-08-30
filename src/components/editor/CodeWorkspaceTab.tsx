@@ -5902,6 +5902,9 @@ export function CodeWorkspaceTab({
     workspaceInstanceId,
   ]);
   const activeLanguageId = activeLspState?.status?.languageId ?? null;
+  const activeRenderedDocLanguageId = activeLanguageId
+    ?? activeFile?.languagePath.split(".").pop()?.toLowerCase()
+    ?? null;
   const activeInlayHintsEnabled = inlayHintsEnabledForLanguage(
     intelligencePreferences,
     activeLanguageId,
@@ -9260,19 +9263,31 @@ export function CodeWorkspaceTab({
     }
   }, [activeFile, setStatusMessage]);
 
+  const setRenderedDocMode = useCallback((fileKey: string, enabled: boolean) => {
+    writeReaderModePreference(workspaceInstanceId, fileKey, enabled);
+    setReaderModeByFile((prev) => {
+      if (prev[fileKey] === enabled) return prev;
+      return { ...prev, [fileKey]: enabled };
+    });
+  }, [workspaceInstanceId]);
+
   const toggleRenderedDocComments = useCallback(() => {
     const file = activeFile;
     if (!file) return;
-    if (!isDocCommentRenderingSupported(activeLanguageId)) {
-      setStatusMessage(`Rendered documentation comments not supported for ${activeLanguageId || "plain text"}`);
+    if (!isDocCommentRenderingSupported(activeRenderedDocLanguageId)) {
+      setStatusMessage(`Rendered documentation comments not supported for ${activeRenderedDocLanguageId || "plain text"}`);
       return;
     }
     const current = readerModeByFile[file.key] ?? readReaderModePreference(workspaceInstanceId, file.key);
     const next = !current;
-    writeReaderModePreference(workspaceInstanceId, file.key, next);
-    setReaderModeByFile((prev) => ({ ...prev, [file.key]: next }));
+    setRenderedDocMode(file.key, next);
     setStatusMessage(next ? "Rendered documentation enabled (Reader Mode)" : "Rendered documentation disabled");
-  }, [activeFile, activeLanguageId, readerModeByFile, setStatusMessage, workspaceInstanceId]);
+  }, [activeFile, activeRenderedDocLanguageId, readerModeByFile, setRenderedDocMode, setStatusMessage, workspaceInstanceId]);
+
+  const revealRenderedDocSource = useCallback((fileKey: string) => {
+    setRenderedDocMode(fileKey, false);
+    if (fileKey === activeFile?.key) setStatusMessage("Rendered documentation disabled");
+  }, [activeFile?.key, setRenderedDocMode, setStatusMessage]);
 
   const navigateDiagnostic = useCallback((direction: 1 | -1) => {
     const file = activeFile;
@@ -10495,7 +10510,7 @@ export function CodeWorkspaceTab({
       category: "View",
       keybinding: "Ctrl+Alt+Q",
       keywords: ["doc", "render", "documentation", "reader", "comment", "jsdoc", "javadoc"],
-      when: () => !!activeFile && isDocCommentRenderingSupported(activeLanguageId),
+      when: () => !!activeFile && isDocCommentRenderingSupported(activeRenderedDocLanguageId),
       run: toggleRenderedDocComments,
     },
     {
@@ -11044,6 +11059,7 @@ export function CodeWorkspaceTab({
     activeKey,
     activeInlayHintsEnabled,
     activeLanguageId,
+    activeRenderedDocLanguageId,
     addRoot,
     closeFile,
     closedTabsStack,
@@ -11090,6 +11106,8 @@ export function CodeWorkspaceTab({
     reloadFile,
     requestGenerateCandidates,
     revealEditorTabInTree,
+    revealRenderedDocSource,
+    readerModeByFile,
     renameSelected,
     resolveEditorTarget,
     roots.length,
@@ -11113,6 +11131,7 @@ export function CodeWorkspaceTab({
     toggleInlayHints,
     toggleInlayHintsForActiveLanguage,
     toggleInlineBlame,
+    toggleRenderedDocComments,
     toggleOutlinePane,
     toggleProjectTree,
     toggleSoftWrap,
@@ -14478,6 +14497,9 @@ export function CodeWorkspaceTab({
     const groupLanguageId = groupLspState?.status?.languageId
       ?? groupFile?.languagePath.split(".").pop()?.toLowerCase()
       ?? "plain-text";
+    const groupReaderMode = groupFile
+      ? readerModeByFile[groupFile.key] ?? readReaderModePreference(workspaceInstanceId, groupFile.key)
+      : false;
     const groupSoftWrap = !!groupFile && matchesSoftWrapPath(
       groupFile.languagePath,
       editorAppearanceProfile.softWrap.patterns,
@@ -14587,6 +14609,11 @@ export function CodeWorkspaceTab({
         readOnly={workspaceResourceOperationLocked}
         softWrap={groupSoftWrap}
         appearance={groupAppearance}
+        renderedDocEnabled={groupReaderMode}
+        renderedDocLanguageId={groupLanguageId}
+        onToggleRenderedDocRaw={() => {
+          if (groupFile) revealRenderedDocSource(groupFile.key);
+        }}
         columnSelectionMode={columnSelectionMode}
         showHoverDocumentation={
           intelligencePreferences.quickDoc.showOnHover

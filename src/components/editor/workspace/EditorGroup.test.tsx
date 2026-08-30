@@ -5,8 +5,20 @@ import { EditorGroup } from "./EditorGroup";
 import type { OpenFileViewModel } from "./editorGroupTypes";
 
 vi.mock("./CodeMirrorHost", () => ({
-  CodeMirrorHost: ({ onFoldProvenanceChange }: { onFoldProvenanceChange?: (p: string | null) => void }) => (
-    <div data-testid="mock-code-mirror">
+  CodeMirrorHost: ({
+    onFoldProvenanceChange,
+    renderedDocEnabled,
+    renderedDocLanguageId,
+  }: {
+    onFoldProvenanceChange?: (p: string | null) => void;
+    renderedDocEnabled?: boolean;
+    renderedDocLanguageId?: string | null;
+  }) => (
+    <div
+      data-testid="mock-code-mirror"
+      data-rendered-doc-enabled={renderedDocEnabled || undefined}
+      data-rendered-doc-language={renderedDocLanguageId || undefined}
+    >
       <button
         type="button"
         data-testid="mock-trigger-fold-provenance"
@@ -358,6 +370,16 @@ describe("EditorGroup tabs", () => {
 
     // Since mock CodeMirrorHost doesn't fire viewport events by default, we verify the component renders without error
     expect(screen.getByTestId("mock-code-mirror")).toBeInTheDocument();
+  });
+
+  it("passes the per-file Reader Mode configuration to the production editor host", () => {
+    render(<EditorGroup {...props({
+      renderedDocEnabled: true,
+      renderedDocLanguageId: "typescript",
+    })} />);
+
+    expect(screen.getByTestId("mock-code-mirror")).toHaveAttribute("data-rendered-doc-enabled", "true");
+    expect(screen.getByTestId("mock-code-mirror")).toHaveAttribute("data-rendered-doc-language", "typescript");
   });
 
   it("orders tabs according to tabPolicy using orderTabsForDisplay", () => {

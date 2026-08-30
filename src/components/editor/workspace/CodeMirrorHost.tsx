@@ -156,6 +156,11 @@ import {
 } from "./workspaceCodeMirrorKeymap";
 import { EditorActionBridge } from "./workspaceActionHost";
 import {
+  RENDERED_DOC_THEME,
+  renderedDocDecorationConfig,
+  renderedDocDecorationField,
+} from "./renderedDocCommentsExtension";
+import {
   completeStatementStrategy,
   surroundWithPlan,
   type SemanticEditSource,
@@ -297,6 +302,12 @@ interface CodeMirrorHostProps {
   parameterInfoShowFullSignatures?: boolean;
   /** Effective code style driving indentUnit, tabSize, and insertSpaces. */
   codeStyle?: EffectiveCodeStyle;
+  /** In-place rendered documentation comments for the active source buffer. */
+  renderedDocEnabled?: boolean;
+  /** Provider/path language identity used by the documentation renderer. */
+  renderedDocLanguageId?: string | null;
+  /** Returns from a rendered block to the source view without changing text. */
+  onToggleRenderedDocRaw?: () => void;
   /** When enabled, a normal mouse drag creates a rectangular selection. */
   columnSelectionMode?: boolean;
   /**
@@ -1402,6 +1413,8 @@ function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirror
   if (prev.doc !== next.doc) return false;
   if (prev.visible !== next.visible) return false;
   if (prev.readOnly !== next.readOnly) return false;
+  if (prev.renderedDocEnabled !== next.renderedDocEnabled) return false;
+  if (prev.renderedDocLanguageId !== next.renderedDocLanguageId) return false;
   if (prev.softWrap !== next.softWrap) return false;
   if (!sameEditorAppearance(prev.appearance, next.appearance)) return false;
   if (prev.columnSelectionMode !== next.columnSelectionMode) return false;
@@ -1564,6 +1577,9 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   fileCoverage,
   coverageEnabled = true,
   codeStyle,
+  renderedDocEnabled = false,
+  renderedDocLanguageId,
+  onToggleRenderedDocRaw,
   workspaceActionHost = null,
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -1606,6 +1622,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const wrappingCompartment = useRef(new Compartment());
   const appearanceCompartment = useRef(new Compartment());
   const completionCompartment = useRef(new Compartment());
+  const renderedDocCompartment = useRef(new Compartment());
   const presentResolveGateRef = useRef<((request: CompletionResolveGateRequest) => void) | null>(null);
 
   const buildAutocompletionExtension = useCallback(() => {
@@ -1677,6 +1694,10 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     inlineValues: debugInlineValues,
     evaluating: !!debugEvaluate,
   });
+  const renderedDocConfigRef = useRef({
+    enabled: !!renderedDocEnabled,
+    languageId: renderedDocLanguageId ?? liveTemplateLanguageForPath(path),
+  });
   const renderedCompletionPolicyRef = useRef<{
     autoPopup: boolean;
     delayMs: number;
@@ -1712,6 +1733,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const onLightbulbRef = useRef(onLightbulb);
   const onGitChangeClickRef = useRef(onGitChangeClick);
   const onContextMenuRef = useRef(onContextMenu);
+  const onToggleRenderedDocRawRef = useRef(onToggleRenderedDocRaw);
   const completionTriggersRef = useRef(completionTriggers ?? []);
   const signatureTriggersRef = useRef(signatureTriggers ?? []);
   const columnSelectionModeRef = useRef(columnSelectionMode);
@@ -1758,6 +1780,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   debugStopRef.current = debugStop;
   debugEvaluateRef.current = debugEvaluate;
   onContextMenuRef.current = onContextMenu;
+  onToggleRenderedDocRawRef.current = onToggleRenderedDocRaw;
 
   /**
    * Build the debug compartment's extensions. Actions read through refs so the
@@ -2077,11 +2100,21 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         appearanceCompartment.current.of(
           appearance ? editorAppearanceExtension(appearance) : [],
         ),
+        renderedDocDecorationField,
+        renderedDocCompartment.current.of(renderedDocDecorationConfig.of({
+          languageId: renderedDocLanguageId ?? liveTemplateLanguageForPath(pathRef.current),
+          enabled: renderedDocEnabled,
+          onToggleRaw: () => {
+            onToggleRenderedDocRawRef.current?.();
+            viewRef.current?.focus();
+          },
+        })),
         ...lspNavigationExtensions(onDefinitionRef, onReferencesRef),
         ...codeViewExtensions(),
         WORKSPACE_EDITOR_STYLE,
         LSP_EDITOR_STYLE,
         WORKSPACE_SEARCH_STYLE,
+        RENDERED_DOC_THEME,
         // IDEA-style Tab:
         // 1) Accept the active completion (often a live template).
         // 2) Else expand an exact live/postfix template under the caret
@@ -2528,6 +2561,28 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       effects: wrappingCompartment.current.reconfigure(softWrap ? EditorView.lineWrapping : []),
     });
   }, [softWrap]);
+
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const languageId = renderedDocLanguageId ?? liveTemplateLanguageForPath(path);
+    const enabled = !!renderedDocEnabled;
+    const previous = renderedDocConfigRef.current;
+    if (previous.enabled === enabled && previous.languageId === languageId) return;
+    renderedDocConfigRef.current = { enabled, languageId };
+    view.dispatch({
+      effects: renderedDocCompartment.current.reconfigure(
+        renderedDocDecorationConfig.of({
+          languageId,
+          enabled,
+          onToggleRaw: () => {
+            onToggleRenderedDocRawRef.current?.();
+            viewRef.current?.focus();
+          },
+        }),
+      ),
+    });
+  }, [path, renderedDocEnabled, renderedDocLanguageId]);
 
   useEffect(() => {
     const view = viewRef.current;

@@ -151,6 +151,12 @@ interface EditorGroupProps {
   editorPaneStyle: CSSProperties;
   softWrap?: boolean;
   appearance?: EditorAppearanceExtensionProfile;
+  /** Whether doc comments are replaced with safe rendered blocks for this file. */
+  renderedDocEnabled?: boolean;
+  /** Language identity used by the rendered documentation extractor. */
+  renderedDocLanguageId?: string | null;
+  /** Return a rendered documentation block to source mode. */
+  onToggleRenderedDocRaw?: () => void;
   columnSelectionMode?: boolean;
   showHoverDocumentation?: boolean;
   hoverDocumentationDelayMs?: number;
@@ -296,6 +302,9 @@ export function EditorGroup({
   editorPaneStyle,
   softWrap = false,
   appearance,
+  renderedDocEnabled = false,
+  renderedDocLanguageId,
+  onToggleRenderedDocRaw,
   columnSelectionMode = false,
   showHoverDocumentation = true,
   hoverDocumentationDelayMs = 300,
@@ -853,6 +862,9 @@ export function EditorGroup({
                         signatureTriggers={signatureTriggers}
                         softWrap={softWrap}
                         appearance={appearance}
+                        renderedDocEnabled={renderedDocEnabled}
+                        renderedDocLanguageId={renderedDocLanguageId}
+                        onToggleRenderedDocRaw={onToggleRenderedDocRaw}
                         columnSelectionMode={columnSelectionMode}
                         showHoverDocumentation={showHoverDocumentation}
                         hoverDocumentationDelayMs={hoverDocumentationDelayMs}
@@ -930,6 +942,9 @@ export function EditorGroup({
                       signatureTriggers={signatureTriggers}
                       softWrap={softWrap}
                       appearance={appearance}
+                      renderedDocEnabled={renderedDocEnabled}
+                      renderedDocLanguageId={renderedDocLanguageId}
+                      onToggleRenderedDocRaw={onToggleRenderedDocRaw}
                       columnSelectionMode={columnSelectionMode}
                       showHoverDocumentation={showHoverDocumentation}
                       hoverDocumentationDelayMs={hoverDocumentationDelayMs}

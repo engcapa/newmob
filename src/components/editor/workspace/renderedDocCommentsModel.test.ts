@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractDocComments,
   isDocCommentRenderingSupported,
+  normalizeDocLanguageId,
   normalizeDocCommentText,
   readReaderModePreference,
   renderDocCommentHtml,
@@ -22,6 +23,14 @@ describe("ED-DOC-001: renderedDocCommentsModel / Reader Mode", () => {
     expect(isDocCommentRenderingSupported("csv")).toBe(false);
     expect(isDocCommentRenderingSupported("log")).toBe(false);
     expect(isDocCommentRenderingSupported(undefined)).toBe(false);
+  });
+
+  it("normalizes file-extension language ids used before a provider is ready", () => {
+    expect(normalizeDocLanguageId("ts")).toBe("typescript");
+    expect(normalizeDocLanguageId("tsx")).toBe("typescriptreact");
+    expect(normalizeDocLanguageId("PY")).toBe("python");
+    expect(isDocCommentRenderingSupported("ts")).toBe(true);
+    expect(isDocCommentRenderingSupported("plain-text")).toBe(false);
   });
 
   it("normalizes JSDoc / Javadoc tags into formatted markdown", () => {
@@ -55,6 +64,13 @@ describe("ED-DOC-001: renderedDocCommentsModel / Reader Mode", () => {
     expect(rendered).not.toContain("onerror");
     expect(rendered).not.toContain("href=\"javascript:");
     expect(rendered).toContain("href=\"https://taomni.org/docs\"");
+    expect(rendered).toContain("Documentation image unavailable");
+  });
+
+  it("caps oversized documentation without dropping the visible fallback", () => {
+    const rendered = renderDocCommentHtml("A".repeat(50_001));
+    expect(rendered).toContain("Documentation truncated");
+    expect(rendered.length).toBeLessThan(60_000);
   });
 
   it("extracts doc comment ranges from source text", () => {

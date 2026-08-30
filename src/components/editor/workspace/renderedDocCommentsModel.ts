@@ -30,9 +30,37 @@ export const SUPPORTED_DOC_LANGUAGES = new Set([
   "csharp",
 ]);
 
+const DOC_LANGUAGE_ALIASES: Record<string, string> = {
+  c: "c",
+  cc: "cpp",
+  cpp: "cpp",
+  cs: "csharp",
+  go: "go",
+  java: "java",
+  js: "javascript",
+  jsx: "javascriptreact",
+  kt: "kotlin",
+  kts: "kotlin",
+  php: "php",
+  py: "python",
+  pyi: "python",
+  rs: "rust",
+  scala: "scala",
+  sc: "scala",
+  swift: "swift",
+  ts: "typescript",
+  tsx: "typescriptreact",
+};
+
+export function normalizeDocLanguageId(languageId: string | null | undefined): string | null {
+  if (!languageId) return null;
+  const normalized = languageId.trim().toLowerCase();
+  return DOC_LANGUAGE_ALIASES[normalized] ?? normalized;
+}
+
 export function isDocCommentRenderingSupported(languageId: string | null | undefined): boolean {
-  if (!languageId) return false;
-  return SUPPORTED_DOC_LANGUAGES.has(languageId.toLowerCase());
+  const normalized = normalizeDocLanguageId(languageId);
+  return normalized !== null && SUPPORTED_DOC_LANGUAGES.has(normalized);
 }
 
 /**
@@ -77,7 +105,7 @@ export function renderDocCommentHtml(markdown: string): string {
   const safeText = markdown.length > 50000 ? `${markdown.slice(0, 50000)}\n\n*(Documentation truncated)*` : markdown;
   const rawHtml = marked.parse(safeText, { async: false, gfm: true, breaks: true }) as string;
 
-  return DOMPurify.sanitize(rawHtml, {
+  const sanitized = DOMPurify.sanitize(rawHtml, {
     ALLOWED_TAGS: [
       "a", "b", "blockquote", "br", "code", "em", "h1", "h2", "h3", "h4",
       "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "span", "strong",
@@ -86,7 +114,38 @@ export function renderDocCommentHtml(markdown: string): string {
     ALLOWED_ATTR: ["href", "title", "alt", "src", "class", "target", "rel"],
     FORBID_TAGS: ["script", "iframe", "object", "embed", "link", "meta"],
     FORBID_ATTR: ["style", "onerror", "onload", "onclick"],
-  });
+    ALLOW_DATA_ATTR: false,
+    ALLOWED_URI_REGEXP: /^(?:(?:https?):|#)/i,
+  }) as unknown as string;
+
+  // Keep unsafe or malformed destinations visible as text while removing the
+  // navigation/load capability. Safe image alt text also remains visible when
+  // a remote image is unavailable.
+  if (typeof document === "undefined") return sanitized;
+  const template = document.createElement("template");
+  template.innerHTML = sanitized;
+  for (const anchor of template.content.querySelectorAll<HTMLAnchorElement>("a")) {
+    const href = anchor.getAttribute("href");
+    if (!href || !/^https?:/i.test(href.trim())) {
+      anchor.removeAttribute("href");
+      continue;
+    }
+    anchor.setAttribute("target", "_blank");
+    anchor.setAttribute("rel", "noopener noreferrer");
+  }
+  for (const image of template.content.querySelectorAll<HTMLImageElement>("img")) {
+    const src = image.getAttribute("src");
+    if (!src || !/^https?:/i.test(src.trim())) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "cm-rendered-doc-image-placeholder";
+      placeholder.textContent = image.getAttribute("alt")?.trim() || "Documentation image unavailable";
+      placeholder.setAttribute("aria-label", placeholder.textContent);
+      image.replaceWith(placeholder);
+      continue;
+    }
+    if (!image.getAttribute("alt")?.trim()) image.setAttribute("alt", "Documentation image");
+  }
+  return template.innerHTML;
 }
 
 /**
