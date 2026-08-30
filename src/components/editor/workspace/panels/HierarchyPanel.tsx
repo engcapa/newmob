@@ -23,7 +23,10 @@ import {
   type HierarchyRootState,
   type TypeHierarchyDirection,
 } from "../hierarchyQueryModel";
-import type { WorkspaceSemanticQueryHost } from "../workspaceSemanticQueryHost";
+import type {
+  SemanticQueryLiveGuards,
+  WorkspaceSemanticQueryHost,
+} from "../workspaceSemanticQueryHost";
 
 export {
   createHierarchyRootNode,
@@ -44,6 +47,7 @@ interface HierarchyPanelProps {
   onStatus?: (status: LspDocumentStatus) => void;
   queryHost?: WorkspaceSemanticQueryHost | null;
   liveLspGeneration?: () => number;
+  liveDocumentRevision?: () => number;
   /**
    * §8.20.5 W4: set when the provider restarted or the project fingerprint
    * moved after this root was prepared — expanded nodes are stale and the
@@ -98,6 +102,7 @@ export function HierarchyPanel({
   onStatus,
   queryHost = null,
   liveLspGeneration,
+  liveDocumentRevision,
   staleReason = null,
   onRerunStale,
 }: HierarchyPanelProps) {
@@ -109,6 +114,19 @@ export function HierarchyPanel({
   const [error, setError] = useState<string | null>(null);
   const treeRef = useRef(tree);
   treeRef.current = tree;
+  const rootRef = useRef(root);
+  rootRef.current = root;
+  const rootItemRef = useRef(rootItem);
+  rootItemRef.current = rootItem;
+  const directionRef = useRef(direction);
+  directionRef.current = direction;
+  const hierarchyRequestSequenceRef = useRef(0);
+
+  useEffect(() => {
+    if (!queryHost) return undefined;
+    const kind = mode === "call" ? "call-hierarchy" : "type-hierarchy";
+    return () => queryHost.cancelKind(kind);
+  }, [direction, mode, queryHost, root, rootItem]);
 
   useEffect(() => {
     const nextDirection = mode === "call" ? "callers" : "supertypes";
@@ -139,8 +157,23 @@ export function HierarchyPanel({
       ? updateHierarchyNode(current, id, (item) => ({ ...item, loading: true, expanded: true }))
       : current);
     setError(null);
+    const requestRoot = root;
+    const requestRootItem = rootItem;
+    const requestDirection = direction;
+    const requestSequence = ++hierarchyRequestSequenceRef.current;
+    const isCurrentRequest = () => (
+      hierarchyRequestSequenceRef.current === requestSequence
+      && rootRef.current === requestRoot
+      && rootItemRef.current === requestRootItem
+      && directionRef.current === requestDirection
+    );
 
     if (queryHost) {
+      const guards: SemanticQueryLiveGuards = {
+        guardDelivery: () => isCurrentRequest(),
+      };
+      if (liveDocumentRevision) guards.getLiveDocumentRevision = liveDocumentRevision;
+      if (liveLspGeneration) guards.getLiveLspGeneration = liveLspGeneration;
       const expandResult = await executeHierarchyExpand(
         queryHost,
         root.descriptor,
@@ -149,13 +182,16 @@ export function HierarchyPanel({
         direction,
         {
           workspaceId: root.descriptor.workspaceId ?? "default",
-          fileKey: root.descriptor.filePath,
-          documentRevision: 0,
+          fileKey: root.fileKey ?? root.descriptor.filePath,
+          documentRevision: root.documentRevision ?? 0,
           lspSessionGeneration: root.providerGeneration ?? 0,
           liveLspGeneration,
+          requestId: `${root.descriptor.workspaceId ?? "default"}:${mode}:expand:${requestSequence}`,
+          guards,
         },
       );
 
+      if (!isCurrentRequest()) return;
       if (expandResult.stale || expandResult.cancelled) {
         setTree((current) => current
           ? updateHierarchyNode(current, id, (item) => ({ ...item, loading: false }))
@@ -172,6 +208,7 @@ export function HierarchyPanel({
         return;
       }
 
+      if (!isCurrentRequest()) return;
       if (expandResult.status) onStatus?.(expandResult.status);
 
       setTree((current) => current
@@ -209,6 +246,7 @@ export function HierarchyPanel({
         status = result.status;
         entries = result.items.map((item) => ({ item, callRanges: [], callSiteItem: item }));
       }
+      if (!isCurrentRequest()) return;
       onStatus?.(status);
       const children = entries.map((entry, index): HierarchyNode => {
         const key = hierarchyItemKey(entry.item);
@@ -229,6 +267,7 @@ export function HierarchyPanel({
           error: null,
         };
       });
+      if (!isCurrentRequest()) return;
       setTree((current) => current
         ? updateHierarchyNode(current, id, (item) => ({
             ...item,
@@ -238,12 +277,13 @@ export function HierarchyPanel({
           }))
         : current);
     } catch (cause) {
+      if (!isCurrentRequest()) return;
       setError(cause instanceof Error ? cause.message : String(cause));
       setTree((current) => current
         ? updateHierarchyNode(current, id, (item) => ({ ...item, loading: false }))
         : current);
     }
-  }, [direction, liveLspGeneration, mode, onStatus, queryHost, root, staleReason]);
+  }, [direction, liveDocumentRevision, liveLspGeneration, mode, onStatus, queryHost, root, rootItem, staleReason]);
 
   const setNewRoot = (item: LspHierarchyItem) => {
     setRootItem(item);

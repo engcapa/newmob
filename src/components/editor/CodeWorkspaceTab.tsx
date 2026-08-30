@@ -123,6 +123,7 @@ import {
   lspTypeDefinition,
   lspWorkspaceSymbolResolve,
   lspWorkspaceSymbols,
+  nextLspRequestSequence,
   type LspCodeAction,
   type JavaTestItem,
   type LspCompletionItem,
@@ -225,7 +226,12 @@ import {
   type BackForwardHistoryBridge,
   type WorkspaceLocationController,
 } from "./workspace/navigationHistoryModel";
-import { WorkspaceSemanticQueryHost } from "./workspace/workspaceSemanticQueryHost";
+import {
+  WorkspaceSemanticQueryHost,
+  type SemanticQueryIdentity,
+  type SemanticQueryKind,
+  type SemanticQueryLiveGuards,
+} from "./workspace/workspaceSemanticQueryHost";
 import {
   createSingleLeafLayout,
   findLeafNode,
@@ -946,9 +952,6 @@ export function CodeWorkspaceTab({
     [referenceInfoController],
   );
   const [parameterPopup, setParameterPopup] = useState<ParameterDisplayState>({ phase: "hidden" });
-  // §8.18.6: monotonic seq so each reference request supersedes the previous
-  // one on the native cancellation registry.
-  const referenceCancelSeqRef = useRef(0);
   const [referenceHistory, setReferenceHistory] = useState<ReferenceHistorySnapshot>(
     () => referenceInfoController.historySnapshot(),
   );
@@ -1803,6 +1806,7 @@ export function CodeWorkspaceTab({
   } | null>(null);
   const findReferencesRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<void>>(async () => {});
   const [callHierarchyRoot, setCallHierarchyRoot] = useState<HierarchyRootState | null>(null);
+  const hierarchyRequestSequenceRef = useRef(0);
   // §8.20.5 W4: per-mode provenance for stale detection (provider restart /
   // project fingerprint move) surfaced as a Rerun banner in HierarchyPanel.
   const hierarchyProvenanceRef = useRef<Partial<Record<"call" | "type", {
@@ -2121,6 +2125,63 @@ export function CodeWorkspaceTab({
   }, [workspaceInstanceId]);
 
   const semanticQueryHostRef = useRef(new WorkspaceSemanticQueryHost());
+  const workspaceInstanceIdRef = useRef(workspaceInstanceId);
+  workspaceInstanceIdRef.current = workspaceInstanceId;
+  const semanticQuerySequenceRef = useRef(0);
+  const semanticQueryLatestRequestRef = useRef<Record<string, string>>({});
+
+  const beginSemanticQuery = useCallback((
+    kind: SemanticQueryKind,
+    file: OpenFileState,
+    descriptor: LspDocumentDescriptor,
+    position: LspPosition,
+  ) => {
+    const documentRevision = openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision;
+    const capturedLspSessionGeneration = lspSessionGeneration();
+    const requestId = `${workspaceInstanceId}:${kind}:${++semanticQuerySequenceRef.current}`;
+    semanticQueryLatestRequestRef.current[kind] = requestId;
+    const cancelKey = `${workspaceInstanceId}|${file.key}`;
+    const requestSeq = nextLspRequestSequence();
+    const identity: SemanticQueryIdentity = {
+      workspaceId: workspaceInstanceId,
+      fileKey: file.key,
+      uri: descriptor.documentUri ?? descriptor.filePath,
+      position,
+      documentRevision,
+      lspSessionGeneration: capturedLspSessionGeneration,
+      requestId,
+    };
+    const isCurrent = (candidate?: SemanticQueryIdentity): boolean => {
+      const current = openFilesRef.current[file.key];
+      const currentDescriptor = current ? lspDescriptorForFile(current) : null;
+      const currentUri = currentDescriptor?.documentUri ?? currentDescriptor?.filePath;
+      return workspaceInstanceIdRef.current === workspaceInstanceId
+        && semanticQueryLatestRequestRef.current[kind] === requestId
+        && (!candidate || candidate.requestId === requestId)
+        && current != null
+        && current.documentRevision === documentRevision
+        && currentUri === identity.uri
+        && lspSessionGeneration() === capturedLspSessionGeneration;
+    };
+    const guards: SemanticQueryLiveGuards = {
+      getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? -1,
+      getLiveLspGeneration: () => lspSessionGeneration(),
+      guardDelivery: (candidate) => isCurrent(candidate),
+    };
+    return {
+      identity,
+      cancelKey,
+      requestSeq,
+      guards,
+      isCurrent,
+      lspOptions: (signal: AbortSignal) => ({ signal, cancelKey, requestSeq }),
+    };
+  }, [lspDescriptorForFile, lspSessionGeneration, workspaceInstanceId]);
+
+  useEffect(() => {
+    const queryHost = semanticQueryHostRef.current;
+    return () => queryHost.cancelWorkspace(workspaceInstanceId);
+  }, [workspaceInstanceId]);
 
   useEffect(() => {
     const entries = readWorkspaceRecoveryEntries(workspaceInstanceId);
@@ -5734,11 +5795,23 @@ export function CodeWorkspaceTab({
       setStatusMessage(`${mode === "call" ? "Call" : "Type"} hierarchy is not supported by this language server`);
       return;
     }
+    let requestSequence = 0;
     try {
       const position = cursorPositions[activeEditorGroupId] ?? editorSelectionRef.current.start;
       const fileKey = file.key;
       const docRevision = openFilesRef.current[fileKey]?.documentRevision ?? 0;
       const lspGen = lspSessionGeneration();
+      requestSequence = ++hierarchyRequestSequenceRef.current;
+      const requestId = `${workspaceInstanceId}:${mode}:prepare:${requestSequence}`;
+      const cancelKey = `${workspaceInstanceId}|${fileKey}`;
+      const requestSeq = nextLspRequestSequence();
+      const isCurrent = (identity?: SemanticQueryIdentity) => (
+        workspaceInstanceIdRef.current === workspaceInstanceId
+        && hierarchyRequestSequenceRef.current === requestSequence
+        && (!identity || identity.requestId === requestId)
+        && openFilesRef.current[fileKey]?.documentRevision === docRevision
+        && lspSessionGeneration() === lspGen
+      );
 
       const prepareResult = await executeHierarchyPrepare(
         semanticQueryHostRef.current,
@@ -5751,13 +5824,18 @@ export function CodeWorkspaceTab({
           documentRevision: docRevision,
           lspSessionGeneration: lspGen,
           projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+          requestId,
+          cancelKey,
+          requestSeq,
           guards: {
             getLiveDocumentRevision: () => openFilesRef.current[fileKey]?.documentRevision ?? 0,
             getLiveLspGeneration: () => lspSessionGeneration(),
+            guardDelivery: (identity) => isCurrent(identity),
           },
         },
       );
 
+      if (!isCurrent()) return;
       if (prepareResult.cancelled) return;
       updateLspStatusForFile(file, prepareResult.status);
 
@@ -5766,6 +5844,7 @@ export function CodeWorkspaceTab({
         setStatusMessage(`No ${mode} hierarchy is available at the cursor`);
         return;
       }
+      if (!isCurrent()) return;
       hierarchyProvenanceRef.current = {
         ...hierarchyProvenanceRef.current,
         [mode]: {
@@ -5783,6 +5862,11 @@ export function CodeWorkspaceTab({
       }
       setBottomDockOpen(true);
     } catch (cause) {
+      if (
+        requestSequence !== 0
+        && (hierarchyRequestSequenceRef.current !== requestSequence
+          || workspaceInstanceIdRef.current !== workspaceInstanceId)
+      ) return;
       setStatusMessage(errorMessage(cause));
     }
   }, [
@@ -5796,6 +5880,7 @@ export function CodeWorkspaceTab({
     setBottomDockTab,
     setStatusMessage,
     updateLspStatusForFile,
+    workspaceInstanceId,
   ]);
   const activeLanguageId = activeLspState?.status?.languageId ?? null;
   const activeInlayHintsEnabled = inlayHintsEnabledForLanguage(
@@ -6696,8 +6781,9 @@ export function CodeWorkspaceTab({
     info: LibraryBufferInfo,
     text: string,
     range: LspLocation["range"],
-    options: { groupId?: EditorGroupId; preview?: boolean } = {},
+    options: { groupId?: EditorGroupId; preview?: boolean; isCurrent?: () => boolean } = {},
   ) => {
+    if (options.isCurrent && !options.isCurrent()) return false;
     const file = makeLibraryFile(info, text);
     const ref = file.ref;
     const key = file.key;
@@ -6724,7 +6810,9 @@ export function CodeWorkspaceTab({
       return { ...group, openOrder: nextOrder, activeKey: key, previewKey };
     });
     if (groupId !== currentUi.activeEditorGroupId) activateEditorGroup(groupId);
+    if (options.isCurrent && !options.isCurrent()) return false;
     revealEditorLocation(key, range);
+    if (options.isCurrent && !options.isCurrent()) return false;
     recordNavigationLocation(ref, {
       line: range.start.line,
       character: range.start.character,
@@ -6781,18 +6869,23 @@ export function CodeWorkspaceTab({
   const openLspLocation = useCallback(
     async (
       location: LspLocation,
-      options: { groupId?: EditorGroupId; preview?: boolean } = {},
+      options: { groupId?: EditorGroupId; preview?: boolean; isCurrent?: () => boolean } = {},
     ) => {
       const openResolvedPath = async (path: string) => {
+        if (options.isCurrent && !options.isCurrent()) return false;
         for (const root of rootsRef.current) {
           const relative = relativePathWithinRoot(root.path, path);
           if (relative === null) continue;
           const ref: CodeWorkspaceFileRef = { kind: "root", rootId: root.id, path: relative };
+          if (options.isCurrent && !options.isCurrent()) return false;
           suppressNextHistoryRecord();
-          revealEditorLocation(fileKey(ref), location.range);
           await openFile(ref, options);
+          if (options.isCurrent && !options.isCurrent()) return false;
           // openFile reports read failures on the buffer instead of throwing.
           if (openFilesRef.current[fileKey(ref)]?.error) return false;
+          if (options.isCurrent && !options.isCurrent()) return false;
+          revealEditorLocation(fileKey(ref), location.range);
+          if (options.isCurrent && !options.isCurrent()) return false;
           recordNavigationLocation(ref, {
             line: location.range.start.line,
             character: location.range.start.character,
@@ -6801,12 +6894,16 @@ export function CodeWorkspaceTab({
         }
         const loose = makeLooseFile(path);
         const ref: CodeWorkspaceFileRef = { kind: "loose", id: loose.id, path: loose.path };
+        if (options.isCurrent && !options.isCurrent()) return false;
         setLooseFiles((current) => current.some((item) => item.path === loose.path) ? current : [...current, loose]);
         suppressNextHistoryRecord();
-        revealEditorLocation(fileKey(ref), location.range);
         await openFile(ref, options);
+        if (options.isCurrent && !options.isCurrent()) return false;
         // openFile reports read failures on the buffer instead of throwing.
         if (openFilesRef.current[fileKey(ref)]?.error) return false;
+        if (options.isCurrent && !options.isCurrent()) return false;
+        revealEditorLocation(fileKey(ref), location.range);
+        if (options.isCurrent && !options.isCurrent()) return false;
         recordNavigationLocation(ref, {
           line: location.range.start.line,
           character: location.range.start.character,
@@ -6847,6 +6944,7 @@ export function CodeWorkspaceTab({
       }
       try {
         const contents = await lspReadUriContents(descriptor, location.uri);
+        if (options.isCurrent && !options.isCurrent()) return false;
         updateLspStatusForFile(origin, contents.status);
         // Attached sources that exist on disk open as a normal editable-looking file.
         if (contents.path) {
@@ -7091,10 +7189,9 @@ export function CodeWorkspaceTab({
       // a per-file cancel key + monotonic seq so `$/cancelRequest` is sent
       // and the in-flight hover stops racing.
       const cancelKey = `${workspaceInstanceId}|${file.key}`;
-      referenceCancelSeqRef.current += 1;
-      const requestSeq = referenceCancelSeqRef.current;
+      const requestSeq = nextLspRequestSequence();
       const onAbort = () => {
-        void lspCancelReferenceRequest(cancelKey).catch(() => 0);
+        void lspCancelReferenceRequest(cancelKey, requestSeq).catch(() => 0);
       };
       signal.addEventListener("abort", onAbort, { once: true });
       try {
@@ -11568,11 +11665,10 @@ export function CodeWorkspaceTab({
       if (!isLspFeatureReady(lspFilesRef.current[live.key])) return null;
       const descriptor = lspDescriptorForFile(live);
       if (!descriptor) return null;
-      referenceCancelSeqRef.current += 1;
       const cancelKey = `${workspaceInstanceId}|${file.key}`;
-      const requestSeq = referenceCancelSeqRef.current;
+      const requestSeq = nextLspRequestSequence();
       const onAbort = () => {
-        void lspCancelReferenceRequest(cancelKey).catch(() => 0);
+        void lspCancelReferenceRequest(cancelKey, requestSeq).catch(() => 0);
       };
       signal.addEventListener("abort", onAbort, { once: true });
       try {
@@ -11712,8 +11808,7 @@ export function CodeWorkspaceTab({
       }, async ({ signal }) => {
         // §8.18.6: same provider-cancellation identity as the explicit path.
         const cancelKey = `${workspaceInstanceId}|${file.key}`;
-        referenceCancelSeqRef.current += 1;
-        const requestSeq = referenceCancelSeqRef.current;
+        const requestSeq = nextLspRequestSequence();
         const result = await lspHover(descriptor, position, { cancelKey, requestSeq });
         if (signal.aborted) return null;
         const current = openFilesRef.current[file.key];
@@ -11782,15 +11877,19 @@ export function CodeWorkspaceTab({
     title: string,
     locations: LspLocation[],
     emptyMessage: string,
+    isCurrent?: () => boolean,
   ) => {
     if (!locations.length) {
       setStatusMessage(emptyMessage);
       return false;
     }
+    if (isCurrent && !isCurrent()) return false;
     if (locations.length === 1) {
       setLocationPeek(null);
-      return openLspLocation(locations[0]);
+      if (isCurrent && !isCurrent()) return false;
+      return openLspLocation(locations[0], { isCurrent });
     }
+    if (isCurrent && !isCurrent()) return false;
     setLocationPeek({ title, locations });
     return true;
   }, [openLspLocation, setStatusMessage]);
@@ -11800,43 +11899,36 @@ export function CodeWorkspaceTab({
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return false;
       try {
+        const query = beginSemanticQuery("definitions", file, descriptor, position);
         const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
           kind: "definitions",
-          identity: {
-            workspaceId: workspaceInstanceId,
-            fileKey: file.key,
-            uri: descriptor.documentUri ?? descriptor.filePath,
-            position,
-            documentRevision: file.documentRevision,
-            lspSessionGeneration: lspSessionGeneration(),
-          },
-          fetcher: async () => {
-            const result = await lspDefinition(descriptor, position);
+          identity: query.identity,
+          fetcher: async ({ signal }) => {
+            const result = await lspDefinition(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          guards: {
-            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
-            getLiveLspGeneration: () => lspSessionGeneration(),
-          },
+          guards: query.guards,
         });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
+        if (!query.isCurrent(queryRes.identity)) return false;
         if (queryRes.status === "unavailable" || queryRes.status === "error") {
           setStatusMessage(queryRes.error ?? "No definition found");
           return false;
         }
         if (queryRes.items.length === 1) {
+          if (!query.isCurrent()) return false;
           recordNavigationLocation(file.ref, position);
         }
-        return navigateLocations("Definitions", queryRes.items, "No definition found");
+        return navigateLocations("Definitions", queryRes.items, "No definition found", query.isCurrent);
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
       }
     },
-    [lspDescriptorForFile, lspSessionGeneration, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
+    [beginSemanticQuery, lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
 
   const peekDefinition = useCallback(
@@ -11844,33 +11936,26 @@ export function CodeWorkspaceTab({
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return false;
       try {
+        const query = beginSemanticQuery("definitions", file, descriptor, position);
         const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
           kind: "definitions",
-          identity: {
-            workspaceId: workspaceInstanceId,
-            fileKey: file.key,
-            uri: descriptor.documentUri ?? descriptor.filePath,
-            position,
-            documentRevision: file.documentRevision,
-            lspSessionGeneration: lspSessionGeneration(),
-          },
-          fetcher: async () => {
-            const result = await lspDefinition(descriptor, position);
+          identity: query.identity,
+          fetcher: async ({ signal }) => {
+            const result = await lspDefinition(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          guards: {
-            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
-            getLiveLspGeneration: () => lspSessionGeneration(),
-          },
+          guards: query.guards,
         });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
+        if (!query.isCurrent(queryRes.identity)) return false;
         if (!queryRes.items.length) {
           setStatusMessage("No definition found");
           return false;
         }
+        if (!query.isCurrent()) return false;
         setLocationPeek({ title: "Quick Definition", locations: queryRes.items });
         return true;
       } catch (err) {
@@ -11878,7 +11963,7 @@ export function CodeWorkspaceTab({
         return false;
       }
     },
-    [lspDescriptorForFile, lspSessionGeneration, setLocationPeek, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
+    [beginSemanticQuery, lspDescriptorForFile, setLocationPeek, setStatusMessage, updateLspStatusForFile],
   );
 
   const goToDeclaration = useCallback(
@@ -11891,43 +11976,36 @@ export function CodeWorkspaceTab({
         return false;
       }
       try {
+        const query = beginSemanticQuery("declarations", file, descriptor, position);
         const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
           kind: "declarations",
-          identity: {
-            workspaceId: workspaceInstanceId,
-            fileKey: file.key,
-            uri: descriptor.documentUri ?? descriptor.filePath,
-            position,
-            documentRevision: file.documentRevision,
-            lspSessionGeneration: lspSessionGeneration(),
-          },
-          fetcher: async () => {
-            const result = await lspDefinition(descriptor, position);
+          identity: query.identity,
+          fetcher: async ({ signal }) => {
+            const result = await lspDefinition(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          guards: {
-            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
-            getLiveLspGeneration: () => lspSessionGeneration(),
-          },
+          guards: query.guards,
         });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
+        if (!query.isCurrent(queryRes.identity)) return false;
         if (queryRes.status === "unavailable" || queryRes.status === "error") {
           setStatusMessage(queryRes.error ?? "No declaration found");
           return false;
         }
         if (queryRes.items.length === 1) {
+          if (!query.isCurrent()) return false;
           recordNavigationLocation(file.ref, position);
         }
-        return navigateLocations("Declarations", queryRes.items, "No declaration found");
+        return navigateLocations("Declarations", queryRes.items, "No declaration found", query.isCurrent);
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
       }
     },
-    [lspDescriptorForFile, lspSessionGeneration, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
+    [beginSemanticQuery, lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
 
   const goToTypeDefinition = useCallback(
@@ -11940,43 +12018,36 @@ export function CodeWorkspaceTab({
         return false;
       }
       try {
+        const query = beginSemanticQuery("typeDefinitions", file, descriptor, position);
         const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
           kind: "typeDefinitions",
-          identity: {
-            workspaceId: workspaceInstanceId,
-            fileKey: file.key,
-            uri: descriptor.documentUri ?? descriptor.filePath,
-            position,
-            documentRevision: file.documentRevision,
-            lspSessionGeneration: lspSessionGeneration(),
-          },
-          fetcher: async () => {
-            const result = await lspTypeDefinition(descriptor, position);
+          identity: query.identity,
+          fetcher: async ({ signal }) => {
+            const result = await lspTypeDefinition(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          guards: {
-            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
-            getLiveLspGeneration: () => lspSessionGeneration(),
-          },
+          guards: query.guards,
         });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
+        if (!query.isCurrent(queryRes.identity)) return false;
         if (queryRes.status === "unavailable" || queryRes.status === "error") {
           setStatusMessage(queryRes.error ?? "No type definition found");
           return false;
         }
         if (queryRes.items.length === 1) {
+          if (!query.isCurrent()) return false;
           recordNavigationLocation(file.ref, position);
         }
-        return navigateLocations("Type definitions", queryRes.items, "No type definition found");
+        return navigateLocations("Type definitions", queryRes.items, "No type definition found", query.isCurrent);
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
       }
     },
-    [lspDescriptorForFile, lspSessionGeneration, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
+    [beginSemanticQuery, lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
 
   const goToImplementation = useCallback(
@@ -11989,43 +12060,36 @@ export function CodeWorkspaceTab({
         return false;
       }
       try {
+        const query = beginSemanticQuery("implementations", file, descriptor, position);
         const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
           kind: "implementations",
-          identity: {
-            workspaceId: workspaceInstanceId,
-            fileKey: file.key,
-            uri: descriptor.documentUri ?? descriptor.filePath,
-            position,
-            documentRevision: file.documentRevision,
-            lspSessionGeneration: lspSessionGeneration(),
-          },
-          fetcher: async () => {
-            const result = await lspImplementation(descriptor, position);
+          identity: query.identity,
+          fetcher: async ({ signal }) => {
+            const result = await lspImplementation(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
             return result.locations;
           },
-          guards: {
-            getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? file.documentRevision,
-            getLiveLspGeneration: () => lspSessionGeneration(),
-          },
+          guards: query.guards,
         });
         if (queryRes.status === "stale" || queryRes.status === "cancelled") {
           return false;
         }
+        if (!query.isCurrent(queryRes.identity)) return false;
         if (queryRes.status === "unavailable" || queryRes.status === "error") {
           setStatusMessage(queryRes.error ?? "No implementation found");
           return false;
         }
         if (queryRes.items.length === 1) {
+          if (!query.isCurrent()) return false;
           recordNavigationLocation(file.ref, position);
         }
-        return navigateLocations("Implementations", queryRes.items, "No implementation found");
+        return navigateLocations("Implementations", queryRes.items, "No implementation found", query.isCurrent);
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
       }
     },
-    [lspDescriptorForFile, lspSessionGeneration, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile, workspaceInstanceId],
+    [beginSemanticQuery, lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
   goToDefinitionRef.current = goToDefinition;
   peekDefinitionRef.current = peekDefinition;
@@ -12429,6 +12493,7 @@ export function CodeWorkspaceTab({
       const expectedRevision = semanticIndex.current().revision;
       const live = await ensureWorkspaceSemanticDocumentsSynced(file.key, expectedRevision);
       if (!live) {
+        if (referencesRequestSequenceRef.current !== requestId) return;
         setReferencesResult({
           loading: false,
           origin: file.subtitle,
@@ -12454,6 +12519,7 @@ export function CodeWorkspaceTab({
         return;
       }
       const buildToken = semanticIndex.beginBuild("language-server");
+      let query: ReturnType<typeof beginSemanticQuery> | null = null;
       try {
         // §8.19.7 real identity + origin symbol key: name comes from the
         // provider's rename range when available (fallback: word at caret),
@@ -12465,6 +12531,10 @@ export function CodeWorkspaceTab({
           symbolRange = prepared.range ?? null;
         } catch {
           symbolRange = null;
+        }
+        if (referencesRequestSequenceRef.current !== requestId) {
+          semanticIndex.abandonBuild(buildToken);
+          return;
         }
         const lines = live.text.split("\n");
         const lineText = lines[position.line] ?? "";
@@ -12483,21 +12553,30 @@ export function CodeWorkspaceTab({
           providerGeneration: lspSessionGeneration(),
           workspaceRoots: rootsRef.current.map((root) => root.path),
         });
+        const queryContext = beginSemanticQuery("references", live, descriptor, position);
+        query = queryContext;
         // §8.20.5 W4 / §8.26.8 AA7: execute via SemanticQueryHost with cancellation and generation guard
-        const queryRes = await semanticQueryHostRef.current.execute<LspLocation>(
-          "references",
-          identity.uri,
-          position,
-          (_signal) => lspReferences(descriptor, position, selection.includeDeclaration).then((res) => {
+        const queryRes = await semanticQueryHostRef.current.executeEnvelope<LspLocation>({
+          kind: "references",
+          identity: queryContext.identity,
+          fetcher: async ({ signal }) => {
+            const res = await lspReferences(
+              descriptor,
+              position,
+              selection.includeDeclaration,
+              queryContext.lspOptions(signal),
+            );
             updateLspStatusForFile(live, res.status);
             return res.locations;
-          }),
-          {
-            generation: live.documentRevision ?? 0,
-            getLiveGeneration: () => live.documentRevision ?? 0,
           },
-        );
+          guards: queryContext.guards,
+        });
         if (queryRes.status === "cancelled" || queryRes.status === "stale") {
+          semanticIndex.abandonBuild(buildToken);
+          return;
+        }
+        if (referencesRequestSequenceRef.current !== requestId || !queryContext.isCurrent(queryRes.identity)) {
+          semanticIndex.abandonBuild(buildToken);
           return;
         }
         const locations: readonly LspLocation[] = queryRes.items ?? [];
@@ -12518,7 +12597,7 @@ export function CodeWorkspaceTab({
           }
           return;
         }
-        if (referencesRequestSequenceRef.current !== requestId) return;
+        if (referencesRequestSequenceRef.current !== requestId || !queryContext.isCurrent()) return;
         referencesRerunRef.current = { fileKey: live.key, uri: identity.uri, position, symbolName };
         // §8.20.5 W4: freeze the scoped result into the shared session — the
         // tool window rows, the Show Usages popup and recents all read THIS
@@ -12542,6 +12621,7 @@ export function CodeWorkspaceTab({
           locations,
           isLibraryUri: libraryUriClassifierForRoots(rootsRef.current, relativePathWithinRoot),
         }) ?? null;
+        if (referencesRequestSequenceRef.current !== requestId || !queryContext.isCurrent()) return;
         const scopedLocations = (snapshot?.envelope.results ?? []).map(({ role: _role, ...location }) => location);
         setUsagesRecentsRevision((revision) => revision + 1);
         setReferencesResult({
@@ -12556,6 +12636,13 @@ export function CodeWorkspaceTab({
         });
         setStatusMessage(`${scopedLocations.length} reference${scopedLocations.length === 1 ? "" : "s"} found${scopedLocations.length !== locations.length ? ` (${locations.length} unscoped)` : ""}`);
       } catch (err) {
+        if (
+          referencesRequestSequenceRef.current !== requestId
+          || (query !== null && !query.isCurrent())
+        ) {
+          semanticIndex.abandonBuild(buildToken);
+          return;
+        }
         semanticIndex.failBuild(buildToken, errorMessage(err));
         if (referencesRequestSequenceRef.current !== requestId) return;
         setReferencesResult({
@@ -12569,17 +12656,20 @@ export function CodeWorkspaceTab({
       }
     },
     [
+      beginSemanticQuery,
       ensureWorkspaceSemanticDocumentsSynced,
       lspDescriptorForFile,
       lspSessionGeneration,
       projectAnalysisSnapshot?.projectFingerprint,
       rootsRef,
       semanticIndex.beginBuild,
+      semanticIndex.abandonBuild,
       semanticIndex.current,
       semanticIndex.failBuild,
       semanticIndex.finishQuery,
       setStatusMessage,
       updateLspStatusForFile,
+      workspaceInstanceId,
     ],
   );
 
@@ -15312,6 +15402,7 @@ export function CodeWorkspaceTab({
                 onOpenLocation={(location) => void openLspLocation(location)}
                 queryHost={semanticQueryHostRef.current}
                 liveLspGeneration={lspSessionGeneration}
+                liveDocumentRevision={() => openFilesRef.current[callHierarchyRoot?.fileKey ?? ""]?.documentRevision ?? -1}
                 onStatus={(status) => {
                   if (activeFile) updateLspStatusForFile(activeFile, status);
                 }}
@@ -15344,6 +15435,7 @@ export function CodeWorkspaceTab({
                 onOpenLocation={(location) => void openLspLocation(location)}
                 queryHost={semanticQueryHostRef.current}
                 liveLspGeneration={lspSessionGeneration}
+                liveDocumentRevision={() => openFilesRef.current[typeHierarchyRoot?.fileKey ?? ""]?.documentRevision ?? -1}
                 onStatus={(status) => {
                   if (activeFile) updateLspStatusForFile(activeFile, status);
                 }}
