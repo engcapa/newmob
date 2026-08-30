@@ -1,106 +1,56 @@
 ---
 name: code-workspace-idea-task
-description: Claim and deliver one small Taomni Code Workspace editor task from the current IntelliJ IDEA parity backlog. Use when an agent should select or receive an ED-* task, implement it, run proportionate verification, and update the shared task status. Do not use the historical design document as a claim queue or for unrelated Code Workspace work.
+description: Claim and deliver exactly one small Taomni Code Workspace editor task from the active IntelliJ IDEA parity backlog. Use when an agent should select or receive a claimable ED-* card, implement or finish its evidence, verify every acceptance ID, and update the shared board. Do not use the historical design document as a queue or for unrelated Code Workspace work.
 ---
 
 # Code Workspace IDEA Task
 
-Deliver exactly one task from `claudedocs/code-workspace-idea-parity-backlog.md` without turning historical plans, model-only code, or unrun evidence into completion claims.
+Deliver one `ED-*` task from `claudedocs/code-workspace-idea-parity-backlog.md`. A historical green task, exported model, fixture-only path, screenshot, or unrun check is not current completion evidence.
 
-## Sources Of Truth
+## Read The Contract
+
+Before claiming:
 
 1. Read the repository `AGENTS.md`.
-2. Read the new backlog's sections 1-5, the selected task card, its dependencies, and the verification rules relevant to that card.
-3. Read `claudedocs/code-workspace-ide-design.md` only when the card's `legacy` field or implementation question requires historical design detail. Never claim work from its old `N/W/V/U/X/Y/Z/AA/BB` queues.
-4. Re-read current production consumers and tests. The backlog is an audited baseline, not permission to ignore code that landed later.
+2. Read backlog sections 1-3, the selected card, and its dependency cards.
+3. Read `claudedocs/code-workspace-idea-specs/shared-contracts.md` and the selected card's linked spec section, including the capability design above it.
+4. Read [references/task-lifecycle.md](references/task-lifecycle.md) before using the task-board script.
 
-Task `done` means the card's narrow outcome is complete. It does not by itself mean an IDEA capability is L2/L3 or release verified.
+Read `claudedocs/code-workspace-ide-design.md` only when a card's `legacy` links or an implementation question needs historical detail. Its old queues are archives, never claim sources.
 
-## Task Board
+Before verification or a terminal status update, read [references/evidence-policy.md](references/evidence-policy.md).
 
-Use the bundled script from the repository root:
+## Non-Negotiable Boundaries
 
-```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py validate
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py list --claimable
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py show ED-CLIP-001
-```
+- Work on exactly one claimed task. Do not absorb adjacent cards or unrelated editor/product work.
+- Claim only `ready` or `implemented` when all dependencies are `done`. Never manually edit ownership metadata.
+- Re-audit current production code after claiming. The backlog records a dated baseline, not an assumption that the gap is unchanged.
+- Satisfy the selected spec, every listed acceptance ID, and every required evidence kind. Do not weaken the spec or tests to fit existing code.
+- Trace a real chain: user entry -> production owner -> provider/IPC -> typed result/effect -> failure/cancel/stale -> undo/recovery -> observable evidence.
+- Preserve unrelated worktree changes. Keep edits within the card's outcome and ownership boundary.
+- Do not collapse `failed`, `cancelled`, `stale`, `conflict`, or unknown external effects into generic success/unavailable states.
+- Browser stubs cannot prove native filesystem, clipboard, IME, provider, performance, accessibility, or IDEA behavior.
+- A task is `done` only when structured evidence covers all acceptance IDs and every required evidence kind has a final passing check.
 
-If the user supplied a task ID, use that task after validating it is claimable. Otherwise choose the first highest-priority claimable task whose owner/files do not conflict with current work. Do not claim `blocked` or `deferred` tasks.
+## Implement And Verify
 
-Choose a stable owner label supplied by the harness/user when available. Otherwise use `codex-<UTC timestamp>-<short HEAD>`. Claim before editing production files:
+If current code already satisfies the card, do not reimplement it; verify the production path and close only with valid current evidence. If the implementation contradicts a material spec contract, stop scope-changing work and set `review_required` with the exact decision needed.
 
-```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py claim ED-CLIP-001 --owner <owner>
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-CLIP-001 --owner <owner> --status in_progress
-```
+For behavior changes, add a focused regression test that fails for the intended reason on the claimed baseline. Pure ADR, audit, catalog, or evidence tasks may use a deterministic failing check instead. Follow local patterns and avoid broad rewrites, especially in `CodeWorkspaceTab.tsx`.
 
-The claim command checks dependencies and current state while holding a lock. If it rejects the claim, re-list tasks and choose another; do not manually overwrite another owner's metadata.
+Always run focused checks. Run `pnpm build` for TypeScript contracts, production wiring, or UI changes, and relevant Rust tests for Rust/IPC changes. Use the repository `qa-ui-auto` skill when the task changes UI controls, user workflows, testcase YAML, feature ownership, or observation/evidence surfaces. Run native/provider/performance/accessibility/IDEA layers only in qualifying environments; record unavailable layers without fabricating substitutes.
 
-## Re-Audit Before Implementation
+Before updating the board, review the final diff and re-check every acceptance ID against the actual production path. Preserve failed checks before successful reruns in chronological evidence.
 
-Record `git status --short`, current HEAD, and the task baseline. Preserve unrelated user/agent changes.
+## Finish One Task
 
-Trace the existing path:
+End in one truthful state:
 
-```text
-user entry -> production owner -> provider/IPC -> typed result/effect
-           -> failure/cancel/stale -> undo/recovery -> observable evidence
-```
+- `done`: all acceptance and required evidence passed.
+- `implemented`: production work is complete, but named required evidence is missing or currently failing.
+- `review_required`: implementation and spec have a material contract conflict requiring maintainer review.
+- `blocked`: a reproducible external prerequisite prevents further progress; record the condition needed to resume.
 
-Then decide one of three cases:
+Validate the board after the update. If the caller requested one commit per task, stage only this task's implementation, tests, necessary spec changes, and backlog update, then create one conventional commit containing the task ID. Never include unrelated user/agent changes.
 
-- The gap still exists: continue with the task.
-- Current code already satisfies the entire card: verify the production path and required checks, then update the card with that evidence. Do not reimplement it.
-- The card is stale or its contract is wrong: stop implementation, record the concrete discrepancy, and ask for review before changing scope or dependencies.
-
-Keep the task's single outcome and main ownership boundary. A discovery that belongs to the next card becomes a note or separate backlog update, not extra production work in this task.
-
-## Implement
-
-For behavior changes, add a focused test that fails against the claimed baseline for the intended reason. Pure audit, ADR, catalog, or evidence tasks may instead start with a deterministic check that exposes the gap.
-
-Follow existing repository patterns and make the smallest production change that closes the card. In particular:
-
-- Do not rewrite or reformat `CodeWorkspaceTab.tsx`; edit only the relevant owner region.
-- Do not treat exported types, comments, protocol fields, fixture-only modules, screenshots, or mock-only tests as production workflow evidence.
-- Do not turn typed `failed/stale/cancelled/conflict` results into `null` or `unavailable` to make tests green.
-- Preserve first-failure output. A later green rerun is additional evidence, not a replacement.
-- Do not mix Mail, Terminal, SFTP, VNC, File Browser, Build/Run/Debug, or unrelated refactors into an Editor parity task.
-
-## Verify
-
-Scale verification to the card, but always run its focused tests. Also run:
-
-- `pnpm build` for shared TypeScript contracts, production wiring, or UI changes.
-- Relevant Rust tests for Rust/IPC changes. Format only changed Rust files with `rustfmt --edition 2024 <files>`.
-- Full `pnpm test` for shared editor state, action, layout, save, completion, query, or cross-workspace behavior when feasible.
-
-When the task changes UI controls, user workflow, feature ownership, testcase YAML, or observation/evidence surfaces, explicitly use the repository `qa-ui-auto` skill. Follow its `audit -> fix one gap -> audit` loop. It does not prove visual layout, viewport behavior, a11y, performance, or native behavior.
-
-Only run native/provider/performance/a11y/IDEA comparison when the card requires it and the environment is available. Never substitute browser stubs for native disk/clipboard/provider effects. Record required but unrun layers as `not run` and leave the task non-done when those layers are part of its DoD.
-
-## Review And Update
-
-Before marking completion, review the diff for unrelated files and re-read the task card against the final production path. Update status with concise evidence:
-
-```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-CLIP-001 \
-  --owner <owner> \
-  --status done \
-  --evidence "focused 12/12; pnpm build exit 0; qa audit exit 0"
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py validate
-```
-
-Use `blocked` only with a reproducible reason and next condition:
-
-```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-PROJECT-002 \
-  --owner <owner> \
-  --status blocked \
-  --note "Maven fixture cannot resolve artifacts offline; requires configured mirror"
-```
-
-Do not mark `done` when any card-specific verification is failing or unrun. If implementation is complete but required native/provider review cannot run, keep `in_progress` or use `blocked` with the exact missing condition.
-
-Report the task ID, baseline/final HEAD or working-tree state, changed files, production effect chain, focused/full/QA/native command exits, unrun layers, and remaining capability ceiling. Do not claim broader IDEA parity than the evidence supports.
+Report the task ID, baseline and final worktree/commit state, files changed, production effect chain, commands and results, unrun layers, terminal status, and the narrow capability ceiling. Do not claim broader IDEA parity than the evidence proves.
