@@ -6467,7 +6467,10 @@ export function CodeWorkspaceTab({
   }, [gitRoots, gitSnapshots, roots]);
 
   const gitTargetForFile = useCallback((file: OpenFileState | null) => {
-    if (!file || file.loading || file.ref.kind !== "root") return null;
+    // A root reference is enough to prefetch the immutable HEAD blob while
+    // the working-tree buffer is loading. Buffer-dependent consumers still
+    // gate on `file.loading` before they render or query.
+    if (!file || file.ref.kind !== "root") return null;
     const ref = file.ref;
     const root = roots.find((candidate) => candidate.id === ref.rootId);
     if (!root) return null;
@@ -6515,7 +6518,10 @@ export function CodeWorkspaceTab({
       const file = openFiles[activeKey];
       const target = gitTargetForFile(file ?? null);
       const head = gitHeadTextByFile[activeKey];
-      if (!file || !target || !head || head.sourceKey !== target.sourceKey) return [];
+      // A repository without a HEAD cannot have a comparable line diff. Keep
+      // the hook idle until the snapshot exposes a real HEAD and its blob is
+      // read, avoiding a throwaway debounce during Git discovery.
+      if (!file || file.loading || !target?.headOid || !head || head.sourceKey !== target.sourceKey) return [];
       return [{
         key: activeKey,
         sourceKey: target.sourceKey,
@@ -6581,7 +6587,7 @@ export function CodeWorkspaceTab({
       // disabled from the first dirty keystroke rather than one batch later.
       const file = key ? openFilesRef.current[key] ?? null : null;
       const target = gitTargetForFile(file);
-      if (!intelligencePreferences.inlineBlameEnabled || !file || file.dirty || !target?.headOid) {
+      if (!intelligencePreferences.inlineBlameEnabled || !file || file.loading || file.dirty || !target?.headOid) {
         return `${groupId}:${key ?? "empty"}:disabled`;
       }
       const line = (cursorPositions[groupId]?.line ?? 0) + 1;
@@ -6617,7 +6623,7 @@ export function CodeWorkspaceTab({
       const key = groupState?.activeKey ?? null;
       const file = key ? openFilesRef.current[key] ?? null : null;
       const target = gitTargetForFile(file);
-      if (!intelligencePreferences.inlineBlameEnabled || !file || file.dirty || !target?.headOid) {
+      if (!intelligencePreferences.inlineBlameEnabled || !file || file.loading || file.dirty || !target?.headOid) {
         setGitBlameByGroup((current) => current[groupId] === null ? current : { ...current, [groupId]: null });
         return;
       }

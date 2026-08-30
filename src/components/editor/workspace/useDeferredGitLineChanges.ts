@@ -112,6 +112,11 @@ export function useDeferredGitLineChanges(
       cancelIdleRef.current = null;
     }
 
+    if (sources.length === 0) {
+      setChangesByFile((current) => (Object.keys(current).length === 0 ? current : {}));
+      return;
+    }
+
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
       cancelIdleRef.current = scheduleWhenIdle(() => {
