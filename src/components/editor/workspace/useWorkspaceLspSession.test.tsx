@@ -256,6 +256,28 @@ describe("useWorkspaceLspSession", () => {
     );
   });
 
+  it("advances the error generation when the same provider failure recurs", async () => {
+    lspMocks.lspOpenDocument.mockRejectedValue(new Error("server unavailable"));
+    const openFilesRef = { current: { [file.key]: file } };
+    let lspFiles: Record<string, LspFileState> = {};
+    const updateLspFiles = vi.fn((updater: Record<string, LspFileState> | ((current: Record<string, LspFileState>) => Record<string, LspFileState>)) => {
+      lspFiles = typeof updater === "function" ? updater(lspFiles) : updater;
+    });
+    const { result } = renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-error-generation",
+      roots,
+      openFilesRef,
+      updateLspFiles,
+      onError: vi.fn(),
+    }));
+
+    await act(async () => result.current.syncDocument(file, "open"));
+    expect(lspFiles[file.key]?.errorGeneration).toBe(1);
+
+    await act(async () => result.current.syncDocument(file, "open"));
+    expect(lspFiles[file.key]?.errorGeneration).toBe(2);
+  });
+
   it("stops every backend LSP session when the workspace unmounts", () => {
     const { unmount } = renderHook(() => useWorkspaceLspSession({
       workspaceInstanceId: "workspace-stop",

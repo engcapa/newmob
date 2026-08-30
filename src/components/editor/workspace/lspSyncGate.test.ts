@@ -29,6 +29,7 @@ function state(partial: Partial<LspFileState> = {}): LspFileState {
     syncing: false,
     syncedText: null,
     error: null,
+    errorGeneration: 0,
     ...partial,
   };
 }

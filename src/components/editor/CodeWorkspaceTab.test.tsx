@@ -1047,12 +1047,21 @@ describe("CodeWorkspaceTab", () => {
     };
     workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/Program.cs", "class Program {}"));
     lspMocks.lspDetectServers.mockResolvedValue([csharpStatus()]);
-    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus());
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({ error: "csharp-ls failed to start" }));
 
     renderWorkspace(workspace);
 
     await screen.findByTitle("app / src/Program.cs");
     await waitFor(() => expect(lspMocks.lspOpenDocument).toHaveBeenCalled(), { timeout: 3_000 });
+
+    const banner = await screen.findByTestId("code-workspace-banner-lsp-error:root:app:src/Program.cs:csharp");
+    expect(banner).toHaveTextContent("Language Server Degraded");
+    expect(banner).toHaveTextContent("csharp-ls failed to start");
+    fireEvent.click(screen.getByTestId("banner-action-open-settings"));
+    expect(settingsNavigationMocks.openSettingsSection).toHaveBeenCalledTimes(1);
+    expect(settingsNavigationMocks.openSettingsSection).toHaveBeenCalledWith("language-servers", {
+      presetId: "csharp",
+    });
 
     const link = await screen.findByTestId("code-workspace-lsp-open-settings");
     expect(link).toBeInTheDocument();

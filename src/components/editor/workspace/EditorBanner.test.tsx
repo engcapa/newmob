@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EditorBanner } from "./EditorBanner";
-import type { EditorBannerItem } from "./editorBannerModel";
+import { editorBannerDismissalKey, type EditorBannerItem } from "./editorBannerModel";
 
 afterEach(() => {
   cleanup();
@@ -25,6 +25,7 @@ describe("EditorBanner", () => {
         title: "File is read-only",
         description: "Modifications cannot be saved directly.",
         priority: 100,
+        conditionGeneration: "g1",
         actions: [
           {
             id: "unlock",
@@ -49,6 +50,36 @@ describe("EditorBanner", () => {
 
     const dismissBtn = screen.getByTestId("banner-dismiss-b-ro");
     fireEvent.click(dismissBtn);
-    expect(handleDismiss).toHaveBeenCalledWith("b-ro");
+    expect(handleDismiss).toHaveBeenCalledWith(editorBannerDismissalKey(banners[0]!));
+  });
+
+  it("keeps an asynchronous action failure visible and retryable", async () => {
+    const run = vi.fn()
+      .mockRejectedValueOnce(new Error("settings unavailable"))
+      .mockResolvedValueOnce(undefined);
+    const banner: EditorBannerItem = {
+      id: "b-lsp",
+      category: "indexing-degraded",
+      severity: "warning",
+      title: "Language Server Degraded",
+      priority: 60,
+      conditionGeneration: "provider-1",
+      actions: [{ id: "configure", label: "Configure", run, primary: true }],
+      createdAt: 1,
+    };
+
+    render(<EditorBanner banners={[banner]} onDismiss={vi.fn()} />);
+
+    const action = screen.getByTestId("banner-action-configure");
+    fireEvent.click(action);
+    await waitFor(() => expect(screen.getByTestId("banner-action-error-configure")).toHaveTextContent(
+      "Configure failed: settings unavailable",
+    ));
+    expect(screen.getByTestId("code-workspace-banner-b-lsp")).toBeInTheDocument();
+    expect(action).not.toBeDisabled();
+
+    fireEvent.click(action);
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("banner-action-error-configure")).toBeNull();
   });
 });

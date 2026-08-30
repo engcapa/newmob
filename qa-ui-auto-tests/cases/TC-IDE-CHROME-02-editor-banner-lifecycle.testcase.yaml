@@ -1,0 +1,91 @@
+id: TC-IDE-CHROME-02
+title: "Editor banner lifecycle, keyboard focus, and setup routing"
+description: |
+  ED-CHROME-002 browser slice. Creates a C# buffer in the browser VFS so the
+  production LSP boundary returns its typed unavailable state. Verifies the
+  file-scoped banner survives switching away and back, exposes accessible
+  actions and dismissal, keeps its action focus in the banner, and routes
+  Configure to the single Language Servers settings owner. Browser VFS does
+  not prove native filesystem or provider behavior; action failure recovery is
+  covered by the focused EditorBanner unit test.
+covers: [F25.5]
+tags: [code-workspace, ide-chrome, editor-banner, unavailable-contract, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+
+  # Add the browser-VFS preview folder (/preview prefilled in the prompt).
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+
+  # Create a real VFS C# file; opening it drives the production LSP session.
+  - click: '[data-testid="code-workspace-tree-new-file"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill:
+      selector: '[data-testid="text-input-dialog-input"]'
+      value: Program.cs
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"][data-path="Program.cs"]'
+  - wait_for: '[data-testid="code-workspace-editor"] .cm-content'
+
+  # A1: an unavailable condition is file-scoped and is restored when the file
+  # becomes active again; the banner is above the editor, not a toast.
+  - wait_for: '[data-testid="code-workspace-editor-banners"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor-banners"]'
+      contains: "Language Server Degraded"
+      timeout_sec: 15
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor-banners"]'
+      contains: "C# language server is not available in browser preview"
+      timeout_sec: 15
+  - click: '[data-testid="code-workspace-tree-file"][data-path="README.txt"]'
+  - assert_not_visible: '[data-testid="code-workspace-editor-banners"]'
+  - click: '[data-testid="code-workspace-tree-file"][data-path="Program.cs"]'
+  - wait_for: '[data-testid="code-workspace-editor-banners"]'
+  - assert_visible: '[data-testid="code-workspace-editor-banners"]'
+
+  # A3: the real browser focus chain reaches both banner controls by keyboard,
+  # and the banner's block ends before the editor surface starts.
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor-banners"]'
+      name: role
+      equals: region
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor-banners"]'
+      name: aria-live
+      equals: polite
+  - assert_visible: '[data-testid="banner-action-open-settings"]'
+  - assert_visible: '[data-testid^="banner-dismiss-"]'
+  - press:
+      key: Tab
+      selector: '[data-testid="banner-action-open-settings"]'
+  - eval_readonly:
+      expression: >-
+        document.activeElement?.getAttribute('data-testid')?.startsWith('banner-dismiss-')
+      expect_truthy: true
+  - press:
+      key: Shift+Tab
+      selector: '[data-testid^="banner-dismiss-"]'
+  - eval_readonly:
+      expression: >-
+        document.activeElement?.getAttribute('data-testid') === 'banner-action-open-settings'
+      expect_truthy: true
+
+  # A2: Configure reaches the one settings owner and focuses the C# preset.
+  - click: '[data-testid="banner-action-open-settings"]'
+  - wait_for: '[data-testid="language-servers-settings"]'
+  - wait_for: '[data-testid="language-server-row-csharp"]'
+  - assert_attribute:
+      selector: '[data-testid="language-server-row-csharp"]'
+      name: data-focused
+      equals: "true"

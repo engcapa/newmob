@@ -193,6 +193,7 @@ describe("codeWorkspaceStore", () => {
         syncing: false,
         syncedText: null,
         error: null,
+        errorGeneration: 0,
       },
     });
     store.updateExpandedRootIds("ws", ["r1"]);

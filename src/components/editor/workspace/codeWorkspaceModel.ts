@@ -96,6 +96,8 @@ export interface LspFileState {
   syncing: boolean;
   syncedText: string | null;
   error: string | null;
+  /** Increments when a failed condition reappears after being cleared. */
+  errorGeneration: number;
 }
 
 export type TreeSelection =
@@ -1447,6 +1449,7 @@ export function emptyLspFileState(): LspFileState {
     syncing: false,
     syncedText: null,
     error: null,
+    errorGeneration: 0,
   };
 }
 

@@ -179,6 +179,10 @@
 - `[data-testid="keymap-replace-editor.replace-0"]` — display [optional] — F25.5.keymap-replace-slot
 - `[data-testid="code-workspace-parameter-info"]` — display [optional] — F25.5.parameter-info-tooltip
 - `[data-testid="code-workspace-quick-doc"]` — display [optional] — F25.5.quick-doc-popup
+- `[data-testid="code-workspace-editor-banners"]` — display [optional] — F25.5.editor-banners
+- `[data-testid="banner-action-open-settings"]` — interactive [optional] — F25.5.editor-banner-open-settings
+- `[data-testid="banner-action-error-open-settings"]` — display [optional] — F25.5.editor-banner-action-error
+- `[data-testid^="banner-dismiss-"]` — interactive [optional] — F25.5.editor-banner-dismiss
 - `[data-testid="code-workspace-bottom-tab-problems"]` — interactive [optional] — F25.5.problems-dock-tab
 - `[data-testid="code-workspace-problems-panel"]` — display [optional] — F25.5.problems-panel
 - `[data-testid="problems-scope-project"]` — interactive [optional] — F25.5.problems-scope-project
@@ -1002,6 +1006,9 @@
 - `[data-testid^="workspace-sdk-root-"]` — display [optional] — F11.2.workspace-sdk-root
 - `[data-testid^="workspace-kotlin-profile-"]` — display [optional] — F11.2.workspace-kotlin-profile
 - `[data-testid^="workspace-sdk-binding-"]` — interactive [optional] — F11.2.workspace-sdk-binding
+- `[data-testid="language-servers-settings"]` — display [optional] — F11.2.language-servers-settings
+- `[data-testid^="language-server-row-"]` — display [optional] — F11.2.language-server-row
+  ↳ `[data-testid="language-server-row-csharp"]` — alias
 
 ## sftp (F7.2)
 

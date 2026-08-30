@@ -18,6 +18,8 @@ export interface EditorBannerAction {
 export interface EditorBannerItem {
   id: string;
   fileKey?: string; // If specified, only shown for that file; if undefined, global to editor
+  /** Changes whenever the same condition is observed again after recovery. */
+  conditionGeneration: string;
   category: EditorBannerCategory;
   severity: EditorBannerSeverity;
   title: string;
@@ -28,16 +30,20 @@ export interface EditorBannerItem {
   createdAt: number;
 }
 
+export function editorBannerDismissalKey(banner: Pick<EditorBannerItem, "id" | "conditionGeneration">): string {
+  return `${banner.id}@${banner.conditionGeneration}`;
+}
+
 /**
  * Filters and prioritizes active banners for the current active file.
  */
 export function selectActiveBanners(
   banners: readonly EditorBannerItem[],
   activeFileKey: string | null | undefined,
-  dismissedIds: ReadonlySet<string>,
+  dismissedKeys: ReadonlySet<string>,
 ): EditorBannerItem[] {
   return banners
-    .filter((b) => !dismissedIds.has(b.id))
+    .filter((b) => !dismissedKeys.has(editorBannerDismissalKey(b)))
     .filter((b) => !b.fileKey || b.fileKey === activeFileKey)
-    .sort((a, b) => b.priority - a.priority || a.createdAt - b.createdAt);
+    .sort((a, b) => b.priority - a.priority || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 }

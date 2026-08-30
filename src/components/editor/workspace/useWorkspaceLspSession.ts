@@ -131,6 +131,17 @@ function sameDiagnostics(left: LspDiagnostic[], right: LspDiagnostic[]): boolean
   return true;
 }
 
+function nextErrorGeneration(
+  existing: LspFileState,
+  nextStatusError: string | null | undefined,
+  nextStateError: string | null | undefined,
+): number {
+  const previousError = existing.status?.error ?? existing.error;
+  const nextError = nextStatusError ?? nextStateError ?? null;
+  const generation = existing.errorGeneration ?? 0;
+  return nextError && nextError !== previousError ? generation + 1 : generation;
+}
+
 export interface WorkspaceLspSessionController {
   serverStatuses: LspServerStatus[];
   commandPrefs: Record<string, string>;
@@ -357,6 +368,7 @@ export function useWorkspaceLspSession({
           status: effectiveStatus,
           syncing: false,
           error: null,
+          errorGeneration: nextErrorGeneration(existing, effectiveStatus.error, null),
         },
       };
     });
@@ -391,6 +403,7 @@ export function useWorkspaceLspSession({
             diagnostics: result.diagnostics,
             syncing: false,
             error: null,
+            errorGeneration: nextErrorGeneration(existing, result.status.error, null),
           },
         };
       });
@@ -406,6 +419,7 @@ export function useWorkspaceLspSession({
             ...existing,
             syncing: false,
             error: message,
+            errorGeneration: nextErrorGeneration(existing, null, message),
           },
         };
       });
@@ -604,6 +618,7 @@ export function useWorkspaceLspSession({
                 syncing: nextSyncing,
                 syncedText: currentSync.file.text,
                 error: null,
+                errorGeneration: nextErrorGeneration(existing, effectiveStatus.error, null),
               },
             };
           });
@@ -620,6 +635,11 @@ export function useWorkspaceLspSession({
               // follow-up keystrokes that are merely queued.
               syncing: false,
               error: errorMessage(error),
+              errorGeneration: nextErrorGeneration(
+                current[currentSync.file.key] ?? emptyLspFileState(),
+                null,
+                errorMessage(error),
+              ),
             },
           }));
         }
@@ -660,16 +680,20 @@ export function useWorkspaceLspSession({
         delete syncedTextRef.current[file.key];
         documentActiveRef.current[file.key] = false;
       }
-      updateLspFiles((current) => ({
-        ...current,
-        [file.key]: {
-          ...(current[file.key] ?? emptyLspFileState()),
-          status,
-          syncing: false,
-          syncedText: status.active ? text : null,
-          error: null,
-        },
-      }));
+      updateLspFiles((current) => {
+        const existing = current[file.key] ?? emptyLspFileState();
+        return {
+          ...current,
+          [file.key]: {
+            ...existing,
+            status,
+            syncing: false,
+            syncedText: status.active ? text : null,
+            error: null,
+            errorGeneration: nextErrorGeneration(existing, status.error, null),
+          },
+        };
+      });
       scheduleDiagnostics(file.key);
       const latest = openFilesRef.current[file.key];
       if (latest && latest.text !== text) {
@@ -683,6 +707,11 @@ export function useWorkspaceLspSession({
           ...(current[file.key] ?? emptyLspFileState()),
           syncing: false,
           error: errorMessage(error),
+          errorGeneration: nextErrorGeneration(
+            current[file.key] ?? emptyLspFileState(),
+            null,
+            errorMessage(error),
+          ),
         },
       }));
     }

@@ -2416,9 +2416,10 @@ controls:
 id: F11.2
 status: done
 area: settings/code-workspace
-components: [SdkSettings, WorkspaceSdkStatus]
+components: [SdkSettings, LanguageServersSettings, WorkspaceSdkStatus]
 files:
   - src/components/settings/SdkSettings.tsx
+  - src/components/settings/LanguageServersSettings.tsx
   - src/components/editor/workspace/WorkspaceSdkStatus.tsx
   - src/lib/editor/sdk.ts
   - src-tauri/src/sdk/
@@ -2573,6 +2574,17 @@ controls:
     selector: '[data-testid^="workspace-sdk-binding-"]'
     kind: interactive
     optional: true
+  # Language server setup is the single settings owner for editor banners.
+  - id: language-servers-settings
+    selector: '[data-testid="language-servers-settings"]'
+    kind: display
+    optional: true
+  - id: language-server-row
+    selector: '[data-testid^="language-server-row-"]'
+    kind: display
+    optional: true
+    aliases:
+      - '[data-testid="language-server-row-csharp"]'
 -->
 
 - 全局 SDK 管理支持登记、探测、自动发现、刷新和移除多个 Java/JDK、Kotlin、Scala 与 Python 安装，并为每类工具链设置兼容默认项。
@@ -5668,6 +5680,23 @@ controls:
     selector: '[data-testid="code-workspace-quick-doc"]'
     kind: display
     optional: true       # explicit Quick Documentation popup
+  # §8.20.2 W1 actionable editor conditions and retryable actions.
+  - id: editor-banners
+    selector: '[data-testid="code-workspace-editor-banners"]'
+    kind: display
+    optional: true       # rendered only when a file/workspace condition is active
+  - id: editor-banner-open-settings
+    selector: '[data-testid="banner-action-open-settings"]'
+    kind: interactive
+    optional: true       # rendered for provider/setup conditions
+  - id: editor-banner-action-error
+    selector: '[data-testid="banner-action-error-open-settings"]'
+    kind: display
+    optional: true       # rendered after a banner action fails
+  - id: editor-banner-dismiss
+    selector: '[data-testid^="banner-dismiss-"]'
+    kind: interactive
+    optional: true       # dismissible conditions only
   # §8.20.4 W3 Problems-surface controls (diagnostics presentation owner).
   - id: problems-dock-tab
     selector: '[data-testid="code-workspace-bottom-tab-problems"]'

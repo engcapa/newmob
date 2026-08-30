@@ -1776,7 +1776,10 @@ export function CodeWorkspaceTab({
     secondary: false,
   });
   const [occurrenceSession, setOccurrenceSession] = useState<OccurrenceHighlightSession | null>(null);
-  const [dismissedBannerIds, setDismissedBannerIds] = useState<Set<string>>(new Set());
+  const [dismissedBannerKeys, setDismissedBannerKeys] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setDismissedBannerKeys(new Set());
+  }, [workspaceInstanceId]);
   const [fileHighlightingLevels, setFileHighlightingLevels] = useState<Record<string, HighlightingLevel>>({});
 
   const getFileHighlightingLevel = useCallback((fileKey: string): HighlightingLevel => {
@@ -11143,6 +11146,12 @@ export function CodeWorkspaceTab({
     ));
   }, []);
 
+  const isEditorSurfaceKeyEvent = useCallback((target: EventTarget | null): boolean => {
+    const node = target instanceof Node ? target : null;
+    const element = node instanceof Element ? node : node?.parentElement;
+    return Boolean(element?.closest?.(".cm-editor"));
+  }, []);
+
   // Stable identity unless the active file actually changes, so the action
   // snapshot stays fresh on file switch without re-render feedback loops.
   const actionContextData = useMemo(() => {
@@ -11431,6 +11440,10 @@ export function CodeWorkspaceTab({
         setTabSwitcherOpen(false);
         return;
       }
+      // Bare Tab belongs to the focused native control outside the editor.
+      // Otherwise the active editor's insertTab action would consume a banner,
+      // tree, or settings control's browser focus navigation.
+      if (logicalKey === "tab" && !switcherModifier && !isEditorSurfaceKeyEvent(event.target)) return;
       // §8.18.5: Backspace inside the open Switcher closes the selected
       // editor entry (dirty tabs confirm) or hides the selected tool window.
       if (logicalKey === "backspace" && tabSwitcherOpenRef.current) {
@@ -11467,7 +11480,7 @@ export function CodeWorkspaceTab({
       window.removeEventListener("keydown", handleWorkspaceCommand, true);
       window.removeEventListener("keyup", release, true);
     };
-  }, [actionsController, isSurfaceOwnedKeyEvent, openFile, visible]);
+  }, [actionsController, isEditorSurfaceKeyEvent, isSurfaceOwnedKeyEvent, openFile, visible]);
 
   const runSearchEverywhereCommand = useCallback((commandId: string) => {
     setSearchEverywhereOpen(false);
@@ -14531,29 +14544,34 @@ export function CodeWorkspaceTab({
           description: "Modifications cannot be written directly to disk.",
           priority: 100,
           dismissible: false,
+          conditionGeneration: "persistent-read-only",
           createdAt: 0,
         });
       }
-      if (groupLspState?.error) {
+      const lspError = groupLspState?.status?.error ?? groupLspState?.error ?? null;
+      if (lspError && groupFile) {
+        const presetId = groupLspState?.status?.presetId ?? "default";
         list.push({
-          id: `lsp-error:${groupLspState.status?.presetId ?? "default"}`,
+          id: `lsp-error:${groupFile.key}:${presetId}`,
+          fileKey: groupFile.key,
           category: "indexing-degraded",
           severity: "warning",
           title: "Language Server Degraded",
-          description: groupLspState.error,
+          description: lspError,
           priority: 60,
+          conditionGeneration: `session-${lspSessionGeneration()}-error-${groupLspState?.errorGeneration ?? 0}`,
           actions: [
             {
               id: "open-settings",
               label: "Configure",
               primary: true,
-              run: () => openLanguageServersSettings(groupLspState.status?.presetId),
+              run: () => openLanguageServersSettings(groupLspState?.status?.presetId),
             },
           ],
           createdAt: 0,
         });
       }
-      return selectActiveBanners(list, groupFile?.key, dismissedBannerIds);
+      return selectActiveBanners(list, groupFile?.key, dismissedBannerKeys);
     })();
 
     return (
@@ -14563,7 +14581,7 @@ export function CodeWorkspaceTab({
         workspaceInstanceId={workspaceInstanceId}
         visible={visible}
         editorBanners={groupBanners}
-        onDismissBanner={(id) => setDismissedBannerIds((prev) => new Set(prev).add(id))}
+        onDismissBanner={(key) => setDismissedBannerKeys((prev) => new Set(prev).add(key))}
         workspaceActionHost={actionsController.host}
         transactionOwner={documentTransactionOwnerRef.current}
         readOnly={workspaceResourceOperationLocked}

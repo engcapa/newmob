@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  editorBannerDismissalKey,
   selectActiveBanners,
   type EditorBannerItem,
 } from "./editorBannerModel";
@@ -12,6 +13,7 @@ describe("editorBannerModel", () => {
       severity: "warning",
       title: "Language Server Degraded",
       priority: 50,
+      conditionGeneration: "provider-1",
       createdAt: 100,
     },
     {
@@ -21,6 +23,7 @@ describe("editorBannerModel", () => {
       severity: "info",
       title: "File is Read-Only",
       priority: 100,
+      conditionGeneration: "readonly-1",
       createdAt: 200,
     },
     {
@@ -30,6 +33,7 @@ describe("editorBannerModel", () => {
       severity: "error",
       title: "Encoding Mismatch",
       priority: 90,
+      conditionGeneration: "encoding-1",
       createdAt: 300,
     },
   ];
@@ -46,7 +50,29 @@ describe("editorBannerModel", () => {
   });
 
   it("excludes dismissed banners", () => {
-    const active = selectActiveBanners(sampleBanners, "fileA.ts", new Set(["b-file-readonly"]));
+    const active = selectActiveBanners(
+      sampleBanners,
+      "fileA.ts",
+      new Set([editorBannerDismissalKey(sampleBanners[1]!)]),
+    );
     expect(active.map((b) => b.id)).toEqual(["b-global-degraded"]);
+  });
+
+  it("dismisses only the condition generation that was acknowledged", () => {
+    const first = sampleBanners[1]!;
+    const nextGeneration = { ...first, conditionGeneration: "readonly-2" };
+    const dismissed = new Set([editorBannerDismissalKey(first)]);
+
+    expect(selectActiveBanners([first], "fileA.ts", dismissed)).toEqual([]);
+    expect(selectActiveBanners([nextGeneration], "fileA.ts", dismissed)).toEqual([nextGeneration]);
+  });
+
+  it("uses the banner id as a deterministic final ordering tie-breaker", () => {
+    const tied = [
+      { ...sampleBanners[0]!, id: "z-banner", conditionGeneration: "g1" },
+      { ...sampleBanners[0]!, id: "a-banner", conditionGeneration: "g1" },
+    ];
+    expect(selectActiveBanners(tied, "fileA.ts", new Set()).map((banner) => banner.id))
+      .toEqual(["a-banner", "z-banner"]);
   });
 });
