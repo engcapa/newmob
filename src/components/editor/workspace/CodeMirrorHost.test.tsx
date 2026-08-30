@@ -106,6 +106,31 @@ describe("CodeMirrorHost search", () => {
     expect(screen.getByText("0 matches")).toBeInTheDocument();
   });
 
+  it("routes Preserve Case through the mounted replace-all workflow", async () => {
+    const onChange = vi.fn();
+    const { content } = renderEditor("FOO foo Foo", onChange);
+    fireEvent.keyDown(content, { key: "r", code: "KeyR", ctrlKey: true });
+
+    fireEvent.input(await screen.findByRole("searchbox", { name: "Find" }), {
+      target: { value: "foo" },
+    });
+    fireEvent.input(screen.getByRole("textbox", { name: "Replace" }), {
+      target: { value: "bar" },
+    });
+    const preserveCase = screen.getByRole("button", { name: "Preserve case" });
+    fireEvent.click(preserveCase);
+    expect(preserveCase).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Replace all matches" }));
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenLastCalledWith(
+        "BAR bar Bar",
+        expect.objectContaining({ line: expect.any(Number), character: expect.any(Number) }),
+        expect.any(Number),
+      );
+    });
+  });
+
   it("opens replacement mode with Ctrl+R and closes with Escape", async () => {
     const { content } = renderEditor("alpha");
     fireEvent.keyDown(content, { key: "r", code: "KeyR", ctrlKey: true });

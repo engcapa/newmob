@@ -1,4 +1,4 @@
-import { SearchQuery, closeSearchPanel, findNext, findPrevious, getSearchQuery, replaceAll, replaceNext, setSearchQuery } from "@codemirror/search";
+import { RegExpCursor, SearchQuery, closeSearchPanel, findNext, findPrevious, getSearchQuery, replaceAll, replaceNext, setSearchQuery } from "@codemirror/search";
 import { EditorSelection, type EditorState } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 import { EditorView, type Panel, type ViewUpdate } from "@codemirror/view";
@@ -192,6 +192,57 @@ export function applyPreserveCase(originalMatch: string, replacement: string): s
   }
 }
 
+function unquoteReplacement(text: string): string {
+  return text.replace(/\\([nrt\\])/g, (_match, character: string) => {
+    if (character === "n") return "\n";
+    if (character === "r") return "\r";
+    if (character === "t") return "\t";
+    return "\\";
+  });
+}
+
+function expandRegexpReplacement(replacement: string, match: RegExpExecArray): string {
+  return unquoteReplacement(replacement).replace(/\$([$&]|\d+)/g, (token, reference: string) => {
+    if (reference === "&") return match[0] ?? "";
+    if (reference === "$") return "$";
+
+    // Match CodeMirror's replacement rule: prefer the longest valid group
+    // prefix so `$10` means group 10 when it exists, otherwise group 1 + `0`.
+    for (let length = reference.length; length > 0; length -= 1) {
+      const group = Number(reference.slice(0, length));
+      if (group > 0 && group < match.length) {
+        return `${match[group] ?? ""}${reference.slice(length)}`;
+      }
+    }
+    return token;
+  });
+}
+
+function replacementForMatch(
+  view: EditorView,
+  query: SearchQuery,
+  from: number,
+  to: number,
+): string {
+  if (!query.regexp) return unquoteReplacement(query.replace);
+
+  // SearchQuery.getCursor intentionally exposes only ranges. Re-run the same
+  // pattern through the public RegExpCursor to retain capture groups for the
+  // exact range selected by the query, including multiline expressions.
+  const cursor = new RegExpCursor(view.state.doc, query.search, {
+    ignoreCase: !query.caseSensitive,
+  });
+  for (let item = cursor.next(); !item.done; item = cursor.next()) {
+    if (item.value.from === from && item.value.to === to) {
+      return expandRegexpReplacement(query.replace, item.value.match);
+    }
+  }
+
+  // The range came from SearchQuery, so this is only a defensive fallback for
+  // a future CodeMirror cursor mismatch. It preserves the literal token text.
+  return unquoteReplacement(query.replace);
+}
+
 export function replaceNextPreserveCase(
   view: EditorView,
   query: SearchQuery,
@@ -227,7 +278,10 @@ export function replaceNextPreserveCase(
   if (!targetMatch) return false;
 
   const matchedText = view.state.sliceDoc(targetMatch.from, targetMatch.to);
-  const replacement = applyPreserveCase(matchedText, query.replace);
+  const replacement = applyPreserveCase(
+    matchedText,
+    replacementForMatch(view, query, targetMatch.from, targetMatch.to),
+  );
 
   view.dispatch({
     changes: { from: targetMatch.from, to: targetMatch.to, insert: replacement },
@@ -270,7 +324,10 @@ export function replaceAllPreserveCase(
 
   for (let item = cursor.next(); !item.done; item = cursor.next()) {
     const matchedText = view.state.sliceDoc(item.value.from, item.value.to);
-    const replacement = applyPreserveCase(matchedText, query.replace);
+    const replacement = applyPreserveCase(
+      matchedText,
+      replacementForMatch(view, query, item.value.from, item.value.to),
+    );
     changes.push({ from: item.value.from, to: item.value.to, insert: replacement });
   }
 

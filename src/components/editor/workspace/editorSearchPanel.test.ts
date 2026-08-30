@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { history, undo, undoDepth } from "@codemirror/commands";
 import { SearchQuery, search } from "@codemirror/search";
 import { javascript } from "@codemirror/lang-javascript";
 import { java } from "@codemirror/lang-java";
@@ -96,6 +97,46 @@ describe("§8.26 / ED-FIND-001: editorSearchPanel Preserve Case", () => {
     // Third replace (Foo -> Bar)
     replaceNextPreserveCase(view, query, true);
     expect(view.state.doc.toString()).toBe("BAR bar Bar");
+  });
+
+  it("expands regex groups and composes preserve case with whole-word matching", () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "FOOBAR fooBar foobarbaz",
+        extensions: [search()],
+      }),
+    });
+    const query = new SearchQuery({
+      search: "(foo)(bar)",
+      replace: "$2_$1",
+      caseSensitive: false,
+      wholeWord: true,
+      regexp: true,
+    });
+
+    expect(replaceAllPreserveCase(view, query, true)).toBe(true);
+    expect(view.state.doc.toString()).toBe("BAR_FOO bar_foo foobarbaz");
+  });
+
+  it("records replace-all as one undo transaction", () => {
+    const original = "FOO foo Foo";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: original,
+        extensions: [search(), history()],
+      }),
+    });
+    const query = new SearchQuery({
+      search: "foo",
+      replace: "bar",
+      caseSensitive: false,
+    });
+
+    expect(replaceAllPreserveCase(view, query, true)).toBe(true);
+    expect(view.state.doc.toString()).toBe("BAR bar Bar");
+    expect(undoDepth(view.state)).toBe(1);
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(original);
   });
 });
 
