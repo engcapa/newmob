@@ -188,6 +188,11 @@
 - `[data-testid="clipboard-history-search"]` — interactive [optional] — F25.5.clipboard-history-search
 - `[data-testid="clipboard-history-entry-0"]` — interactive [optional] — F25.5.clipboard-history-entry-0
 - `[data-testid="clipboard-history-close"]` — interactive [optional] — F25.5.clipboard-history-close
+- `[data-testid="code-workspace-breadcrumbs"]` — interactive [optional] — F25.5.navigation-bar
+- `[data-testid="code-workspace-breadcrumb-popup"]` — display [optional] — F25.5.navigation-bar-popup
+- `[data-testid="code-workspace-breadcrumb-popup-filter"]` — interactive [optional] — F25.5.navigation-bar-popup-filter
+- `[data-testid="code-workspace-breadcrumb-entry-directory"]` — interactive [optional] — F25.5.navigation-bar-popup-directory-entry
+- `[data-testid="code-workspace-breadcrumb-entry-file"]` — interactive [optional] — F25.5.navigation-bar-popup-file-entry
 
 ## code-workspace/execution (F25.1)
 

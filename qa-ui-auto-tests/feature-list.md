@@ -5524,9 +5524,10 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge]
+components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/Breadcrumbs.tsx
   - src/components/editor/workspace/ProjectFactsStatusBadge.tsx
   - src/components/editor/workspace/EditorGroup.tsx
   - src/components/editor/workspace/FileTreePane.tsx
@@ -5702,6 +5703,27 @@ controls:
     optional: true
   - id: clipboard-history-close
     selector: '[data-testid="clipboard-history-close"]'
+    kind: interactive
+    optional: true
+  # §8.19.8 IDEA-style navigation bar keyboard traversal and popup state.
+  - id: navigation-bar
+    selector: '[data-testid="code-workspace-breadcrumbs"]'
+    kind: interactive
+    optional: true
+  - id: navigation-bar-popup
+    selector: '[data-testid="code-workspace-breadcrumb-popup"]'
+    kind: display
+    optional: true
+  - id: navigation-bar-popup-filter
+    selector: '[data-testid="code-workspace-breadcrumb-popup-filter"]'
+    kind: interactive
+    optional: true
+  - id: navigation-bar-popup-directory-entry
+    selector: '[data-testid="code-workspace-breadcrumb-entry-directory"]'
+    kind: interactive
+    optional: true
+  - id: navigation-bar-popup-file-entry
+    selector: '[data-testid="code-workspace-breadcrumb-entry-file"]'
     kind: interactive
     optional: true
 -->

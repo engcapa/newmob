@@ -11135,6 +11135,14 @@ export function CodeWorkspaceTab({
     return "workspace";
   }, []);
 
+  const isSurfaceOwnedKeyEvent = useCallback((target: EventTarget | null): boolean => {
+    const node = target instanceof Node ? target : null;
+    const element = node instanceof Element ? node : node?.parentElement;
+    return Boolean(element?.closest?.(
+      '[data-testid="code-workspace-breadcrumbs"], [data-taomni-context-menu]',
+    ));
+  }, []);
+
   // Stable identity unless the active file actually changes, so the action
   // snapshot stays fresh on file switch without re-render feedback loops.
   const actionContextData = useMemo(() => {
@@ -11389,6 +11397,10 @@ export function CodeWorkspaceTab({
     // and Windows/Linux Ctrl+Tab share one code path and no second window
     // listener competes with the host dispatch below.
     const handleWorkspaceCommand = (event: KeyboardEvent) => {
+      // Navigation bar and popup controls own their keyboard state. They are
+      // rendered in the workspace or a portal, so the window capture listener
+      // must not turn Home/arrows/Enter/Escape into editor actions first.
+      if (isSurfaceOwnedKeyEvent(event.target)) return;
       const logicalKey = eventLogicalKey(event);
       const switcherModifier = event.ctrlKey || event.metaKey;
       if (logicalKey === "tab" && switcherModifier && !event.altKey) {
@@ -11455,7 +11467,7 @@ export function CodeWorkspaceTab({
       window.removeEventListener("keydown", handleWorkspaceCommand, true);
       window.removeEventListener("keyup", release, true);
     };
-  }, [actionsController, openFile, visible]);
+  }, [actionsController, isSurfaceOwnedKeyEvent, openFile, visible]);
 
   const runSearchEverywhereCommand = useCallback((commandId: string) => {
     setSearchEverywhereOpen(false);
@@ -14657,7 +14669,13 @@ export function CodeWorkspaceTab({
                 setSelected({ kind: "file", ref: groupFile.ref });
               }
             }}
-            onSymbolClick={(symbol) => revealEditorLocation(groupFile.key, symbol.selectionRange)}
+            onSymbolClick={(symbol) => {
+              revealEditorLocation(groupFile.key, symbol.selectionRange);
+              recordNavigationLocation(groupFile.ref, {
+                line: symbol.selectionRange.start.line,
+                character: symbol.selectionRange.start.character,
+              }, { replaceSameFile: false });
+            }}
             activeNavigationBar={navigationBarActiveByGroup[groupId]}
             onCloseNavigationBar={() => setNavigationBarActiveByGroup((prev) => ({ ...prev, [groupId]: false }))}
           />

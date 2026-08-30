@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -170,7 +171,7 @@ interface SegmentPopupProps {
   actions: BreadcrumbPathAction[];
   onQueryChange: (value: string) => void;
   onSelectedIndexChange: (index: number) => void;
-  onClose: () => void;
+  onClose: (restoreFocus?: boolean) => void;
   onPickPathChild: (child: BreadcrumbPathChild) => void;
   onPickSymbol: (symbol: LspDocumentSymbol) => void;
   onPickCollapsedSegment: (segment: BreadcrumbPathSegment) => void;
@@ -194,6 +195,7 @@ function SegmentPopup({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const [coords, setCoords] = useState({ left: open.anchor.left, top: open.anchor.bottom + 2 });
+  const popupId = `code-workspace-breadcrumb-popup-${useId().replace(/:/g, "")}`;
 
   const pathChildren = open.kind === "path" ? sortPathChildren(open.children) : [];
   const filteredPath = open.kind === "path"
@@ -214,6 +216,7 @@ function SegmentPopup({
   const actionStart = itemCount;
   const totalCount = itemCount + actions.length;
   const safeIndex = totalCount === 0 ? 0 : Math.min(selectedIndex, totalCount - 1);
+  const activeOptionId = totalCount > 0 ? `${popupId}-option-${safeIndex}` : undefined;
 
   useLayoutEffect(() => {
     const el = panelRef.current;
@@ -246,7 +249,8 @@ function SegmentPopup({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onClose();
+        event.stopPropagation();
+        onClose(true);
       }
     };
     document.addEventListener("mousedown", onMouseDown);
@@ -302,7 +306,7 @@ function SegmentPopup({
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      onClose();
+      onClose(true);
     }
   };
 
@@ -317,6 +321,8 @@ function SegmentPopup({
       ref={panelRef}
       role="listbox"
       aria-label={`${title} breadcrumb menu`}
+      aria-activedescendant={activeOptionId}
+      id={popupId}
       data-testid="code-workspace-breadcrumb-popup"
       data-taomni-context-menu="true"
       className="fixed z-[500] flex max-h-[min(360px,50vh)] w-[min(320px,calc(100vw-12px))] flex-col overflow-hidden rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-tooltip-bg)] text-[11px] text-[var(--taomni-code-text)] shadow-xl"
@@ -327,8 +333,13 @@ function SegmentPopup({
         <input
           ref={inputRef}
           type="search"
+          role="combobox"
           data-testid="code-workspace-breadcrumb-popup-filter"
           aria-label="Filter breadcrumb entries"
+          aria-controls={popupId}
+          aria-expanded="true"
+          aria-autocomplete="list"
+          aria-activedescendant={activeOptionId}
           className="taomni-input h-6 w-full text-[11px]"
           placeholder={open.kind === "path" && open.loading ? "Loading…" : "Type to filter"}
           value={query}
@@ -352,7 +363,9 @@ function SegmentPopup({
             key={`${child.kind}:${child.path}`}
             type="button"
             role="option"
+            id={`${popupId}-option-${index}`}
             aria-selected={index === safeIndex}
+            aria-current={child.active ? "page" : undefined}
             data-popup-index={index}
             data-active={child.active || undefined}
             data-testid={`code-workspace-breadcrumb-entry-${child.kind}`}
@@ -385,6 +398,7 @@ function SegmentPopup({
               key={`${symbol.name}:${symbol.selectionRange.start.line}:${symbol.selectionRange.start.character}`}
               type="button"
               role="option"
+              id={`${popupId}-option-${index}`}
               aria-selected={index === safeIndex}
               data-popup-index={index}
               data-testid="code-workspace-breadcrumb-entry-symbol"
@@ -409,6 +423,7 @@ function SegmentPopup({
             key={`collapsed:${segment.path}:${segment.label}`}
             type="button"
             role="option"
+            id={`${popupId}-option-${index}`}
             aria-selected={index === safeIndex}
             data-popup-index={index}
             data-testid="code-workspace-breadcrumb-entry-collapsed"
@@ -436,6 +451,7 @@ function SegmentPopup({
                 key={action.id}
                 type="button"
                 role="option"
+                id={`${popupId}-option-${index}`}
                 aria-selected={index === safeIndex}
                 data-popup-index={index}
                 data-testid={`code-workspace-breadcrumb-action-${action.id}`}
@@ -516,16 +532,20 @@ export function Breadcrumbs({
 
   // Close popup when the active trail changes (file switch / cursor jump).
   useEffect(() => {
+    // Invalidate an in-flight directory listing whenever the active trail or
+    // caret changes, so a late response cannot reopen an obsolete popup.
+    loadGenerationRef.current += 1;
     setPopup(null);
     setQuery("");
     setSelectedIndex(0);
   }, [pathSegments, position.line, position.character]);
 
-  const closePopup = useCallback(() => {
+  const closePopup = useCallback((restoreFocus = false) => {
     loadGenerationRef.current += 1;
     setPopup(null);
     setQuery("");
     setSelectedIndex(0);
+    if (restoreFocus) navRef.current?.focus();
   }, []);
 
   const actionsForOpen = useMemo(() => {
@@ -556,7 +576,7 @@ export function Breadcrumbs({
     try {
       const children = await loadPathChildren(segment);
       if (generation !== loadGenerationRef.current) return;
-      const activeIndex = Math.max(0, children.findIndex((child) => child.active));
+      const activeIndex = Math.max(0, sortPathChildren(children).findIndex((child) => child.active));
       setSelectedIndex(activeIndex);
       setPopup({
         kind: "path",
@@ -685,6 +705,8 @@ export function Breadcrumbs({
                 isFocused ? "ring-1 ring-[var(--taomni-accent)] bg-[var(--taomni-code-active-line-bg)]" : ""
               }`}
               aria-label="Hidden breadcrumb segments"
+              id={`code-workspace-breadcrumb-segment-${index}`}
+              tabIndex={activeNavigationBar ? -1 : 0}
               data-testid="code-workspace-breadcrumb-collapsed"
               data-nav-index={index}
               onClick={(event) => {
@@ -722,6 +744,9 @@ export function Breadcrumbs({
               flexible ? "flex-1" : ""
             } ${isFocused ? "ring-1 ring-[var(--taomni-accent)] bg-[var(--taomni-code-active-line-bg)]" : ""}`}
             aria-haspopup="listbox"
+            aria-current={index === items.length - 1 ? (path?.kind === "file" ? "page" : symbol ? "location" : undefined) : undefined}
+            id={`code-workspace-breadcrumb-segment-${index}`}
+            tabIndex={activeNavigationBar ? -1 : 0}
             data-nav-index={index}
             data-focused={isFocused ? "true" : undefined}
             data-testid={path
@@ -750,6 +775,9 @@ export function Breadcrumbs({
     <nav
       ref={navRef}
       tabIndex={activeNavigationBar ? 0 : -1}
+      aria-activedescendant={navBarFocusedIndex === null || visibleItems.length === 0
+        ? undefined
+        : `code-workspace-breadcrumb-segment-${navBarFocusedIndex}`}
       onKeyDown={handleNavKeyDown}
       aria-label="Editor breadcrumbs"
       data-testid="code-workspace-breadcrumbs"
@@ -810,7 +838,7 @@ export function Breadcrumbs({
             });
             void loadPathChildren(segment).then((children) => {
               if (generation !== loadGenerationRef.current) return;
-              const activeIndex = Math.max(0, children.findIndex((child) => child.active));
+              const activeIndex = Math.max(0, sortPathChildren(children).findIndex((child) => child.active));
               setSelectedIndex(activeIndex);
               setPopup({
                 kind: "path",

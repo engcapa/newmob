@@ -950,6 +950,43 @@ describe("CodeWorkspaceTab", () => {
     expect(parentRenderCount).toBeLessThan(20);
   });
 
+  it("leaves navigation-bar keyboard state to the mounted breadcrumb surface", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-navigation-bar-keyboard",
+      workspaceInstanceId: "instance-navigation-bar-keyboard",
+      name: "Navigation Bar Keyboard",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([
+      entry("src", "src", "dir"),
+      entry("README.md", "README.md"),
+    ]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;"));
+
+    const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(content).not.toBeNull();
+
+    fireEvent.keyDown(content!, { key: "Home", code: "Home", altKey: true });
+    const nav = await screen.findByTestId("code-workspace-breadcrumbs");
+    await waitFor(() => expect(document.activeElement).toBe(nav));
+
+    fireEvent.keyDown(nav, { key: "Home", code: "Home" });
+    expect(nav).toHaveAttribute("aria-activedescendant", "code-workspace-breadcrumb-segment-0");
+    fireEvent.keyDown(nav, { key: "Enter", code: "Enter" });
+
+    const popup = await screen.findByTestId("code-workspace-breadcrumb-popup");
+    expect(popup).toHaveAttribute("role", "listbox");
+    const filter = within(popup).getByRole("combobox");
+    fireEvent.keyDown(filter, { key: "Escape", code: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("code-workspace-breadcrumb-popup")).toBeNull());
+    expect(document.activeElement).toBe(nav);
+  });
+
   it("opens a multi-root workspace without embedding Language Servers in the tree", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
