@@ -1,0 +1,164 @@
+id: TC-IDE-BOOKMARK-01
+title: "Mnemonic bookmarks, groups, history, and resource lifecycle"
+description: |
+  ED-BOOKMARK-001 browser slice. Opens the browser-VFS README buffer and
+  exercises the mounted bookmark owner: F11 toggle, group rename with Enter
+  and Escape focus recovery, mnemonic conflict replacement, keyboard jump,
+  Back history, remove, and delete/recreate missing-target recovery.
+  Browser VFS proves the browser-wired UI and model transitions only; it does
+  not claim native filesystem or IDEA runtime parity. Highest claim on green:
+  L1 browser-wired bookmark lifecycle contract.
+covers: [F25.5]
+tags: [code-workspace, ide-bookmark, bookmarks, keyboard, lifecycle, p1, smoke]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor"] .cm-content'
+
+  # A1: F11 creates a persistent bookmark and opens its separate panel.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: F11
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="code-workspace-todos-panel"]'
+  - assert_count:
+      selector: '[data-testid="code-workspace-bookmark-item"]'
+      equal: 1
+  - assert_text:
+      selector: '[data-testid="code-workspace-todos-panel"]'
+      contains: Bookmarks
+
+  # A3: group rename commits on Enter and Escape returns focus without a
+  # mutation; both paths are keyboard-only after the initial rename click.
+  - click: '[data-testid="code-workspace-bookmark-group-rename"]'
+  - fill:
+      selector: '[data-testid="code-workspace-bookmark-group-input"]'
+      value: Review
+  - press:
+      key: Enter
+      selector: '[data-testid="code-workspace-bookmark-group-input"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-bookmark-group"]'
+      name: data-group-name
+      equals: Review
+  - click: '[data-testid="code-workspace-bookmark-group-rename"]'
+  - fill:
+      selector: '[data-testid="code-workspace-bookmark-group-input"]'
+      value: Canceled
+  - press:
+      key: Escape
+      selector: '[data-testid="code-workspace-bookmark-group-input"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-bookmark-group"]'
+      name: data-group-name
+      equals: Review
+  - eval_readonly:
+      expression: "document.activeElement?.getAttribute('data-testid') === 'code-workspace-bookmark-group-rename'"
+      expect_truthy: true
+  # Remove the first bookmark through its mounted control before creating the
+  # mnemonic entries; this keeps remove coverage independent of file deletion.
+  - click: '[data-testid="code-workspace-bookmark-remove"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-todos-panel"]'
+      contains: "No bookmarks yet"
+
+  # A1: assign a mnemonic, then assign the same mnemonic on the next line.
+  # The production model must clear the old mnemonic rather than duplicate it.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+F11
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill:
+      selector: '[data-testid="text-input-dialog-input"]'
+      value: J
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-bookmark-item"]'
+  - click: '[data-testid="code-workspace-bookmark-group-rename"]'
+  - fill:
+      selector: '[data-testid="code-workspace-bookmark-group-input"]'
+      value: Review
+  - press:
+      key: Enter
+      selector: '[data-testid="code-workspace-bookmark-group-input"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: ArrowDown
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+F11
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill:
+      selector: '[data-testid="text-input-dialog-input"]'
+      value: J
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - assert_count:
+      selector: '[data-testid="code-workspace-bookmark-item"]'
+      equal: 2
+  - assert_count:
+      selector: '[data-testid="code-workspace-bookmark-mnemonic"]'
+      equal: 1
+
+  # A2: Ctrl+J jumps from line one to the current J bookmark and records the
+  # origin so the mounted Back control can restore it.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+J
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Jumped to bookmark [J]"
+  - assert_enabled: '[data-testid="code-workspace-nav-back"]'
+  - click: '[data-testid="code-workspace-nav-back"]'
+
+  # A3: delete through the focused tree action. The bookmark identities stay
+  # visible as missing until the same resource is recreated.
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - press:
+      key: Delete
+      selector: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="confirm-dialog"]'
+  - click: '[data-testid="confirm-dialog-confirm"]'
+  - wait_for:
+      selector: '[data-testid="code-workspace-bookmark-item"][data-state="missing"]'
+      timeout_sec: 15
+  - assert_text:
+      selector: '[data-testid="code-workspace-bookmark-missing"]'
+      contains: Missing target
+  - assert_count:
+      selector: '[data-testid="code-workspace-bookmark-item"][data-state="missing"]'
+      equal: 2
+
+  # Recreate the deleted resource through the real mounted New File action.
+  - click: '[data-testid="code-workspace-tree-new-file"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill:
+      selector: '[data-testid="text-input-dialog-input"]'
+      value: README.txt
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"][data-path="README.txt"]'
+  - wait_for:
+      selector: '[data-testid="code-workspace-bookmark-item"][data-state="current"]'
+      timeout_sec: 15
+  - assert_count:
+      selector: '[data-testid="code-workspace-bookmark-item"][data-state="missing"]'
+      equal: 0

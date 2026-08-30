@@ -5536,7 +5536,7 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge]
+components: [CodeWorkspaceTab, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
   - src/components/editor/workspace/Breadcrumbs.tsx
@@ -5547,6 +5547,8 @@ files:
   - src/components/editor/workspace/TabSwitcher.tsx
   - src/components/editor/workspace/KeymapSettingsDialog.tsx
   - src/components/editor/workspace/ClipboardHistoryPopup.tsx
+  - src/components/editor/workspace/panels/TodosBookmarksPanel.tsx
+  - src/components/editor/workspace/todoBookmarks.ts
 controls:
   - id: tree-add-folder
     selector: '[data-testid="code-workspace-tree-add-folder"]'
@@ -5784,6 +5786,10 @@ controls:
     selector: '[data-testid="code-workspace-breadcrumbs"]'
     kind: interactive
     optional: true
+  - id: navigation-back
+    selector: '[data-testid="code-workspace-nav-back"]'
+    kind: interactive
+    optional: true
   - id: navigation-bar-popup
     selector: '[data-testid="code-workspace-breadcrumb-popup"]'
     kind: display
@@ -5799,6 +5805,51 @@ controls:
   - id: navigation-bar-popup-file-entry
     selector: '[data-testid="code-workspace-breadcrumb-entry-file"]'
     kind: interactive
+    optional: true
+  # §ED-BOOKMARK-001: mounted TODO/bookmark owner and group lifecycle controls.
+  - id: todos-bookmarks-panel
+    selector: '[data-testid="code-workspace-todos-panel"]'
+    kind: display
+    optional: true       # mounted after Toggle Bookmark / Show Bookmarks
+  - id: bookmark-group
+    selector: '[data-testid="code-workspace-bookmark-group"]'
+    kind: display
+    optional: true
+  - id: bookmark-group-rename
+    selector: '[data-testid="code-workspace-bookmark-group-rename"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-group-input
+    selector: '[data-testid="code-workspace-bookmark-group-input"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-group-save
+    selector: '[data-testid="code-workspace-bookmark-group-save"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-group-cancel
+    selector: '[data-testid="code-workspace-bookmark-group-cancel"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-item
+    selector: '[data-testid="code-workspace-bookmark-item"]'
+    kind: display
+    optional: true
+  - id: bookmark-open
+    selector: '[data-testid="code-workspace-bookmark-open"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-mnemonic
+    selector: '[data-testid="code-workspace-bookmark-mnemonic"]'
+    kind: display
+    optional: true
+  - id: bookmark-remove
+    selector: '[data-testid="code-workspace-bookmark-remove"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-missing
+    selector: '[data-testid="code-workspace-bookmark-missing"]'
+    kind: display
     optional: true
 -->
 

@@ -204,10 +204,22 @@
 - `[data-testid="clipboard-history-entry-0"]` — interactive [optional] — F25.5.clipboard-history-entry-0
 - `[data-testid="clipboard-history-close"]` — interactive [optional] — F25.5.clipboard-history-close
 - `[data-testid="code-workspace-breadcrumbs"]` — interactive [optional] — F25.5.navigation-bar
+- `[data-testid="code-workspace-nav-back"]` — interactive [optional] — F25.5.navigation-back
 - `[data-testid="code-workspace-breadcrumb-popup"]` — display [optional] — F25.5.navigation-bar-popup
 - `[data-testid="code-workspace-breadcrumb-popup-filter"]` — interactive [optional] — F25.5.navigation-bar-popup-filter
 - `[data-testid="code-workspace-breadcrumb-entry-directory"]` — interactive [optional] — F25.5.navigation-bar-popup-directory-entry
 - `[data-testid="code-workspace-breadcrumb-entry-file"]` — interactive [optional] — F25.5.navigation-bar-popup-file-entry
+- `[data-testid="code-workspace-todos-panel"]` — display [optional] — F25.5.todos-bookmarks-panel
+- `[data-testid="code-workspace-bookmark-group"]` — display [optional] — F25.5.bookmark-group
+- `[data-testid="code-workspace-bookmark-group-rename"]` — interactive [optional] — F25.5.bookmark-group-rename
+- `[data-testid="code-workspace-bookmark-group-input"]` — interactive [optional] — F25.5.bookmark-group-input
+- `[data-testid="code-workspace-bookmark-group-save"]` — interactive [optional] — F25.5.bookmark-group-save
+- `[data-testid="code-workspace-bookmark-group-cancel"]` — interactive [optional] — F25.5.bookmark-group-cancel
+- `[data-testid="code-workspace-bookmark-item"]` — display [optional] — F25.5.bookmark-item
+- `[data-testid="code-workspace-bookmark-open"]` — interactive [optional] — F25.5.bookmark-open
+- `[data-testid="code-workspace-bookmark-mnemonic"]` — display [optional] — F25.5.bookmark-mnemonic
+- `[data-testid="code-workspace-bookmark-remove"]` — interactive [optional] — F25.5.bookmark-remove
+- `[data-testid="code-workspace-bookmark-missing"]` — display [optional] — F25.5.bookmark-missing
 
 ## code-workspace/execution (F25.1)
 

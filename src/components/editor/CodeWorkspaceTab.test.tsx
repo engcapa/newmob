@@ -22,10 +22,9 @@ import { CodeWorkspaceTab, extractContextSnippet } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
 import { WORKSPACE_RECOVERY_STORAGE_PREFIX, hasBlockingDiskEffectResolution, listDiskEffectLedgerEntries, resolveDiskEffectLedgerEntry } from "./workspace/workspaceRecovery";
 import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
-import { confirmAppDialog } from "../../lib/appDialogs";
+import { confirmAppDialog, promptAppDialog } from "../../lib/appDialogs";
 import { workspaceActionRegistry } from "./workspace/workspaceActionRegistry";
 import {
-  navigationHistoryTracker,
   WorkspaceLocationController,
 } from "./workspace/navigationHistoryModel";
 import { EditorSelection } from "@codemirror/state";
@@ -216,6 +215,7 @@ vi.mock("../../lib/settingsNavigation", () => settingsNavigationMocks);
 vi.mock("../../lib/appDialogs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/appDialogs")>()),
   confirmAppDialog: vi.fn(async () => true),
+  promptAppDialog: vi.fn(async () => null),
 }));
 
 const gitMocks = vi.hoisted(() => ({
@@ -481,9 +481,9 @@ describe("CodeWorkspaceTab", () => {
   beforeEach(() => {
     window.localStorage.clear();
     workspaceActionRegistry.clear();
-    navigationHistoryTracker.clear();
     globalEditorConfigResolver.clearAll();
     vi.mocked(confirmAppDialog).mockReset().mockResolvedValue(true);
+    vi.mocked(promptAppDialog).mockReset().mockResolvedValue(null);
     useAppStore.setState({
       statusMessage: "Ready",
       codeWorkspaceByTab: {},
@@ -717,7 +717,6 @@ describe("CodeWorkspaceTab", () => {
   afterEach(() => {
     cleanup();
     workspaceActionRegistry.clear();
-    navigationHistoryTracker.clear();
     globalEditorConfigResolver.clearAll();
   });
 
@@ -4294,6 +4293,226 @@ describe("CodeWorkspaceTab", () => {
 
     fireEvent.keyDown(editor, { key: "F11", code: "F11" });
     await waitFor(() => expect(panel).toHaveTextContent("No bookmarks yet"));
+  });
+
+  it("sets mnemonic bookmarks through the mounted prompt and replaces conflicts", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-mnemonic-mounted",
+      workspaceInstanceId: "instance-mnemonic-mounted",
+      name: "Mnemonic bookmarks",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main.ts",
+      "const first = 1;\nconst second = 2;\n",
+    ));
+
+    const rendered = renderWorkspace(workspace);
+    const content = await screen.findByTestId("code-workspace-editor").then((editor) => (
+      editor.querySelector<HTMLElement>(".cm-content")
+    ));
+    expect(content).not.toBeNull();
+    const cmEditor = content?.closest<HTMLElement>(".cm-editor");
+    expect(cmEditor).not.toBeNull();
+    const view = EditorView.findFromDOM(cmEditor!);
+    expect(view).not.toBeNull();
+
+    vi.mocked(promptAppDialog).mockResolvedValueOnce("a");
+    fireEvent.keyDown(content!, { key: "F11", code: "F11", ctrlKey: true });
+
+    const panel = await screen.findByTestId("code-workspace-todos-panel");
+    await waitFor(() => {
+      const saved = JSON.parse(
+        window.localStorage.getItem("taomni.codeWorkspace.bookmarks.v1.instance-mnemonic-mounted") ?? "[]",
+      ) as Array<{ line: number; mnemonic: string | null; group: string | null }>;
+      expect(saved).toHaveLength(1);
+      expect(saved[0]).toMatchObject({ line: 0, mnemonic: "A", group: "Mnemonic" });
+    });
+    expect(panel).toHaveTextContent("A");
+    expect(promptAppDialog).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Set Bookmark Mnemonic",
+      label: "Mnemonic (0-9 or A-Z)",
+    }));
+
+    view!.dispatch({ selection: EditorSelection.cursor(view!.state.doc.line(2).from) });
+    vi.mocked(promptAppDialog).mockResolvedValueOnce("A");
+    fireEvent.keyDown(content!, { key: "F11", code: "F11", ctrlKey: true });
+
+    await waitFor(() => {
+      const saved = JSON.parse(
+        window.localStorage.getItem("taomni.codeWorkspace.bookmarks.v1.instance-mnemonic-mounted") ?? "[]",
+      ) as Array<{ line: number; mnemonic: string | null }>;
+      expect(saved).toHaveLength(2);
+      expect(saved.find((bookmark) => bookmark.line === 0)?.mnemonic).toBeNull();
+      expect(saved.find((bookmark) => bookmark.line === 1)?.mnemonic).toBe("A");
+    });
+    expect(screen.getAllByTestId("code-workspace-bookmark-open")).toHaveLength(2);
+    rendered.unmount();
+  });
+
+  it("renames bookmark groups with Enter or Escape and returns focus to the group action", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-bookmark-group-focus",
+      workspaceInstanceId: "instance-bookmark-group-focus",
+      name: "Bookmark group focus",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;\n"));
+
+    renderWorkspace(workspace);
+    const editor = await screen.findByTestId("code-workspace-editor-pane");
+    fireEvent.keyDown(editor, { key: "F11", code: "F11" });
+    await screen.findByTestId("code-workspace-bookmark-group");
+
+    const rename = screen.getByTestId("code-workspace-bookmark-group-rename");
+    fireEvent.click(rename);
+    const input = await screen.findByTestId("code-workspace-bookmark-group-input");
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: "Review" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(screen.getByTestId("code-workspace-bookmark-group"))
+      .toHaveAttribute("data-group-name", "Review"));
+    expect(document.activeElement).toBe(screen.getByTestId("code-workspace-bookmark-group-rename"));
+    expect(window.localStorage.getItem("taomni.codeWorkspace.bookmarks.v1.instance-bookmark-group-focus"))
+      .toContain("Review");
+
+    const renamed = screen.getByTestId("code-workspace-bookmark-group-rename");
+    fireEvent.click(renamed);
+    const secondInput = await screen.findByTestId("code-workspace-bookmark-group-input");
+    fireEvent.change(secondInput, { target: { value: "Canceled" } });
+    fireEvent.keyDown(secondInput, { key: "Escape" });
+
+    await waitFor(() => expect(screen.getByTestId("code-workspace-bookmark-group"))
+      .toHaveAttribute("data-group-name", "Review"));
+    expect(document.activeElement).toBe(screen.getByTestId("code-workspace-bookmark-group-rename"));
+    expect(window.localStorage.getItem("taomni.codeWorkspace.bookmarks.v1.instance-bookmark-group-focus"))
+      .not.toContain("Canceled");
+  });
+
+  it("jumps to a mnemonic bookmark and uses Back to restore the origin", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-bookmark-history",
+      workspaceInstanceId: "instance-bookmark-history",
+      name: "Bookmark history",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/one.ts" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([
+      entry("one.ts", "src/one.ts"),
+      entry("two.ts", "src/two.ts"),
+    ]);
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => (
+      path === "src/two.ts"
+        ? file(path, "zero\nmarked\n")
+        : file(path, "origin\n")
+    ));
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.bookmarks.v1.instance-bookmark-history",
+      JSON.stringify([{
+        id: "bookmark-two",
+        fileKey: "root:app:src/two.ts",
+        pathLabel: "app / src/two.ts",
+        line: 1,
+        character: 0,
+        label: "marked",
+        mnemonic: "J",
+        group: "Mnemonic",
+        state: "current",
+        createdAt: 1,
+      }]),
+    );
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/one.ts");
+    await waitFor(() => expect(registrationRef.current).not.toBeNull());
+
+    expect(registrationRef.current?.execute("workspace.jumpToBookmarkJ")).toBe(true);
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-bookmark-history").activeKey,
+    ).toBe("root:app:src/two.ts"));
+    const backButton = screen.getByTestId("code-workspace-nav-back");
+    await waitFor(() => expect(backButton).not.toBeDisabled());
+    fireEvent.click(backButton);
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-bookmark-history").activeKey,
+    ).toBe("root:app:src/one.ts"));
+  });
+
+  it("keeps a deleted bookmark as missing and restores it when the file is recreated", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-bookmark-resource-lifecycle",
+      workspaceInstanceId: "instance-bookmark-resource-lifecycle",
+      name: "Bookmark resource lifecycle",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "folder" }],
+      looseFiles: [],
+    };
+    const disk = new Map([["src/bookmark.ts", "const bookmarked = true;\n"]]);
+    const listDirectory = (_root: string, path = "") => {
+      if (path === "") return [entry("src", "src", "dir")];
+      if (path === "src" && disk.has("src/bookmark.ts")) return [entry("bookmark.ts", "src/bookmark.ts")];
+      return [];
+    };
+    workspaceMocks.workspaceListDir.mockImplementation(async (root: string, path = "") => listDirectory(root, path));
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => {
+      const text = disk.get(path);
+      if (text === undefined) throw new Error(`missing fixture ${path}`);
+      return file(path, text);
+    });
+    workspaceMocks.workspaceApplyResourceOperation.mockImplementation(async (
+      _root: string,
+      operation: { kind: string; path?: string },
+    ) => {
+      if (operation.kind === "delete" && operation.path) disk.delete(operation.path);
+      return { ignored: false };
+    });
+    workspaceMocks.workspaceCreateFile.mockImplementation(async (_root: string, path: string) => {
+      const text = "const recreated = true;\n";
+      disk.set(path, text);
+      return file(path, text);
+    });
+
+    renderWorkspace(workspace);
+    const directory = await screen.findByTestId("code-workspace-tree-dir");
+    fireEvent.click(directory);
+    const row = await screen.findByTestId("code-workspace-tree-file");
+    fireEvent.click(row);
+    await screen.findByTitle("app / src/bookmark.ts");
+    const editor = screen.getByTestId("code-workspace-editor-pane");
+    fireEvent.keyDown(editor, { key: "F11", code: "F11" });
+    await screen.findByTestId("code-workspace-bookmark-item");
+
+    // The tree pane is the keyboard owner; dispatch against its focus target
+    // so the test follows the mounted tree shortcut path used by the app.
+    fireEvent.keyDown(screen.getByTestId("code-workspace-tree-pane"), {
+      key: "Delete",
+      code: "Delete",
+    });
+    await waitFor(() => expect(workspaceMocks.workspaceApplyResourceOperation).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId("code-workspace-bookmark-item"))
+      .toHaveAttribute("data-state", "missing"));
+    expect(screen.getByTestId("code-workspace-bookmark-missing")).toHaveTextContent("Missing target");
+    expect(disk.has("src/bookmark.ts")).toBe(false);
+
+    vi.mocked(promptAppDialog).mockResolvedValueOnce("src/bookmark.ts");
+    fireEvent.click(screen.getByTestId("code-workspace-tree-new-file"));
+    await waitFor(() => expect(screen.getByTestId("code-workspace-bookmark-item"))
+      .toHaveAttribute("data-state", "current"));
+    expect(disk.has("src/bookmark.ts")).toBe(true);
+    expect(screen.getByTestId("code-workspace-bookmark-open")).toBeInTheDocument();
   });
 
   it("restores open editor tabs and dock chrome from the layout snapshot", async () => {

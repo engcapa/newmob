@@ -125,6 +125,8 @@ export interface WorkspaceBookmark {
   label: string;
   mnemonic?: string | null;
   group?: string | null;
+  /** A deleted resource keeps its identity so the panel can explain the gap. */
+  state?: "current" | "missing";
   createdAt: number;
 }
 
@@ -134,6 +136,11 @@ export function isValidMnemonic(char: string): boolean {
 
 export function normalizeMnemonic(char: string): string {
   return char.toUpperCase();
+}
+
+export function workspaceBookmarkGroupName(bookmark: WorkspaceBookmark): string {
+  const group = bookmark.group?.trim();
+  return group || (bookmark.mnemonic ? "Mnemonic Bookmarks" : "General Bookmarks");
 }
 
 function bookmarksKey(workspaceInstanceId: string): string {
@@ -163,6 +170,7 @@ export function readWorkspaceBookmarks(workspaceInstanceId: string): WorkspaceBo
         ...item,
         mnemonic: typeof item.mnemonic === "string" ? item.mnemonic : null,
         group: typeof item.group === "string" ? item.group : null,
+        state: item.state === "missing" ? "missing" as const : "current" as const,
       }))
       .slice(0, 200);
   } catch {
@@ -199,6 +207,7 @@ export function toggleWorkspaceBookmark(
           mnemonic: candidate.mnemonic ?? null,
           group: candidate.group ?? (candidate.mnemonic ? "Mnemonic" : "General"),
           ...candidate,
+          state: candidate.state ?? "current",
         },
         ...current,
       ].slice(0, 200);
@@ -236,6 +245,7 @@ export function setMnemonicBookmark(
       ...candidate,
       mnemonic,
       group: candidate.group ?? "Mnemonic",
+      state: candidate.state ?? "current",
     },
     ...deduped,
   ].slice(0, 200);
@@ -264,6 +274,7 @@ export function updateBookmarksOnPathRename(
         ...item,
         fileKey: newFileKey,
         pathLabel: newPathLabel,
+        state: "current",
       };
     }
     return item;
@@ -275,4 +286,79 @@ export function removeBookmarksForFile(
   fileKey: string,
 ): WorkspaceBookmark[] {
   return bookmarks.filter((item) => item.fileKey !== fileKey);
+}
+
+export function renameWorkspaceBookmarkGroup(
+  workspaceInstanceId: string,
+  oldGroupName: string,
+  newGroupName: string,
+  current: WorkspaceBookmark[] = readWorkspaceBookmarks(workspaceInstanceId),
+): WorkspaceBookmark[] {
+  const oldName = oldGroupName.trim();
+  const nextName = newGroupName.trim();
+  if (!oldName || !nextName || oldName === nextName) return current;
+  let changed = false;
+  const next = current.map((bookmark) => {
+    if (workspaceBookmarkGroupName(bookmark) !== oldName) return bookmark;
+    changed = true;
+    return { ...bookmark, group: nextName };
+  });
+  if (changed) writeWorkspaceBookmarks(workspaceInstanceId, next);
+  return changed ? next : current;
+}
+
+export function markWorkspaceBookmarksMissingForFile(
+  bookmarks: readonly WorkspaceBookmark[],
+  fileKey: string,
+): WorkspaceBookmark[] {
+  let changed = false;
+  const next = bookmarks.map((bookmark) => {
+    if (bookmark.fileKey !== fileKey || bookmark.state === "missing") return bookmark;
+    changed = true;
+    return { ...bookmark, state: "missing" as const };
+  });
+  return changed ? next : bookmarks.slice();
+}
+
+export function restoreWorkspaceBookmarksForFile(
+  bookmarks: readonly WorkspaceBookmark[],
+  fileKey: string,
+  pathLabel?: string,
+): WorkspaceBookmark[] {
+  let changed = false;
+  const next = bookmarks.map((bookmark) => {
+    if (bookmark.fileKey !== fileKey || bookmark.state !== "missing") return bookmark;
+    changed = true;
+    return {
+      ...bookmark,
+      state: "current" as const,
+      ...(pathLabel ? { pathLabel } : {}),
+    };
+  });
+  return changed ? next : bookmarks.slice();
+}
+
+/** Merge only the bookmark identities touched by a workspace transaction. */
+export function mergeWorkspaceBookmarkSnapshot(
+  current: readonly WorkspaceBookmark[],
+  snapshot: readonly WorkspaceBookmark[],
+  affectedIds: readonly string[],
+): WorkspaceBookmark[] {
+  const affected = new Set(affectedIds);
+  if (affected.size === 0) return current.slice();
+  const snapshotById = new Map(snapshot
+    .filter((bookmark) => affected.has(bookmark.id))
+    .map((bookmark) => [bookmark.id, bookmark]));
+  const restored = new Set<string>();
+  const next = current.flatMap((bookmark) => {
+    if (!affected.has(bookmark.id)) return [bookmark];
+    const replacement = snapshotById.get(bookmark.id);
+    if (!replacement) return [];
+    restored.add(bookmark.id);
+    return [replacement];
+  });
+  for (const bookmark of snapshot) {
+    if (affected.has(bookmark.id) && !restored.has(bookmark.id)) next.push(bookmark);
+  }
+  return next;
 }

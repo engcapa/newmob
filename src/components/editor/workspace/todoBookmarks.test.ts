@@ -2,13 +2,19 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   createOpenFileTodoScanner,
   findBookmarkByMnemonic,
+  markWorkspaceBookmarksMissingForFile,
+  mergeWorkspaceBookmarkSnapshot,
+  renameWorkspaceBookmarkGroup,
   readWorkspaceBookmarks,
   removeBookmarksForFile,
+  restoreWorkspaceBookmarksForFile,
   scanTodosInText,
   sameWorkspaceTodoItems,
   setMnemonicBookmark,
   toggleWorkspaceBookmark,
   updateBookmarksOnPathRename,
+  writeWorkspaceBookmarks,
+  type WorkspaceBookmark,
 } from "./todoBookmarks";
 
 describe("todoBookmarks", () => {
@@ -145,5 +151,105 @@ describe("todoBookmarks", () => {
 
     const deleted = removeBookmarksForFile(renamed, "new/path.ts");
     expect(deleted).toHaveLength(0);
+  });
+
+  it("persists group renames without changing bookmark identity", () => {
+    const initial = [
+      ...toggleWorkspaceBookmark("ws", {
+        fileKey: "root:app:a.ts",
+        pathLabel: "app / a.ts",
+        line: 3,
+        character: 0,
+        label: "entry",
+        group: "Review",
+      }),
+      ...toggleWorkspaceBookmark("ws", {
+        fileKey: "root:app:b.ts",
+        pathLabel: "app / b.ts",
+        line: 7,
+        character: 0,
+        label: "second",
+        group: "Review",
+      }, []),
+    ];
+    writeWorkspaceBookmarks("ws", initial);
+
+    const renamed = renameWorkspaceBookmarkGroup("ws", "Review", "Release", initial);
+
+    expect(renamed).toHaveLength(2);
+    expect(renamed.map((bookmark) => bookmark.id)).toEqual(initial.map((bookmark) => bookmark.id));
+    expect(renamed.every((bookmark) => bookmark.group === "Release")).toBe(true);
+    expect(readWorkspaceBookmarks("ws")).toEqual(renamed);
+  });
+
+  it("keeps deleted bookmark identities visible and restores them on recreation", () => {
+    const initial = setMnemonicBookmark("ws", {
+      fileKey: "root:app:src/main.ts",
+      pathLabel: "app / src/main.ts",
+      line: 4,
+      character: 2,
+      label: "target",
+      mnemonic: "m",
+    });
+    const missing = markWorkspaceBookmarksMissingForFile(initial, "root:app:src/main.ts");
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toMatchObject({
+      id: initial[0]?.id,
+      state: "missing",
+      mnemonic: "M",
+    });
+
+    writeWorkspaceBookmarks("ws", missing);
+    const restored = restoreWorkspaceBookmarksForFile(
+      readWorkspaceBookmarks("ws"),
+      "root:app:src/main.ts",
+      "app / src/main.ts",
+    );
+    expect(restored[0]).toMatchObject({
+      id: initial[0]?.id,
+      state: "current",
+      pathLabel: "app / src/main.ts",
+    });
+  });
+
+  it("merges only affected bookmark identities during workspace undo/redo", () => {
+    const unaffected: WorkspaceBookmark = {
+      id: "unaffected",
+      fileKey: "root:app:other.ts",
+      pathLabel: "app / other.ts",
+      line: 1,
+      character: 0,
+      label: "leave alone",
+      mnemonic: null,
+      group: "General",
+      state: "current",
+      createdAt: 1,
+    };
+    const changed: WorkspaceBookmark = {
+      ...unaffected,
+      id: "changed",
+      fileKey: "root:app:main.ts",
+      pathLabel: "app / main.ts",
+      label: "before",
+    };
+    const snapshot: WorkspaceBookmark = {
+      ...changed,
+      label: "after",
+      state: "missing",
+    };
+    const addedBySnapshot: WorkspaceBookmark = {
+      ...changed,
+      id: "added-by-snapshot",
+      line: 9,
+      label: "new bookmark",
+    };
+
+    const merged = mergeWorkspaceBookmarkSnapshot(
+      [unaffected, { ...changed, label: "live" }],
+      [snapshot, addedBySnapshot],
+      ["changed", "added-by-snapshot"],
+    );
+
+    expect(merged).toEqual([unaffected, snapshot, addedBySnapshot]);
   });
 });
