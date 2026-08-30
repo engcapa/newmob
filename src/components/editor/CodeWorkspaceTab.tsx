@@ -144,6 +144,7 @@ import {
 } from "../../lib/editor/lsp";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { selectFilePath } from "../../lib/ipc";
 import { loadCodeViewProfile } from "../../lib/codeViewProfile";
 import { useAppStore } from "../../stores/appStore";
 import {
@@ -241,7 +242,12 @@ import {
   cloneLayoutTree,
   type LayoutNode,
 } from "./workspace/recursiveLayoutTree";
-import { historySnapshot } from "../../lib/localHistory";
+import {
+  historyList,
+  historyRead,
+  historySnapshot,
+  type LocalHistoryEntry,
+} from "../../lib/localHistory";
 import {
   defaultWorkspaceLayoutSnapshot,
   layoutSnapshotHasOpenFiles,
@@ -288,7 +294,7 @@ import {
 } from "../../lib/ai/answerLanguage";
 import { EditorAiRewriteDialog } from "./workspace/EditorAiRewriteDialog";
 import { confirmAppDialog, promptAppDialog } from "../../lib/appDialogs";
-import { readText, writeText } from "../../lib/clipboard";
+import { readText, readTextResult, writeText } from "../../lib/clipboard";
 import { useContextMenu } from "../ContextMenu";
 import { useChatStore } from "../../stores/chatStore";
 import {
@@ -454,7 +460,18 @@ import {
   type HighlightingLevel,
 } from "./workspace/highlightingLevelModel";
 import {
+  classifyCompareReadError,
+  compareDocumentDescriptor,
+  compareTextByteLength,
   createClipboardCompareSession,
+  createFileCompareSession,
+  createUnavailableCompareSession,
+  MAX_COMPARE_SIZE_BYTES,
+  normalizeCompareText,
+  type CompareDocumentDescriptor,
+  type CompareSelection,
+  type CompareSource,
+  type CompareTarget,
   type EditorCompareSession,
 } from "./workspace/editorCompareModel";
 import { EditorCompareDialog } from "./workspace/EditorCompareDialog";
@@ -636,6 +653,82 @@ function isJavaBuildFile(languagePath: string): boolean {
 function encodingSupportsBom(encoding: string): boolean {
   const normalized = encoding.trim().toLowerCase().replace(/_/g, "-");
   return normalized === "utf-8" || normalized === "utf-16le" || normalized === "utf-16be";
+}
+
+function compareSelectionFromEditorSelection(
+  selection: EditorSelectionRange,
+): CompareSelection | undefined {
+  if (selection.empty || (
+    selection.start.line === selection.end.line
+    && selection.start.character === selection.end.character
+  )) return undefined;
+  return {
+    start: { ...selection.start },
+    end: { ...selection.end },
+    text: normalizeCompareText(selection.text),
+  };
+}
+
+function compareDescriptorForOpenFile(
+  file: OpenFileState,
+  source: CompareSource,
+  path: string,
+  text = file.text,
+  title = file.title,
+): CompareDocumentDescriptor {
+  return compareDocumentDescriptor({
+    title,
+    path,
+    text,
+    encoding: file.encoding ?? "UTF-8",
+    eol: file.eol,
+    bom: file.bom ?? false,
+    sizeBytes: text === file.text && !file.dirty ? file.size : compareTextByteLength(text),
+    source,
+    readOnly: false,
+  });
+}
+
+function compareTargetForOpenFile(
+  file: OpenFileState,
+  selection?: CompareSelection,
+): CompareTarget {
+  return {
+    fileKey: file.key,
+    documentRevision: file.documentRevision ?? 0,
+    expectedText: file.text,
+    selection,
+  };
+}
+
+function comparePositionOffset(text: string, position: { line: number; character: number }): number {
+  const lines = text.split("\n");
+  const line = Math.min(Math.max(0, position.line), Math.max(0, lines.length - 1));
+  let offset = 0;
+  for (let index = 0; index < line; index += 1) {
+    offset += (lines[index]?.length ?? 0) + 1;
+  }
+  return offset + Math.min(Math.max(0, position.character), lines[line]?.length ?? 0);
+}
+
+function replaceCompareSelection(
+  text: string,
+  selection: CompareSelection,
+  replacement: string,
+): string | null {
+  const from = comparePositionOffset(text, selection.start);
+  const to = comparePositionOffset(text, selection.end);
+  const start = Math.min(from, to);
+  const end = Math.max(from, to);
+  if (text.slice(start, end) !== selection.text) return null;
+  return `${text.slice(0, start)}${replacement}${text.slice(end)}`;
+}
+
+function compareTargetMatches(file: OpenFileState | null, target: CompareTarget): boolean {
+  return !!file
+    && file.key === target.fileKey
+    && (file.documentRevision ?? 0) === target.documentRevision
+    && file.text === target.expectedText;
 }
 
 interface ExternalDiskSnapshot {
@@ -4017,6 +4110,58 @@ export function CodeWorkspaceTab({
    * Unlike `saveFile`, this does not require the buffer to already be dirty.
    */
   const [localHistoryTarget, setLocalHistoryTarget] = useState<{ key: string; path: string } | null>(null);
+
+  const compareLocalHistorySnapshot = useCallback((
+    key: string,
+    entry: LocalHistoryEntry,
+    snapshotText: string,
+    options?: {
+      file?: OpenFileState;
+      selection?: CompareSelection;
+      target?: CompareTarget;
+    },
+  ) => {
+    const file = options?.file ?? openFilesRef.current[key];
+    if (!file) return;
+    const path = absolutePathForOpenFile(file);
+    if (!path) {
+      setStatusMessage(`${file.title} has no local filesystem path`);
+      return;
+    }
+    const selection = options?.selection ?? compareSelectionFromEditorSelection(editorSelectionRef.current);
+    const rightText = selection?.text ?? file.text;
+    const rightTitle = selection ? `${file.title} (Selection)` : file.title;
+    const target = options?.target ?? compareTargetForOpenFile(file, selection);
+    const result = createFileCompareSession(
+      {
+        title: `${file.title} @ ${entry.reason} #${entry.id}`,
+        path: entry.path,
+        text: snapshotText,
+        encoding: file.encoding ?? "UTF-8",
+        eol: file.eol,
+        bom: file.bom ?? false,
+        sizeBytes: entry.byteLen,
+        source: "local-history",
+        readOnly: true,
+      },
+      compareDescriptorForOpenFile(file, "buffer", path, rightText, rightTitle),
+      target,
+    );
+    if (!result.session) {
+      const unavailable = classifyCompareReadError(result.error ?? "Local history snapshot is unavailable");
+      setActiveCompareSession(createUnavailableCompareSession({
+        source: "local-history",
+        title: `Compare ${file.title} with Local History`,
+        unavailableTitle: "Local History snapshot",
+        reason: unavailable.reason,
+        message: unavailable.message,
+        right: compareDescriptorForOpenFile(file, "buffer", path, rightText, rightTitle),
+        target,
+      }));
+      return;
+    }
+    setActiveCompareSession(result.session);
+  }, [absolutePathForOpenFile, setStatusMessage]);
 
   const openLocalHistoryForKey = useCallback((key: string) => {
     const file = openFilesRef.current[key];
@@ -9407,18 +9552,275 @@ export function CodeWorkspaceTab({
   const compareWithClipboard = useCallback(async () => {
     const file = activeFile;
     if (!file) return;
+    const selection = compareSelectionFromEditorSelection(editorSelectionRef.current);
+    const rightText = selection?.text ?? file.text;
+    const rightTitle = selection ? `${file.title} (Selection)` : file.title;
+    const target = compareTargetForOpenFile(file, selection);
+    const rightDescriptor = {
+      ...compareDescriptorForOpenFile(file, "buffer", file.path, rightText, rightTitle),
+      readOnly: !!file.library,
+    };
     try {
-      const clipText = await navigator.clipboard.readText();
-      const result = createClipboardCompareSession(file.title, file.path, file.text, clipText);
+      const clipboard = await readTextResult();
+      if (!clipboard.ok) {
+        setActiveCompareSession(createUnavailableCompareSession({
+          source: "clipboard",
+          title: `Compare ${rightTitle} with Clipboard`,
+          unavailableTitle: "Clipboard",
+          reason: "read-failed",
+          message: "The system clipboard could not be read.",
+          right: rightDescriptor,
+          target,
+        }));
+        return;
+      }
+      const result = createClipboardCompareSession(
+        file.title,
+        file.path,
+        file.text,
+        clipboard.text,
+        selection,
+        target,
+      );
       if (!result.session) {
-        setStatusMessage(result.error || "Cannot compare with clipboard");
+        const unavailable = classifyCompareReadError(result.error || "Clipboard is unavailable");
+        setActiveCompareSession(createUnavailableCompareSession({
+          source: "clipboard",
+          title: `Compare ${rightTitle} with Clipboard`,
+          unavailableTitle: "Clipboard",
+          reason: unavailable.reason,
+          message: unavailable.message,
+          right: rightDescriptor,
+          target,
+        }));
         return;
       }
       setActiveCompareSession(result.session);
-    } catch {
-      setStatusMessage("Failed to read clipboard text");
+    } catch (error) {
+      const unavailable = classifyCompareReadError(error);
+      setActiveCompareSession(createUnavailableCompareSession({
+        source: "clipboard",
+        title: `Compare ${rightTitle} with Clipboard`,
+        unavailableTitle: "Clipboard",
+        reason: unavailable.reason,
+        message: unavailable.message,
+        right: rightDescriptor,
+        target,
+      }));
     }
-  }, [activeFile, setStatusMessage]);
+  }, [activeFile]);
+
+  const compareWithFile = useCallback(async () => {
+    const file = activeFile;
+    if (!file || file.library) return;
+    const selection = compareSelectionFromEditorSelection(editorSelectionRef.current);
+    const rightText = selection?.text ?? file.text;
+    const rightTitle = selection ? `${file.title} (Selection)` : file.title;
+    const target = compareTargetForOpenFile(file, selection);
+    const activePath = absolutePathForOpenFile(file) ?? file.path;
+    const rightDescriptor = compareDescriptorForOpenFile(file, "buffer", activePath, rightText, rightTitle);
+    const selectedPath = await selectFilePath();
+    if (!selectedPath) {
+      setStatusMessage("Compare with file cancelled");
+      return;
+    }
+
+    const normalizedPath = normalizeFsPath(selectedPath);
+    const root = rootsRef.current.find((candidate) => (
+      relativePathWithinRoot(candidate.path, normalizedPath) !== null
+    ));
+    const title = normalizedPath.split("/").filter(Boolean).at(-1) ?? normalizedPath;
+    try {
+      const selected = root
+        ? await workspaceReadFile(
+          root.path,
+          relativePathWithinRoot(root.path, normalizedPath) ?? "",
+          MAX_COMPARE_SIZE_BYTES + 1,
+        )
+        : await workspaceReadLooseFile(normalizedPath, MAX_COMPARE_SIZE_BYTES + 1);
+      const result = createFileCompareSession(
+        {
+          title,
+          path: normalizedPath,
+          text: selected.text,
+          encoding: selected.encoding ?? "UTF-8",
+          bom: selected.bom ?? false,
+          sizeBytes: selected.size,
+          source: "file",
+          readOnly: true,
+        },
+        rightDescriptor,
+        target,
+      );
+      if (!result.session) {
+        const unavailable = classifyCompareReadError(result.error || "Selected file is unavailable");
+        setActiveCompareSession(createUnavailableCompareSession({
+          source: "file",
+          title: `Compare ${rightTitle} with ${title}`,
+          unavailableTitle: title,
+          reason: unavailable.reason,
+          message: unavailable.message,
+          right: rightDescriptor,
+          target,
+        }));
+        return;
+      }
+      setActiveCompareSession(result.session);
+    } catch (error) {
+      const unavailable = classifyCompareReadError(error);
+      setActiveCompareSession(createUnavailableCompareSession({
+        source: "file",
+        title: `Compare ${rightTitle} with ${title}`,
+        unavailableTitle: title,
+        reason: unavailable.reason,
+        message: unavailable.message,
+        right: rightDescriptor,
+        target,
+      }));
+    }
+  }, [absolutePathForOpenFile, activeFile, setStatusMessage]);
+
+  const compareWithLocalHistory = useCallback(async () => {
+    const file = activeFile;
+    if (!file) return;
+    const path = absolutePathForOpenFile(file);
+    if (!path) {
+      setStatusMessage(file.library
+        ? `${file.title} is a library source with no local history`
+        : "Cannot resolve path for local history");
+      return;
+    }
+    const selection = compareSelectionFromEditorSelection(editorSelectionRef.current);
+    const target = compareTargetForOpenFile(file, selection);
+    const rightText = selection?.text ?? file.text;
+    const rightTitle = selection ? `${file.title} (Selection)` : file.title;
+    const rightDescriptor = compareDescriptorForOpenFile(file, "buffer", path, rightText, rightTitle);
+    try {
+      const entries = await historyList(path);
+      const entry = entries[0];
+      if (!entry) {
+        setActiveCompareSession(createUnavailableCompareSession({
+          source: "local-history",
+          title: `Compare ${rightTitle} with Local History`,
+          unavailableTitle: "Local History",
+          reason: "no-history",
+          message: `No local history snapshots exist for ${path}.`,
+          right: rightDescriptor,
+          target,
+        }));
+        return;
+      }
+      const snapshotText = await historyRead(entry.id);
+      compareLocalHistorySnapshot(file.key, entry, snapshotText, { file, selection, target });
+    } catch (error) {
+      const unavailable = classifyCompareReadError(error);
+      setActiveCompareSession(createUnavailableCompareSession({
+        source: "local-history",
+        title: `Compare ${rightTitle} with Local History`,
+        unavailableTitle: "Local History",
+        reason: unavailable.reason,
+        message: unavailable.message,
+        right: rightDescriptor,
+        target,
+      }));
+    }
+  }, [absolutePathForOpenFile, activeFile, compareLocalHistorySnapshot, setStatusMessage]);
+
+  const applyCompareSession = useCallback(async (
+    session: EditorCompareSession,
+    newText: string,
+  ) => {
+    const target = session.target;
+    if (!target) throw new Error("Comparison target is no longer available");
+    if (workspaceResourceOperationLocked) {
+      throw new Error("Workspace resource operations are busy");
+    }
+    flushPendingEditorText();
+    let current = openFilesRef.current[target.fileKey] ?? null;
+    if (current?.library) throw new Error(`${current.title} is a read-only library source`);
+    if (!compareTargetMatches(current, target)) {
+      throw new Error("Comparison target is stale; no changes were applied");
+    }
+    if (!current) throw new Error("Comparison target is no longer open");
+    if (current.dirty) {
+      const confirmed = await confirmAppDialog({
+        title: "Apply comparison",
+        message: `Replace unsaved changes in ${current.subtitle} with the comparison result?`,
+        confirmLabel: "Apply",
+      });
+      if (!confirmed) {
+        setStatusMessage("Comparison apply cancelled; unsaved changes were kept");
+        return;
+      }
+      flushPendingEditorText();
+      current = openFilesRef.current[target.fileKey] ?? null;
+      if (current?.library) throw new Error(`${current.title} is a read-only library source`);
+      if (!compareTargetMatches(current, target)) {
+        throw new Error("Comparison target became stale; no changes were applied");
+      }
+      if (!current) throw new Error("Comparison target is no longer open");
+    }
+
+    const nextText = target.selection
+      ? replaceCompareSelection(current.text, target.selection, newText)
+      : normalizeCompareText(newText);
+    if (nextText === null) {
+      throw new Error("Comparison selection is stale; no changes were applied");
+    }
+    if (nextText === current.text) {
+      setStatusMessage("Comparison already matches the current buffer");
+      return;
+    }
+
+    const beforeText = current.text;
+    const next = mutateOpenBuffer(target.fileKey, { text: nextText, error: null }, "workspace-edit");
+    if (!next) throw new Error("Comparison target closed before apply");
+    const affectedPath = absolutePathForOpenFile(next) ?? next.path;
+    semanticIndex.invalidate("document-edited", [affectedPath]);
+    workspaceEditHistory.push({
+      id: `${workspaceInstanceId}:compare:${Date.now()}`,
+      label: `Apply comparison from ${session.left.title}`,
+      affectedPaths: [affectedPath],
+      undo: async () => {
+        const live = openFilesRef.current[target.fileKey] ?? null;
+        if (!compareTargetMatches(live, {
+          ...target,
+          documentRevision: next.documentRevision ?? 0,
+          expectedText: next.text,
+        })) {
+          throw new Error("Cannot undo comparison: the buffer changed after apply");
+        }
+        const restored = mutateOpenBuffer(target.fileKey, { text: beforeText, error: null }, "history-replay");
+        if (!restored) throw new Error("Cannot undo comparison: target is closed");
+        semanticIndex.invalidate("document-edited", [affectedPath]);
+        await syncLspDocument(restored, "change");
+      },
+      redo: async () => {
+        const live = openFilesRef.current[target.fileKey] ?? null;
+        if (!live || live.text !== beforeText) {
+          throw new Error("Cannot redo comparison: the buffer changed after undo");
+        }
+        const redone = mutateOpenBuffer(target.fileKey, { text: nextText, error: null }, "history-replay");
+        if (!redone) throw new Error("Cannot redo comparison: target is closed");
+        semanticIndex.invalidate("document-edited", [affectedPath]);
+        await syncLspDocument(redone, "change");
+      },
+    });
+    setWorkspaceEditHistoryRevision((revision) => revision + 1);
+    await syncLspDocument(next, "change");
+    setActiveCompareSession(null);
+    setStatusMessage(`Applied comparison to ${next.subtitle}; undo is available`);
+  }, [
+    absolutePathForOpenFile,
+    flushPendingEditorText,
+    mutateOpenBuffer,
+    semanticIndex.invalidate,
+    setStatusMessage,
+    syncLspDocument,
+    workspaceEditHistory,
+    workspaceInstanceId,
+    workspaceResourceOperationLocked,
+  ]);
 
   const setRenderedDocMode = useCallback((fileKey: string, enabled: boolean) => {
     writeReaderModePreference(workspaceInstanceId, fileKey, enabled);
@@ -10698,7 +11100,15 @@ export function CodeWorkspaceTab({
       category: "Diff",
       keywords: ["diff", "compare", "file"],
       when: () => !!activeFile,
-      run: compareWithClipboard,
+      run: compareWithFile,
+    },
+    {
+      id: "workspace.compareWithLocalHistory",
+      title: "Compare with Local History",
+      category: "Diff",
+      keywords: ["diff", "compare", "local", "history", "snapshot"],
+      when: () => !!activeFile,
+      run: compareWithLocalHistory,
     },
     {
       id: "workspace.toggleRenderedDocComments",
@@ -11259,6 +11669,9 @@ export function CodeWorkspaceTab({
     addRoot,
     bookmarks,
     closeFile,
+    compareWithClipboard,
+    compareWithFile,
+    compareWithLocalHistory,
     chooseMnemonicBookmarkAtCursor,
     closedTabsStack,
     columnSelectionMode,
@@ -16091,9 +16504,11 @@ export function CodeWorkspaceTab({
       {localHistoryTarget && openFiles[localHistoryTarget.key] && (
         <LocalHistoryDialog
           path={localHistoryTarget.path}
-          currentText={openFiles[localHistoryTarget.key].text}
           onClose={() => setLocalHistoryTarget(null)}
           onRestore={(text) => restoreLocalHistoryText(localHistoryTarget.key, text)}
+          onCompare={(entry, text) => {
+            compareLocalHistorySnapshot(localHistoryTarget.key, entry, text);
+          }}
         />
       )}
       <EditorSelectionAiToolbar
@@ -16345,13 +16760,7 @@ export function CodeWorkspaceTab({
         <EditorCompareDialog
           session={activeCompareSession}
           onClose={() => setActiveCompareSession(null)}
-          onApplyRight={(newText) => {
-            if (activeFile && !workspaceResourceOperationLocked) {
-              updateFileText(activeFile.key, newText);
-              setActiveCompareSession(null);
-              setStatusMessage("Applied changes from comparison");
-            }
-          }}
+          onApplyRight={(newText) => applyCompareSession(activeCompareSession, newText)}
         />
       )}
       <ClipboardHistoryPopup

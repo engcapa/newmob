@@ -9,16 +9,16 @@ import {
 
 interface LocalHistoryDialogProps {
   path: string;
-  currentText: string;
   onClose: () => void;
   onRestore: (text: string) => void;
+  onCompare?: (entry: LocalHistoryEntry, text: string) => void;
 }
 
 export function LocalHistoryDialog({
   path,
-  currentText,
   onClose,
   onRestore,
+  onCompare,
 }: LocalHistoryDialogProps) {
   const [entries, setEntries] = useState<LocalHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,27 +75,11 @@ export function LocalHistoryDialog({
     [entries, selectedId],
   );
 
-  const previewLines = useMemo(() => {
-    if (previewText == null) return [];
-    const oldLines = previewText.split("\n");
-    const newLines = currentText.split("\n");
-    const max = Math.max(oldLines.length, newLines.length);
-    const rows: Array<{ kind: "same" | "old" | "new"; text: string }> = [];
-    for (let index = 0; index < max; index += 1) {
-      const oldLine = oldLines[index];
-      const newLine = newLines[index];
-      if (oldLine === newLine) {
-        if (oldLine != null) rows.push({ kind: "same", text: oldLine });
-        continue;
-      }
-      if (oldLine != null) rows.push({ kind: "old", text: oldLine });
-      if (newLine != null) rows.push({ kind: "new", text: newLine });
-    }
-    return rows.slice(0, 400);
-  }, [currentText, previewText]);
-
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Local History for ${path}`}
       data-testid="code-workspace-local-history-dialog"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
       onClick={onClose}
@@ -167,23 +151,9 @@ export function LocalHistoryDialog({
               ) : previewText == null ? (
                 <div className="p-3 text-[var(--taomni-code-muted)]">No snapshot selected.</div>
               ) : (
-                previewLines.map((line, index) => (
-                  <div
-                    key={`${line.kind}:${index}`}
-                    className={
-                      line.kind === "old"
-                        ? "flex bg-red-500/10 text-red-400"
-                        : line.kind === "new"
-                          ? "flex bg-green-500/10 text-green-400"
-                          : "flex text-[var(--taomni-code-text)]"
-                    }
-                  >
-                    <span className="w-7 shrink-0 select-none text-center opacity-60">
-                      {line.kind === "old" ? "−" : line.kind === "new" ? "+" : " "}
-                    </span>
-                    <pre className="min-w-0 flex-1 whitespace-pre-wrap break-all pr-2">{line.text || " "}</pre>
-                  </div>
-                ))
+                <div className="p-3 text-[var(--taomni-code-muted)]">
+                  Snapshot loaded. Open Compare to inspect the revision against the current buffer.
+                </div>
               )}
             </div>
             {error && (
@@ -198,6 +168,19 @@ export function LocalHistoryDialog({
                 onClick={onClose}
               >
                 Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="code-workspace-local-history-compare"
+                disabled={previewText == null || selected == null || !onCompare}
+                className="h-7 rounded bg-[var(--taomni-accent)] px-2 text-[11px] text-white disabled:opacity-40"
+                onClick={() => {
+                  if (previewText == null || selected == null || !onCompare) return;
+                  onCompare(selected, previewText);
+                  onClose();
+                }}
+              >
+                Compare snapshot
               </button>
               <button
                 type="button"

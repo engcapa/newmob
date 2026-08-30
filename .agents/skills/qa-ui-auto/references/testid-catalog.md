@@ -220,6 +220,20 @@
 - `[data-testid="code-workspace-bookmark-mnemonic"]` — display [optional] — F25.5.bookmark-mnemonic
 - `[data-testid="code-workspace-bookmark-remove"]` — interactive [optional] — F25.5.bookmark-remove
 - `[data-testid="code-workspace-bookmark-missing"]` — display [optional] — F25.5.bookmark-missing
+- `[data-testid="code-workspace-compare-dialog"]` — display [optional] — F25.5.compare-dialog
+- `[data-testid="compare-session-metadata"]` — display [optional] — F25.5.compare-session-metadata
+- `[data-testid^="compare-left-line-"]` — display [optional] — F25.5.compare-left-line
+- `[data-testid^="compare-right-line-"]` — display [optional] — F25.5.compare-right-line
+- `[data-testid="compare-copy-left"]` — interactive [optional] — F25.5.compare-copy-left
+- `[data-testid="compare-copy-right"]` — interactive [optional] — F25.5.compare-copy-right
+- `[data-testid="compare-apply-left-to-right"]` — interactive [optional] — F25.5.compare-apply
+- `[data-testid="compare-dialog-close"]` — interactive [optional] — F25.5.compare-dialog-close
+- `[data-testid="compare-apply-error"]` — display [optional] — F25.5.compare-apply-error
+- `[data-testid="compare-left-unavailable"]` — display [optional] — F25.5.compare-left-unavailable
+- `[data-testid="compare-right-unavailable"]` — display [optional] — F25.5.compare-right-unavailable
+- `[data-testid="code-workspace-local-history-dialog"]` — display [optional] — F25.5.local-history-dialog
+- `[data-testid="code-workspace-local-history-compare"]` — interactive [optional] — F25.5.local-history-compare
+- `[data-testid="code-workspace-local-history-restore"]` — interactive [optional] — F25.5.local-history-restore
 
 ## code-workspace/execution (F25.1)
 

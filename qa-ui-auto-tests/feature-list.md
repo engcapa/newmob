@@ -5536,7 +5536,7 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel]
+components: [CodeWorkspaceTab, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
   - src/components/editor/workspace/Breadcrumbs.tsx
@@ -5549,6 +5549,9 @@ files:
   - src/components/editor/workspace/ClipboardHistoryPopup.tsx
   - src/components/editor/workspace/panels/TodosBookmarksPanel.tsx
   - src/components/editor/workspace/todoBookmarks.ts
+  - src/components/editor/workspace/EditorCompareDialog.tsx
+  - src/components/editor/workspace/LocalHistoryDialog.tsx
+  - src/components/editor/workspace/editorCompareModel.ts
 controls:
   - id: tree-add-folder
     selector: '[data-testid="code-workspace-tree-add-folder"]'
@@ -5850,6 +5853,63 @@ controls:
   - id: bookmark-missing
     selector: '[data-testid="code-workspace-bookmark-missing"]'
     kind: display
+    optional: true
+  # §ED-COMPARE-001: shared compare surface and local-history entry point.
+  - id: compare-dialog
+    selector: '[data-testid="code-workspace-compare-dialog"]'
+    kind: display
+    optional: true
+  - id: compare-session-metadata
+    selector: '[data-testid="compare-session-metadata"]'
+    kind: display
+    optional: true
+  - id: compare-left-line
+    selector: '[data-testid^="compare-left-line-"]'
+    kind: display
+    optional: true
+  - id: compare-right-line
+    selector: '[data-testid^="compare-right-line-"]'
+    kind: display
+    optional: true
+  - id: compare-copy-left
+    selector: '[data-testid="compare-copy-left"]'
+    kind: interactive
+    optional: true
+  - id: compare-copy-right
+    selector: '[data-testid="compare-copy-right"]'
+    kind: interactive
+    optional: true
+  - id: compare-apply
+    selector: '[data-testid="compare-apply-left-to-right"]'
+    kind: interactive
+    optional: true
+  - id: compare-dialog-close
+    selector: '[data-testid="compare-dialog-close"]'
+    kind: interactive
+    optional: true
+  - id: compare-apply-error
+    selector: '[data-testid="compare-apply-error"]'
+    kind: display
+    optional: true
+  - id: compare-left-unavailable
+    selector: '[data-testid="compare-left-unavailable"]'
+    kind: display
+    optional: true
+  - id: compare-right-unavailable
+    selector: '[data-testid="compare-right-unavailable"]'
+    kind: display
+    optional: true
+  - id: local-history-dialog
+    selector: '[data-testid="code-workspace-local-history-dialog"]'
+    kind: display
+    optional: true
+  - id: local-history-compare
+    selector: '[data-testid="code-workspace-local-history-compare"]'
+    kind: interactive
+    optional: true
+  - id: local-history-restore
+    selector: '[data-testid="code-workspace-local-history-restore"]'
+    kind: interactive
     optional: true
 -->
 
