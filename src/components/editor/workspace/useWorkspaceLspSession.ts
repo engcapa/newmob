@@ -21,6 +21,7 @@ import {
 import type { CodeWorkspaceRootInfo } from "../../../types";
 import { subscribeSdkRegistryChanged } from "../../../lib/editor/sdk";
 import { buildIncrementalContentChange } from "./lspTextEdits";
+import { isDiagnosticScopeCurrent, type DiagnosticScope } from "./diagnosticScopeModel";
 import {
   CUSTOM_LSP_COMMAND_ID,
   customServerCommandFromConfig,
@@ -195,6 +196,7 @@ export function useWorkspaceLspSession({
   /** Last known server-active flag per file (avoids store peeks before didChange). */
   const documentActiveRef = useRef<Record<string, boolean>>({});
   const diagnosticsTimersRef = useRef<Record<string, number>>({});
+  const diagnosticsRequestSequenceRef = useRef<Record<string, number>>({});
   const syncQueuesRef = useRef<Record<string, DocumentSyncQueue>>({});
   const mountedRef = useRef(true);
 
@@ -211,6 +213,7 @@ export function useWorkspaceLspSession({
       syncedTextRef.current = {};
       incrementalSyncRef.current = {};
       documentActiveRef.current = {};
+      diagnosticsRequestSequenceRef.current = {};
       Object.values(diagnosticsTimersRef.current).forEach((timer) => window.clearTimeout(timer));
       diagnosticsTimersRef.current = {};
     };
@@ -249,7 +252,12 @@ export function useWorkspaceLspSession({
     documentActiveRef.current = {};
     versionRef.current = {};
     updateLspFiles((current) => Object.fromEntries(
-      Object.entries(current).map(([key, state]) => [key, { ...state, syncedText: null }]),
+      Object.entries(current).map(([key, state]) => [key, {
+        ...state,
+        diagnostics: [],
+        diagnosticScope: null,
+        syncedText: null,
+      }]),
     ));
     void lspStopWorkspace(workspaceInstanceId)
       .catch(() => undefined)
@@ -357,7 +365,19 @@ export function useWorkspaceLspSession({
       const effectiveStatus: LspDocumentStatus = effectiveCapabilities !== status.capabilities
         ? { ...status, capabilities: effectiveCapabilities }
         : status;
+      const currentRevision = openFilesRef.current[file.key]?.documentRevision;
+      const existingScope = existing.diagnosticScope;
+      const preserveDiagnostics = !!existingScope
+        && effectiveStatus.active
+        && currentRevision !== undefined
+        && existingScope.revision === currentRevision
+        && existingScope.providerId === effectiveStatus.presetId
+        && existingScope.providerGeneration === sessionGenerationRef.current
+        && existingScope.uri === (effectiveStatus.uri || null);
+      const diagnosticsUnchanged = (existing.diagnostics.length === 0 && existingScope === null)
+        || preserveDiagnostics;
       if (existing.status && sameDocumentStatus(existing.status, effectiveStatus)
+        && diagnosticsUnchanged
         && !existing.syncing && existing.error === null) {
         return current;
       }
@@ -366,30 +386,56 @@ export function useWorkspaceLspSession({
         [file.key]: {
           ...existing,
           status: effectiveStatus,
+          ...(preserveDiagnostics ? {} : { diagnostics: [], diagnosticScope: null }),
           syncing: false,
           error: null,
           errorGeneration: nextErrorGeneration(existing, effectiveStatus.error, null),
         },
       };
     });
-  }, [updateLspFiles]);
+  }, [openFilesRef, updateLspFiles]);
 
   const refreshDiagnostics = useCallback(async (file: OpenFileState) => {
     // Library sources are never opened on the server, so they publish no diagnostics.
     if (file.library) return;
     const descriptor = descriptorForFile(file);
     if (!descriptor) return;
+    const requestRevision = file.documentRevision ?? openFilesRef.current[file.key]?.documentRevision ?? 0;
+    const requestGeneration = sessionGenerationRef.current;
+    const requestSequence = (diagnosticsRequestSequenceRef.current[file.key] ?? 0) + 1;
+    diagnosticsRequestSequenceRef.current[file.key] = requestSequence;
+    const isCurrentRequest = () => (
+      mountedRef.current
+      && !!openFilesRef.current[file.key]
+      && openFilesRef.current[file.key]?.documentRevision === requestRevision
+      && sessionGenerationRef.current === requestGeneration
+      && diagnosticsRequestSequenceRef.current[file.key] === requestSequence
+    );
     try {
       const result = await lspGetDiagnostics(descriptor);
-      if (!mountedRef.current || !openFilesRef.current[file.key]) return;
+      if (!isCurrentRequest()) return;
       updateLspFiles((current) => {
+        if (!isCurrentRequest()) return current;
         const existing = current[file.key] ?? emptyLspFileState();
+        if (existing.status?.active && existing.status.presetId !== result.status.presetId) return current;
+        const nextScope: DiagnosticScope | null = result.status.active
+          ? {
+              fileKey: file.key,
+              revision: requestRevision,
+              providerId: result.status.presetId,
+              providerGeneration: requestGeneration,
+              uri: result.status.uri || descriptor.documentUri || descriptor.filePath || null,
+            }
+          : null;
         const statusUnchanged = existing.status
           ? sameDocumentStatus(existing.status, result.status)
           : false;
         if (
           statusUnchanged
-          && sameDiagnostics(existing.diagnostics, result.diagnostics)
+          && sameDiagnostics(existing.diagnostics, result.status.active ? result.diagnostics : [])
+          && (nextScope === null
+            ? existing.diagnosticScope === null
+            : isDiagnosticScopeCurrent(existing.diagnosticScope, nextScope))
           && !existing.syncing
           && existing.error === null
         ) {
@@ -400,7 +446,8 @@ export function useWorkspaceLspSession({
           [file.key]: {
             ...existing,
             status: result.status,
-            diagnostics: result.diagnostics,
+            diagnostics: result.status.active ? result.diagnostics : [],
+            diagnosticScope: nextScope,
             syncing: false,
             error: null,
             errorGeneration: nextErrorGeneration(existing, result.status.error, null),
@@ -408,8 +455,9 @@ export function useWorkspaceLspSession({
         };
       });
     } catch (error) {
-      if (!mountedRef.current || !openFilesRef.current[file.key]) return;
+      if (!isCurrentRequest()) return;
       updateLspFiles((current) => {
+        if (!isCurrentRequest()) return current;
         const existing = current[file.key] ?? emptyLspFileState();
         const message = errorMessage(error);
         if (!existing.syncing && existing.error === message) return current;
@@ -417,6 +465,8 @@ export function useWorkspaceLspSession({
           ...current,
           [file.key]: {
             ...existing,
+            diagnostics: [],
+            diagnosticScope: null,
             syncing: false,
             error: message,
             errorGeneration: nextErrorGeneration(existing, null, message),
@@ -730,6 +780,7 @@ export function useWorkspaceLspSession({
     delete syncedTextRef.current[key];
     delete incrementalSyncRef.current[key];
     delete documentActiveRef.current[key];
+    delete diagnosticsRequestSequenceRef.current[key];
     const timer = diagnosticsTimersRef.current[key];
     if (timer) window.clearTimeout(timer);
     delete diagnosticsTimersRef.current[key];

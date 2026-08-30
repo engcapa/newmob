@@ -457,6 +457,10 @@ import {
 import { EditorCompareDialog } from "./workspace/EditorCompareDialog";
 import { HighlightingWidget } from "./workspace/HighlightingWidget";
 import {
+  isDiagnosticScopeCurrent,
+  type DiagnosticScope,
+} from "./workspace/diagnosticScopeModel";
+import {
   isDocCommentRenderingSupported,
   readReaderModePreference,
   writeReaderModePreference,
@@ -5773,6 +5777,28 @@ export function CodeWorkspaceTab({
     },
     [displayDiagnosticsCache, inspectionTransform],
   );
+  const diagnosticScopeForFile = useCallback((
+    file: OpenFileState,
+    state: LspFileState | null | undefined,
+  ): DiagnosticScope => {
+    const descriptor = lspDescriptorForFile(file);
+    return {
+      fileKey: file.key,
+      revision: file.documentRevision ?? 0,
+      providerId: state?.status?.presetId ?? null,
+      providerGeneration: lspSessionGeneration(),
+      uri: state?.status?.uri || descriptor?.documentUri || descriptor?.filePath || null,
+    };
+  }, [lspDescriptorForFile, lspSessionGeneration]);
+  const currentDiagnosticsForFile = useCallback((
+    file: OpenFileState,
+    state: LspFileState | null | undefined,
+  ): LspDiagnostic[] | null => {
+    if (!state || !isDiagnosticScopeCurrent(state.diagnosticScope, diagnosticScopeForFile(file, state))) {
+      return null;
+    }
+    return state.diagnostics;
+  }, [diagnosticScopeForFile]);
   const activeLspDocumentIsSynced = Boolean(
     activeFile
     && !activeFile.loading
@@ -9292,7 +9318,21 @@ export function CodeWorkspaceTab({
   const navigateDiagnostic = useCallback((direction: 1 | -1) => {
     const file = activeFile;
     if (!file) return;
-    const diags = (lspFilesRef.current[file.key]?.diagnostics ?? []).slice().sort((a, b) => {
+    const state = lspFilesRef.current[file.key] ?? null;
+    const currentDiagnostics = currentDiagnosticsForFile(file, state);
+    if (!currentDiagnostics) {
+      setStatusMessage(state?.error
+        ? `Diagnostics failed: ${state.error}`
+        : state?.status?.active
+          ? "Diagnostics are still refreshing for the current file"
+          : "Diagnostics unavailable without a language server");
+      return;
+    }
+    const requestScope = diagnosticScopeForFile(file, state);
+    const diags = displayDiagnosticsFor(
+      currentDiagnostics,
+      inspectionPathForFileKey(file.key),
+    ).filter((item) => item.severity === 1 || item.severity === 2).slice().sort((a, b) => {
       if (a.range.start.line !== b.range.start.line) {
         return a.range.start.line - b.range.start.line;
       }
@@ -9336,11 +9376,42 @@ export function CodeWorkspaceTab({
     const target = diags[targetIndex];
     if (target) {
       void openFile(file.ref).then(() => {
+        const latest = openFilesRef.current[file.key];
+        const latestState = lspFilesRef.current[file.key] ?? null;
+        const latestDiagnostics = latest
+          ? currentDiagnosticsForFile(latest, latestState)
+          : null;
+        if (
+          !latest
+          || latest.documentRevision !== file.documentRevision
+          || !isDiagnosticScopeCurrent(latestState?.diagnosticScope, requestScope)
+          || !latestDiagnostics
+          || !displayDiagnosticsFor(latestDiagnostics, inspectionPathForFileKey(file.key)).some((candidate) => (
+            candidate.severity === target.severity
+            && candidate.message === target.message
+            && candidate.range.start.line === target.range.start.line
+            && candidate.range.start.character === target.range.start.character
+          ))
+        ) {
+          return;
+        }
         revealEditorLocation(file.key, target.range);
       });
       setStatusMessage(`${target.severity === 1 ? "Error" : "Warning"}: ${target.message}`);
     }
-  }, [activeEditorGroupId, activeFile, cursorPositions, openFile, revealEditorLocation, setStatusMessage]);
+  }, [
+    activeEditorGroupId,
+    activeFile,
+    currentDiagnosticsForFile,
+    cursorPositions,
+    diagnosticScopeForFile,
+    displayDiagnosticsFor,
+    inspectionPathForFileKey,
+    openFile,
+    openFilesRef,
+    revealEditorLocation,
+    setStatusMessage,
+  ]);
 
   const optimizeImports = useCallback(async () => {
     const file = activeFile;
@@ -11161,7 +11232,7 @@ export function CodeWorkspaceTab({
     const node = target instanceof Node ? target : null;
     const element = node instanceof Element ? node : node?.parentElement;
     return Boolean(element?.closest?.(
-      '[data-testid="code-workspace-breadcrumbs"], [data-taomni-context-menu]',
+      '[data-testid="code-workspace-breadcrumbs"], [data-testid="code-workspace-highlighting-widget"], [data-taomni-context-menu]',
     ));
   }, []);
 
@@ -14486,7 +14557,11 @@ export function CodeWorkspaceTab({
     const groupLspState = group.activeKey ? lspFiles[group.activeKey] ?? null : null;
     const groupPath = groupFile ? inspectionPathForFileKey(groupFile.key) : undefined;
     const groupHighlightingLevel = groupFile ? getFileHighlightingLevel(groupFile.key) : "all";
-    const groupDiagnosticsRaw = displayDiagnosticsFor(groupLspState?.diagnostics, groupPath);
+    const groupDiagnosticsCurrent = groupFile
+      ? currentDiagnosticsForFile(groupFile, groupLspState)
+      : null;
+    const groupDiagnosticsReady = groupDiagnosticsCurrent !== null;
+    const groupDiagnosticsRaw = displayDiagnosticsFor(groupDiagnosticsCurrent, groupPath);
     const groupDiagnostics = groupHighlightingLevel === "none" || groupHighlightingLevel === "syntax"
       ? []
       : groupDiagnosticsRaw;
@@ -14680,7 +14755,11 @@ export function CodeWorkspaceTab({
         )}
         highlightingWidget={groupFile ? (
           <HighlightingWidget
+            fileKey={groupFile.key}
+            diagnosticScope={groupDiagnosticsReady ? groupLspState?.diagnosticScope : null}
             diagnostics={groupDiagnosticsRaw}
+            diagnosticsReady={groupDiagnosticsReady}
+            diagnosticsError={groupLspState?.error ?? groupLspState?.status?.error ?? null}
             level={groupHighlightingLevel}
             onChangeLevel={(lvl) => setFileHighlightingLevel(groupFile.key, lvl)}
             providerName={groupLspState?.status?.displayName}
@@ -14688,6 +14767,12 @@ export function CodeWorkspaceTab({
             onNavigateNextError={() => navigateDiagnostic(1)}
             onNavigatePrevError={() => navigateDiagnostic(-1)}
             onOpenSettings={() => openLanguageServersSettings(groupLspState?.status?.presetId)}
+            onRestoreEditorFocus={() => {
+              const pane = groupId === activeEditorGroupId
+                ? editorPaneRef.current
+                : inactiveEditorPaneRef.current;
+              pane?.querySelector<HTMLElement>(".cm-content")?.focus();
+            }}
           />
         ) : null}
         breadcrumbs={showGroupBreadcrumbs && groupFile ? (

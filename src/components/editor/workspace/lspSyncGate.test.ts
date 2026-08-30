@@ -26,6 +26,7 @@ function state(partial: Partial<LspFileState> = {}): LspFileState {
   return {
     status: null,
     diagnostics: [],
+    diagnosticScope: null,
     syncing: false,
     syncedText: null,
     error: null,

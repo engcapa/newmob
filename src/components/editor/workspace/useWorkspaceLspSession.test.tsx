@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { emit } from "@tauri-apps/api/event";
-import type { LspDocumentStatus } from "../../../lib/editor/lsp";
+import type { LspDiagnostic, LspDocumentStatus } from "../../../lib/editor/lsp";
 import { SDK_REGISTRY_CHANGED_EVENT } from "../../../lib/editor/sdk";
 import type { CodeWorkspaceRootInfo } from "../../../types";
 import type { LspFileState, OpenFileState } from "./codeWorkspaceModel";
@@ -178,6 +178,88 @@ describe("useWorkspaceLspSession", () => {
       workspaceId: "workspace-1",
       filePath: "src/main.ts",
     }));
+    unmount();
+  });
+
+  it("records the file revision and provider session scope for diagnostics", async () => {
+    const diagnostic: LspDiagnostic = {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+      severity: 1,
+      message: "Type error",
+      source: "ts",
+      code: "2322",
+    };
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [diagnostic] });
+    const openFilesRef = { current: { [file.key]: file } };
+    let lspFiles: Record<string, LspFileState> = {};
+    const updateLspFiles = vi.fn((updater: Record<string, LspFileState> | ((current: Record<string, LspFileState>) => Record<string, LspFileState>)) => {
+      lspFiles = typeof updater === "function" ? updater(lspFiles) : updater;
+    });
+    const { result, unmount } = renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-diagnostic-scope",
+      roots,
+      openFilesRef,
+      updateLspFiles,
+      onError: vi.fn(),
+    }));
+
+    await act(async () => result.current.syncDocument(file, "open"));
+    await act(async () => {
+      await emit(LSP_DIAGNOSTICS_REFRESH_EVENT, { workspaceId: "workspace-diagnostic-scope" });
+    });
+
+    await waitFor(() => expect(lspFiles[file.key]?.diagnostics).toHaveLength(1));
+    expect(lspFiles[file.key]?.diagnosticScope).toEqual({
+      fileKey: file.key,
+      revision: 0,
+      providerId: "typescript",
+      providerGeneration: 0,
+      uri: "file:///repo/src/main.ts",
+    });
+    unmount();
+  });
+
+  it("drops a diagnostics response when the buffer revision changes while it is pending", async () => {
+    let resolveDiagnostics!: (value: { status: LspDocumentStatus; diagnostics: LspDiagnostic[] }) => void;
+    lspMocks.lspGetDiagnostics.mockImplementation(() => new Promise((resolve) => {
+      resolveDiagnostics = resolve;
+    }));
+    const openFilesRef: { current: Record<string, OpenFileState> } = {
+      current: { [file.key]: file },
+    };
+    let lspFiles: Record<string, LspFileState> = {};
+    const updateLspFiles = vi.fn((updater: Record<string, LspFileState> | ((current: Record<string, LspFileState>) => Record<string, LspFileState>)) => {
+      lspFiles = typeof updater === "function" ? updater(lspFiles) : updater;
+    });
+    const { result, unmount } = renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-diagnostic-revision",
+      roots,
+      openFilesRef,
+      updateLspFiles,
+      onError: vi.fn(),
+    }));
+
+    await act(async () => result.current.syncDocument(file, "open"));
+    await act(async () => {
+      await emit(LSP_DIAGNOSTICS_REFRESH_EVENT, { workspaceId: "workspace-diagnostic-revision" });
+    });
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalled());
+
+    openFilesRef.current[file.key] = { ...file, text: "const value = 2;", documentRevision: 1 };
+    resolveDiagnostics({
+      status,
+      diagnostics: [{
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+        severity: 1,
+        message: "Stale error",
+        source: "ts",
+        code: "2322",
+      }],
+    });
+    await act(async () => Promise.resolve());
+
+    expect(lspFiles[file.key]?.diagnostics).toEqual([]);
+    expect(lspFiles[file.key]?.diagnosticScope).toBeNull();
     unmount();
   });
 

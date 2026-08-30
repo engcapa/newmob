@@ -153,6 +153,17 @@
 - `[data-testid="code-workspace-editor-tab-strip"]` — display [optional] — F25.5.editor-tab-strip
 - `[data-testid="code-workspace-editor"] .cm-content` — interactive [optional] — F25.5.editor-content
 - `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
+- `[data-testid="code-workspace-highlighting-widget"]` — display — F25.5.highlighting-widget
+- `[data-testid="highlighting-widget-prev-error"]` — interactive [optional] — F25.5.highlighting-widget-prev-error
+- `[data-testid="highlighting-widget-next-error"]` — interactive [optional] — F25.5.highlighting-widget-next-error
+- `[data-testid="highlighting-widget-level-button"]` — interactive — F25.5.highlighting-widget-level-button
+- `[data-testid="highlighting-widget-menu"]` — display [optional] — F25.5.highlighting-widget-menu
+- `[data-testid="highlighting-level-option-none"]` — interactive [optional] — F25.5.highlighting-level-option-none
+- `[data-testid="highlighting-level-option-syntax"]` — interactive [optional] — F25.5.highlighting-level-option-syntax
+- `[data-testid="highlighting-level-option-all"]` — interactive [optional] — F25.5.highlighting-level-option-all
+- `[data-testid="highlighting-widget-provider"]` — display [optional] — F25.5.highlighting-widget-provider
+- `[data-testid="highlighting-widget-diagnostic-status"]` — display [optional] — F25.5.highlighting-widget-diagnostic-status
+- `[data-testid="highlighting-widget-open-settings"]` — interactive [optional] — F25.5.highlighting-widget-open-settings
 - `[data-testid="project-facts-status-badge"]` — display [optional] — F25.5.project-facts-status-badge
 - `[data-testid="project-facts-discovery-status"]` — display [optional] — F25.5.project-facts-discovery-status
 - `[data-testid="project-facts-refresh-btn"]` — interactive [optional] — F25.5.project-facts-refresh

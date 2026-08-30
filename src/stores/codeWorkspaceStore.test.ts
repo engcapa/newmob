@@ -190,6 +190,7 @@ describe("codeWorkspaceStore", () => {
       "root:a": {
         status: null,
         diagnostics: [],
+        diagnosticScope: null,
         syncing: false,
         syncedText: null,
         error: null,

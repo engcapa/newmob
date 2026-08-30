@@ -5536,12 +5536,13 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge]
+components: [CodeWorkspaceTab, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
   - src/components/editor/workspace/Breadcrumbs.tsx
   - src/components/editor/workspace/ProjectFactsStatusBadge.tsx
   - src/components/editor/workspace/EditorGroup.tsx
+  - src/components/editor/workspace/HighlightingWidget.tsx
   - src/components/editor/workspace/FileTreePane.tsx
   - src/components/editor/workspace/TabSwitcher.tsx
   - src/components/editor/workspace/KeymapSettingsDialog.tsx
@@ -5574,6 +5575,50 @@ controls:
     selector: '[data-testid="code-workspace-file-status"]'
     kind: display
     optional: true       # dirty/saved indicator on the active tab strip
+  # Per-file IDEA-style diagnostics chrome. Provider-backed counts are covered
+  # by unit/native/provider evidence; browser covers the typed no-provider UI.
+  - id: highlighting-widget
+    selector: '[data-testid="code-workspace-highlighting-widget"]'
+    kind: display
+  - id: highlighting-widget-prev-error
+    selector: '[data-testid="highlighting-widget-prev-error"]'
+    kind: interactive
+    optional: true       # disabled when the browser preview has no diagnostics
+  - id: highlighting-widget-next-error
+    selector: '[data-testid="highlighting-widget-next-error"]'
+    kind: interactive
+    optional: true       # disabled when the browser preview has no diagnostics
+  - id: highlighting-widget-level-button
+    selector: '[data-testid="highlighting-widget-level-button"]'
+    kind: interactive
+  - id: highlighting-widget-menu
+    selector: '[data-testid="highlighting-widget-menu"]'
+    kind: display
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-level-option-none
+    selector: '[data-testid="highlighting-level-option-none"]'
+    kind: interactive
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-level-option-syntax
+    selector: '[data-testid="highlighting-level-option-syntax"]'
+    kind: interactive
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-level-option-all
+    selector: '[data-testid="highlighting-level-option-all"]'
+    kind: interactive
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-widget-provider
+    selector: '[data-testid="highlighting-widget-provider"]'
+    kind: display
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-widget-diagnostic-status
+    selector: '[data-testid="highlighting-widget-diagnostic-status"]'
+    kind: display
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-widget-open-settings
+    selector: '[data-testid="highlighting-widget-open-settings"]'
+    kind: interactive
+    optional: true       # settings action is available only in the menu
   - id: project-facts-status-badge
     selector: '[data-testid="project-facts-status-badge"]'
     kind: display
