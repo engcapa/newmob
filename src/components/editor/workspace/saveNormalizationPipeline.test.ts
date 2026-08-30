@@ -458,6 +458,29 @@ describe("saveNormalizationPipeline", () => {
       expect(result.plan.finalHash).toBe(result.plan.stages[5]!.afterHash);
     });
 
+    it("deep-freezes plan identities and stage reports against caller mutations", async () => {
+      const style: EffectiveCodeStyle = {
+        tabSize: 2,
+        indentSize: 2,
+        continuationIndent: 4,
+        insertSpaces: true,
+        trimTrailingWhitespace: true,
+        source: "editorconfig",
+        label: "Spaces: 2",
+      };
+
+      const result = await runSaveNormalizationPipeline({
+        text: "const value = 1;\n",
+        codeStyle: style,
+      });
+
+      expect(Object.isFrozen(result.plan.identity.style)).toBe(true);
+      expect(Object.isFrozen(result.plan.stages[0])).toBe(true);
+
+      style.trimTrailingWhitespace = false;
+      expect(result.plan.identity.style.trimTrailingWhitespace).toBe(true);
+    });
+
     it("isolates encoding failure to single failed stage with zero live buffer effect", async () => {
       const style: EffectiveCodeStyle = {
         tabSize: 2,

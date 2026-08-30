@@ -203,7 +203,7 @@ function buildImmutableSavePlan(
   disposition: "ready" | "stale" | "failed" | "cancelled",
 ): ImmutableSavePlan {
   const planId = `save-plan-${sha256Hex(`${options.filePath || ""}:${options.text}:${Date.now()}`).slice(0, 16)}`;
-  const identity: SavePlanIdentity = {
+  const identity = cloneAndFreeze<SavePlanIdentity>({
     text: options.text,
     document: options.documentIdentity ?? {
       uri: options.filePath ? (options.filePath.startsWith("file://") ? options.filePath : `file://${options.filePath}`) : "untitled:file",
@@ -219,24 +219,47 @@ function buildImmutableSavePlan(
       charset: result.resolvedCharset ?? options.codeStyle.charset,
       bom: result.resolvedBom,
     },
-  };
+  });
 
   return Object.freeze({
     planId,
-    identity: Object.freeze(identity),
+    identity,
     initialHash: sha256Hex(options.text),
     finalHash: sha256Hex(result.text),
     finalText: result.text,
-    stages: Object.freeze([...result.stages]),
+    stages: cloneAndFreeze(result.stages),
     disposition,
     cancelledDueToEdit: result.cancelledDueToEdit,
     encodingError: result.encodingError,
-    diagnostics: Object.freeze([...result.diagnostics]),
+    diagnostics: cloneAndFreeze(result.diagnostics),
     resolvedEol: result.resolvedEol,
     resolvedCharset: result.resolvedCharset,
     resolvedBom: result.resolvedBom,
     createdAt: Date.now(),
   });
+}
+
+/** Clone plan inputs before freezing so a save cannot freeze caller-owned state. */
+function cloneAndFreeze<T>(value: T, seen = new WeakMap<object, unknown>()): T {
+  if (value === null || typeof value !== "object") return value;
+
+  const source = value as object;
+  const existing = seen.get(source);
+  if (existing !== undefined) return existing as T;
+
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    seen.set(source, clone);
+    for (const item of value) clone.push(cloneAndFreeze(item, seen));
+    return Object.freeze(clone) as unknown as T;
+  }
+
+  const clone: Record<string, unknown> = {};
+  seen.set(source, clone);
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    clone[key] = cloneAndFreeze(child, seen);
+  }
+  return Object.freeze(clone) as T;
 }
 
 /**
