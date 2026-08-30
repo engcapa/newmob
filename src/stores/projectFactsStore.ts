@@ -8,8 +8,8 @@ import {
 import {
   buildProjectStructureSnapshotV2,
   type ProjectStructureSnapshotV2,
-  type ProjectSourceSetKind,
 } from "../components/editor/workspace/projectStructureModel";
+import type { JavaProjectModuleV1 } from "../components/editor/workspace/projectAnalysisModel";
 
 export type ProjectFactsStatus = "idle" | "loading" | "ready" | "degraded" | "untrusted" | "failed";
 
@@ -253,15 +253,19 @@ export const useProjectFactsStore = create<ProjectFactsState>((set, get) => ({
       // Convert raw modules to ProjectStructureSnapshotV2
       const dependenciesByModule: Record<string, string[]> = {};
       const classpathFingerprintsByModule: Record<string, string> = {};
-      const convertedModules = rawModules.map((m) => {
+      const buildSystem: JavaProjectModuleV1["buildSystem"] =
+        tool === "gradle" || provenance?.toolKind?.startsWith("gradle") ? "gradle" : "maven";
+      const convertedModules: JavaProjectModuleV1[] = rawModules.map((m) => {
         dependenciesByModule[m.id] = m.dependencies;
         classpathFingerprintsByModule[m.id] = m.classpath.join(";");
         return {
           id: m.id,
+          buildSystem,
           root: m.root,
           sourceRoots: m.sourceRoots,
           testRoots: m.testRoots,
           generatedRoots: [],
+          excludedRoots: [],
           outputDirectory: "",
           testOutputDirectory: "",
           dependencies: m.dependencies,
