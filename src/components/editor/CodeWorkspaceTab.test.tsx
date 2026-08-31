@@ -4339,14 +4339,19 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.keyDown(content!, { key: "F11", code: "F11", ctrlKey: true });
 
     const panel = await screen.findByTestId("code-workspace-todos-panel");
+    // setMnemonicBookmark writes localStorage synchronously and only then dispatches
+    // replaceBookmarks, so the persisted value becomes observable one React commit
+    // before the panel re-renders. Gating on storage alone and asserting the DOM
+    // afterwards therefore reads a fact the gate never waited for. Both facts are
+    // asserted under the same gate so the wait covers the later one too.
     await waitFor(() => {
       const saved = JSON.parse(
         window.localStorage.getItem("taomni.codeWorkspace.bookmarks.v1.instance-mnemonic-mounted") ?? "[]",
       ) as Array<{ line: number; mnemonic: string | null; group: string | null }>;
       expect(saved).toHaveLength(1);
       expect(saved[0]).toMatchObject({ line: 0, mnemonic: "A", group: "Mnemonic" });
+      expect(panel).toHaveTextContent("A");
     });
-    expect(panel).toHaveTextContent("A");
     expect(promptAppDialog).toHaveBeenCalledWith(expect.objectContaining({
       title: "Set Bookmark Mnemonic",
       label: "Mnemonic (0-9 or A-Z)",
@@ -4363,8 +4368,10 @@ describe("CodeWorkspaceTab", () => {
       expect(saved).toHaveLength(2);
       expect(saved.find((bookmark) => bookmark.line === 0)?.mnemonic).toBeNull();
       expect(saved.find((bookmark) => bookmark.line === 1)?.mnemonic).toBe("A");
+      // Same ordering hazard as above: this is the row count the storage gate does
+      // not imply, so it belongs inside the gate.
+      expect(screen.getAllByTestId("code-workspace-bookmark-open")).toHaveLength(2);
     });
-    expect(screen.getAllByTestId("code-workspace-bookmark-open")).toHaveLength(2);
     rendered.unmount();
   });
 
