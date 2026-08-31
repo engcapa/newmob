@@ -2352,6 +2352,248 @@ describe("CodeWorkspaceTab", () => {
     expect(lspMocks.lspCodeActions).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps Problems and editor context-menu code actions on the frozen target", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-action-frozen-target",
+      workspaceInstanceId: "instance-action-frozen-target",
+      name: "Action frozen target",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const diagnostic = {
+      range: { start: { line: 1, character: 0 }, end: { line: 1, character: 6 } },
+      severity: 2,
+      code: "shared-problem-entry",
+      source: "typescript",
+      message: "Target file diagnostic",
+    };
+    const action = {
+      title: "Use target-file candidate",
+      kind: "quickfix",
+      isPreferred: true,
+      edit: { documentEdits: [] },
+      command: null,
+      commandArguments: null,
+      raw: { title: "Use target-file candidate", kind: "quickfix" },
+    };
+    const statusFor = (filePath: string) => documentStatus({
+      path: filePath,
+      uri: `file://${filePath}`,
+      presetId: "typescript-javascript",
+      languageId: "typescript",
+      displayName: "TypeScript / JavaScript",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({ codeAction: true }),
+    });
+    window.localStorage.setItem("taomni.codeWorkspace.layout.v1.instance-action-frozen-target", JSON.stringify({
+      version: 1,
+      splitOrientation: "vertical",
+      activeEditorGroupId: "primary",
+      editorGroups: {
+        primary: {
+          openOrder: ["root:app:src/main.ts"],
+          activeKey: "root:app:src/main.ts",
+          previewKey: null,
+          pinnedKeys: [],
+        },
+        secondary: {
+          openOrder: ["root:app:src/util.ts"],
+          activeKey: "root:app:src/util.ts",
+          previewKey: null,
+          pinnedKeys: [],
+        },
+      },
+    }));
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => (
+      file(path, path === "src/util.ts" ? "first\ntarget" : "main")
+    ));
+    lspMocks.lspOpenDocument.mockImplementation(async (descriptor: { filePath: string }) => (
+      statusFor(descriptor.filePath)
+    ));
+    lspMocks.lspGetDiagnostics.mockImplementation(async (descriptor: { filePath: string }) => ({
+      status: statusFor(descriptor.filePath),
+      diagnostics: descriptor.filePath.endsWith("src/main.ts") ? [diagnostic] : [],
+    }));
+    lspMocks.lspCodeActions.mockImplementation(async (descriptor: { filePath: string }) => ({
+      status: statusFor(descriptor.filePath),
+      actions: [action],
+    }));
+
+    const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await screen.findByTitle("app / src/util.ts");
+    const panes = screen.getAllByTestId("code-workspace-editor-pane");
+    const primaryPane = panes.find((pane) => pane.getAttribute("data-editor-group-id") === "primary");
+    const secondaryPane = panes.find((pane) => (
+      pane.getAttribute("data-editor-group-id") === "secondary"
+    ));
+    fireEvent.mouseDown(primaryPane!);
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: "src/main.ts" }),
+    ));
+    fireEvent.click(screen.getByTestId("code-workspace-bottom-tab-problems"));
+    const problem = await screen.findByRole("button", { name: /Target file diagnostic/ });
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: "Quick Fix" }));
+    const problemCandidate = await screen.findByRole("button", { name: "Use target-file candidate" });
+    const problemCandidateId = problemCandidate.getAttribute("data-testid");
+    expect(problemCandidateId).toMatch(/^code-workspace-intention-intention\.provider\./);
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Use target-file candidate" })).not.toBeInTheDocument());
+
+    const secondaryContent = secondaryPane?.querySelector<HTMLElement>(".cm-content");
+    expect(secondaryContent).not.toBeNull();
+    const secondaryView = EditorView.findFromDOM(secondaryContent!);
+    expect(secondaryView).not.toBeNull();
+    act(() => {
+      secondaryView!.dispatch({ selection: { anchor: secondaryView!.state.doc.toString().indexOf("target") } });
+    });
+    vi.spyOn(secondaryView!, "posAtCoords").mockReturnValue(null);
+    fireEvent.contextMenu(secondaryContent!, { clientX: 24, clientY: 36, button: 2 });
+    fireEvent.click(await screen.findByTestId("editor-context-code-actions"));
+    const contextCandidate = await screen.findByRole("button", { name: "Use target-file candidate" });
+
+    expect(contextCandidate.getAttribute("data-testid")).toBe(problemCandidateId);
+    expect(lspMocks.lspCodeActions).toHaveBeenCalledTimes(2);
+    expect(lspMocks.lspCodeActions).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ filePath: "src/main.ts" }),
+      diagnostic.range,
+      [expect.objectContaining({ code: diagnostic.code, message: diagnostic.message })],
+      undefined,
+    );
+    expect(lspMocks.lspCodeActions).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ filePath: "src/util.ts" }),
+      {
+        start: { line: 1, character: 0 },
+        end: { line: 1, character: 0 },
+      },
+      [],
+      undefined,
+    );
+    expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-action-frozen-target",
+    ).activeEditorGroupId).toBe("primary");
+    expect(rendered.container).toBeInTheDocument();
+  });
+
+  it("uses the canonical plan-only result for organize imports on save", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-action-save-plan",
+      workspaceInstanceId: "instance-action-save-plan",
+      name: "Action save plan",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const initialText = "import { b } from \"./b\";\nimport { a } from \"./a\";\nvalue();\n";
+    const dirtyText = `${initialText}// dirty\n`;
+    const organizedText = "import { a } from \"./a\";\nimport { b } from \"./b\";\nvalue();\n// dirty\n";
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      presetId: "typescript-javascript",
+      languageId: "typescript",
+      displayName: "TypeScript / JavaScript",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({ codeAction: true }),
+    });
+    window.localStorage.setItem("taomni.codeWorkspace.codeStyle.schemes.v1", JSON.stringify({
+      schemes: [{
+        schemaVersion: 3,
+        id: "save-actions",
+        name: "Save actions",
+        languageId: "ts",
+        basedOn: null,
+        values: {},
+        saveActions: { format: false, organizeImports: true, rearrange: false, cleanup: false },
+        exclusions: { patterns: [], formatterMarkers: true },
+      }],
+      activeByLanguage: { ts: "save-actions" },
+    }));
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", initialText));
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspChangeDocument.mockResolvedValue(status);
+    lspMocks.lspSaveDocument.mockResolvedValue(status);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [] });
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status,
+      actions: [{
+        title: "Organize Imports",
+        kind: "source.organizeImports",
+        isPreferred: true,
+        edit: {
+          documentEdits: [{
+            uri: "file:///repo/app/src/main.ts",
+            path: "/repo/app/src/main.ts",
+            edits: [{
+              range: { start: { line: 0, character: 0 }, end: { line: 2, character: 0 } },
+              newText: "import { a } from \"./a\";\nimport { b } from \"./b\";\n",
+            }],
+          }],
+        },
+        command: null,
+        commandArguments: null,
+        raw: null,
+      }],
+    });
+    let releaseWrite!: (ack: WorkspaceWriteAck) => void;
+    workspaceMocks.workspaceWriteFileEncoded.mockImplementation(() => new Promise((resolve) => {
+      releaseWrite = resolve;
+    }));
+
+    const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(content).not.toBeNull();
+    const view = EditorView.findFromDOM(content!);
+    expect(view).not.toBeNull();
+    act(() => {
+      view!.dispatch({ changes: { from: view!.state.doc.length, insert: "// dirty\n" } });
+    });
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-action-save-plan",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe(dirtyText));
+
+    fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+    await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: "src/main.ts" }),
+      expect.anything(),
+      [],
+      ["source.organizeImports"],
+    ));
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/main.ts",
+      organizedText,
+      "hash-src/main.ts",
+      "UTF-8",
+      false,
+    ));
+    expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-action-save-plan",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe(dirtyText);
+    expect(lspMocks.lspExecuteCommand).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseWrite(writeAck(file("src/main.ts", organizedText, { hash: "hash-organized" })));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-action-save-plan",
+    ).openFiles["root:app:src/main.ts"]?.dirty).toBe(false));
+  });
+
   it("supersedes an older intention request when another entry opens", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",

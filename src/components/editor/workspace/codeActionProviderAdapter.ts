@@ -606,7 +606,7 @@ export class CanonicalCodeActionService {
           reason,
           retryable: reqRes.state === "timeout" || reqRes.state === "cancelled",
         },
-        effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0 },
+        effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0, commands: 0 },
       };
     }
 
@@ -635,7 +635,7 @@ export class CanonicalCodeActionService {
     return {
       plan: resolveOutcome.state === "resolved" ? resolveOutcome.plan : null,
       outcome: resolveOutcome,
-      effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0 },
+      effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0, commands: 0 },
     };
   }
 
@@ -808,6 +808,7 @@ export interface PlanOnlyCodeActionResult {
     liveEdits: 0;
     diskWrites: 0;
     historyEntries: 0;
+    commands: 0;
   };
 }
 

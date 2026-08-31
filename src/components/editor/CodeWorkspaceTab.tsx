@@ -9294,27 +9294,43 @@ export function CodeWorkspaceTab({
     );
   }, [activeFile, showCodeActionsMenu]);
 
-  const openCodeActionsAtCursor = useCallback(async () => {
-    const file = activeFile;
+  const openCodeActionsAtCursor = useCallback(async (context?: WorkspaceCommandContext) => {
+    const target = resolveEditorTarget(context);
+    const file = target.file;
     if (!file || file.loading) return;
+    const payload = context?.payload as {
+      position?: LspPosition;
+      selectionStart?: LspPosition;
+      selectionEnd?: LspPosition;
+      hasSelection?: boolean;
+      diagnostics?: LspDiagnostic[];
+      clientX?: number;
+      clientY?: number;
+    } | undefined;
     const selection = editorSelectionRef.current;
-    const range: LspRange = {
-      start: selection.start,
-      end: selection.empty ? selection.start : selection.end,
-    };
+    const position = target.position ?? selection.start;
+    const range: LspRange = payload
+      ? {
+          start: payload.hasSelection ? (payload.selectionStart ?? position) : position,
+          end: payload.hasSelection ? (payload.selectionEnd ?? position) : position,
+        }
+      : {
+          start: selection.start,
+          end: selection.empty ? selection.start : selection.end,
+        };
     const line = range.start.line;
-    const diagnostics = (lspFilesRef.current[file.key]?.diagnostics ?? []).filter((item) => (
-      item.range.start.line <= line && item.range.end.line >= line
-    ));
+    const diagnostics = payload?.diagnostics ?? (
+      lspFilesRef.current[file.key]?.diagnostics ?? []
+    ).filter((item) => item.range.start.line <= line && item.range.end.line >= line);
     const rect = editorPaneRef.current?.getBoundingClientRect();
     await showCodeActionsMenu(
-      (rect?.left ?? 0) + 80,
-      (rect?.top ?? 0) + 80,
+      payload?.clientX ?? (rect?.left ?? 0) + 80,
+      payload?.clientY ?? (rect?.top ?? 0) + 80,
       file,
       range,
       diagnostics,
     );
-  }, [activeFile, showCodeActionsMenu]);
+  }, [resolveEditorTarget, showCodeActionsMenu]);
 
   const openCodeActionsForLine = useCallback(async (line: number) => {
     const file = activeFile;
@@ -10834,7 +10850,7 @@ export function CodeWorkspaceTab({
       keybinding: "Alt+Enter",
       keywords: ["quickfix", "bulb", "intention"],
       when: (context) => context.focus !== "tree" && context.focus !== "terminal" && !!activeFile && !activeFile.loading,
-      run: () => void openCodeActionsAtCursor(),
+      run: (context) => void openCodeActionsAtCursor(context),
     },
     {
       id: "workspace.gotoTypeDefinition",

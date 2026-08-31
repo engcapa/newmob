@@ -680,6 +680,7 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
         liveEdits: 0,
         diskWrites: 0,
         historyEntries: 0,
+        commands: 0,
       });
     });
 
@@ -698,6 +699,7 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
         liveEdits: 0,
         diskWrites: 0,
         historyEntries: 0,
+        commands: 0,
       });
     });
 
