@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildReleaseBundleIdentity,
-  computeSourceIdentityDigest,
-  computeTestPlanIdentityDigest,
   verifyBundleIntegrity,
   type TrackedSourceFile,
   type TestPlanIdentityInputs,

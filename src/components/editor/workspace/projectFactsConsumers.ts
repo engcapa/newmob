@@ -3,7 +3,6 @@ import {
   findPathSourceSet,
   isPathExcluded,
   type ProjectSourceSetKind,
-  type ProjectStructureSnapshotV2,
 } from "./projectStructureModel";
 
 export type ConsumerState = "ready" | "loading" | "untrusted" | "degraded" | "stale" | "failed";

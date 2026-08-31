@@ -124,7 +124,8 @@ export function buildReleaseRollupManifest(params: {
     };
   }
 
-  const overallStatus = sortedReceipts.length === 0 ? "INCOMPLETE" : (allReceiptsPassed && allChannelsPassed ? "PASS" : "FAIL");
+  const overallStatus: ReleaseRollupManifest["overallStatus"] =
+    sortedReceipts.length === 0 ? "INCOMPLETE" : (allReceiptsPassed && allChannelsPassed ? "PASS" : "FAIL");
 
   // Compute canonical deterministic manifest digest (excluding the digest field itself)
   const canonicalData = {

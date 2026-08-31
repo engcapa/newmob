@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildSemanticEnvelope,
-  type UsageEnvelopeLocation,
-} from "./semanticQueryEnvelope";
-import {
   UsageQuerySession,
   DEFAULT_SCOPE_SELECTION,
   type UsageSymbolIdentity,
@@ -119,14 +115,25 @@ describe("ED-QUERY-004: Semantic Query behavior case (C6-02)", () => {
         name: "processData",
         kind: 12,
         uri: symbolIdentity.uri,
+        path: "/workspace/src/Service.java",
         range: symbolIdentity.range,
         selectionRange: symbolIdentity.range,
         detail: "void processData()",
+        raw: null,
       };
 
       const rootNode = createHierarchyRootNode(lspItem, {
-        descriptor: { uri: symbolIdentity.uri, languageId: "java", version: 1 },
+        // LspDocumentDescriptor selects the session by filePath and carries the
+        // virtual document URI separately; the buffer revision belongs to the root
+        // state, not the descriptor.
+        descriptor: {
+          workspaceId: "ws-behavior",
+          filePath: "/workspace/src/Service.java",
+          documentUri: symbolIdentity.uri,
+          languageId: "java",
+        },
         item: lspItem,
+        documentRevision: 1,
         providerGeneration: 1,
         projectFingerprint: "fp",
       });
@@ -140,9 +147,11 @@ describe("ED-QUERY-004: Semantic Query behavior case (C6-02)", () => {
         name: "handleRequest",
         kind: 12,
         uri: "file:///workspace/src/Controller.java",
+        path: "/workspace/src/Controller.java",
         range: { start: { line: 35, character: 4 }, end: { line: 50, character: 5 } },
         selectionRange: { start: { line: 35, character: 15 }, end: { line: 35, character: 28 } },
         detail: "void handleRequest()",
+        raw: null,
       };
 
       const childNode: HierarchyNode = {

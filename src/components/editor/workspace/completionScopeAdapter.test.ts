@@ -16,15 +16,13 @@ describe("ED-COMP-004: completionScopeAdapter ready project scope facts", () => 
     modules: [
       {
         id: "com.example:service",
+        buildSystem: "maven",
         root: "/ws1/service",
         sourceRoots: ["/ws1/service/src/main/java"],
         testRoots: ["/ws1/service/src/test/java"],
         generatedRoots: [],
-        outputDirectory: "",
-        testOutputDirectory: "",
-        dependencies: ["com.example:model", "io.grpc:grpc-stub:1.58.0"],
+        excludedRoots: [],
         dependencyFingerprint: "cp-service-fp",
-        isCurrent: true,
       },
     ],
     dependenciesByModule: {
@@ -51,6 +49,9 @@ describe("ED-COMP-004: completionScopeAdapter ready project scope facts", () => 
   it("always provides document scope without depending on project facts", () => {
     const res = resolveCompletionScopeFacts("/ws1", "/ws1/service/src/main/java/Main.java", "document");
     expect(res.status).toBe("ready");
+    // `scope` only exists on the ready variant, so narrow before reading it rather
+    // than asserting through the union.
+    if (res.status !== "ready") throw new Error(`expected ready, got ${res.status}`);
     expect(res.scope).toBe("document");
     const display = getCompletionScopeDisplay(res);
     expect(display.label).toBe("Document Scope");
@@ -143,15 +144,13 @@ describe("ED-COMP-004: completionScopeAdapter ready project scope facts", () => 
         modules: [
           {
             id: ":ws2-module",
+            buildSystem: "gradle",
             root: "/ws2/app",
             sourceRoots: ["/ws2/app/src/main/kotlin"],
             testRoots: [],
             generatedRoots: [],
-            outputDirectory: "",
-            testOutputDirectory: "",
-            dependencies: ["com.google.guava:guava:32.1.2-jre"],
+            excludedRoots: [],
             dependencyFingerprint: "cp-ws2",
-            isCurrent: true,
           },
         ],
         source: "gradle-model",

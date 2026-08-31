@@ -368,11 +368,15 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => 
       const multiFileEdit: LspWorkspaceEdit = {
         documentEdits: [
           {
-            textDocument: { uri: "file:///workspace/core/User.java", version: 1 },
+            uri: "file:///workspace/core/User.java",
+            path: "/workspace/core/User.java",
+            version: 1,
             edits: [{ range: { start: { line: 5, character: 13 }, end: { line: 5, character: 17 } }, newText: "Account" }],
           },
           {
-            textDocument: { uri: "file:///workspace/app/UserService.java", version: 2 },
+            uri: "file:///workspace/app/UserService.java",
+            path: "/workspace/app/UserService.java",
+            version: 2,
             edits: [{ range: { start: { line: 12, character: 8 }, end: { line: 12, character: 12 } }, newText: "Account" }],
           },
         ],
@@ -393,7 +397,10 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => 
             severity: "error",
             message: "File '/workspace/app/UserService.java' has unsaved buffer edits",
             location: null,
-            source: "derived",
+            // The dirty-buffer conflict is observed by the client from local buffer
+            // revisions, which is what client-observed-bounded denotes. "derived" was
+            // never a member of the closed provenance union.
+            source: "client-observed-bounded",
           },
         ],
       });
@@ -408,7 +415,10 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => 
       const libraryEdit: LspWorkspaceEdit = {
         documentEdits: [
           {
-            textDocument: { uri: "jar:file:///root/.m2/repository/com/google/guava/guava.jar!/ImmutableList.class", version: null },
+            // A jar: library buffer has no workspace file, so path stays null.
+            uri: "jar:file:///root/.m2/repository/com/google/guava/guava.jar!/ImmutableList.class",
+            path: null,
+            version: null,
             edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } }, newText: "List" }],
           },
         ],

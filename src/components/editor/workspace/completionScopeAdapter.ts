@@ -1,5 +1,5 @@
 import { useProjectFactsStore, type WorkspaceProjectFactsEntry } from "../../../stores/projectFactsStore";
-import { consumeCompletionScope, type CompletionScopeFacts } from "./projectFactsConsumers";
+import { consumeCompletionScope } from "./projectFactsConsumers";
 import type { ProjectSourceSetKind } from "./projectStructureModel";
 
 export type CompletionScopeLevel = "document" | "module" | "project" | "expanded";

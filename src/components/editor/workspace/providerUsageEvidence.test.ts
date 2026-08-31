@@ -63,9 +63,11 @@ describe("ED-USAGE-002: providerUsageEvidence usage role, ownership, and complet
           range: { start: { line: 15, character: 12 }, end: { line: 15, character: 16 } },
           path: "/workspace/src/com/example/UserDTO.java",
         },
-        // 5. Decompiled library reference
+        // 5. Decompiled library reference: a jdt:// buffer has no file on disk, so
+        // LspLocation.path is explicitly null rather than absent.
         {
           uri: "jdt://contents/rt.jar/java.lang/Object.class",
+          path: null,
           range: { start: { line: 100, character: 4 }, end: { line: 100, character: 8 } },
         },
       ];

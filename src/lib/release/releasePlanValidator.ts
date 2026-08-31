@@ -4,7 +4,7 @@
  * and rejects absolute paths, /tmp paths, directory traversal escapes, and untracked sources.
  */
 
-import type { DailyEditorReleaseScope, EvidenceLayer } from "../../components/editor/workspace/editorReleaseScope";
+import type { EvidenceLayer } from "../../components/editor/workspace/editorReleaseScope";
 
 export interface ReleaseChannelConfig {
   platform: "linux" | "macos" | "windows" | "cross-platform";

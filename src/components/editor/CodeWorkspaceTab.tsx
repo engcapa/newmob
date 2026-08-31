@@ -10549,8 +10549,11 @@ export function CodeWorkspaceTab({
         const decision = planRearrange({
           scope: "file",
           targetPath: activeFile.path ?? activeFile.key,
-          languageId: activeFile.languageId ?? null,
-          readOnly: !!activeFile.readOnly,
+          // Language and write-lock come from the live LSP session and the buffer's
+          // library origin, the same resolution the Reformat entry uses. The buffer
+          // view model carries neither as its own property.
+          languageId: activeLanguageId,
+          readOnly: !!activeFile.library || workspaceResourceOperationLocked,
           hasSelection: false,
           capabilities: { rearrangeSupported: false },
         });
@@ -10570,8 +10573,8 @@ export function CodeWorkspaceTab({
         const decision = planCleanup({
           scope: "file",
           targetPath: activeFile.path ?? activeFile.key,
-          languageId: activeFile.languageId ?? null,
-          readOnly: !!activeFile.readOnly,
+          languageId: activeLanguageId,
+          readOnly: !!activeFile.library || workspaceResourceOperationLocked,
           capabilities: { cleanupSupported: false },
         });
         if (decision.kind === "unavailable") {

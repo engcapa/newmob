@@ -4,7 +4,7 @@
  * per-occurrence exclusion, dirty/disk hash conflict protection, and single-step undo.
  */
 
-import type { LspTextEdit, LspWorkspaceEdit } from "../../../lib/editor/lsp";
+import type { LspFileTextEdits, LspTextEdit, LspWorkspaceEdit } from "../../../lib/editor/lsp";
 import {
   buildWorkspaceEditPreview,
   filterWorkspaceEditByUsages,
@@ -48,10 +48,12 @@ export function buildReplaceInFilesWorkspaceEdit(params: BuildReplaceEditParams)
     });
   }
 
-  const documentEdits = Array.from(groupedByPath.entries()).map(([path, { uri, edits }]) => ({
-    textDocument: { uri, version: null },
-    edits,
-  }));
+  // LspFileTextEdits is the app's normalized per-document shape (uri + resolved
+  // path + optional version), not the wire-level VersionedTextDocumentIdentifier.
+  // A null version accepts the current document version.
+  const documentEdits: LspFileTextEdits[] = Array.from(groupedByPath.entries()).map(
+    ([path, { uri, edits }]) => ({ uri, path, version: null, edits }),
+  );
 
   return {
     documentEdits,
@@ -119,9 +121,9 @@ export function createReplaceInFilesPlan(
   excludedUsageIds: ReadonlySet<string> = new Set(),
 ): ReplaceInFilesPlan {
   const filteredEdit = filterWorkspaceEditByUsages(originalEdit, excludedUsageIds);
-  const preview = buildWorkspaceEditPreview(filteredEdit, "Replace in Files");
+  const preview = buildWorkspaceEditPreview(filteredEdit, { label: "Replace in Files" });
 
-  const totalPreview = buildWorkspaceEditPreview(originalEdit, "Replace in Files (Total)");
+  const totalPreview = buildWorkspaceEditPreview(originalEdit, { label: "Replace in Files (Total)" });
 
   return {
     transactionId: `replace-in-files-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,

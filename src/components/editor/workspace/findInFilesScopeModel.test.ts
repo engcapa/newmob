@@ -34,15 +34,13 @@ describe("ED-FIND-003: findInFilesScopeModel scope and file-mask filtering", () 
       modules: [
         {
           id: "com.example:core",
+          buildSystem: "maven",
           root: "/workspace/core",
           sourceRoots: ["/workspace/core/src/main/java"],
           testRoots: ["/workspace/core/src/test/java"],
           generatedRoots: [],
-          outputDirectory: "",
-          testOutputDirectory: "",
-          dependencies: [],
+          excludedRoots: [],
           dependencyFingerprint: "",
-          isCurrent: true,
         },
       ],
       userExcludedRoots: ["/workspace/target"],
@@ -83,6 +81,8 @@ describe("ED-FIND-003: findInFilesScopeModel scope and file-mask filtering", () 
         recentFiles: ["/workspace/core/src/main/java/Main.java"],
       });
       expect(recentPlan.status).toBe("ready");
+      // `explicitFiles` only exists on the ready variant.
+      if (recentPlan.status !== "ready") throw new Error(`expected ready, got ${recentPlan.status}`);
       expect(recentPlan.explicitFiles).toContain("/workspace/core/src/main/java/Main.java");
     });
 
