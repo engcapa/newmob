@@ -337,7 +337,7 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
       expect(requestCodeActions).not.toHaveBeenCalled();
     });
 
-    it("handles timeout, throw, null, and malformed actions during request", async () => {
+    it("keeps timeout, throw, null, malformed, and cancellation outcomes distinct", async () => {
       // 1. Throw
       const throwClient = {
         requestCodeActions: vi.fn().mockRejectedValue(new Error("LSP connection dropped")),
@@ -348,17 +348,17 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
         expect(resThrow.message).toContain("LSP connection dropped");
       }
 
-      // 2. Null response -> ready with empty actions
+      // 2. Null is a typed provider response, not an ordinary empty list.
       const nullClient = {
         requestCodeActions: vi.fn().mockResolvedValue(null),
       };
       const resNull = await service.requestCandidates(sampleContext, nullClient);
-      expect(resNull.state).toBe("ready");
-      if (resNull.state === "ready") {
-        expect(resNull.actions).toEqual([]);
+      expect(resNull.state).toBe("empty");
+      if (resNull.state === "empty") {
+        expect(resNull.reason).toBe("null-response");
       }
 
-      // 3. Malformed actions -> filtered to valid actions only
+      // 3. A mixed response keeps valid actions and reports discarded entries.
       const malformedClient = {
         requestCodeActions: vi.fn().mockResolvedValue([
           null,
@@ -372,18 +372,148 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
       if (resMalformed.state === "ready") {
         expect(resMalformed.actions).toHaveLength(1);
         expect(resMalformed.actions[0].action.title).toBe("Valid Quickfix");
+        expect(resMalformed.discardedMalformedCount).toBe(3);
       }
 
-      // 4. Timeout
+      // 4. An entirely malformed response has its own typed state.
+      const allMalformed = await service.requestCandidates(sampleContext, {
+        requestCodeActions: vi.fn().mockResolvedValue([null, { title: "" }, { kind: "quickfix" }]),
+      });
+      expect(allMalformed.state).toBe("malformed");
+      if (allMalformed.state === "malformed") {
+        expect(allMalformed.malformedCount).toBe(3);
+      }
+
+      // 5. Timeout
       const timeoutClient = {
         requestCodeActions: vi.fn().mockImplementation(
-          () => new Promise((resolve) => setTimeout(resolve, 50)),
+          (_params, signal?: AbortSignal) => new Promise((resolve) => {
+            signal?.addEventListener("abort", () => resolve([]), { once: true });
+          }),
         ),
       };
       const resTimeout = await service.requestCandidates(sampleContext, timeoutClient, { timeoutMs: 10 });
       expect(resTimeout.state).toBe("timeout");
       if (resTimeout.state === "timeout") {
         expect(resTimeout.cancelled).toBe(true);
+      }
+
+      // 6. Caller cancellation is not reported as timeout or failure.
+      const abort = new AbortController();
+      const cancelledClient = {
+        requestCodeActions: vi.fn().mockImplementation(
+          (_params, signal?: AbortSignal) => new Promise((resolve) => {
+            signal?.addEventListener("abort", () => resolve([]), { once: true });
+          }),
+        ),
+      };
+      const cancelled = service.requestCandidates(sampleContext, cancelledClient, {
+        signal: abort.signal,
+      });
+      abort.abort();
+      await expect(cancelled).resolves.toMatchObject({ state: "cancelled", reason: "aborted" });
+    });
+
+    it("freezes request identity before await and deep-freezes the resolved plan", async () => {
+      const mutableContext: CodeActionContextIdentity = {
+        document: { ...sampleContext.document },
+        provider: { ...sampleContext.provider },
+        range: {
+          start: { ...sampleContext.range.start },
+          end: { ...sampleContext.range.end },
+        },
+        diagnostics: [{ ...sampleDiagnostic }],
+        only: ["quickfix"],
+      };
+      let releaseRequest: ((actions: readonly LspCodeAction[]) => void) | null = null;
+      const requestCodeActions = vi.fn(() => new Promise<readonly LspCodeAction[]>((resolve) => {
+        releaseRequest = resolve;
+      }));
+      const pendingRequest = service.requestCandidates(mutableContext, { requestCodeActions });
+
+      mutableContext.document.uri = "file:///mutated.java";
+      mutableContext.provider.projectFingerprint = "mutated";
+      mutableContext.range.start.line = 99;
+      (mutableContext.diagnostics as LspDiagnostic[])[0]!.message = "mutated";
+      (mutableContext.only as string[])[0] = "source";
+      releaseRequest!([]);
+
+      await expect(pendingRequest).resolves.toMatchObject({ state: "ready" });
+      expect(requestCodeActions).toHaveBeenCalledWith(
+        expect.objectContaining({
+          textDocument: { uri: sampleContext.document.uri },
+          range: sampleContext.range,
+          context: expect.objectContaining({
+            diagnostics: [sampleDiagnostic],
+            only: ["quickfix"],
+          }),
+        }),
+        expect.any(AbortSignal),
+      );
+
+      const candidate: CodeActionCandidate = {
+        id: "codeAction.jdtls.deep-freeze",
+        title: "Deep freeze",
+        kind: "quickfix",
+        disabledReason: null,
+        resolveRequired: true,
+        rawAction: {
+          title: "Deep freeze",
+          kind: "quickfix",
+          isPreferred: false,
+          edit: null,
+          command: null,
+          commandArguments: null,
+          raw: { data: { resolveId: "original" } },
+        },
+      };
+      const planContext: CodeActionContextIdentity = {
+        document: { ...sampleContext.document },
+        provider: { ...sampleContext.provider },
+        range: sampleRange,
+        diagnostics: [],
+      };
+      const resolvedAction: LspCodeAction = {
+        ...candidate.rawAction,
+        edit: {
+          documentEdits: [{
+            uri: sampleContext.document.uri,
+            path: "/workspace/src/Main.java",
+            edits: [{ range: sampleRange, newText: "fixed" }],
+          }],
+        },
+        command: "workspace.afterFix",
+        commandArguments: [{ nested: ["value"] }],
+      };
+      let releaseResolve: ((action: LspCodeAction) => void) | null = null;
+      const pendingResolve = service.resolvePlan(
+        candidate,
+        planContext,
+        {
+          requestCodeActions: vi.fn(),
+          resolveCodeAction: vi.fn(() => new Promise<LspCodeAction>((resolve) => {
+            releaseResolve = resolve;
+          })),
+        },
+        planContext.document.revision,
+        planContext.provider.generation,
+      );
+      planContext.document.uri = "file:///mutated-during-resolve.java";
+      planContext.provider.projectFingerprint = "mutated-during-resolve";
+      candidate.title = "Mutated title";
+      releaseResolve!(resolvedAction);
+
+      const resolved = await pendingResolve;
+      expect(resolved.state).toBe("resolved");
+      if (resolved.state === "resolved") {
+        expect(resolved.plan.document.uri).toBe(sampleContext.document.uri);
+        expect(resolved.plan.provider.projectFingerprint).toBe(sampleContext.provider.projectFingerprint);
+        expect(resolved.plan.actionId).toBe("codeAction.jdtls.deep-freeze");
+        expect(Object.isFrozen(resolved.plan.edit?.documentEdits)).toBe(true);
+        expect(Object.isFrozen(resolved.plan.edit?.documentEdits[0])).toBe(true);
+        expect(Object.isFrozen(resolved.plan.edit?.documentEdits[0]?.edits[0]?.range.start)).toBe(true);
+        expect(Object.isFrozen(resolved.plan.command?.arguments)).toBe(true);
+        expect(Object.isFrozen((resolved.plan.command?.arguments?.[0] as { nested: string[] }).nested)).toBe(true);
       }
     });
 

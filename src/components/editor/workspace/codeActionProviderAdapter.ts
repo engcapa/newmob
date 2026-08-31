@@ -19,14 +19,28 @@ export interface ProviderActionV4 {
 
 /**
  * §8.21.4 V3 CodeActionProviderResultV4 union.
- * Provider responses are strictly categorized: ready actions, version-level
- * unsupported with actionable reason, timeout with cancellation tracking,
- * or failure without faking completion.
+ * Provider responses are strictly categorized: ready actions, null/empty,
+ * malformed, version-level unsupported, timeout, caller cancellation, or
+ * failure without faking completion.
  */
 export type CodeActionProviderResultV4 =
-  | { state: "ready"; actions: readonly ProviderActionV4[]; evidence: CapabilityEvidenceV3 }
+  | {
+    state: "ready";
+    actions: readonly ProviderActionV4[];
+    evidence: CapabilityEvidenceV3;
+    discardedMalformedCount: number;
+  }
+  | { state: "empty"; reason: "null-response"; evidence: CapabilityEvidenceV3 }
+  | {
+    state: "malformed";
+    message: string;
+    malformedCount: number;
+    providerStillHealthy: boolean;
+    evidence: CapabilityEvidenceV3;
+  }
   | { state: "unsupported"; reason: string; evidence: CapabilityEvidenceV3 }
   | { state: "timeout"; requestId: string; cancelled: boolean; providerStillHealthy: boolean; retryAfter: "manual" | "restart" }
+  | { state: "cancelled"; requestId: string; reason: "aborted"; providerStillHealthy: boolean }
   | { state: "failed"; message: string; providerStillHealthy: boolean };
 
 /**
@@ -115,9 +129,12 @@ export function toProviderActionsV4(
  */
 export function evaluateCodeActionResult(
   outcome:
-    | { kind: "ready"; actions: readonly LspCodeAction[] }
+    | { kind: "ready"; actions: readonly LspCodeAction[]; discardedMalformedCount?: number }
+    | { kind: "empty"; reason: "null-response" }
+    | { kind: "malformed"; malformedCount: number; message: string }
     | { kind: "unsupported"; reason: string }
     | { kind: "timeout"; requestId: string; cancelled: boolean; providerStillHealthy: boolean; retryAfter: "manual" | "restart" }
+    | { kind: "cancelled"; requestId: string; reason: "aborted"; providerStillHealthy: boolean }
     | { kind: "failed"; message: string; providerStillHealthy: boolean },
   evidenceInput: Omit<BuildEvidenceInput, "capabilityId" | "complete" | "reason">,
 ): CodeActionProviderResultV4 {
@@ -131,6 +148,31 @@ export function evaluateCodeActionResult(
     return {
       state: "ready",
       actions: toProviderActionsV4(outcome.actions, evidenceInput),
+      evidence,
+      discardedMalformedCount: outcome.discardedMalformedCount ?? 0,
+    };
+  }
+  if (outcome.kind === "empty") {
+    const evidence = buildCapabilityEvidence({
+      ...evidenceInput,
+      capabilityId: "codeAction.intention",
+      complete: false,
+      reason: "provider returned null instead of a code-action array",
+    });
+    return { state: "empty", reason: outcome.reason, evidence };
+  }
+  if (outcome.kind === "malformed") {
+    const evidence = buildCapabilityEvidence({
+      ...evidenceInput,
+      capabilityId: "codeAction.intention",
+      complete: false,
+      reason: outcome.message,
+    });
+    return {
+      state: "malformed",
+      message: outcome.message,
+      malformedCount: outcome.malformedCount,
+      providerStillHealthy: true,
       evidence,
     };
   }
@@ -154,6 +196,14 @@ export function evaluateCodeActionResult(
       cancelled: outcome.cancelled,
       providerStillHealthy: outcome.providerStillHealthy,
       retryAfter: outcome.retryAfter,
+    };
+  }
+  if (outcome.kind === "cancelled") {
+    return {
+      state: "cancelled",
+      requestId: outcome.requestId,
+      reason: outcome.reason,
+      providerStillHealthy: outcome.providerStillHealthy,
     };
   }
   return {
@@ -241,9 +291,29 @@ export function computeStableActionId(
 }
 
 export interface CodeActionProviderClient {
-  requestCodeActions: (params: ReturnType<typeof buildCodeActionParams>) => Promise<readonly LspCodeAction[] | null>;
-  resolveCodeAction?: (action: LspCodeAction) => Promise<LspCodeAction | null>;
+  requestCodeActions: (
+    params: ReturnType<typeof buildCodeActionParams>,
+    signal?: AbortSignal,
+  ) => Promise<readonly LspCodeAction[] | null>;
+  resolveCodeAction?: (action: LspCodeAction, signal?: AbortSignal) => Promise<LspCodeAction | null>;
   checkCapability?: () => { supported: boolean; reason?: string };
+}
+
+function cloneAndDeepFreeze<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => cloneAndDeepFreeze(item))) as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const clone = Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, cloneAndDeepFreeze(item)]),
+    );
+    return Object.freeze(clone) as T;
+  }
+  return value;
+}
+
+function freezeCodeActionContext(context: CodeActionContextIdentity): CodeActionContextIdentity {
+  return cloneAndDeepFreeze(context);
 }
 
 /**
@@ -258,9 +328,10 @@ export class CanonicalCodeActionService {
   async requestCandidates(
     context: CodeActionContextIdentity,
     client: CodeActionProviderClient,
-    options: { timeoutMs?: number } = {},
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<CodeActionProviderResultV4> {
-    const { document, provider, range, diagnostics, only } = context;
+    const frozenContext = freezeCodeActionContext(context);
+    const { document, provider, range, diagnostics, only } = frozenContext;
     const timeoutMs = options.timeoutMs ?? 10_000;
 
     const evidenceInput = {
@@ -298,30 +369,68 @@ export class CanonicalCodeActionService {
 
     const params = buildCodeActionParams(document.uri, range, diagnostics, only);
     const requestId = `ca-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    if (options.signal?.aborted) {
+      return evaluateCodeActionResult(
+        { kind: "cancelled", requestId, reason: "aborted", providerStillHealthy: true },
+        evidenceInput,
+      );
+    }
 
+    const requestAbort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let rejectCancellation!: (reason: Error) => void;
+    const cancellationPromise = new Promise<never>((_, reject) => {
+      rejectCancellation = reject;
+    });
+    const onAbort = () => {
+      rejectCancellation(new Error("CODE_ACTION_CANCELLED"));
+      requestAbort.abort();
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      const resultPromise = client.requestCodeActions(params);
-      let timer: ReturnType<typeof setTimeout> | null = null;
+      const resultPromise = client.requestCodeActions(params, requestAbort.signal);
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("CODE_ACTION_TIMEOUT")), timeoutMs);
+        timer = setTimeout(() => {
+          reject(new Error("CODE_ACTION_TIMEOUT"));
+          requestAbort.abort();
+        }, timeoutMs);
       });
-
-      const rawActions = await Promise.race([resultPromise, timeoutPromise]).finally(() => {
-        if (timer) clearTimeout(timer);
-      });
+      const rawActions = await Promise.race([
+        resultPromise,
+        timeoutPromise,
+        cancellationPromise,
+      ]);
 
       if (!rawActions) {
-        return evaluateCodeActionResult({ kind: "ready", actions: [] }, evidenceInput);
+        return evaluateCodeActionResult({ kind: "empty", reason: "null-response" }, evidenceInput);
       }
 
       // Filter out malformed actions (e.g. missing or non-string title)
       const validActions = rawActions.filter((a): a is LspCodeAction => {
         return a != null && typeof a === "object" && typeof a.title === "string" && a.title.trim().length > 0;
       });
+      const malformedCount = rawActions.length - validActions.length;
+      if (validActions.length === 0 && malformedCount > 0) {
+        return evaluateCodeActionResult({
+          kind: "malformed",
+          malformedCount,
+          message: `Provider returned ${malformedCount} malformed code action${malformedCount === 1 ? "" : "s"}`,
+        }, evidenceInput);
+      }
 
-      return evaluateCodeActionResult({ kind: "ready", actions: validActions }, evidenceInput);
+      return evaluateCodeActionResult({
+        kind: "ready",
+        actions: validActions,
+        discardedMalformedCount: malformedCount,
+      }, evidenceInput);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      if (message === "CODE_ACTION_CANCELLED") {
+        return evaluateCodeActionResult(
+          { kind: "cancelled", requestId, reason: "aborted", providerStillHealthy: true },
+          evidenceInput,
+        );
+      }
       if (message === "CODE_ACTION_TIMEOUT" || message.includes("timeout") || message.includes("Timeout")) {
         return evaluateCodeActionResult(
           {
@@ -342,6 +451,9 @@ export class CanonicalCodeActionService {
         },
         evidenceInput,
       );
+    } finally {
+      if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
     }
   }
 
@@ -357,7 +469,9 @@ export class CanonicalCodeActionService {
     options: { timeoutMs?: number; allowedCommands?: readonly string[] } = {},
   ): Promise<CodeActionResolveOutcome> {
     const timeoutMs = options.timeoutMs ?? 10_000;
-    const { document, provider } = context;
+    const frozenContext = freezeCodeActionContext(context);
+    const frozenCandidate = cloneAndDeepFreeze(candidate);
+    const { document, provider } = frozenContext;
 
     // Check for stale document or provider generation (§ED-ACTION-001)
     if (currentDocumentRevision !== document.revision) {
@@ -379,18 +493,18 @@ export class CanonicalCodeActionService {
 
     // Java language guard
     const isJavaSpecific =
-      Boolean(candidate.kind?.startsWith("quickfix.import.java")) ||
-      Boolean(candidate.rawAction.command?.includes("_java.")) ||
-      Boolean(candidate.rawAction.command?.includes("java."));
+      Boolean(frozenCandidate.kind?.startsWith("quickfix.import.java")) ||
+      Boolean(frozenCandidate.rawAction.command?.includes("_java.")) ||
+      Boolean(frozenCandidate.rawAction.command?.includes("java."));
     if (isJavaSpecific && document.languageId !== "java") {
       return { state: "rejected", reason: "language-mismatch" };
     }
 
-    let resolvedAction = candidate.rawAction;
-    if (candidate.resolveRequired && client.resolveCodeAction) {
+    let resolvedAction = frozenCandidate.rawAction;
+    if (frozenCandidate.resolveRequired && client.resolveCodeAction) {
       try {
         let timer: ReturnType<typeof setTimeout> | null = null;
-        const resolvePromise = client.resolveCodeAction(candidate.rawAction);
+        const resolvePromise = client.resolveCodeAction(frozenCandidate.rawAction);
         const timeoutPromise = new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("RESOLVE_TIMEOUT")), timeoutMs);
         });
@@ -446,15 +560,15 @@ export class CanonicalCodeActionService {
       return { state: "rejected", reason: "command-disallowed" };
     }
 
-    const plan: ImmutableCodeActionPlan = Object.freeze({
-      actionId: candidate.id,
-      title: resolvedAction.title || candidate.title,
-      kind: resolvedAction.kind || candidate.kind,
-      document: Object.freeze({ ...document }),
-      provider: Object.freeze({ ...provider }),
-      edit: effectiveEdit ? Object.freeze(JSON.parse(JSON.stringify(effectiveEdit))) : null,
-      command: effectiveCommand ? Object.freeze({ ...effectiveCommand }) : null,
-      evidence: candidate.evidence ?? null,
+    const plan = cloneAndDeepFreeze<ImmutableCodeActionPlan>({
+      actionId: frozenCandidate.id,
+      title: resolvedAction.title || frozenCandidate.title,
+      kind: resolvedAction.kind || frozenCandidate.kind,
+      document,
+      provider,
+      edit: effectiveEdit,
+      command: effectiveCommand,
+      evidence: frozenCandidate.evidence ?? null,
       createdAt: Date.now(),
     });
 
@@ -479,12 +593,18 @@ export class CanonicalCodeActionService {
     const reqRes = await this.requestCandidates(reqContext, client, { timeoutMs: options.timeoutMs });
 
     if (reqRes.state !== "ready" || reqRes.actions.length === 0) {
+      let reason: string;
+      if (reqRes.state === "unsupported") reason = reqRes.reason;
+      else if (reqRes.state === "failed" || reqRes.state === "malformed") reason = reqRes.message;
+      else if (reqRes.state === "empty") reason = "Provider returned a null code-action response";
+      else if (reqRes.state === "cancelled") reason = "Code-action request was cancelled";
+      else reason = "No actions returned";
       return {
         plan: null,
         outcome: {
           state: "unresolved",
-          reason: reqRes.state === "unsupported" ? reqRes.reason : reqRes.state === "failed" ? reqRes.message : "No actions returned",
-          retryable: reqRes.state === "timeout",
+          reason,
+          retryable: reqRes.state === "timeout" || reqRes.state === "cancelled",
         },
         effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0 },
       };
