@@ -1,6 +1,10 @@
 import type { CodeWorkspaceFileRef, CodeWorkspaceLooseFileInfo } from "../../../types";
-import { fileRefFromFileKey } from "./workspaceLayoutPersistence";
-import type { EditorGroupId, PersistedEditorGroup, WorkspaceLayoutSnapshot } from "./workspaceLayoutSnapshot";
+import type { EditorGroupId } from "../../../stores/codeWorkspaceStore";
+import {
+  fileRefFromFileKey,
+  type PersistedEditorGroup,
+  type WorkspaceLayoutSnapshot,
+} from "./workspaceLayoutPersistence";
 
 export interface RestoreTarget {
   key: string;
@@ -68,20 +72,27 @@ export async function executeBoundedAsyncQueue<T, R>(
   items: readonly T[],
   worker: (item: T) => Promise<R>,
   concurrency = 3,
-): Promise<R[]> {
+): Promise<PromiseSettledResult<R>[]> {
   if (items.length === 0) return [];
-  const results: R[] = new Array(items.length);
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
   let nextIndex = 0;
 
   async function runner(): Promise<void> {
     while (nextIndex < items.length) {
       const currentIndex = nextIndex++;
       const item = items[currentIndex]!;
-      results[currentIndex] = await worker(item);
+      try {
+        results[currentIndex] = { status: "fulfilled", value: await worker(item) };
+      } catch (reason) {
+        // A failed background read is isolated to its tab. Keep consuming the
+        // queue so one bad file cannot prevent later tabs from restoring.
+        results[currentIndex] = { status: "rejected", reason };
+      }
     }
   }
 
-  const poolSize = Math.max(1, Math.min(concurrency, items.length));
+  const requestedConcurrency = Number.isFinite(concurrency) ? Math.floor(concurrency) : 3;
+  const poolSize = Math.min(items.length, Math.max(2, Math.min(4, requestedConcurrency)));
   const pool = Array.from({ length: poolSize }, () => runner());
   await Promise.all(pool);
   return results;

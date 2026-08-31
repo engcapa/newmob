@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { buildGitLineChanges, type GitLineChange } from "./gitEditorChrome";
+import { getLineDiffCacheKey } from "./workspaceRestoreModel";
 
 export interface GitLineChangeSource {
   key: string;
+  /** Canonical path identity used by the diff cache. */
+  filePath: string;
   sourceKey: string;
+  headOid: string | null;
+  /** Monotonic workspace buffer revision, not text length. */
+  textVersion: number;
   headText: string | null;
   bufferText: string;
+  /** Large files deliberately skip line-diff decoration work. */
+  largeFile?: boolean;
 }
 
 type BuildGitLineChanges = (headText: string, bufferText: string) => GitLineChange[];
@@ -65,9 +73,13 @@ export function sameGitLineChangeSources(
     const other = right[index];
     return !!other
       && source.key === other.key
+      && source.filePath === other.filePath
       && source.sourceKey === other.sourceKey
+      && source.headOid === other.headOid
+      && source.textVersion === other.textVersion
       && source.headText === other.headText
-      && source.bufferText === other.bufferText;
+      && source.bufferText === other.bufferText
+      && source.largeFile === other.largeFile;
   });
 }
 
@@ -87,6 +99,7 @@ export function useDeferredGitLineChanges(
   const [changesByFile, setChangesByFile] = useState<Record<string, GitLineChange[]>>({});
   const cacheRef = useRef(new Map<string, {
     sourceKey: string;
+    textVersion: number;
     bufferText: string;
     changes: GitLineChange[];
   }>());
@@ -125,20 +138,24 @@ export function useDeferredGitLineChanges(
         const next: Record<string, GitLineChange[]> = {};
         const nextCache = new Map<string, {
           sourceKey: string;
+          textVersion: number;
           bufferText: string;
           changes: GitLineChange[];
         }>();
         for (const source of currentSources) {
-          if (source.headText === null) continue;
-          const cached = cacheRef.current.get(source.key);
+          if (source.headText === null || source.largeFile) continue;
+          const cacheKey = getLineDiffCacheKey(source.filePath, source.headOid, source.textVersion);
+          const cached = cacheRef.current.get(cacheKey);
           const changes = cached
             && cached.sourceKey === source.sourceKey
+            && cached.textVersion === source.textVersion
             && cached.bufferText === source.bufferText
             ? cached.changes
             : buildChangesRef.current(source.headText, source.bufferText);
           next[source.key] = changes;
-          nextCache.set(source.key, {
+          nextCache.set(cacheKey, {
             sourceKey: source.sourceKey,
+            textVersion: source.textVersion,
             bufferText: source.bufferText,
             changes,
           });

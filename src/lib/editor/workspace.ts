@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { invokeWithPerformanceObservation } from "../performanceInstrumentation";
 
 export type WorkspaceEntryType = "file" | "dir" | "symlink" | "other";
 
@@ -541,21 +542,31 @@ export function workspaceReadFile(
   path: string,
   maxBytes?: number,
 ): Promise<WorkspaceFile> {
-  return invoke<WorkspaceFile>("workspace_read_file", {
+  const args = {
     repoRoot,
     path,
     maxBytes: maxBytes ?? null,
-  });
+  };
+  return invokeWithPerformanceObservation(
+    "workspace_read_file",
+    args,
+    () => invoke<WorkspaceFile>("workspace_read_file", args),
+  );
 }
 
 export function workspaceReadLooseFile(
   path: string,
   maxBytes?: number,
 ): Promise<WorkspaceFile> {
-  return invoke<WorkspaceFile>("workspace_read_loose_file", {
+  const args = {
     path,
     maxBytes: maxBytes ?? null,
-  });
+  };
+  return invokeWithPerformanceObservation(
+    "workspace_read_loose_file",
+    args,
+    () => invoke<WorkspaceFile>("workspace_read_loose_file", args),
+  );
 }
 
 /** Read a workspace file using an explicit charset selected in the editor. */

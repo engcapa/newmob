@@ -4534,6 +4534,8 @@ describe("CodeWorkspaceTab", () => {
     workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => (
       path === "src/util.ts"
         ? file("src/util.ts", "export const util = 1;")
+        : path === "src/other.ts"
+          ? file("src/other.ts", "export const other = 1;")
         : file("src/main.ts", "export const main = 1;")
     ));
     window.localStorage.setItem("taomni.codeWorkspace.layout.v1.instance-layout-restore", JSON.stringify({
@@ -4549,7 +4551,7 @@ describe("CodeWorkspaceTab", () => {
       expandedDirKeys: ["app:"],
       editorGroups: {
         primary: {
-          openOrder: ["root:app:src/main.ts"],
+          openOrder: ["root:app:src/main.ts", "root:app:src/other.ts"],
           activeKey: "root:app:src/main.ts",
           previewKey: null,
           pinnedKeys: ["root:app:src/main.ts"],
@@ -4563,10 +4565,11 @@ describe("CodeWorkspaceTab", () => {
       },
     }));
 
-    renderWorkspace(workspace);
+    renderWorkspace(workspace, {}, { strict: true });
 
     await screen.findByTitle("app / src/main.ts");
     await screen.findByTitle("app / src/util.ts");
+    await screen.findByTitle("app / src/other.ts");
     await waitFor(() => {
       const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-layout-restore");
       expect(ui.bottomDockOpen).toBe(false);
@@ -4576,11 +4579,15 @@ describe("CodeWorkspaceTab", () => {
       expect(ui.splitOrientation).toBe("vertical");
       expect(ui.editorGroups.primary.openOrder).toContain("root:app:src/main.ts");
       expect(ui.editorGroups.secondary.openOrder).toContain("root:app:src/util.ts");
+      expect(ui.editorGroups.primary.activeKey).toBe("root:app:src/main.ts");
+      expect(ui.editorGroups.secondary.activeKey).toBe("root:app:src/util.ts");
     });
     expect(screen.getByTestId("code-workspace-project-collapsed-rail")).toBeInTheDocument();
     expect(screen.getByTestId("code-workspace-project-expand")).toBeInTheDocument();
     expect(workspaceMocks.workspaceReadFile).toHaveBeenCalledWith("/repo/app", "src/main.ts");
     expect(workspaceMocks.workspaceReadFile).toHaveBeenCalledWith("/repo/app", "src/util.ts");
+    expect(workspaceMocks.workspaceReadFile).toHaveBeenCalledWith("/repo/app", "src/other.ts");
+    expect(workspaceMocks.workspaceReadFile).toHaveBeenCalledTimes(3);
   });
 
   it("routes editor actions through ActionHost to the active recursive leaf", async () => {

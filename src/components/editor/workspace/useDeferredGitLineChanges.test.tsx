@@ -21,7 +21,10 @@ describe("useDeferredGitLineChanges", () => {
     const buildChanges = vi.fn(() => changed);
     const initial = [{
       key: "main.rs",
+      filePath: "/repo/main.rs",
       sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
       headText: "before",
       bufferText: "first",
     }];
@@ -47,7 +50,10 @@ describe("useDeferredGitLineChanges", () => {
     const buildChanges = vi.fn(() => changed);
     const source = {
       key: "main.rs",
+      filePath: "/repo/main.rs",
       sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
       headText: "before",
       bufferText: "after",
     };
@@ -67,7 +73,10 @@ describe("useDeferredGitLineChanges", () => {
     const buildChanges = vi.fn(() => changed);
     const source = {
       key: "main.rs",
+      filePath: "/repo/main.rs",
       sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
       headText: "before",
       bufferText: "first",
     };
@@ -87,5 +96,57 @@ describe("useDeferredGitLineChanges", () => {
     act(() => vi.runOnlyPendingTimers());
     expect(buildChanges).toHaveBeenCalledTimes(1);
     expect(buildChanges).toHaveBeenCalledWith("before", "first");
+  });
+
+  it("invalidates the cache when the document revision changes even if text is equal", () => {
+    vi.useFakeTimers();
+    const buildChanges = vi.fn(() => changed);
+    const source = {
+      key: "main.rs",
+      filePath: "/repo/main.rs",
+      sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
+      headText: "before",
+      bufferText: "after",
+    };
+    const { rerender } = renderHook(
+      ({ sources }) => useDeferredGitLineChanges(sources, { delayMs: 10, buildChanges }),
+      { initialProps: { sources: [source] } },
+    );
+
+    act(() => vi.runAllTimers());
+    rerender({ sources: [{ ...source, textVersion: 2 }] });
+    act(() => vi.runAllTimers());
+
+    expect(buildChanges).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips line diff work while a visible file is in large-file mode", () => {
+    vi.useFakeTimers();
+    const buildChanges = vi.fn(() => changed);
+    const source = {
+      key: "main.rs",
+      filePath: "/repo/main.rs",
+      sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
+      headText: "before",
+      bufferText: "after",
+      largeFile: false,
+    };
+    const { result, rerender } = renderHook(
+      ({ sources }) => useDeferredGitLineChanges(sources, { delayMs: 10, buildChanges }),
+      { initialProps: { sources: [source] } },
+    );
+
+    act(() => vi.runAllTimers());
+    expect(result.current["main.rs"]).toEqual(changed);
+
+    rerender({ sources: [{ ...source, largeFile: true, textVersion: 2 }] });
+    act(() => vi.runAllTimers());
+
+    expect(buildChanges).toHaveBeenCalledTimes(1);
+    expect(result.current).toEqual({});
   });
 });

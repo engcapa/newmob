@@ -2038,6 +2038,29 @@ export function CodeWorkspaceTab({
   const editActiveBreakpointRef = useRef<(line: number) => void>(() => {});
   const debugRef = useRef<ReturnType<typeof useCodeDebugSession> | null>(null);
   const lastTrackedBufferTextRef = useRef<Record<string, string>>({});
+  const restoreRunRef = useRef<{
+    workspaceInstanceId: string;
+    cancelled: boolean;
+    cancelPending: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    const run = restoreRunRef.current;
+    // React StrictMode immediately re-runs effects after cleanup. Re-arm the
+    // current restore before the deferred cancellation callback can fire so
+    // the in-flight native read is shared by both effect passes.
+    if (run?.workspaceInstanceId === workspaceInstanceId) run.cancelPending = false;
+    return () => {
+      const cleanupRun = restoreRunRef.current;
+      if (cleanupRun?.workspaceInstanceId !== workspaceInstanceId) return;
+      cleanupRun.cancelPending = true;
+      queueMicrotask(() => {
+        if (restoreRunRef.current !== cleanupRun || !cleanupRun.cancelPending) return;
+        cleanupRun.cancelled = true;
+        restoreRunRef.current = null;
+      });
+    };
+  }, [workspaceInstanceId]);
 
   useEffect(() => {
     workspaceEditHistory.clear();
@@ -2626,13 +2649,30 @@ export function CodeWorkspaceTab({
   >(null);
 
   const openFile = useCallback(
-    async (ref: CodeWorkspaceFileRef, options: { preview?: boolean; groupId?: EditorGroupId } = {}) => {
+    async (
+      ref: CodeWorkspaceFileRef,
+      options: {
+        preview?: boolean;
+        groupId?: EditorGroupId;
+        activate?: boolean;
+        restoring?: boolean;
+        isCurrent?: () => boolean;
+      } = {},
+    ) => {
+      const isCurrent = options.isCurrent ?? (() => true);
+      if (!isCurrent()) {
+        return;
+      }
       // Switching tabs before the input idle timer fires must never show an
       // older buffer snapshot in the newly activated editor.
       flushPendingEditorText();
+      if (!isCurrent()) {
+        return;
+      }
       const key = fileKey(ref);
       const currentUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
       const groupId = options.groupId ?? currentUi.activeEditorGroupId;
+      const shouldActivate = options.activate !== false;
       updateEditorGroup(groupId, (group) => {
         const alreadyOpen = group.openOrder.includes(key);
         let nextOrder = group.openOrder;
@@ -2662,13 +2702,13 @@ export function CodeWorkspaceTab({
         } else if (previewKey === key) {
           previewKey = null;
         }
-        return { ...group, openOrder: nextOrder, activeKey: key, previewKey };
+        return { ...group, openOrder: nextOrder, activeKey: shouldActivate ? key : group.activeKey, previewKey };
       });
-      if (groupId !== currentUi.activeEditorGroupId) activateEditorGroup(groupId);
+      if (shouldActivate && groupId !== currentUi.activeEditorGroupId) activateEditorGroup(groupId);
       // §8.18.5 tab limit enforcement: opening beyond the leaf's limit evicts
       // clean preview/least-recent candidates; dirty/pinned tabs are never
       // silently closed (over-limit surfaces a reason instead).
-      {
+      if (!options.restoring) {
         const groupAfter = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).editorGroups[groupId];
         if (groupAfter) {
           const meta = new Map(groupAfter.openOrder.map((entryKey) => [
@@ -2691,7 +2731,12 @@ export function CodeWorkspaceTab({
           }
         }
       }
-      if (openFilesRef.current[key] && !openFilesRef.current[key].loading) return;
+      if (!isCurrent()) {
+        return;
+      }
+      if (openFilesRef.current[key] && !openFilesRef.current[key].loading) {
+        return;
+      }
       // Library sources (JDK / dependency classes) have no file to read: ask the
       // language server again so history and Recent Files can reopen them.
       const library = libraryBuffersRef.current[key];
@@ -2705,6 +2750,7 @@ export function CodeWorkspaceTab({
             lspDescriptorForPath(library.originRootPath, library.originFilePath),
             library.uri,
           );
+          if (!isCurrent()) return;
           const info: LibraryBufferInfo = {
             ...library,
             title: contents.title || library.title,
@@ -2737,6 +2783,9 @@ export function CodeWorkspaceTab({
         const file = ref.kind === "root"
           ? await workspaceReadFile(findRoot(ref.rootId)?.path ?? "", ref.path)
           : await workspaceReadLooseFile(ref.path);
+        if (!isCurrent()) {
+          return;
+        }
         const nextRef = ref.kind === "root" ? { ...ref, path: file.path } : { ...ref, path: file.path };
         const meta = fileMeta(nextRef, rootsRef.current, looseFilesRef.current);
         // CodeMirror normalizes to LF; keep buffer + dirty compare on LF and
@@ -2778,6 +2827,9 @@ export function CodeWorkspaceTab({
         }));
         setStatusMessage(`Opened ${meta.subtitle}`);
       } catch (err) {
+        if (!isCurrent()) {
+          return;
+        }
         const message = errorMessage(err);
         setOpenFiles((current) => ({
           ...current,
@@ -3067,35 +3119,51 @@ export function CodeWorkspaceTab({
         if (keys.length === 0) {
           layoutRestoredOpenFilesRef.current = false;
         } else {
-          if (initialOpenedKeyRef.current === `restored:${workspaceInstanceId}`) return;
+          // StrictMode cleans up the first effect pass before running the
+          // second one. A run that survived deferred cleanup is reused so
+          // the second pass does not issue duplicate native reads.
+          if (
+            initialOpenedKeyRef.current === `restored:${workspaceInstanceId}`
+            && restoreRunRef.current
+          ) return;
           initialOpenedKeyRef.current = `restored:${workspaceInstanceId}`;
           const plan = planWorkspaceRestore(snapshot, looseFiles);
-
-          // 1. Immediately open active tabs in each leaf so first screen interactive time (TTI) is minimal
-          for (const target of plan.activeTargets) {
-            void openFile(target.ref, {
-              groupId: target.groupId,
-              preview: target.preview,
-            });
-            updateEditorGroup(target.groupId, (g) => ({ ...g, activeKey: target.key }));
-          }
+          const restoreRun = { workspaceInstanceId, cancelled: false, cancelPending: false };
+          restoreRunRef.current = restoreRun;
+          const isCurrent = () => restoreRunRef.current === restoreRun && !restoreRun.cancelled;
 
           // Restore active group selection
           if (plan.activeGroupId) {
             activateEditorGroup(plan.activeGroupId);
           }
 
-          // 2. Open background tabs with bounded concurrency (3) to avoid I/O bottlenecks
-          if (plan.backgroundTargets.length > 0) {
-            void executeBoundedAsyncQueue(
+          // Restore active tabs before starting background work. Both phases
+          // use the same bounded queue so multiple split leaves cannot add
+          // unbounded active reads on top of the background pool.
+          void executeBoundedAsyncQueue(
+            plan.activeTargets,
+            (target) => openFile(target.ref, {
+              groupId: target.groupId,
+              preview: target.preview,
+              activate: true,
+              restoring: true,
+              isCurrent,
+            }),
+            3,
+          ).then(() => {
+            if (plan.backgroundTargets.length === 0) return [];
+            return executeBoundedAsyncQueue(
               plan.backgroundTargets,
               (target) => openFile(target.ref, {
                 groupId: target.groupId,
                 preview: target.preview,
+                activate: false,
+                restoring: true,
+                isCurrent,
               }),
               3,
             );
-          }
+          });
           return;
         }
       }
@@ -6837,7 +6905,8 @@ export function CodeWorkspaceTab({
       if (!key) return "empty";
       const file = openFiles[key];
       if (!file) return "missing";
-      return file.loading ? "loading" : "ready";
+      if (file.loading) return "loading";
+      return `${file.documentRevision ?? 0}:${isLargeFileContent(file.text) ? "large" : "ready"}`;
     };
     return layoutLeafActiveEntries
       .map(({ groupId, activeKey }) => `${groupId}:${activeKey ?? "empty"}:${stateForKey(activeKey)}`)
@@ -6852,15 +6921,20 @@ export function CodeWorkspaceTab({
       const file = openFiles[activeKey];
       const target = gitTargetForFile(file ?? null);
       const head = gitHeadTextByFile[activeKey];
+      const largeFile = file ? isLargeFileContent(file.text) : false;
       // A repository without a HEAD cannot have a comparable line diff. Keep
       // the hook idle until the snapshot exposes a real HEAD and its blob is
       // read, avoiding a throwaway debounce during Git discovery.
-      if (!file || file.loading || !target?.headOid || !head || head.sourceKey !== target.sourceKey) return [];
+      if (!file || file.loading || largeFile || !target?.headOid || !head || head.sourceKey !== target.sourceKey) return [];
       return [{
         key: activeKey,
+        filePath: `${target.repoRoot}/${target.path}`,
         sourceKey: target.sourceKey,
+        headOid: target.headOid,
+        textVersion: file.documentRevision ?? 0,
         headText: head.text,
         bufferText: file.text,
+        largeFile,
       }];
     });
   }, [
@@ -6879,7 +6953,7 @@ export function CodeWorkspaceTab({
     for (const key of activeKeys) {
       const file = openFilesRef.current[key];
       const target = gitTargetForFile(file ?? null);
-      if (!file || !target || gitHeadTextByFile[key]?.sourceKey === target.sourceKey) continue;
+      if (!file || file.loading || isLargeFileContent(file.text) || !target || gitHeadTextByFile[key]?.sourceKey === target.sourceKey) continue;
       if (!target.headOid) {
         setGitHeadTextByFile((current) => ({
           ...current,

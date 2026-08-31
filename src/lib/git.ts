@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { withVaultLockedNotice } from "./ipc";
+import { invokeWithPerformanceObservation } from "./performanceInstrumentation";
 
 export interface GitProbeResult {
   path: string;
@@ -184,13 +185,18 @@ export function gitBlobPair(
   newRef: string,
   oldPath?: string | null,
 ): Promise<GitBlobPair> {
-  return invoke<GitBlobPair>("git_blob_pair", {
+  const args = {
     repoRoot,
     path,
     oldPath: oldPath ?? null,
     oldRef,
     newRef,
-  });
+  };
+  return invokeWithPerformanceObservation(
+    "git_blob_pair",
+    args,
+    () => invoke<GitBlobPair>("git_blob_pair", args),
+  );
 }
 
 export function gitBlameLines(
