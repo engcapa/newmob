@@ -514,22 +514,37 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     resetWorkspaceClipboardStores();
   });
 
-  it("handles createWebClipboardPermissionAdapter and createNativeClipboardPermissionAdapter safely", async () => {
+  it("keeps a native capability probe separate from permission state", async () => {
     const webAdapter = createWebClipboardPermissionAdapter();
-    const nativeAdapter = createNativeClipboardPermissionAdapter();
+    const probeCapabilities = vi.fn(async () => ({
+      platform: "linux",
+      displayBackend: "wayland",
+      webkitApiExpected: true,
+      nativeBackend: "arboard",
+      wlPaste: true,
+      wlCopy: true,
+      xclip: false,
+      xsel: false,
+      htmlRtfNative: false,
+    }));
+    const nativeAdapter = createNativeClipboardPermissionAdapter({
+      isRuntime: () => true,
+      probeCapabilities,
+    });
     const defaultAdapter = createDefaultClipboardPermissionAdapter();
 
     const webRes = await webAdapter.queryPermission();
     expect(["unknown", "granted", "denied"]).toContain(webRes);
 
     const nativeRes = await nativeAdapter.queryPermission();
-    expect(["unknown", "granted", "denied"]).toContain(nativeRes);
+    expect(probeCapabilities).toHaveBeenCalledOnce();
+    expect(nativeRes).toBe("unknown");
 
     const defRes = await defaultAdapter.queryPermission();
     expect(["unknown", "granted", "denied"]).toContain(defRes);
   });
 
-  it("writeSystemClipboard: returns denied with systemEffect: 0 when permission is denied", async () => {
+  it("writeSystemClipboard: reports not-performed when permission denies before the OS call", async () => {
     resetWorkspaceClipboardStores();
     const handle = acquireClipboardStore("ws-write-denied");
     handle.setPermission("denied");
@@ -538,14 +553,14 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
 
     expect(result.outcome).toBe("denied");
-    expect(result.systemEffect).toBe(0);
+    expect(result.systemEffect).toBe("not-performed");
     expect(mockWriter).not.toHaveBeenCalled();
 
     handle.release();
     resetWorkspaceClipboardStores();
   });
 
-  it("writeSystemClipboard: detects permission change mid-await and returns stale-generation with systemEffect: 0", async () => {
+  it("writeSystemClipboard: preserves performed effect when permission changes after the OS write", async () => {
     resetWorkspaceClipboardStores();
     const handle = acquireClipboardStore("ws-write-stale");
     handle.setPermission("granted");
@@ -559,13 +574,13 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
 
     expect(result.outcome).toBe("stale-generation");
-    expect(result.systemEffect).toBe(0);
+    expect(result.systemEffect).toBe("performed");
 
     handle.release();
     resetWorkspaceClipboardStores();
   });
 
-  it("writeSystemClipboard: returns unavailable with systemEffect: 0 when IO fails", async () => {
+  it("writeSystemClipboard: reports unknown effect when an entered OS write throws", async () => {
     resetWorkspaceClipboardStores();
     const handle = acquireClipboardStore("ws-write-fail");
     handle.setPermission("granted");
@@ -577,13 +592,13 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
 
     expect(result.outcome).toBe("unavailable");
-    expect(result.systemEffect).toBe(0);
+    expect(result.systemEffect).toBe("unknown");
 
     handle.release();
     resetWorkspaceClipboardStores();
   });
 
-  it("writeSystemClipboard: returns success with systemEffect: 1 on valid write", async () => {
+  it("writeSystemClipboard: returns success with performed effect on valid write", async () => {
     resetWorkspaceClipboardStores();
     const handle = acquireClipboardStore("ws-write-ok");
     handle.setPermission("granted");
@@ -592,14 +607,14 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
 
     expect(result.outcome).toBe("success");
-    expect(result.systemEffect).toBe(1);
+    expect(result.systemEffect).toBe("performed");
     expect(mockWriter).toHaveBeenCalledWith("hello");
 
     handle.release();
     resetWorkspaceClipboardStores();
   });
 
-  it("readSystemClipboard: returns denied with systemEffect: 0 and fallbackSession when denied", async () => {
+  it("readSystemClipboard: reports not-performed and a visible fallback when denied before read", async () => {
     resetWorkspaceClipboardStores();
     const handle = acquireClipboardStore("ws-read-denied");
     handle.write({ sourceViewId: null, plainText: "fallback text", rectangular: false, sourceEol: "lf" });
@@ -609,7 +624,7 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     const result = await handle.readSystemClipboard({ readTextResult: mockReader });
 
     expect(result.outcome).toBe("denied");
-    expect(result.systemEffect).toBe(0);
+    expect(result.systemEffect).toBe("not-performed");
     if (result.outcome === "denied") {
       expect(result.fallbackSession?.plainText).toBe("fallback text");
     }
@@ -634,7 +649,7 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     const result = await handle.readSystemClipboard({ readTextResult: mockReader });
 
     expect(result.outcome).toBe("stale-generation");
-    expect(result.systemEffect).toBe(0);
+    expect(result.systemEffect).toBe("performed");
     if (result.outcome === "stale-generation") {
       expect(result.fallbackSession?.plainText).toBe("fallback text");
     }
@@ -643,7 +658,7 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     resetWorkspaceClipboardStores();
   });
 
-  it("readSystemClipboard: returns unavailable with fallbackSession when reader returns ok: false", async () => {
+  it("readSystemClipboard: reports unknown effect with fallback when the adapter cannot confirm a read", async () => {
     resetWorkspaceClipboardStores();
     const handle = acquireClipboardStore("ws-read-unavail");
     handle.write({ sourceViewId: null, plainText: "fallback text", rectangular: false, sourceEol: "lf" });
@@ -653,7 +668,7 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     const result = await handle.readSystemClipboard({ readTextResult: mockReader });
 
     expect(result.outcome).toBe("unavailable");
-    expect(result.systemEffect).toBe(0);
+    expect(result.systemEffect).toBe("unknown");
     if (result.outcome === "unavailable") {
       expect(result.fallbackSession?.plainText).toBe("fallback text");
     }
@@ -662,7 +677,7 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     resetWorkspaceClipboardStores();
   });
 
-  it("readSystemClipboard: returns success with text and systemEffect: 1 on valid read", async () => {
+  it("readSystemClipboard: returns success with text and performed effect on valid read", async () => {
     resetWorkspaceClipboardStores();
     const handle = acquireClipboardStore("ws-read-ok");
     handle.setPermission("granted");
@@ -674,10 +689,9 @@ describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write",
     if (result.outcome === "success") {
       expect(result.text).toBe("remote-clip");
     }
-    expect(result.systemEffect).toBe(1);
+    expect(result.systemEffect).toBe("performed");
 
     handle.release();
     resetWorkspaceClipboardStores();
   });
 });
-

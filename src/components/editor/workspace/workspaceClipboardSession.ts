@@ -5,6 +5,7 @@ import {
   probeClipboardCapabilities,
   readTextResult,
   writeText,
+  type ClipboardCapabilities,
   type ClipboardTextReadResult,
 } from "../../../lib/clipboard";
 
@@ -296,17 +297,19 @@ export interface GuardedClipboardIO {
   readTextResult?: () => Promise<ClipboardTextReadResult>;
 }
 
+export type GuardedSystemEffect = "not-performed" | "performed" | "unknown";
+
 export type GuardedSystemWriteResult =
-  | { outcome: "success"; systemEffect: 1 }
-  | { outcome: "denied"; systemEffect: 0 }
-  | { outcome: "stale-generation"; baseGeneration: number; currentGeneration: number; systemEffect: 0 }
-  | { outcome: "unavailable" | "error"; error?: string; systemEffect: 0 };
+  | { outcome: "success"; systemEffect: "performed" }
+  | { outcome: "denied"; systemEffect: "not-performed" | "performed" }
+  | { outcome: "stale-generation"; baseGeneration: number; currentGeneration: number; systemEffect: "performed" | "unknown" }
+  | { outcome: "unavailable" | "error"; error?: string; systemEffect: "unknown" };
 
 export type GuardedSystemReadResult =
-  | { outcome: "success"; text: string; systemEffect: 1 }
-  | { outcome: "denied"; systemEffect: 0; fallbackSession: EditorClipboardSession | null }
-  | { outcome: "stale-generation"; baseGeneration: number; currentGeneration: number; systemEffect: 0; fallbackSession: EditorClipboardSession | null }
-  | { outcome: "unavailable" | "error"; error?: string; systemEffect: 0; fallbackSession: EditorClipboardSession | null };
+  | { outcome: "success"; text: string; systemEffect: "performed" }
+  | { outcome: "denied"; systemEffect: "not-performed" | "performed"; fallbackSession: EditorClipboardSession | null }
+  | { outcome: "stale-generation"; baseGeneration: number; currentGeneration: number; systemEffect: "performed" | "unknown"; fallbackSession: EditorClipboardSession | null }
+  | { outcome: "unavailable" | "error"; error?: string; systemEffect: "unknown"; fallbackSession: EditorClipboardSession | null };
 
 export function createWebClipboardPermissionAdapter(): ClipboardPermissionAdapter {
   return {
@@ -350,17 +353,28 @@ export function createWebClipboardPermissionAdapter(): ClipboardPermissionAdapte
   };
 }
 
-export function createNativeClipboardPermissionAdapter(): ClipboardPermissionAdapter {
+export interface NativeClipboardPermissionAdapterOptions {
+  isRuntime?: () => boolean;
+  probeCapabilities?: () => Promise<ClipboardCapabilities | null>;
+}
+
+export function createNativeClipboardPermissionAdapter(
+  options: NativeClipboardPermissionAdapterOptions = {},
+): ClipboardPermissionAdapter {
+  const runtimeAvailable = options.isRuntime ?? isTauriRuntime;
+  const probeCapabilities = options.probeCapabilities ?? probeClipboardCapabilities;
   return {
     async queryPermission(): Promise<ClipboardPermissionState> {
-      if (!isTauriRuntime()) return "unknown";
+      if (!runtimeAvailable()) return "unknown";
       try {
-        const caps = await probeClipboardCapabilities();
-        if (caps) return "granted";
-        return "unknown";
+        // Backend availability is not an OS permission grant. The native
+        // boundary has no permission-query command, so a successful probe
+        // deliberately leaves permission unknown until a real read/write.
+        await probeCapabilities();
       } catch {
-        return "unknown";
+        // Permission remains unknown when capability discovery itself fails.
       }
+      return "unknown";
     },
   };
 }
@@ -688,7 +702,7 @@ export function acquireClipboardStore(
     writeSystemClipboard: async (text: string, io?: GuardedClipboardIO): Promise<GuardedSystemWriteResult> => {
       const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
       if (current.permission === "denied") {
-        return { outcome: "denied", systemEffect: 0 };
+        return { outcome: "denied", systemEffect: "not-performed" };
       }
       const baseGeneration = current.permissionGeneration;
       const writeFn = io?.writeText ?? writeText;
@@ -698,7 +712,7 @@ export function acquireClipboardStore(
         return {
           outcome: "unavailable",
           error: err instanceof Error ? err.message : String(err),
-          systemEffect: 0,
+          systemEffect: "unknown",
         };
       }
       const postSlot = slotStatesByWorkspace.get(workspaceInstanceId);
@@ -707,18 +721,18 @@ export function acquireClipboardStore(
           outcome: "stale-generation",
           baseGeneration,
           currentGeneration: postSlot ? postSlot.permissionGeneration : -1,
-          systemEffect: 0,
+          systemEffect: "performed",
         };
       }
       if (postSlot.permission === "denied") {
-        return { outcome: "denied", systemEffect: 0 };
+        return { outcome: "denied", systemEffect: "performed" };
       }
-      return { outcome: "success", systemEffect: 1 };
+      return { outcome: "success", systemEffect: "performed" };
     },
     readSystemClipboard: async (io?: GuardedClipboardIO): Promise<GuardedSystemReadResult> => {
       const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
       if (current.permission === "denied") {
-        return { outcome: "denied", systemEffect: 0, fallbackSession: current.store.read() };
+        return { outcome: "denied", systemEffect: "not-performed", fallbackSession: current.store.read() };
       }
       const baseGeneration = current.permissionGeneration;
       const readFn = io?.readTextResult ?? readTextResult;
@@ -730,27 +744,28 @@ export function acquireClipboardStore(
         return {
           outcome: "error",
           error: err instanceof Error ? err.message : String(err),
-          systemEffect: 0,
+          systemEffect: "unknown",
           fallbackSession: postSlot.store.read(),
         };
       }
+      const systemEffect: GuardedSystemEffect = res.ok ? "performed" : "unknown";
       const postSlot = slotStatesByWorkspace.get(workspaceInstanceId);
       if (!postSlot || postSlot.permissionGeneration !== baseGeneration) {
         return {
           outcome: "stale-generation",
           baseGeneration,
           currentGeneration: postSlot ? postSlot.permissionGeneration : -1,
-          systemEffect: 0,
+          systemEffect,
           fallbackSession: postSlot ? postSlot.store.read() : null,
         };
       }
       if (postSlot.permission === "denied") {
-        return { outcome: "denied", systemEffect: 0, fallbackSession: postSlot.store.read() };
+        return { outcome: "denied", systemEffect: "performed", fallbackSession: postSlot.store.read() };
       }
       if (!res.ok) {
-        return { outcome: "unavailable", systemEffect: 0, fallbackSession: postSlot.store.read() };
+        return { outcome: "unavailable", systemEffect: "unknown", fallbackSession: postSlot.store.read() };
       }
-      return { outcome: "success", text: res.text, systemEffect: 1 };
+      return { outcome: "success", text: res.text, systemEffect: "performed" };
     },
   };
 
@@ -808,4 +823,3 @@ if (typeof window !== "undefined") {
     return slot ? buildWorkspaceClipboardSnapshot(slot) : null;
   };
 }
-

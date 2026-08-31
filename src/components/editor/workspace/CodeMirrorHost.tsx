@@ -433,19 +433,31 @@ function writeEditorSelectionToClipboard(view: EditorView): boolean {
       if (res.outcome === "success") {
         rememberEditorClipboardPayload(view, payload);
       } else if (res.outcome === "denied") {
-        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        rememberEditorClipboardPayload(
+          view,
+          payload,
+          res.systemEffect === "performed" ? {} : { systemClipboardUnavailable: true },
+        );
         context?.onUnavailable(
-          "System clipboard access denied — copy kept for in-workspace paste only",
+          res.systemEffect === "performed"
+            ? "System clipboard permission was denied after the copy completed"
+            : "System clipboard access denied — copy kept for in-workspace paste only",
         );
       } else if (res.outcome === "stale-generation") {
-        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        rememberEditorClipboardPayload(
+          view,
+          payload,
+          res.systemEffect === "performed" ? {} : { systemClipboardUnavailable: true },
+        );
         context?.onUnavailable(
-          "Clipboard permission changed during copy — copy kept for in-workspace paste only",
+          res.systemEffect === "performed"
+            ? "Clipboard permission changed after the system clipboard copy completed"
+            : "Clipboard permission changed during copy — system clipboard effect is unknown; copy kept for in-workspace paste",
         );
       } else {
         rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
         context?.onUnavailable(
-          "System clipboard unavailable — copy kept for in-workspace paste only",
+          "System clipboard write effect is unknown — copy kept for in-workspace paste",
         );
       }
     });
@@ -658,13 +670,21 @@ function cutSystemClipboard(view: EditorView): boolean {
         cutEditorSelections(view);
         view.focus();
       } else {
-        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        rememberEditorClipboardPayload(
+          view,
+          payload,
+          res.systemEffect === "performed" ? {} : { systemClipboardUnavailable: true },
+        );
         cutEditorSelections(view);
         const reasonMsg = res.outcome === "denied"
-          ? "System clipboard access denied — cut kept for in-workspace paste only"
+          ? res.systemEffect === "performed"
+            ? "System clipboard permission was denied after the cut copy completed"
+            : "System clipboard access denied — cut kept for in-workspace paste only"
           : res.outcome === "stale-generation"
-          ? "Clipboard permission changed during cut — cut kept for in-workspace paste only"
-          : "System clipboard unavailable — cut kept for in-workspace paste only";
+          ? res.systemEffect === "performed"
+            ? "Clipboard permission changed after the system clipboard cut copy completed"
+            : "Clipboard permission changed during cut — system clipboard effect is unknown; cut kept for in-workspace paste"
+          : "System clipboard write effect is unknown — cut kept for in-workspace paste";
         context?.onUnavailable(reasonMsg);
         view.focus();
       }
