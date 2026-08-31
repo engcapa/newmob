@@ -169,6 +169,7 @@ import {
 import { observeSyntaxFacts, treeRevisionField } from "./workspaceSyntaxFacts";
 import {
   desiredVisualColumnField,
+  isEditorGeometryReady,
   virtualSpaceClickHandler,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
@@ -2378,6 +2379,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           cancelLspSnippetSession(view)
           || escapeEditorSelections(view)
           || (onParameterEscapeRef.current?.() ?? false),
+        isEditorGeometryReady: () => isEditorGeometryReady(view),
         runEditorCommand: (command) => command(view),
         undo: () => {
           const currentOwner = transactionOwnerRef.current;

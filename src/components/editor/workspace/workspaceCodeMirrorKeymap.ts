@@ -61,6 +61,7 @@ import {
 import {
   type ActionDisabledReason,
   type ActionResult,
+  type ActionState,
   type WorkspaceActionContext,
 } from "./workspaceActionRegistry";
 
@@ -168,6 +169,8 @@ export interface EditorHostActionHandlers {
    * migration channel for the previously inline keymap business bindings).
    */
   runEditorCommand(command: (view: EditorView) => boolean): boolean;
+  /** Live display geometry gate used before consuming PageUp/PageDown. */
+  isEditorGeometryReady?(): boolean;
   /** Shared document history owner; undefined keeps standalone CM history. */
   undo?(): boolean | undefined;
   redo?(): boolean | undefined;
@@ -181,6 +184,7 @@ function editorAction(input: {
   secondary?: readonly string[];
   keywords?: readonly string[];
   requiresEditor: boolean;
+  getState?: (context: WorkspaceActionContext) => ActionState;
   run: (context: WorkspaceActionContext) => Promise<ActionResult>;
 }) {
   return {
@@ -191,10 +195,30 @@ function editorAction(input: {
     ...(input.secondary ? { secondaryKeybindings: [...input.secondary] } : {}),
     ...(input.keywords ? { keywords: [...input.keywords] } : {}),
     provenance: "local" as const,
+    ...(input.getState ? { getState: input.getState } : {}),
     when: input.requiresEditor
       ? (context: WorkspaceActionContext) => context.focus === "editor" && !!context.hasActiveFile
       : undefined,
     run: input.run,
+  };
+}
+
+function editorGeometryActionState(
+  handlers: EditorHostActionHandlers,
+  context: WorkspaceActionContext,
+): ActionState {
+  const hasEditorOwner = context.focus === "editor" && !!context.hasActiveFile;
+  const geometryReady = handlers.isEditorGeometryReady?.() ?? true;
+  const available = hasEditorOwner && geometryReady;
+  return {
+    availability: available ? "available" : "disabled",
+    disabledReason: available
+      ? undefined
+      : (hasEditorOwner ? "geometryUnavailable" : "noEditor"),
+    source: "local",
+    scope: "editor",
+    freshness: "current",
+    completeness: geometryReady ? "complete" : "unavailable",
   };
 }
 
@@ -505,6 +529,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "PageUp",
       keywords: ["page", "up", "scroll", "virtual space"],
       requiresEditor: true,
+      getState: (context) => editorGeometryActionState(handlers, context),
       run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "pageUp", false)),
     }),
     editorAction({
@@ -514,6 +539,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Shift+PageUp",
       keywords: ["page", "up", "select", "virtual space"],
       requiresEditor: true,
+      getState: (context) => editorGeometryActionState(handlers, context),
       run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "pageUp", true)),
     }),
     editorAction({
@@ -523,6 +549,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "PageDown",
       keywords: ["page", "down", "scroll", "virtual space"],
       requiresEditor: true,
+      getState: (context) => editorGeometryActionState(handlers, context),
       run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "pageDown", false)),
     }),
     editorAction({
@@ -532,6 +559,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Shift+PageDown",
       keywords: ["page", "down", "select", "virtual space"],
       requiresEditor: true,
+      getState: (context) => editorGeometryActionState(handlers, context),
       run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "pageDown", true)),
     }),
     editorAction({

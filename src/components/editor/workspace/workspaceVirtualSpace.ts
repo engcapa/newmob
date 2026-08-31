@@ -1,4 +1,4 @@
-import { EditorSelection, StateEffect, StateField } from "@codemirror/state";
+import { EditorSelection, StateEffect, StateField, findClusterBreak } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { Facet } from "@codemirror/state";
@@ -102,6 +102,8 @@ export function virtualOverflowAt(state: EditorState, head: number): number {
 export function charVisualWidth(char: string, column: number, tabWidth: number): number {
   if (char === "\t") return tabWidth - (column % tabWidth);
   const code = char.codePointAt(0) ?? 0;
+  const first = String.fromCodePoint(code);
+  if (/^\p{Mark}$/u.test(first) || code === 0x200d) return 0;
   // Approximate double-width test: astral code points plus common wide ranges
   // (CJK, Hangul, fullwidth forms, emoji blocks).
   if (code > 0xffff || (code >= 0x1100 && (
@@ -124,9 +126,10 @@ export function visualColumnFor(lineText: string, documentColumn: number, tabWid
   let column = 0;
   let index = 0;
   while (index < documentColumn && index < lineText.length) {
-    const char = String.fromCodePoint(lineText.codePointAt(index)!);
-    column += charVisualWidth(char, column, tabWidth);
-    index += char.length;
+    const next = findClusterBreak(lineText, index, true, true);
+    if (next <= index || next > documentColumn) break;
+    column += charVisualWidth(lineText.slice(index, next), column, tabWidth);
+    index = next;
   }
   return column;
 }
@@ -144,15 +147,14 @@ export function documentColumnForVisualColumn(
   let visual = 0;
   let index = 0;
   while (index < lineText.length) {
-    const codePoint = lineText.codePointAt(index);
-    if (codePoint == null) break;
-    const char = String.fromCodePoint(codePoint);
-    const width = charVisualWidth(char, visual, tabWidth);
+    const next = findClusterBreak(lineText, index, true, true);
+    if (next <= index) break;
+    const width = charVisualWidth(lineText.slice(index, next), visual, tabWidth);
     if (visual + width > targetVisualColumn) {
       break;
     }
     visual += width;
-    index += char.length;
+    index = next;
   }
   return index;
 }
@@ -386,6 +388,10 @@ export function isEditorGeometryReady(view: EditorView): boolean {
 export interface TargetVisualBlock {
   from: number;
   to: number;
+  /** Exact caret returned by CodeMirror's rendered-geometry navigation. */
+  head?: number;
+  /** Rendered horizontal goal returned by CodeMirror, in CSS pixels. */
+  goalColumn?: number;
 }
 
 /**
@@ -396,34 +402,27 @@ export function resolveTargetVisualBlock(
   view: EditorView,
   head: number,
   direction: "up" | "down" | "pageUp" | "pageDown",
+  goalColumn?: number,
 ): TargetVisualBlock | null {
   const state = view.state;
   const currentLine = state.doc.lineAt(head);
 
   if (isEditorGeometryReady(view)) {
     try {
-      const currentBlock = view.lineBlockAt(head);
-      if (direction === "up") {
-        const targetBlock = view.lineBlockAtHeight(currentBlock.top - 1);
-        return { from: targetBlock.from, to: targetBlock.to };
-      }
-      if (direction === "down") {
-        const targetBlock = view.lineBlockAtHeight(currentBlock.bottom + 1);
-        return { from: targetBlock.from, to: targetBlock.to };
-      }
       const viewportHeight = view.scrollDOM.clientHeight || view.dom.clientHeight;
       const pageDistance = Math.max(view.defaultLineHeight, viewportHeight - view.defaultLineHeight);
-      if (direction === "pageUp") {
-        const targetY = Math.max(0, currentBlock.top - pageDistance);
-        const targetBlock = view.lineBlockAtHeight(targetY);
-        return { from: targetBlock.from, to: targetBlock.to };
-      }
-      if (direction === "pageDown") {
-        const maxContentHeight = Math.max(currentBlock.bottom, view.contentHeight || (state.doc.lines * view.defaultLineHeight));
-        const targetY = Math.min(maxContentHeight - 1, currentBlock.top + pageDistance);
-        const targetBlock = view.lineBlockAtHeight(targetY);
-        return { from: targetBlock.from, to: targetBlock.to };
-      }
+      const start = EditorSelection.cursor(head, 1, undefined, goalColumn);
+      const forward = direction === "down" || direction === "pageDown";
+      const target = direction === "pageUp" || direction === "pageDown"
+        ? view.moveVertically(start, forward, pageDistance)
+        : view.moveVertically(start, forward);
+      const targetLine = state.doc.lineAt(target.head);
+      return {
+        from: targetLine.from,
+        to: targetLine.to,
+        head: target.head,
+        goalColumn: target.goalColumn ?? undefined,
+      };
     } catch {
       // Fall through to non-geometry fallback
     }
@@ -470,25 +469,46 @@ export function virtualVerticalMoveCommand(
   for (let idx = 0; idx < state.selection.ranges.length; idx++) {
     const range = state.selection.ranges[idx];
     const currentLine = state.doc.lineAt(range.head);
-    const targetBlock = resolveTargetVisualBlock(view, range.head, direction);
+    const currentOverflow = virtualOverflowAt(state, range.head);
+    const initialDesiredCol = desired[idx] ?? (
+      visualColumnFor(currentLine.text, range.head - currentLine.from, tabWidth)
+      + currentOverflow
+    );
+    const requestedGoalColumn = range.goalColumn
+      ?? (currentOverflow > 0
+        ? initialDesiredCol * Math.max(1, view.defaultCharacterWidth)
+        : undefined);
+
+    const targetBlock = resolveTargetVisualBlock(
+      view,
+      range.head,
+      direction,
+      requestedGoalColumn,
+    );
     if (!targetBlock) return false;
 
-    const targetPhysLine = state.doc.lineAt(targetBlock.from);
-    const isEndOfPhysLine = targetBlock.to === targetPhysLine.to;
+    const desiredCol = targetBlock.goalColumn == null
+      ? initialDesiredCol
+      : Math.max(0, Math.round(targetBlock.goalColumn / Math.max(1, view.defaultCharacterWidth)));
+    nextDesired.push(desiredCol);
+
+    const geometryTargetHead = targetBlock.head;
+    const targetPhysLine = state.doc.lineAt(geometryTargetHead ?? targetBlock.from);
+    const isEndOfPhysLine = (geometryTargetHead ?? targetBlock.to) === targetPhysLine.to;
     const isLastLine = targetPhysLine.number === state.doc.lines;
     const allowed = isLastLine ? policy.atFileBottom : policy.afterLineEnd;
-
-    const desiredCol = desired[idx] ?? (
-      visualColumnFor(currentLine.text, range.head - currentLine.from, tabWidth)
-      + virtualOverflowAt(state, range.head)
-    );
-    nextDesired.push(desiredCol);
 
     const blockText = state.sliceDoc(targetBlock.from, targetBlock.to);
     const blockVisualWidth = visualColumnFor(blockText, blockText.length, tabWidth);
 
     let targetHead: number;
-    if (desiredCol > blockVisualWidth) {
+    if (geometryTargetHead != null) {
+      targetHead = geometryTargetHead;
+      if (desiredCol > blockVisualWidth && allowed && isEndOfPhysLine) {
+        const overflow = Math.min(desiredCol - blockVisualWidth, MAX_OVERFLOW_COLUMNS);
+        nextOverflow.set(targetHead, overflow);
+      }
+    } else if (desiredCol > blockVisualWidth) {
       targetHead = targetBlock.to;
       if (allowed && isEndOfPhysLine) {
         const overflow = Math.min(desiredCol - blockVisualWidth, MAX_OVERFLOW_COLUMNS);
@@ -506,11 +526,11 @@ export function virtualVerticalMoveCommand(
     if (extend) {
       nextRanges.push(
         range.anchor <= targetHead
-          ? EditorSelection.range(range.anchor, targetHead)
-          : EditorSelection.range(targetHead, range.anchor)
+          ? EditorSelection.range(range.anchor, targetHead, targetBlock.goalColumn)
+          : EditorSelection.range(targetHead, range.anchor, targetBlock.goalColumn)
       );
     } else {
-      nextRanges.push(EditorSelection.cursor(targetHead));
+      nextRanges.push(EditorSelection.cursor(targetHead, 1, undefined, targetBlock.goalColumn));
     }
   }
 
@@ -746,4 +766,3 @@ export const VIRTUAL_SPACE_KNOWN_GAPS = [
     behavior: "Pure indent fallback operates on indentation levels without grammar token analysis.",
   },
 ] as const;
-

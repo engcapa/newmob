@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { EditorSelection, EditorState } from "@codemirror/state";
+import { describe, expect, it, vi } from "vitest";
+import { EditorSelection, EditorState, type SelectionRange } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import {
   charVisualWidth,
@@ -27,6 +27,7 @@ import {
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
   virtualTabCommand,
+  visualColumnFor,
   isEditorGeometryReady,
   VirtualSpaceController,
   VIRTUAL_SPACE_KNOWN_GAPS,
@@ -40,11 +41,28 @@ import { history, undo } from "@codemirror/commands";
 const POLICY = editorVirtualSpacePolicy.of({ afterLineEnd: true, atFileBottom: true });
 
 function visualColumnOf(text: string, column: number, tabWidth: number): number {
-  let visual = 0;
-  for (let index = 0; index < column; index += 1) {
-    visual += charVisualWidth(text[index], visual, tabWidth);
-  }
-  return visual;
+  return visualColumnFor(text, column, tabWidth);
+}
+
+function installPhysicalLineVerticalGeometry(view: EditorView, lineHeight: number) {
+  const moveVertically = vi.fn((start: SelectionRange, forward: boolean, distance?: number) => {
+    const current = view.state.doc.lineAt(start.head);
+    const lineDelta = Math.max(1, Math.round((distance ?? lineHeight) / lineHeight));
+    const targetNumber = Math.min(
+      view.state.doc.lines,
+      Math.max(1, current.number + (forward ? lineDelta : -lineDelta)),
+    );
+    const target = view.state.doc.line(targetNumber);
+    const documentColumn = Math.min(start.head - current.from, target.length);
+    return EditorSelection.cursor(
+      target.from + documentColumn,
+      1,
+      undefined,
+      start.goalColumn ?? undefined,
+    );
+  });
+  Object.defineProperty(view, "moveVertically", { value: moveVertically, configurable: true });
+  return moveVertically;
 }
 
 function mount(doc: string, policyEnabled = true): EditorView {
@@ -556,6 +574,45 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       expect(virtualSelectPageUp(view)).toBe(false);
     });
 
+    it("§ED-VSPACE-002: leaves PageDown unconsumed when the focused editor geometry is unavailable", async () => {
+      const host = new WorkspaceActionHost({ workspaceId: "ws-vspace-geometry" });
+      new EditorActionBridge(host).registerView("primary");
+      let commandRuns = 0;
+      host.registerActions(buildEditorHostActions({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        isEditorGeometryReady: () => false,
+        runEditorCommand: () => {
+          commandRuns += 1;
+          return false;
+        },
+      }), { ownerViewId: "primary" });
+      const event = {
+        key: "PageDown",
+        code: "PageDown",
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      };
+
+      const result = host.dispatchKeydownV2({
+        event,
+        workspaceId: "ws-vspace-geometry",
+        targetViewId: "primary",
+      });
+
+      expect(result).toMatchObject({ kind: "rejected", reason: "disabled" });
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopPropagation).not.toHaveBeenCalled();
+      await Promise.resolve();
+      expect(commandRuns).toBe(0);
+    });
+
     it("performs real geometry PageDown and PageUp based on viewport height and line height", () => {
       const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n");
       const view = new EditorView({
@@ -571,32 +628,7 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
       Object.defineProperty(view, "contentHeight", { value: 1000, configurable: true });
 
-      // Mock lineBlockAt and lineBlockAtHeight based on 20px line height:
-      (view as any).lineBlockAt = (pos: number) => {
-        const line = view.state.doc.lineAt(pos);
-        const top = (line.number - 1) * 20;
-        return {
-          from: line.from,
-          to: line.to,
-          top,
-          bottom: top + 20,
-          height: 20,
-          type: 0,
-        };
-      };
-      (view as any).lineBlockAtHeight = (height: number) => {
-        const lineNum = Math.min(view.state.doc.lines, Math.max(1, Math.floor(height / 20) + 1));
-        const line = view.state.doc.line(lineNum);
-        const top = (line.number - 1) * 20;
-        return {
-          from: line.from,
-          to: line.to,
-          top,
-          bottom: top + 20,
-          height: 20,
-          type: 0,
-        };
-      };
+      const moveVertically = installPhysicalLineVerticalGeometry(view, 20);
 
       // Caret on Line 1 offset 0
       view.dispatch({ selection: EditorSelection.cursor(0) });
@@ -606,6 +638,12 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       const head1 = view.state.selection.main.head;
       const line1 = view.state.doc.lineAt(head1);
       expect(line1.number).toBe(10);
+      expect(moveVertically).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        true,
+        180,
+      );
 
       // PageDown again -> Line 19
       expect(virtualPageDown(view)).toBe(true);
@@ -633,17 +671,7 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
       Object.defineProperty(view, "contentHeight", { value: 1000, configurable: true });
 
-      (view as any).lineBlockAt = (pos: number) => {
-        const line = view.state.doc.lineAt(pos);
-        const top = (line.number - 1) * 20;
-        return { from: line.from, to: line.to, top, bottom: top + 20, height: 20, type: 0 };
-      };
-      (view as any).lineBlockAtHeight = (height: number) => {
-        const lineNum = Math.min(view.state.doc.lines, Math.max(1, Math.floor(height / 20) + 1));
-        const line = view.state.doc.line(lineNum);
-        const top = (line.number - 1) * 20;
-        return { from: line.from, to: line.to, top, bottom: top + 20, height: 20, type: 0 };
-      };
+      const moveVertically = installPhysicalLineVerticalGeometry(view, 20);
 
       // Resize viewport to 400px (400 - 20 = 380px = 19 lines jump)
       Object.defineProperty(view.scrollDOM, "clientHeight", { value: 400, configurable: true });
@@ -654,10 +682,10 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       // Should land on Line 20 (1 + 19)
       const head = view.state.selection.main.head;
       expect(view.state.doc.lineAt(head).number).toBe(20);
+      expect(moveVertically).toHaveBeenCalledWith(expect.anything(), true, 380);
     });
 
-    it("navigates visual line blocks in soft-wrapped text and clamps before line-end virtual space", () => {
-      // Physical doc with 1 long line: "0123456789ABCDEFGHIJ"
+    it("§ED-VSPACE-002: delegates wrapped visual-line movement to CodeMirror geometry", () => {
       const doc = "0123456789ABCDEFGHIJ";
       const view = new EditorView({
         state: EditorState.create({
@@ -671,24 +699,34 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
       Object.defineProperty(view, "contentHeight", { value: 40, configurable: true });
 
-      // Soft wrapped into 2 visual blocks: block 1 (0..10), block 2 (10..20)
-      (view as any).lineBlockAt = (pos: number) => {
-        if (pos < 10) {
-          return { from: 0, to: 10, top: 0, bottom: 20, height: 20, type: 0 };
-        }
-        return { from: 10, to: 20, top: 20, bottom: 40, height: 20, type: 0 };
-      };
-      (view as any).lineBlockAtHeight = (height: number) => {
-        if (height < 20) {
-          return { from: 0, to: 10, top: 0, bottom: 20, height: 20, type: 0 };
-        }
-        return { from: 10, to: 20, top: 20, bottom: 40, height: 20, type: 0 };
-      };
+      // Real CodeMirror lineBlockAt spans the physical line even when it wraps.
+      (view as any).lineBlockAt = () => ({
+        from: 0,
+        to: 20,
+        top: 0,
+        bottom: 40,
+        height: 40,
+        type: 0,
+      });
+      (view as any).lineBlockAtHeight = () => ({
+        from: 0,
+        to: 20,
+        top: 0,
+        bottom: 40,
+        height: 40,
+        type: 0,
+      });
+      const moveVertically = vi.fn((start: SelectionRange) => {
+        expect(start.goalColumn).toBeUndefined();
+        return EditorSelection.cursor(13);
+      });
+      Object.defineProperty(view, "moveVertically", { value: moveVertically, configurable: true });
 
-      // Moving down from block 1 to block 2
       view.dispatch({ selection: EditorSelection.cursor(3) });
       expect(virtualMoveDown(view)).toBe(true);
-      expect(view.state.selection.main.head).toBe(13); // offset 10 + 3 in block 2
+      expect(view.state.selection.main.head).toBe(13);
+      expect(virtualOverflowAt(view.state, 13)).toBe(0);
+      expect(moveVertically).toHaveBeenCalledOnce();
     });
 
     it("handles top and bottom boundaries and preserves virtual overflow at file bottom", () => {
@@ -745,6 +783,40 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       expect(visualColumnOf("你好", 2, 4)).toBe(4);
       // Emoji "🚀" (astral code point, string length 2) -> visual width 2
       expect(visualColumnOf("🚀", 2, 4)).toBe(2);
+      // Combining marks and ZWJ emoji are each one grapheme cluster.
+      expect(visualColumnOf("e\u0301", 2, 4)).toBe(1);
+      const family = "👨‍👩‍👧‍👦";
+      expect(visualColumnOf(family, family.length, 4)).toBe(2);
+      expect(documentColumnForVisualColumn(family, 2, 4)).toBe(family.length);
+    });
+
+    it("preserves tab and wide-grapheme desired columns through CodeMirror geometry", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "\tfoo\n你好🚀",
+          extensions: [
+            EditorState.tabSize.of(2),
+            virtualSpaceOverflowField,
+            desiredVisualColumnField,
+            POLICY,
+          ],
+        }),
+      });
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      const secondLine = view.state.doc.line(2);
+      const moveVertically = vi.fn((start: SelectionRange) => {
+        expect(start.goalColumn).toBe(40); // tabSize 2: "\tfoo" is 5 visual columns
+        return EditorSelection.cursor(secondLine.from + 2, 1, undefined, start.goalColumn ?? undefined);
+      });
+      Object.defineProperty(view, "moveVertically", { value: moveVertically, configurable: true });
+
+      view.dispatch({ selection: EditorSelection.cursor(4, 1, undefined, 40) });
+      expect(virtualMoveDown(view)).toBe(true);
+      expect(view.state.selection.main.head).toBe(secondLine.from + 2);
+      expect(view.state.field(desiredVisualColumnField)).toEqual([5]);
+      expect(moveVertically).toHaveBeenCalledOnce();
     });
   });
 
