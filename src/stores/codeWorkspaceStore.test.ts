@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { getAllLeafNodes } from "../components/editor/workspace/recursiveLayoutTree";
+import {
+  cloneLayoutTree,
+  getAllLeafNodes,
+  validateTreeGroupConsistency,
+} from "../components/editor/workspace/recursiveLayoutTree";
 import {
   createDefaultCodeWorkspaceUi,
   selectCodeWorkspaceUi,
@@ -273,40 +277,68 @@ describe("codeWorkspaceStore", () => {
       const sourceLeaf = leafNodes.find((l) => l.openFileKeys.includes("file:1"))?.id ?? leafA;
       const targetLeaf = leafNodes.find((l) => l.id !== sourceLeaf)?.id ?? leafB;
 
-      // 5. setActiveEditorGroup (switch active focus from targetLeaf back to sourceLeaf)
+      // 5. setLayoutNodeRatios (interactive resize)
+      const splitId = currentUi.layoutTreeV2.type === "split" ? currentUi.layoutTreeV2.id : "missing";
+      store.setLayoutNodeRatios("ws-mut", splitId, [0.6, 0.4]);
+      expect(getRev()).toBe(++currentRev);
+
+      // 6. setLayoutTreeV2 (effective whole-tree replacement)
+      const resizedTree = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "ws-mut").layoutTreeV2;
+      if (resizedTree.type !== "split") throw new Error("expected split layout after splitLayoutLeaf");
+      store.setLayoutTreeV2("ws-mut", {
+        ...resizedTree,
+        orientation: "horizontal",
+        ratios: [...resizedTree.ratios],
+        children: resizedTree.children.map(cloneLayoutTree),
+      });
+      expect(getRev()).toBe(++currentRev);
+
+      // 7. setActiveEditorGroup (switch active focus from targetLeaf back to sourceLeaf)
       expect(currentUi.activeEditorGroupId).toBe(targetLeaf);
       store.setActiveEditorGroup("ws-mut", sourceLeaf);
       expect(getRev()).toBe(++currentRev);
 
-      // 6. setLeafActiveTab
+      // 8. setLeafActiveTab
       store.setLeafActiveTab("ws-mut", sourceLeaf, "file:1");
       expect(getRev()).toBe(++currentRev);
 
-      // 7. moveLayoutTab
+      // 9. moveLayoutTab
       store.moveLayoutTab("ws-mut", sourceLeaf, targetLeaf, "file:1");
       expect(getRev()).toBe(++currentRev);
 
-      // 8. closeLayoutTabInLeaf
+      // 10. closeLayoutTabInLeaf
       store.closeLayoutTabInLeaf("ws-mut", targetLeaf, "file:1");
       expect(getRev()).toBe(++currentRev);
 
-      // 9. stretchLayoutLeaf
-      store.stretchLayoutLeaf("ws-mut", sourceLeaf, { step: 0.1 });
+      // 11. closeLayoutLeaf
+      store.closeLayoutLeaf("ws-mut", targetLeaf);
       expect(getRev()).toBe(++currentRev);
 
-      // 10. equalizeLayoutRatios
-      store.equalizeLayoutRatios("ws-mut", sourceLeaf);
+      // 12. splitLayoutLeaf again to recreate a split for ratio commands.
+      store.splitLayoutLeaf("ws-mut", sourceLeaf, "vertical");
+      expect(getRev()).toBe(++currentRev);
+      const recreatedLeaves = getAllLeafNodes(
+        selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "ws-mut").layoutTreeV2,
+      );
+      const recreatedTarget = recreatedLeaves.find((leaf) => leaf.id !== sourceLeaf)?.id ?? sourceLeaf;
+
+      // 13. stretchLayoutLeaf
+      store.stretchLayoutLeaf("ws-mut", recreatedTarget, { step: 0.1 });
       expect(getRev()).toBe(++currentRev);
 
-      // 11. setSplitOrientation
+      // 14. equalizeLayoutRatios
+      store.equalizeLayoutRatios("ws-mut", recreatedTarget);
+      expect(getRev()).toBe(++currentRev);
+
+      // 15. setSplitOrientation
       store.setSplitOrientation("ws-mut", "horizontal");
       expect(getRev()).toBe(++currentRev);
 
-      // 12. unsplitAllLayout
+      // 16. unsplitAllLayout
       store.unsplitAllLayout("ws-mut");
       expect(getRev()).toBe(++currentRev);
 
-      // 13. replaceFileState
+      // 17. replaceFileState
       store.replaceFileState("ws-mut", {
         openFiles: {},
         lspFiles: {},
@@ -314,7 +346,7 @@ describe("codeWorkspaceStore", () => {
       });
       expect(getRev()).toBe(++currentRev);
 
-      // 14. bumpLayoutRevision
+      // 18. bumpLayoutRevision
       const bumped = store.bumpLayoutRevision("ws-mut");
       expect(bumped).toBe(++currentRev);
       expect(getRev()).toBe(currentRev);
@@ -346,6 +378,58 @@ describe("codeWorkspaceStore", () => {
       // Non-layout patch should not increment layoutRevision
       store.patchInstance("ws-noop", { treeFilter: "some-filter" });
       expect(selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "ws-noop").layoutRevision).toBe(revAfterSetup);
+
+      // A structurally identical tree clone is also a semantic no-op.
+      const tree = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "ws-noop").layoutTreeV2;
+      store.setLayoutTreeV2("ws-noop", cloneLayoutTree(tree));
+      expect(selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "ws-noop").layoutRevision).toBe(revAfterSetup);
+
+      const groups = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "ws-noop").editorGroups;
+      const reorderedClone = Object.fromEntries(Object.entries(groups).reverse().map(([id, group]) => [id, {
+        ...group,
+        openOrder: [...group.openOrder],
+        pinnedKeys: [...group.pinnedKeys],
+      }]));
+      store.patchInstance("ws-noop", { editorGroups: reorderedClone });
+      expect(selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "ws-noop").layoutRevision).toBe(revAfterSetup);
+    });
+
+    it("publishes a coherent restored layout in one revision", () => {
+      const store = useCodeWorkspaceStore.getState();
+      store.ensureInstance("ws-restore");
+      const layoutTreeV2 = {
+        type: "split" as const,
+        id: "restore-split",
+        orientation: "vertical" as const,
+        ratios: [0.5, 0.5],
+        children: [
+          { type: "leaf" as const, id: "restore-a", openFileKeys: ["a"], activeKey: "a" },
+          { type: "leaf" as const, id: "restore-b", openFileKeys: ["b"], activeKey: "b" },
+        ],
+      };
+      const editorGroups = {
+        "restore-a": { id: "restore-a", openOrder: ["a"], activeKey: "a", previewKey: null, pinnedKeys: ["a"] },
+        "restore-b": { id: "restore-b", openOrder: ["b"], activeKey: "b", previewKey: "b", pinnedKeys: [] },
+      };
+
+      store.patchInstance("ws-restore", {
+        splitOrientation: "vertical",
+        activeEditorGroupId: "restore-b",
+        layoutTreeV2,
+        editorGroups,
+        openOrder: ["a", "b"],
+        activeKey: "b",
+      });
+
+      const restored = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "ws-restore");
+      expect(restored.layoutRevision).toBe(1);
+      expect(restored.layoutTreeV2).toBe(layoutTreeV2);
+      expect(restored.editorGroups).toBe(editorGroups);
+      expect(restored.activeEditorGroupId).toBe("restore-b");
+      expect(validateTreeGroupConsistency(restored.layoutTreeV2, restored.editorGroups)).toEqual({
+        consistent: true,
+        errors: [],
+      });
     });
 
     it("keeps layoutRevision isolated between multiple workspaces", () => {

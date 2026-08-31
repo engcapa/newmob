@@ -180,6 +180,46 @@ function resolveUpdater<T>(prev: T, updater: Updater<T>): T {
   return typeof updater === "function" ? (updater as (prev: T) => T)(prev) : updater;
 }
 
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameLayoutTree(left: LayoutNode, right: LayoutNode): boolean {
+  if (left === right) return true;
+  if (left.type !== right.type || left.id !== right.id) return false;
+  if (left.type === "leaf" && right.type === "leaf") {
+    return left.activeKey === right.activeKey && sameStringArray(left.openFileKeys, right.openFileKeys);
+  }
+  if (left.type === "split" && right.type === "split") {
+    return left.orientation === right.orientation
+      && left.ratios.length === right.ratios.length
+      && left.ratios.every((ratio, index) => ratio === right.ratios[index])
+      && left.children.length === right.children.length
+      && left.children.every((child, index) => sameLayoutTree(child, right.children[index]));
+  }
+  return false;
+}
+
+function sameEditorGroups(
+  left: Readonly<Record<EditorGroupId, CodeWorkspaceEditorGroupState>>,
+  right: Readonly<Record<EditorGroupId, CodeWorkspaceEditorGroupState>>,
+): boolean {
+  if (left === right) return true;
+  const leftIds = Object.keys(left);
+  const rightIds = Object.keys(right);
+  if (leftIds.length !== rightIds.length) return false;
+  return leftIds.every((id) => {
+    const leftGroup = left[id];
+    const rightGroup = right[id];
+    return rightGroup !== undefined
+      && leftGroup.id === rightGroup.id
+      && leftGroup.activeKey === rightGroup.activeKey
+      && leftGroup.previewKey === rightGroup.previewKey
+      && sameStringArray(leftGroup.openOrder, rightGroup.openOrder)
+      && sameStringArray(leftGroup.pinnedKeys, rightGroup.pinnedKeys);
+  });
+}
+
 function remappedFileKey(
   key: string,
   keyChanges: CodeWorkspaceFileKeyChanges,
@@ -344,16 +384,13 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
       if (patch.splitOrientation !== undefined && patch.splitOrientation !== current.splitOrientation) {
         isLayoutChanged = true;
       }
-      if (patch.layoutTreeV2 !== undefined && patch.layoutTreeV2 !== current.layoutTreeV2) {
+      if (patch.layoutTreeV2 !== undefined && !sameLayoutTree(patch.layoutTreeV2, current.layoutTreeV2)) {
         isLayoutChanged = true;
       }
-      if (patch.editorGroups !== undefined && patch.editorGroups !== current.editorGroups) {
+      if (patch.editorGroups !== undefined && !sameEditorGroups(patch.editorGroups, current.editorGroups)) {
         isLayoutChanged = true;
       }
-      if (patch.openOrder !== undefined && (
-        patch.openOrder.length !== current.openOrder.length ||
-        patch.openOrder.some((k, i) => k !== current.openOrder[i])
-      )) {
+      if (patch.openOrder !== undefined && !sameStringArray(patch.openOrder, current.openOrder)) {
         isLayoutChanged = true;
       }
 
@@ -520,7 +557,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     if (!validateLayoutTree(layoutTree).valid) return;
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      if (current.layoutTreeV2 === layoutTree) return state;
+      if (sameLayoutTree(current.layoutTreeV2, layoutTree)) return state;
       return {
         byInstanceId: {
           ...state.byInstanceId,
