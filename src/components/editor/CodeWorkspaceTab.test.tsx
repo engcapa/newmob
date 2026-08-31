@@ -30,7 +30,6 @@ import {
 } from "./workspace/navigationHistoryModel";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { undo } from "@codemirror/commands";
 import { globalEditorConfigResolver } from "./workspace/editorConfigResolver";
 import { acquireClipboardStore, resetWorkspaceClipboardStores } from "./workspace/workspaceClipboardSession";
 
@@ -62,6 +61,16 @@ const workspaceMocks = vi.hoisted(() => ({
 }));
 
 const lspMocks = vi.hoisted(() => ({
+  // This mock replaces the whole lsp module, so every value export
+  // CodeWorkspaceTab imports must exist here. Keep the renderer-wide sequence
+  // monotonic like the real module: handlers call it before the IPC request.
+  nextLspRequestSequence: (() => {
+    let seq = 0;
+    return vi.fn(() => {
+      seq += 1;
+      return seq;
+    });
+  })(),
   lspDetectServers: vi.fn(),
   lspSetJavaHome: vi.fn(),
   lspSetJavaVmargs: vi.fn(),
@@ -5927,8 +5936,10 @@ end_of_record
         expect(secondaryView!.state.doc.toString()).toBe("const x = 10;let a = 0;\nconst y = 20;let b = 0;\n");
       });
 
-      // Single undo restores pre-paste state
-      undo(secondaryView!);
+      // Single undo restores pre-paste state. Drive the production entry
+      // (Ctrl+Z -> workspace.undo -> shared transaction owner): a shared
+      // document has no local CodeMirror history() to undo.
+      fireEvent.keyDown(secondaryPane!, { key: "z", ctrlKey: true });
       await waitFor(() => {
         expect(secondaryView!.state.doc.toString()).toBe("let a = 0;\nlet b = 0;\n");
       });
@@ -6044,8 +6055,8 @@ end_of_record
         expect(secondaryView!.state.doc.toString()).toBe("line1: alpha\nline2: beta\nline1: alpha\n");
       });
 
-      // Undo in secondary view
-      undo(secondaryView!);
+      // Undo in secondary view through the production entry.
+      fireEvent.keyDown(secondaryPane!, { key: "z", ctrlKey: true });
       await waitFor(() => {
         expect(secondaryView!.state.doc.toString()).toBe("line1: alpha\nline2: beta\nline3: gamma\n");
       });
