@@ -114,6 +114,7 @@
 - `[data-testid="workspace-editor-appearance-color-scheme-id"]` — interactive [optional] — F25.3.appearance-color-scheme-id
 - `[data-testid="workspace-editor-appearance-high-contrast"]` — interactive [optional] — F25.3.appearance-high-contrast
 - `[data-testid="workspace-editor-appearance-zoom-scope"]` — interactive [optional] — F25.3.appearance-zoom-scope
+- `[data-testid="code-workspace-zoom-reset"]` — interactive [optional] — F25.3.editor-zoom-reset
 - `[data-testid="workspace-editor-appearance-soft-wrap-patterns"]` — interactive [optional] — F25.3.appearance-soft-wrap-patterns
 - `[data-testid="workspace-editor-appearance-soft-wrap-use-original-indent"]` — interactive [optional] — F25.3.appearance-soft-wrap-use-original-indent
 - `[data-testid="workspace-editor-appearance-soft-wrap-additional-indent"]` — interactive [optional] — F25.3.appearance-soft-wrap-additional-indent

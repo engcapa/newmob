@@ -114,6 +114,45 @@ describe("WorkspaceActionHost (N0.1)", () => {
     expect(res1.kind).toBe("applied");
   });
 
+  it("releases synchronous actions before the next keydown dispatch", async () => {
+    const host = new WorkspaceActionHost({
+      workspaceId: "ws-sync-repeat",
+      getDefaultContext: () => ({ focus: "editor", hasActiveFile: true }),
+    });
+    const run = vi.fn(() => ({ kind: "applied" as const }));
+    host.registerAction({
+      id: "editor.selectNextOccurrence",
+      title: "Select Next Occurrence",
+      category: "Edit",
+      provenance: "local",
+      keybinding: "Alt+J",
+      run,
+    });
+    const makeEvent = () => ({
+      key: "j",
+      code: "KeyJ",
+      ctrlKey: false,
+      altKey: true,
+      shiftKey: false,
+      metaKey: false,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+
+    expect(host.dispatchKeydownV2({
+      event: makeEvent(),
+      workspaceId: "ws-sync-repeat",
+      targetViewId: null,
+    })).toMatchObject({ kind: "executed", actionId: "editor.selectNextOccurrence" });
+    expect(host.dispatchKeydownV2({
+      event: makeEvent(),
+      workspaceId: "ws-sync-repeat",
+      targetViewId: null,
+    })).toMatchObject({ kind: "executed", actionId: "editor.selectNextOccurrence" });
+
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+  });
+
   it("builds context with correct focus precedence and clean payload (Gate R0)", () => {
     const defaultCtx: Partial<WorkspaceActionContext> = { hasActiveFile: true };
     const mockTreeElement = { id: "tree-node" } as unknown as EventTarget;

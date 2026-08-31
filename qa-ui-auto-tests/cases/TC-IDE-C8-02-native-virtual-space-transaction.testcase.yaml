@@ -1,0 +1,99 @@
+id: TC-IDE-C8-02
+title: "Native virtual space multi-caret transaction and one undo"
+description: |
+  ED-VSPACE-003 packaged Linux/WebKitGTK slice. Enters a real temporary
+  workspace through persisted recents, enables Virtual Space through the
+  production action palette, then verifies mixed-direction occurrence
+  selections, three independent desired columns, deferred padding, Shift
+  anchor reversal, and one undo in the Tauri runtime. It then injects physical
+  X11 keys through fcitx5/wbpy and verifies composition movement has zero
+  accidental dispatch. Highest claim on green: packaged Linux A1-A4 slice.
+covers: [F25.5, F25.3]
+tags: [code-workspace, ide-c8, virtual-space, navigation, caret, native-gate, p0]
+modes: [native]
+fixtures: [reset_db, workspace_root]
+timeout_sec: 300
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-c8","name":"qa-c8","roots":[{"id":"r1","name":"qa-c8","path":"${fixture.workspace_root}","kind":"folder"}],"looseFiles":[],"lastOpenedAt":1756100000000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.workspace_root}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"][data-path="README.md"]'
+  - click: '[data-testid="code-workspace-tree-file"][data-path="README.md"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+
+  - click: '[data-testid="code-workspace-tab"]'
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] button[role="tab"]:nth-of-type(5)'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Editor Appearance Settings
+  - press: Enter
+  - wait_for: '[data-testid="workspace-editor-appearance-settings-dialog"]'
+  - click: '[data-testid="workspace-editor-appearance-virtual-space-after-line-end"]'
+  - click: '[data-testid="workspace-editor-appearance-virtual-space-at-file-bottom"]'
+  - click: '[data-testid="workspace-editor-appearance-apply"]'
+  - wait: 1
+
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: prefixXXlongprefixX
+  - press: Control+Home
+  - press: ArrowRight
+  - press: ArrowRight
+  - press: ArrowRight
+  - press: ArrowRight
+  - press: ArrowRight
+  - press: ArrowRight
+  - press: ArrowRight
+  - press: Enter
+  - press: ArrowRight
+  - press: Enter
+  - eval_readonly:
+      expression: 'JSON.stringify([document.querySelectorAll(".cm-line")[0]?.textContent, document.querySelectorAll(".cm-line")[1]?.textContent, document.querySelectorAll(".cm-line")[2]?.textContent])'
+      contains: '["prefixX","X","longprefixX"]'
+  - press: Control+Home
+  - press: End
+  - press: Shift+ArrowLeft
+  - press: Alt+j
+  - press: Alt+j
+  - press: ArrowRight
+  - press: ArrowDown
+  - type: Z
+  - eval_readonly:
+      expression: 'JSON.stringify([document.querySelectorAll(".cm-line")[0]?.textContent, document.querySelectorAll(".cm-line")[1]?.textContent, document.querySelectorAll(".cm-line")[2]?.textContent])'
+      contains: '["prefixX","X      Z","lZongprefixXZ"]'
+  - press: Control+z
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[0]?.textContent === "prefixX" && document.querySelectorAll(".cm-line")[1]?.textContent === "X" && document.querySelectorAll(".cm-line")[2]?.textContent === "longprefixX"'
+      expect_truthy: true
+
+  - press: Escape
+  - press: Control+Home
+  - press: ArrowDown
+  - press: Shift+ArrowDown
+  - press: Shift+ArrowUp
+  - press: Shift+ArrowUp
+  - press: Shift+ArrowDown
+  - type: Q
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[0]?.textContent === "prefixX" && document.querySelectorAll(".cm-line")[1]?.textContent === "QX" && document.querySelectorAll(".cm-line")[2]?.textContent === "longprefixX"'
+      expect_truthy: true
+  - press: Control+z
+  - press: Control+Home
+  - native_ime_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      expected_engine: wbpy
+      keys: [w, q, ArrowDown, Escape, w, q, i, Space]
+  - eval_readonly:
+      expression: 'JSON.stringify([document.querySelectorAll(".cm-line")[0]?.textContent, document.querySelectorAll(".cm-line")[1]?.textContent, document.querySelectorAll(".cm-line")[2]?.textContent])'
+      contains: '["你prefixX","X","longprefixX"]'
+  - screenshot: tc-ide-c8-native-virtual-space.png

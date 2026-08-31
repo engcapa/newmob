@@ -140,6 +140,12 @@
     "send_keys": {
      "$ref": "#/$defs/text_arg"
     },
+    "compose_text": {
+     "$ref": "#/$defs/compose_text_arg"
+    },
+    "native_ime_keys": {
+     "$ref": "#/$defs/native_ime_keys_arg"
+    },
     "press": {
      "$ref": "#/$defs/press_arg"
     },
@@ -503,6 +509,53 @@
   },
   "type_arg": {
    "type": "string"
+  },
+  "compose_text_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "selector",
+    "text"
+   ],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    },
+    "text": {
+     "type": "string",
+     "minLength": 1
+    },
+    "during_key": {
+     "type": "string",
+     "minLength": 1
+    }
+   }
+  },
+  "native_ime_keys_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "selector",
+    "expected_engine",
+    "keys"
+   ],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    },
+    "expected_engine": {
+     "type": "string",
+     "minLength": 1
+    },
+    "keys": {
+     "type": "array",
+     "minItems": 1,
+     "items": {
+      "type": "string",
+      "minLength": 1
+     }
+    }
+   }
   },
   "press_arg": {
    "oneOf": [

@@ -290,6 +290,12 @@ function executeConsuming(
   return host.executePrepared(evaluation);
 }
 
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return value !== null
+    && (typeof value === "object" || typeof value === "function")
+    && typeof (value as { then?: unknown }).then === "function";
+}
+
 /** A mounted editor view registered with the host's action bridge. */
 export interface EditorActionBridgeViewRegistration {
   viewId: string;
@@ -824,10 +830,13 @@ export class WorkspaceActionHost {
           message: "Action cancelled before run.",
         };
       }
-      const response = await prepared.action.run(
+      const pending = prepared.action.run(
         prepared.context as WorkspaceActionContext,
         signal,
       );
+      const response = isPromiseLike<ActionResult | void>(pending)
+        ? await pending
+        : pending;
       const result = response ?? { kind: "applied" as const };
       this.onExecuted?.(prepared.actionId, result);
       return result;

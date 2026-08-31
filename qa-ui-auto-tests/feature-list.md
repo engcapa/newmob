@@ -6081,6 +6081,10 @@ controls:
     selector: '[data-testid="workspace-editor-appearance-zoom-scope"]'
     kind: interactive
     optional: true
+  - id: editor-zoom-reset
+    selector: '[data-testid="code-workspace-zoom-reset"]'
+    kind: interactive
+    optional: true
   - id: appearance-soft-wrap-patterns
     selector: '[data-testid="workspace-editor-appearance-soft-wrap-patterns"]'
     kind: interactive

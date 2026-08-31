@@ -202,7 +202,7 @@ export function setVirtualHead(
   const main = view.state.selection.main;
   const ranges = view.state.selection.ranges.map((range, index) => (
     index === view.state.selection.mainIndex
-      ? (extend && mouse_anchorIsBehind(main)
+      ? (extend
           ? EditorSelection.range(main.anchor, head)
           : EditorSelection.cursor(head))
       : range
@@ -212,10 +212,6 @@ export function setVirtualHead(
     effects: setVirtualOverflow.of(map),
     scrollIntoView: true,
   });
-}
-
-function mouse_anchorIsBehind(main: { anchor: number; head: number }): boolean {
-  return main.anchor <= main.head;
 }
 
 /**
@@ -255,9 +251,7 @@ export function virtualLineEndCommand(view: EditorView, extend: boolean): boolea
       changed = true;
     }
     if (!extend) return EditorSelection.cursor(targetHead);
-    return range.anchor <= targetHead
-      ? EditorSelection.range(range.anchor, targetHead)
-      : EditorSelection.range(targetHead, range.anchor);
+    return EditorSelection.range(range.anchor, targetHead);
   });
   if (!changed) return false;
 
@@ -451,6 +445,7 @@ export function virtualVerticalMoveCommand(
   direction: "up" | "down" | "pageUp" | "pageDown",
   extend: boolean,
 ): boolean {
+  if (view.composing) return false;
   const policy = view.state.facet(editorVirtualSpacePolicy);
   const state = view.state;
   const tabWidth = state.tabSize;
@@ -487,9 +482,9 @@ export function virtualVerticalMoveCommand(
     );
     if (!targetBlock) return false;
 
-    const desiredCol = targetBlock.goalColumn == null
-      ? initialDesiredCol
-      : Math.max(0, Math.round(targetBlock.goalColumn / Math.max(1, view.defaultCharacterWidth)));
+    const desiredCol = view.lineWrapping && targetBlock.goalColumn != null
+      ? Math.max(0, Math.round(targetBlock.goalColumn / Math.max(1, view.defaultCharacterWidth)))
+      : initialDesiredCol;
     nextDesired.push(desiredCol);
 
     const geometryTargetHead = targetBlock.head;
@@ -502,7 +497,7 @@ export function virtualVerticalMoveCommand(
     const blockVisualWidth = visualColumnFor(blockText, blockText.length, tabWidth);
 
     let targetHead: number;
-    if (geometryTargetHead != null) {
+    if (view.lineWrapping && geometryTargetHead != null) {
       targetHead = geometryTargetHead;
       if (desiredCol > blockVisualWidth && allowed && isEndOfPhysLine) {
         const overflow = Math.min(desiredCol - blockVisualWidth, MAX_OVERFLOW_COLUMNS);
@@ -524,11 +519,11 @@ export function virtualVerticalMoveCommand(
     }
 
     if (extend) {
-      nextRanges.push(
-        range.anchor <= targetHead
-          ? EditorSelection.range(range.anchor, targetHead, targetBlock.goalColumn)
-          : EditorSelection.range(targetHead, range.anchor, targetBlock.goalColumn)
-      );
+      nextRanges.push(EditorSelection.range(
+        range.anchor,
+        targetHead,
+        targetBlock.goalColumn,
+      ));
     } else {
       nextRanges.push(EditorSelection.cursor(targetHead, 1, undefined, targetBlock.goalColumn));
     }
@@ -565,6 +560,11 @@ export function virtualMoveLeftCommand(view: EditorView, extend: boolean): boole
   let changed = false;
 
   const ranges = state.selection.ranges.map((range) => {
+    if (!extend && !range.empty) {
+      next.delete(range.head);
+      changed = true;
+      return EditorSelection.cursor(range.from);
+    }
     const overflow = next.get(range.head);
     let targetHead = range.head;
     if (overflow != null && overflow > 0) {
@@ -580,9 +580,7 @@ export function virtualMoveLeftCommand(view: EditorView, extend: boolean): boole
     }
 
     if (!extend) return EditorSelection.cursor(targetHead);
-    return range.anchor <= targetHead
-      ? EditorSelection.range(range.anchor, targetHead)
-      : EditorSelection.range(targetHead, range.anchor);
+    return EditorSelection.range(range.anchor, targetHead);
   });
 
   if (!changed) return false;
@@ -610,6 +608,11 @@ export function virtualMoveRightCommand(view: EditorView, extend: boolean): bool
   let changed = false;
 
   const ranges = state.selection.ranges.map((range) => {
+    if (!extend && !range.empty) {
+      next.delete(range.head);
+      changed = true;
+      return EditorSelection.cursor(range.to);
+    }
     const headLine = state.doc.lineAt(range.head);
     const oldOverflow = previous.get(range.head) ?? 0;
     let targetHead = range.head;
@@ -628,9 +631,7 @@ export function virtualMoveRightCommand(view: EditorView, extend: boolean): bool
     }
 
     if (!extend) return EditorSelection.cursor(targetHead);
-    return range.anchor <= targetHead
-      ? EditorSelection.range(range.anchor, targetHead)
-      : EditorSelection.range(targetHead, range.anchor);
+    return EditorSelection.range(range.anchor, targetHead);
   });
 
   if (!changed) return false;
@@ -653,9 +654,7 @@ export function virtualHomeCommand(view: EditorView, extend: boolean = false): b
     const indentCol = match ? match[0].length : 0;
     const target = range.head === line.from + indentCol ? line.from : line.from + indentCol;
     if (!extend) return EditorSelection.cursor(target);
-    return range.anchor <= target
-      ? EditorSelection.range(range.anchor, target)
-      : EditorSelection.range(target, range.anchor);
+    return EditorSelection.range(range.anchor, target);
   });
   view.dispatch({
     selection: EditorSelection.create(ranges, state.selection.mainIndex),

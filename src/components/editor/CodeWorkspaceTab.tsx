@@ -12253,6 +12253,9 @@ export function CodeWorkspaceTab({
         void closeFromTabSwitcherRef.current();
         return;
       }
+      const editorEventOwner = isEditorSurfaceKeyEvent(event.target)
+        ? activeEditorCommandOwner()
+        : null;
       const dispatchResult = actionsController.dispatchKeydownV2({
         event,
         workspaceId: workspaceInstanceId,
@@ -12261,9 +12264,10 @@ export function CodeWorkspaceTab({
         // Non-editor surfaces must resolve their own focus from the event
         // target; otherwise a tree Delete is evaluated against the editor
         // context before the tree can consume it.
-        targetViewId: isEditorSurfaceKeyEvent(event.target) && activeEditorCommandOwner()
+        targetViewId: editorEventOwner
           ? activeEditorGroupIdRef.current
           : null,
+        composing: editorEventOwner?.port.state().composing ?? false,
       });
       if (
         dispatchResult.kind === "rejected"

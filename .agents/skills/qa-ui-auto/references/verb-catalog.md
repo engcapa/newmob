@@ -42,6 +42,8 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `fill` | `{selector, value}` | Replaces field content. |
 | `type` | string | Types into the focused element. Prefer `fill` for inputs. |
 | `send_keys` | string | Same as `type`; semantic for terminal-pane interaction. |
+| `compose_text` | `{selector, text, during_key?}` | Browser-only composition lifecycle; optionally dispatches one composing key before committing text. Never substitutes for native IME evidence. |
+| `native_ime_keys` | `{selector, expected_engine, keys}` | Native Linux/X11 only. Injects physical XTest keys through the named configured fcitx5 engine and records an observation artifact; testcase assertions must verify the committed result. |
 | `press` | key string **or** `{key, selector?}` | E.g. `Enter`, `Control+Shift+F`. |
 | `select_option` | `{selector, label?, value?}` | At least one of label/value. |
 | `upload_file` | `{selector, path}` | Hooks into a file input. |

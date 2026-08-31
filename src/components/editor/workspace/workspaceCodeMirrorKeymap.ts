@@ -11,13 +11,23 @@
 import type { EditorView } from "@codemirror/view";
 import {
   copyLineDown,
+  cursorCharLeft,
+  cursorCharRight,
+  cursorLineBoundaryBackward,
+  cursorLineBoundaryForward,
   defaultKeymap,
+  deleteCharBackward,
+  deleteCharForward,
   deleteLine,
   historyKeymap,
   indentWithTab,
+  insertNewlineAndIndent,
   moveLineDown,
   moveLineUp,
   redo,
+  selectCharLeft,
+  selectCharRight,
+  selectLineBoundaryForward,
   toggleBlockComment,
   toggleComment,
   undo,
@@ -81,6 +91,13 @@ function runViaHandlers(
   command: (view: EditorView) => boolean,
 ): ActionResult {
   return commandResult(handlers.runEditorCommand(command));
+}
+
+function virtualOrFallback(
+  virtualCommand: (view: EditorView) => boolean,
+  fallbackCommand: (view: EditorView) => boolean,
+): (view: EditorView) => boolean {
+  return (view) => virtualCommand(view) || fallbackCommand(view);
 }
 
 function runSharedHistoryOrLocal(
@@ -569,7 +586,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "ArrowLeft",
       keywords: ["left", "cursor", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, (view) => virtualMoveLeftCommand(view, false)),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualMoveLeftCommand(view, false),
+        cursorCharLeft,
+      )),
     }),
     editorAction({
       id: "editor.selectLeft",
@@ -578,7 +598,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Shift+ArrowLeft",
       keywords: ["left", "select", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, (view) => virtualMoveLeftCommand(view, true)),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualMoveLeftCommand(view, true),
+        selectCharLeft,
+      )),
     }),
     editorAction({
       id: "editor.moveRight",
@@ -587,7 +610,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "ArrowRight",
       keywords: ["right", "cursor", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, (view) => virtualMoveRightCommand(view, false)),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualMoveRightCommand(view, false),
+        cursorCharRight,
+      )),
     }),
     editorAction({
       id: "editor.selectRight",
@@ -596,7 +622,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Shift+ArrowRight",
       keywords: ["right", "select", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, (view) => virtualMoveRightCommand(view, true)),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualMoveRightCommand(view, true),
+        selectCharRight,
+      )),
     }),
     editorAction({
       id: "editor.moveToLineStart",
@@ -605,7 +634,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Home",
       keywords: ["home", "start", "line"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, virtualHomeCommand),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        virtualHomeCommand,
+        cursorLineBoundaryBackward,
+      )),
     }),
     editorAction({
       id: "editor.moveToLineEnd",
@@ -614,7 +646,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "End",
       keywords: ["end", "line", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, (view) => virtualLineEndCommand(view, false)),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualLineEndCommand(view, false),
+        cursorLineBoundaryForward,
+      )),
     }),
     editorAction({
       id: "editor.selectToLineEnd",
@@ -623,7 +658,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Shift+End",
       keywords: ["end", "line", "select", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, (view) => virtualLineEndCommand(view, true)),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualLineEndCommand(view, true),
+        selectLineBoundaryForward,
+      )),
     }),
     editorAction({
       id: "editor.deleteBackward",
@@ -632,7 +670,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Backspace",
       keywords: ["backspace", "delete", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, virtualBackspaceCommand),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        virtualBackspaceCommand,
+        deleteCharBackward,
+      )),
     }),
     editorAction({
       id: "editor.deleteForward",
@@ -641,7 +682,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Delete",
       keywords: ["delete", "forward", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, virtualDeleteCommand),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        virtualDeleteCommand,
+        deleteCharForward,
+      )),
     }),
     editorAction({
       id: "editor.insertNewline",
@@ -650,7 +694,10 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       defaultKeybinding: "Enter",
       keywords: ["enter", "newline", "virtual space"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, virtualEnterCommand),
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        virtualEnterCommand,
+        insertNewlineAndIndent,
+      )),
     }),
     editorAction({
       id: "editor.insertTab",
