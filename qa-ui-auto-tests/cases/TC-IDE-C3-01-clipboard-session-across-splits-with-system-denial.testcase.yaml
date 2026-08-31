@@ -9,7 +9,7 @@ description: |
   denial/grant transitions remain NATIVE concerns (R9 manifest / BB11) and stay blocked
   in browser-only test runs. Highest claim on green: L1 browser-wired plain-path.
 covers: [F25.5]
-tags: [code-workspace, ide-c3, clipboard, split, p1]
+tags: [code-workspace, ide-c3, clipboard, split, p0]
 modes: [browser]
 fixtures: [reset_db]
 timeout_sec: 120
@@ -30,46 +30,127 @@ steps:
   - wait_for: '[data-testid="code-workspace-editor-pane"]'
   - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
 
-  # Observation seam: verify initial single-leaf clipboard lease
+  # Observation seam: freeze the exact initial single-leaf clipboard lease.
   - eval_readonly:
-      expression: 'Number(document.querySelector("div[data-clipboard-consumer-count]")?.dataset.clipboardConsumerCount || 0) >= 1'
+      expression: 'document.querySelector("[data-clipboard-consumer-count]")?.getAttribute("data-clipboard-consumer-count") === "1"'
+      expect_truthy: true
 
-  # Copy a line into the workspace clipboard slot from leaf A.
+  # Copy the complete source document into the workspace clipboard slot from
+  # leaf A. Ctrl+A is a CodeMirror primitive and keeps this case scoped to the
+  # clipboard contract rather than the separate selection-keymap contract.
   - click: '[data-testid="code-workspace-editor"] .cm-content'
-  - press: Home
-  - press: Shift+End
-  - press: Control+c
-  # Verify clipboard revision updated after copy
-  - eval_readonly:
-      expression: 'Number(document.querySelector("div[data-clipboard-revision]")?.dataset.clipboardRevision || 0) >= 1'
+  - press:
+      key: Control+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+a
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+c
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="code-workspace-tab"][data-clipboard-revision="1"]'
 
   # Split right; assert two leaves and lease count increase.
   - click: '[data-testid="code-workspace-split-right"]'
   - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', min: 2}
   - eval_readonly:
-      expression: 'Number(document.querySelector("div[data-clipboard-consumer-count]")?.dataset.clipboardConsumerCount || 0) >= 2'
+      expression: 'document.querySelector("[data-clipboard-consumer-count]")?.getAttribute("data-clipboard-consumer-count") === "2"'
+      expect_truthy: true
 
-  # Focus leaf B, paste copied text, assert text arrival.
-  - click: '[data-testid="code-workspace-editor"] .cm-content'
-  - press: End
-  - press: Control+v
-  - assert_visible: '[data-testid="code-workspace-editor"]'
+  # Focus leaf B and paste at the empty fourth line. The selector is scoped to
+  # the second pane so this cannot accidentally exercise leaf A.
+  - click: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+End
+      selector: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+v
+      selector: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[3]?.textContent === "Browser preview uses an in-memory virtual local filesystem."'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[4]?.textContent === "Drop OS files here or download remote files to persist them in IndexedDB."'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[5]?.textContent === "The real Tauri build uses your actual OS filesystem."'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line").length === 7'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[6]?.textContent === ""'
+      expect_truthy: true
   - screenshot: tc-ide-c3-cross-leaf.png
 
-  # Single undo: reverts pasted text in leaf B.
-  - press: Control+z
+  # One undo restores the exact empty line in leaf B.
+  - press:
+      key: Control+z
+      selector: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[3]?.textContent === ""'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line").length === 4'
+      expect_truthy: true
 
-  # History ring popup: open via shortcut, assert popup and entry visible.
-  - press: Control+Shift+v
+  # History ring selection promotes the chosen payload to revision 2 and pastes
+  # the same exact first line back into the active second leaf.
+  - press:
+      key: Control+Shift+v
+      selector: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
   - wait_for: '[data-testid="clipboard-history-popup"]'
   - assert_visible: '[data-testid="clipboard-history-popup"]'
   - assert_visible: '[data-testid="clipboard-history-entry-0"]'
+  - assert_text:
+      selector: '[data-testid="clipboard-history-entry-0"]'
+      contains: "Browser preview uses an in-memory virtual local filesystem."
   - screenshot: tc-ide-c3-history.png
-  - press: Escape
+  - click: '[data-testid="clipboard-history-entry-0"]'
   - assert_not_visible: '[data-testid="clipboard-history-popup"]'
+  - wait_for: '[data-testid="code-workspace-tab"][data-clipboard-revision="2"]'
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[3]?.textContent === "Browser preview uses an in-memory virtual local filesystem."'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[4]?.textContent === "Drop OS files here or download remote files to persist them in IndexedDB."'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[5]?.textContent === "The real Tauri build uses your actual OS filesystem."'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line").length === 7'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[6]?.textContent === ""'
+      expect_truthy: true
+
+  # The active CodeMirror surface remains an accessible multiline textbox and
+  # history replay restores focus before a second exact undo.
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
+      name: role
+      equals: textbox
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
+      name: aria-multiline
+      equals: "true"
+  - eval_readonly:
+      expression: 'document.activeElement === document.querySelectorAll(".cm-content")[1]'
+      expect_truthy: true
+  - press:
+      key: Control+z
+      selector: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[3]?.textContent === ""'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line").length === 4'
+      expect_truthy: true
 
   # Unsplit / close leaf B: verify lease cleanup back to single leaf.
   - click: '[data-testid="code-workspace-split-close"]'
   - assert_count: {selector: '[data-testid="code-workspace-editor-pane"]', max: 1}
   - eval_readonly:
-      expression: 'Number(document.querySelector("div[data-clipboard-consumer-count]")?.dataset.clipboardConsumerCount || 0) <= 2'
+      expression: 'document.querySelector("[data-clipboard-consumer-count]")?.getAttribute("data-clipboard-consumer-count") === "1"'
+      expect_truthy: true
