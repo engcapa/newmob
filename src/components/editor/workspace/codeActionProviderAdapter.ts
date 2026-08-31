@@ -312,7 +312,7 @@ function cloneAndDeepFreeze<T>(value: T): T {
   return value;
 }
 
-function freezeCodeActionContext(context: CodeActionContextIdentity): CodeActionContextIdentity {
+export function snapshotCodeActionContext(context: CodeActionContextIdentity): CodeActionContextIdentity {
   return cloneAndDeepFreeze(context);
 }
 
@@ -330,7 +330,7 @@ export class CanonicalCodeActionService {
     client: CodeActionProviderClient,
     options: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<CodeActionProviderResultV4> {
-    const frozenContext = freezeCodeActionContext(context);
+    const frozenContext = snapshotCodeActionContext(context);
     const { document, provider, range, diagnostics, only } = frozenContext;
     const timeoutMs = options.timeoutMs ?? 10_000;
 
@@ -420,7 +420,7 @@ export class CanonicalCodeActionService {
 
       return evaluateCodeActionResult({
         kind: "ready",
-        actions: validActions,
+        actions: validActions.map((action) => cloneAndDeepFreeze(action)),
         discardedMalformedCount: malformedCount,
       }, evidenceInput);
     } catch (err: unknown) {
@@ -469,7 +469,7 @@ export class CanonicalCodeActionService {
     options: { timeoutMs?: number; allowedCommands?: readonly string[] } = {},
   ): Promise<CodeActionResolveOutcome> {
     const timeoutMs = options.timeoutMs ?? 10_000;
-    const frozenContext = freezeCodeActionContext(context);
+    const frozenContext = snapshotCodeActionContext(context);
     const frozenCandidate = cloneAndDeepFreeze(candidate);
     const { document, provider } = frozenContext;
 

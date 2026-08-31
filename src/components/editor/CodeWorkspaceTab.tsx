@@ -392,8 +392,10 @@ import {
 } from "./workspace/intentionSession";
 import {
   CanonicalCodeActionService,
+  snapshotCodeActionContext,
   type CodeActionContextIdentity,
   type CodeActionProviderClient,
+  type ProviderActionV4,
 } from "./workspace/codeActionProviderAdapter";
 import type { MenuItem } from "../ContextMenu";
 import {
@@ -8577,24 +8579,29 @@ export function CodeWorkspaceTab({
     range: LspRange,
     diagnostics: LspDiagnostic[] = [],
     only: string[] = [],
+    options: { signal?: AbortSignal } = {},
   ): Promise<{
     actions: LspCodeAction[];
+    providerActions: readonly ProviderActionV4[];
+    context: CodeActionContextIdentity | null;
     semanticToken: WorkspaceSemanticIndexBuildToken | null;
   }> => {
     const caps = lspFilesRef.current[file.key]?.status?.capabilities;
-    if (caps && !caps.codeAction) return { actions: [], semanticToken: null };
+    if (caps && !caps.codeAction) {
+      return { actions: [], providerActions: [], context: null, semanticToken: null };
+    }
     const semanticQuery = only.some((kind) => kind === "refactor" || kind.startsWith("refactor."));
     const expectedRevision = semanticIndex.current().revision;
     const live = await ensureWorkspaceSemanticDocumentsSynced(file.key, expectedRevision);
     if (!live) {
       setStatusMessage(`${semanticQuery ? "Refactor" : "Code actions"} require the language server to finish synchronizing current editor buffers`);
-      return { actions: [], semanticToken: null };
+      return { actions: [], providerActions: [], context: null, semanticToken: null };
     }
     const descriptor = lspDescriptorForFile(live);
-    if (!descriptor) return { actions: [], semanticToken: null };
+    if (!descriptor) return { actions: [], providerActions: [], context: null, semanticToken: null };
     const buildToken = semanticIndex.beginBuild("language-server");
     try {
-      const context: CodeActionContextIdentity = {
+      const context = snapshotCodeActionContext({
         document: {
           uri: descriptor.documentUri ?? lspFilesRef.current[live.key]?.status?.uri ?? descriptor.filePath ?? live.key,
           revision: live.documentRevision,
@@ -8610,7 +8617,7 @@ export function CodeWorkspaceTab({
         range,
         diagnostics,
         only: only.length > 0 ? only : undefined,
-      };
+      });
 
       const client: CodeActionProviderClient = {
         requestCodeActions: async (params) => {
@@ -8635,21 +8642,24 @@ export function CodeWorkspaceTab({
         },
       };
 
-      const serviceRes = await canonicalCodeActionServiceRef.current!.requestCandidates(context, client);
-      const rawActions: LspCodeAction[] = serviceRes.state === "ready"
-        ? serviceRes.actions.map((pa) => pa.action)
-        : [];
+      const serviceRes = await canonicalCodeActionServiceRef.current!.requestCandidates(
+        context,
+        client,
+        { signal: options.signal },
+      );
+      const providerActions = serviceRes.state === "ready" ? serviceRes.actions : [];
+      const rawActions = providerActions.map((providerAction) => providerAction.action);
 
       const completion = semanticIndex.finishQuery(buildToken, {
         kind: semanticQuery ? "refactor" : "code-action",
         resultCount: rawActions.length,
       });
       return completion.accepted
-        ? { actions: rawActions, semanticToken: buildToken }
-        : { actions: [], semanticToken: null };
+        ? { actions: rawActions, providerActions, context, semanticToken: buildToken }
+        : { actions: [], providerActions: [], context: null, semanticToken: null };
     } catch (error) {
       semanticIndex.failBuild(buildToken, errorMessage(error));
-      return { actions: [], semanticToken: null };
+      return { actions: [], providerActions: [], context: null, semanticToken: null };
     }
   }, [
     ensureWorkspaceSemanticDocumentsSynced,
@@ -8671,7 +8681,11 @@ export function CodeWorkspaceTab({
   if (!intentionSessionRef.current) intentionSessionRef.current = new IntentionSession();
   const canonicalCodeActionServiceRef = useRef<CanonicalCodeActionService | null>(null);
   if (!canonicalCodeActionServiceRef.current) canonicalCodeActionServiceRef.current = new CanonicalCodeActionService();
-  useEffect(() => () => intentionSessionRef.current?.dispose(), []);
+  const intentionRequestAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    intentionRequestAbortRef.current?.abort();
+    intentionSessionRef.current?.dispose();
+  }, []);
   // Diagnostics whose provider suppression edit applied successfully
   // ("Suppressed in source"); distinct from local hide (profile suppressions).
   const [suppressedInSourceKeys, setSuppressedInSourceKeys] = useState<Set<string>>(new Set());
@@ -8694,17 +8708,8 @@ export function CodeWorkspaceTab({
     file: OpenFileState,
     semanticToken: WorkspaceSemanticIndexBuildToken | null = null,
     intentionCandidateId?: string,
-  ) => {
-    // §8.20.4 W3: resolve state lives on the frozen Intention session keyed
-    // by stable candidate id; a timeout/failed resolve KEEPS the candidates.
-    const markIntentionResolve = (state: "resolving" | "resolved" | "failed", message?: string) => {
-      if (!intentionCandidateId) return;
-      const session = intentionSessionRef.current;
-      if (!session) return;
-      if (state === "resolving") session.markResolving(intentionCandidateId);
-      else if (state === "resolved") session.markResolved(intentionCandidateId);
-      else session.markFailed(intentionCandidateId, message ?? "resolve failed");
-    };
+    intentionContext?: CodeActionContextIdentity,
+  ): Promise<{ ok: boolean; message: string | null; retryable: boolean }> => {
     try {
       const assertSemanticCurrent = () => {
         if (
@@ -8715,105 +8720,98 @@ export function CodeWorkspaceTab({
         }
       };
       assertSemanticCurrent();
-      let executableAction = action;
-      const raw = action.raw;
-      const hasDeferredData = raw != null
-        && typeof raw === "object"
-        && !Array.isArray(raw)
-        && "data" in raw;
-      if (hasDeferredData) {
-        const descriptor = lspDescriptorForFile(file);
-        if (descriptor) {
-          markIntentionResolve("resolving");
-          const candidate = intentionCandidateId
-            ? intentionSessionRef.current?.getCandidate(intentionCandidateId)
-            : null;
-          const context: CodeActionContextIdentity = {
-            document: {
-              uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath ?? file.key,
-              revision: file.documentRevision,
-              languageId: lspFilesRef.current[file.key]?.status?.languageId ?? descriptor.languageId ?? "plaintext",
-            },
-            provider: {
-              id: descriptor.languageId === "java" || !descriptor.languageId ? "jdtls" : descriptor.languageId,
-              version: null,
-              generation: lspSessionGeneration(),
-              projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
-              trusted: true,
-            },
-            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
-            diagnostics: [],
-          };
-          const client: CodeActionProviderClient = {
-            requestCodeActions: async () => [action],
-            resolveCodeAction: async (act) => {
-              if (!descriptor || !act.raw) return null;
-              const res = await lspCodeActionResolve(descriptor, act.raw);
-              updateLspStatusForFile(file, res.status);
-              return res.action;
-            },
-          };
-
-          if (candidate) {
-            const resolveOutcome = await canonicalCodeActionServiceRef.current!.resolvePlan(
-              { ...candidate, rawAction: action },
-              context,
-              client,
-              file.documentRevision,
-              lspSessionGeneration(),
-              { timeoutMs: INTENTION_RESOLVE_TIMEOUT_MS },
-            );
-            if (resolveOutcome.state === "stale") {
-              markIntentionResolve("failed", resolveOutcome.reason);
-              const message = `Code action became stale: ${resolveOutcome.reason}`;
-              setStatusMessage(message);
-              return { ok: false, message };
-            }
-            if (resolveOutcome.state === "rejected") {
-              markIntentionResolve("failed", `Rejected: ${resolveOutcome.reason}`);
-              const message = `Code action rejected: ${resolveOutcome.reason}`;
-              setStatusMessage(message);
-              return { ok: false, message };
-            }
-            if (resolveOutcome.state === "unresolved") {
-              const message = `Code action resolve failed: ${resolveOutcome.reason} — you can retry`;
-              markIntentionResolve("failed", resolveOutcome.reason);
-              setStatusMessage(message);
-            } else if (resolveOutcome.state === "resolved") {
-              markIntentionResolve("resolved");
-              executableAction = {
-                ...action,
-                title: resolveOutcome.plan.title,
-                kind: resolveOutcome.plan.kind,
-                edit: resolveOutcome.plan.edit,
-                command: resolveOutcome.plan.command?.command ?? null,
-                commandArguments: resolveOutcome.plan.command?.arguments ?? null,
-              };
-            }
-          } else {
-            try {
-              // §8.20.4: resolve timeout keeps the frozen candidates and marks
-              // the failure retryable instead of dropping the popup's options.
-              const resolved = await Promise.race([
-                lspCodeActionResolve(descriptor, raw),
-                new Promise<never>((_, rejectTimeout) => window.setTimeout(
-                  () => rejectTimeout(new Error(`resolve timed out after ${INTENTION_RESOLVE_TIMEOUT_MS}ms`)),
-                  INTENTION_RESOLVE_TIMEOUT_MS,
-                )),
-              ]);
-              updateLspStatusForFile(file, resolved.status);
-              if (resolved.action) executableAction = resolved.action;
-              markIntentionResolve("resolved");
-            } catch (error) {
-              // A server may advertise data but not implement resolve. Keep the
-              // original action usable and make the fallback + Retry visible.
-              const message = `Code action resolve failed: ${errorMessage(error)} — you can retry`;
-              markIntentionResolve("failed", errorMessage(error));
-              setStatusMessage(message);
-            }
-          }
-        }
+      const descriptor = lspDescriptorForFile(file);
+      if (!descriptor) {
+        const message = "Cannot resolve the language server for this code action";
+        setStatusMessage(message);
+        return { ok: false, message, retryable: false };
       }
+
+      const session = intentionSessionRef.current;
+      const sessionCandidate = intentionCandidateId
+        ? session?.getCandidate(intentionCandidateId) ?? null
+        : null;
+      if (intentionCandidateId && (!sessionCandidate || !intentionContext)) {
+        const message = "Code action session became stale; request the candidates again";
+        setStatusMessage(message);
+        return { ok: false, message, retryable: false };
+      }
+
+      const context = intentionContext ?? snapshotCodeActionContext({
+        document: {
+          uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath ?? file.key,
+          revision: file.documentRevision,
+          languageId: lspFilesRef.current[file.key]?.status?.languageId ?? descriptor.languageId ?? "plaintext",
+        },
+        provider: {
+          id: descriptor.languageId === "java" || !descriptor.languageId ? "jdtls" : descriptor.languageId,
+          version: null,
+          generation: lspSessionGeneration(),
+          projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+          trusted: true,
+        },
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        diagnostics: [],
+      });
+      const candidate = sessionCandidate ?? candidateFromProviderAction(action, null);
+      const client: CodeActionProviderClient = {
+        requestCodeActions: async () => [action],
+        resolveCodeAction: async (candidateAction) => {
+          if (!candidateAction.raw) return null;
+          const result = await lspCodeActionResolve(descriptor, candidateAction.raw);
+          updateLspStatusForFile(file, result.status);
+          return result.action;
+        },
+      };
+
+      if (intentionCandidateId) session?.markResolving(intentionCandidateId);
+      const resolvingSnapshot = intentionCandidateId ? session?.getState() ?? null : null;
+      const liveFile = openFilesRef.current[file.key];
+      const resolveOutcome = await canonicalCodeActionServiceRef.current!.resolvePlan(
+        { ...candidate, rawAction: action },
+        context,
+        client,
+        liveFile?.documentRevision ?? -1,
+        lspSessionGeneration(),
+        { timeoutMs: INTENTION_RESOLVE_TIMEOUT_MS },
+      );
+      if (
+        intentionCandidateId
+        && intentionSessionRef.current?.getState() !== resolvingSnapshot
+      ) {
+        return {
+          ok: false,
+          message: "Code action session was superseded by a newer request",
+          retryable: false,
+        };
+      }
+      if (resolveOutcome.state === "stale") {
+        if (intentionCandidateId) session?.markStale(intentionCandidateId, resolveOutcome.reason);
+        const message = `Code action became stale: ${resolveOutcome.reason}`;
+        setStatusMessage(message);
+        return { ok: false, message, retryable: false };
+      }
+      if (resolveOutcome.state === "rejected") {
+        const message = `Code action rejected: ${resolveOutcome.reason}`;
+        if (intentionCandidateId) session?.markFailed(intentionCandidateId, message);
+        setStatusMessage(message);
+        return { ok: false, message, retryable: false };
+      }
+      if (resolveOutcome.state === "unresolved") {
+        const message = `Code action resolve failed: ${resolveOutcome.reason} — you can retry`;
+        if (intentionCandidateId) session?.markFailed(intentionCandidateId, resolveOutcome.reason);
+        setStatusMessage(message);
+        return { ok: false, message, retryable: resolveOutcome.retryable };
+      }
+      if (intentionCandidateId) session?.markResolved(intentionCandidateId);
+      const executableAction: LspCodeAction = {
+        ...action,
+        title: resolveOutcome.plan.title,
+        kind: resolveOutcome.plan.kind,
+        edit: resolveOutcome.plan.edit,
+        command: resolveOutcome.plan.command?.command ?? null,
+        commandArguments: resolveOutcome.plan.command?.arguments ?? null,
+      };
       assertSemanticCurrent();
       let semanticEditApplied = false;
       let semanticCommandRevision: number | null = null;
@@ -8822,11 +8820,6 @@ export function CodeWorkspaceTab({
         executableAction,
         {
           languageId: fileDescriptor?.languageId ?? "java",
-          resolveAction: async (act) => {
-            if (!fileDescriptor || !act.raw) return null;
-            const res = await lspCodeActionResolve(fileDescriptor, act.raw);
-            return res.action;
-          },
           applyEdit: async (edit) => {
             let plan: RefactorPlanV3 | undefined;
             const isRefactorAction =
@@ -8965,11 +8958,11 @@ export function CodeWorkspaceTab({
       if (result.status === "executed-command") {
         markProviderSuppressionApplied(action, file);
         setStatusMessage(`Executed code action: ${executableAction.title}`);
-        return { ok: true, message: null };
+        return { ok: true, message: null, retryable: false };
       } else if (result.status === "empty") {
         const message = "Code action had no edit or command to apply";
         setStatusMessage(message);
-        return { ok: false, message };
+        return { ok: false, message, retryable: false };
       }
       if (result.status === "applied-edit") {
         // §8.20.4 naming rule: a provider suppression edit that applied
@@ -8977,11 +8970,11 @@ export function CodeWorkspaceTab({
         // "hidden locally".
         markProviderSuppressionApplied(action, file);
       }
-      return { ok: true, message: null };
+      return { ok: true, message: null, retryable: false };
     } catch (error) {
       const message = errorMessage(error);
       setStatusMessage(message);
-      return { ok: false, message };
+      return { ok: false, message, retryable: false };
     }
   }, [
     applyLspWorkspaceEdit,
@@ -9167,8 +9160,17 @@ export function CodeWorkspaceTab({
     only: string[] = [],
     sectionLabel = "code actions",
   ) => {
-    const requested = await requestCodeActions(file, range, diagnostics, only);
-    const actions = [...requested.actions];
+    const requestAbort = new AbortController();
+    intentionRequestAbortRef.current?.abort();
+    intentionRequestAbortRef.current = requestAbort;
+    const requested = await requestCodeActions(
+      file,
+      range,
+      diagnostics,
+      only,
+      { signal: requestAbort.signal },
+    );
+    if (requestAbort.signal.aborted || intentionRequestAbortRef.current !== requestAbort) return;
 
     if (requested.semanticToken && !workspaceSemanticIndexBuildIsCurrent(
       semanticIndex.current(),
@@ -9177,85 +9179,95 @@ export function CodeWorkspaceTab({
       setStatusMessage("Refactor actions became stale because the workspace changed; request them again");
       return;
     }
+    if (!requested.context) {
+      setStatusMessage(`No ${sectionLabel} provided by the language server`);
+      return;
+    }
     const filtered = only.length === 0
-      ? actions
-      : actions.filter((action) => only.some((kind) => (
-        action.kind === kind || action.kind?.startsWith(`${kind}.`)
+      ? [...requested.providerActions]
+      : requested.providerActions.filter((providerAction) => only.some((kind) => (
+        providerAction.action.kind === kind || providerAction.action.kind?.startsWith(`${kind}.`)
       )));
     if (!filtered.length) {
       setStatusMessage(`No ${sectionLabel} provided by the language server`);
       return;
     }
     const sorted = [...filtered].sort((a, b) => {
-      const aQuick = a.kind?.includes("quickfix") ? 0 : 1;
-      const bQuick = b.kind?.includes("quickfix") ? 0 : 1;
+      const aQuick = a.action.kind?.includes("quickfix") ? 0 : 1;
+      const bQuick = b.action.kind?.includes("quickfix") ? 0 : 1;
       if (aQuick !== bQuick) return aQuick - bQuick;
-      if (a.isPreferred !== b.isPreferred) return a.isPreferred ? -1 : 1;
-      return a.title.localeCompare(b.title);
+      if (a.action.isPreferred !== b.action.isPreferred) return a.action.isPreferred ? -1 : 1;
+      return a.action.title.localeCompare(b.action.title);
     });
     // §8.20.4 W3: freeze the candidate list into the shared Intention session
     // with per-candidate evidence; the menu renders the frozen snapshot so all
     // entry points see identical ids, resolve states and disabled reasons.
-    const descriptor = lspDescriptorForFile(file);
-    const evidence = buildCapabilityEvidence({
-      capabilityId: "codeAction.intention",
-      languageId: lspFilesRef.current[file.key]?.status?.languageId ?? descriptor?.languageId ?? "plaintext",
-      provider: { id: "jdtls", version: null, generation: lspSessionGeneration() },
-      projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
-      uri: descriptor?.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor?.filePath ?? file.key,
-      revision: file.documentRevision,
-      scope: "document",
-    });
     const intentionSnapshot = intentionSessionRef.current!.open(
-      sorted.map((action) => candidateFromProviderAction(action, evidence)),
+      sorted.map((providerAction) => candidateFromProviderAction(
+        providerAction.action,
+        providerAction.evidence,
+        providerAction.disabledReason,
+      )),
       {
         fileKey: file.key,
-        uri: evidence.document.uri,
-        documentRevision: file.documentRevision,
-        providerGeneration: lspSessionGeneration(),
-        projectFingerprint: evidence.projectFingerprint,
+        uri: requested.context.document.uri,
+        documentRevision: requested.context.document.revision,
+        providerGeneration: requested.context.provider.generation,
+        projectFingerprint: requested.context.provider.projectFingerprint,
       },
     );
     // Grouped rendering: provider candidates first, then local editor actions
     // (none registered in this funnel yet — the group renders only when present).
     // Candidates were built 1:1 over `sorted`, so index maps back to the action.
-    const menuItems: MenuItem[] = [];
-    const candidateIndexById = new Map<string, number>();
-    sorted.forEach((_action, index) => {
+    const actionByCandidateId = new Map<string, LspCodeAction>();
+    sorted.forEach((providerAction, index) => {
       const candidate = intentionSnapshot.candidates[index];
-      if (candidate && !candidateIndexById.has(candidate.id)) {
-        candidateIndexById.set(candidate.id, index);
-      }
+      if (candidate) actionByCandidateId.set(candidate.id, providerAction.action);
     });
-    for (const group of intentionSnapshot.groups) {
-      menuItems.push({ label: group.label, disabled: true });
-      for (const candidate of group.candidates) {
-        const actionIndex = candidateIndexById.get(candidate.id);
-        const action = actionIndex !== undefined ? sorted[actionIndex] : undefined;
-        if (!action) continue;
-        menuItems.push({
-          label: candidate.disabledReason
-            ? `${candidate.title} (${candidate.disabledReason})`
-            : candidate.title,
-          disabled: candidate.disabledReason !== null,
-          onClick: () => void runCodeAction(
-            action,
-            file,
-            requested.semanticToken,
-            candidate.id,
-          ),
-        });
+    const openedAt = intentionSnapshot.context.openedAt;
+    const openFrozenMenu = () => {
+      const current = intentionSessionRef.current?.getState();
+      if (!current || current.context.openedAt !== openedAt) return;
+      const menuItems: MenuItem[] = [];
+      for (const group of current.groups) {
+        menuItems.push({ label: group.label, disabled: true });
+        for (const candidate of group.candidates) {
+          const action = actionByCandidateId.get(candidate.id);
+          if (!action) continue;
+          const resolveState = current.resolveStates[candidate.id] ?? { status: "idle" as const };
+          const retryLabel = resolveState.status === "failed"
+            ? `Retry ${candidate.title} (${resolveState.message})`
+            : candidate.title;
+          menuItems.push({
+            testId: `code-workspace-intention-${candidate.id}`,
+            label: candidate.disabledReason
+              ? `${candidate.title} (${candidate.disabledReason})`
+              : retryLabel,
+            disabled: candidate.disabledReason !== null
+              || resolveState.status === "resolving"
+              || resolveState.status === "stale",
+            onClick: () => {
+              void runCodeAction(
+                action,
+                file,
+                requested.semanticToken,
+                candidate.id,
+                requested.context!,
+              ).then((outcome) => {
+                if (outcome.retryable) openFrozenMenu();
+              });
+            },
+          });
+        }
+        if (group.source === "provider-code-action" && current.groups.length > 1) {
+          menuItems.push({ label: "", separator: true });
+        }
       }
-      if (group.source === "provider-code-action" && intentionSnapshot.groups.length > 1) {
-        menuItems.push({ label: "", separator: true });
-      }
-    }
-    openTreeContextMenuAt(clientX, clientY, menuItems);
+      openTreeContextMenuAt(clientX, clientY, menuItems);
+    };
+    openFrozenMenu();
   }, [
-    lspDescriptorForFile,
-    lspSessionGeneration,
     openTreeContextMenuAt,
-    projectAnalysisSnapshot?.projectFingerprint,
     requestCodeActions,
     runCodeAction,
     semanticIndex.current,

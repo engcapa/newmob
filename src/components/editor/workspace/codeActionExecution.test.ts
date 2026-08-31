@@ -93,7 +93,7 @@ describe("executeCodeAction", () => {
       ActionExecutionTelemetry.clear();
     });
 
-    it("resolves unpopulated action via resolveAction hook before execution", async () => {
+    it("leaves unresolved actions effect-free for the canonical service", async () => {
       const applyEdit = vi.fn(async () => [{ operationIndex: 0, path: "/repo/App.java", status: "applied-disk" as const }]);
       const unresolvedAction = action({
         title: "Add import 'java.util.Map'",
@@ -102,29 +102,18 @@ describe("executeCodeAction", () => {
         command: null,
       });
 
-      const resolvedAction = action({
-        title: "Add import 'java.util.Map'",
-        kind: "quickfix.import",
-        edit: { documentEdits: [{ uri: "file:///repo/App.java", path: "/repo/App.java", edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "import java.util.Map;\n" }] }], operations: [] },
-      });
-
-      const resolveAction = vi.fn(async () => resolvedAction);
-
       const result = await CodeActionExecutionCoordinator.execute(unresolvedAction, {
         applyEdit,
         executeCommand: vi.fn(async () => {}),
-        resolveAction,
       });
 
-      expect(resolveAction).toHaveBeenCalledWith(unresolvedAction);
-      expect(applyEdit).toHaveBeenCalled();
-      expect(result.status).toBe("applied-edit");
-      expect((result as any).undoToken).toBeDefined();
+      expect(applyEdit).not.toHaveBeenCalled();
+      expect(result.status).toBe("empty");
 
       const telemetry = ActionExecutionTelemetry.recent();
       expect(telemetry).toHaveLength(1);
       expect(telemetry[0].title).toBe("Add import 'java.util.Map'");
-      expect(telemetry[0].status).toBe("applied-edit");
+      expect(telemetry[0].status).toBe("empty");
     });
 
     it("blocks Java quickfix when file language is not Java (language-mismatch)", async () => {
@@ -147,4 +136,3 @@ describe("executeCodeAction", () => {
     });
   });
 });
-

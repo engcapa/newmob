@@ -13,7 +13,6 @@ export interface CodeActionExecutionHooks {
   languageId?: string;
   applyEdit: (edit: LspWorkspaceEdit, options?: { undoToken?: string }) => Promise<WorkspaceEditApplyOutcome[]>;
   executeCommand: (command: string, argumentsValue: unknown) => Promise<unknown>;
-  resolveAction?: (action: LspCodeAction) => Promise<LspCodeAction | null>;
 }
 
 export interface ActionExecutionTelemetryEntry {
@@ -89,21 +88,9 @@ export async function executeCodeAction(
     return res;
   }
 
-  let effectiveAction = action;
-  if (!effectiveAction.edit && !effectiveAction.command && hooks.resolveAction) {
-    try {
-      const resolved = await hooks.resolveAction(action);
-      if (resolved) {
-        effectiveAction = resolved;
-      }
-    } catch {
-      // best-effort resolve
-    }
-  }
-
   let outcomes: WorkspaceEditApplyOutcome[] = [];
-  let effectiveEdit = effectiveAction.edit;
-  let effectiveCommand = effectiveAction.command;
+  let effectiveEdit = action.edit;
+  let effectiveCommand = action.command;
 
   const isApplyEditCommand =
     effectiveCommand === "_java.apply.workspaceEdit" ||
@@ -111,8 +98,8 @@ export async function executeCodeAction(
     effectiveCommand === "editor.action.applyWorkspaceEdit" ||
     effectiveCommand === "applyWorkspaceEdit";
 
-  if (!effectiveEdit && isApplyEditCommand && Array.isArray(effectiveAction.commandArguments)) {
-    const firstArg = effectiveAction.commandArguments[0] as Record<string, unknown> | undefined;
+  if (!effectiveEdit && isApplyEditCommand && Array.isArray(action.commandArguments)) {
+    const firstArg = action.commandArguments[0] as Record<string, unknown> | undefined;
     if (firstArg && (firstArg.changes || firstArg.documentChanges || firstArg.documentEdits || firstArg.operations)) {
       effectiveEdit = firstArg as unknown as LspWorkspaceEdit;
       effectiveCommand = null;
@@ -139,7 +126,7 @@ export async function executeCodeAction(
   }
 
   if (effectiveCommand) {
-    await hooks.executeCommand(effectiveCommand, effectiveAction.commandArguments);
+    await hooks.executeCommand(effectiveCommand, action.commandArguments);
     const res: CodeActionExecutionResult = { status: "executed-command", outcomes, undoToken };
     ActionExecutionTelemetry.record({
       title: action.title,

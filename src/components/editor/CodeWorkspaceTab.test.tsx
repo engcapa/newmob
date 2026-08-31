@@ -2221,6 +2221,288 @@ describe("CodeWorkspaceTab", () => {
     ).openFiles["root:app:src/main.ts"]?.text).toBe("x =1"));
   });
 
+  it("keeps a failed Alt+Enter resolve visible and retries the frozen candidate", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-action-retry",
+      workspaceInstanceId: "instance-action-retry",
+      name: "Action retry",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({ codeAction: true }),
+    });
+    const deferredAction = {
+      title: "Insert retry space",
+      kind: "quickfix",
+      isPreferred: true,
+      edit: null,
+      command: null,
+      commandArguments: null,
+      raw: { title: "Insert retry space", kind: "quickfix", data: { fixId: "retry-space" } },
+    };
+    const resolvedAction = {
+      ...deferredAction,
+      edit: {
+        documentEdits: [{
+          uri: "file:///repo/app/src/main.ts",
+          path: "/repo/app/src/main.ts",
+          edits: [{
+            range: {
+              start: { line: 0, character: 1 },
+              end: { line: 0, character: 1 },
+            },
+            newText: " ",
+          }],
+        }],
+      },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "x=1"));
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspCodeActions.mockResolvedValue({ status, actions: [deferredAction] });
+    lspMocks.lspCodeActionResolve
+      .mockRejectedValueOnce(new Error("resolve transport unavailable"))
+      .mockResolvedValueOnce({ status, action: resolvedAction });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Insert retry space" }));
+
+    const retry = await screen.findByRole("button", {
+      name: /Retry Insert retry space.*resolve transport unavailable/i,
+    });
+    expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-action-retry",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe("x=1");
+    expect(lspMocks.lspCodeActionResolve).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(retry);
+    await waitFor(() => expect(lspMocks.lspCodeActionResolve).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-action-retry",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe("x =1"));
+  });
+
+  it("shares frozen candidate identity between Alt+Enter and the gutter lightbulb", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-action-entries",
+      workspaceInstanceId: "instance-action-entries",
+      name: "Action entries",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({ codeAction: true }),
+    });
+    const diagnostic = {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      severity: 2,
+      code: "shared-entry",
+      source: "typescript",
+      message: "Shared entry diagnostic",
+    };
+    const action = {
+      title: "Use shared candidate",
+      kind: "quickfix",
+      isPreferred: true,
+      edit: { documentEdits: [] },
+      command: null,
+      commandArguments: null,
+      raw: { title: "Use shared candidate", kind: "quickfix" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "x"));
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [diagnostic] });
+    lspMocks.lspCodeActions.mockResolvedValue({ status, actions: [action] });
+
+    const rendered = renderWorkspace(workspace);
+    await waitFor(() => expect(rendered.container.querySelector(
+      '[data-testid="code-workspace-lightbulb"]',
+    )).toBeTruthy());
+
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    const keyboardCandidate = await screen.findByRole("button", { name: "Use shared candidate" });
+    const keyboardCandidateId = keyboardCandidate.getAttribute("data-testid");
+    expect(keyboardCandidateId).toMatch(/^code-workspace-intention-intention\.provider\./);
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Use shared candidate" })).not.toBeInTheDocument());
+
+    const bulb = rendered.container.querySelector('[data-testid="code-workspace-lightbulb"]');
+    expect(bulb).toBeTruthy();
+    fireEvent.mouseDown(bulb!);
+    const gutterCandidate = await screen.findByRole("button", { name: "Use shared candidate" });
+    expect(gutterCandidate.getAttribute("data-testid")).toBe(keyboardCandidateId);
+    expect(lspMocks.lspCodeActions).toHaveBeenCalledTimes(2);
+  });
+
+  it("supersedes an older intention request when another entry opens", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-action-supersede",
+      workspaceInstanceId: "instance-action-supersede",
+      name: "Action supersede",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({ codeAction: true }),
+    });
+    const diagnostic = {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      severity: 2,
+      code: "supersede-entry",
+      source: "typescript",
+      message: "Supersede entry diagnostic",
+    };
+    const olderAction = {
+      title: "Older candidate",
+      kind: "quickfix",
+      isPreferred: false,
+      edit: { documentEdits: [] },
+      command: null,
+      commandArguments: null,
+      raw: { title: "Older candidate" },
+    };
+    const newerAction = { ...olderAction, title: "Newer candidate", raw: { title: "Newer candidate" } };
+    let releaseOlder!: (value: { status: LspDocumentStatus; actions: typeof olderAction[] }) => void;
+    lspMocks.lspCodeActions
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseOlder = resolve;
+      }))
+      .mockResolvedValueOnce({ status, actions: [newerAction] });
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "x"));
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [diagnostic] });
+
+    const rendered = renderWorkspace(workspace);
+    await waitFor(() => expect(rendered.container.querySelector(
+      '[data-testid="code-workspace-lightbulb"]',
+    )).toBeTruthy());
+
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalledTimes(1));
+    fireEvent.mouseDown(rendered.container.querySelector('[data-testid="code-workspace-lightbulb"]')!);
+    expect(await screen.findByRole("button", { name: "Newer candidate" })).toBeInTheDocument();
+
+    await act(async () => {
+      releaseOlder({ status, actions: [olderAction] });
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "Newer candidate" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Older candidate" })).not.toBeInTheDocument();
+    expect(useAppStore.getState().statusMessage).not.toContain("No code actions");
+  });
+
+  it("discards a resolved action when a newer intention session owns the menu", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-action-resolve-owner",
+      workspaceInstanceId: "instance-action-resolve-owner",
+      name: "Action resolve owner",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({ codeAction: true }),
+    });
+    const diagnostic = {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      severity: 2,
+      code: "resolve-owner",
+      source: "typescript",
+      message: "Resolve owner diagnostic",
+    };
+    const oldAction = {
+      title: "Deferred old fix",
+      kind: "quickfix",
+      isPreferred: true,
+      edit: null,
+      command: null,
+      commandArguments: null,
+      raw: { title: "Deferred old fix", data: { fixId: "old" } },
+    };
+    const newAction = {
+      title: "Current fix",
+      kind: "quickfix",
+      isPreferred: true,
+      edit: { documentEdits: [] },
+      command: null,
+      commandArguments: null,
+      raw: { title: "Current fix" },
+    };
+    const resolvedOldAction = {
+      ...oldAction,
+      edit: {
+        documentEdits: [{
+          uri: "file:///repo/app/src/main.ts",
+          path: "/repo/app/src/main.ts",
+          edits: [{
+            range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } },
+            newText: " ",
+          }],
+        }],
+      },
+    };
+    let releaseResolve!: (value: { status: LspDocumentStatus; action: typeof resolvedOldAction }) => void;
+    lspMocks.lspCodeActions
+      .mockResolvedValueOnce({ status, actions: [oldAction] })
+      .mockResolvedValueOnce({ status, actions: [newAction] });
+    lspMocks.lspCodeActionResolve.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseResolve = resolve;
+    }));
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "x=1"));
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [diagnostic] });
+
+    const rendered = renderWorkspace(workspace);
+    await waitFor(() => expect(rendered.container.querySelector(
+      '[data-testid="code-workspace-lightbulb"]',
+    )).toBeTruthy());
+
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Deferred old fix" }));
+    await waitFor(() => expect(lspMocks.lspCodeActionResolve).toHaveBeenCalledTimes(1));
+    fireEvent.mouseDown(rendered.container.querySelector('[data-testid="code-workspace-lightbulb"]')!);
+    expect(await screen.findByRole("button", { name: "Current fix" })).toBeInTheDocument();
+
+    await act(async () => {
+      releaseResolve({ status, action: resolvedOldAction });
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "Current fix" })).toBeInTheDocument();
+    expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-action-resolve-owner",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe("x=1");
+  });
+
   it("applies provider Java import quick fixes on Alt+Enter and inserts the import statement", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
