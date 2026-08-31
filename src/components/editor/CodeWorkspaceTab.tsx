@@ -405,6 +405,8 @@ import {
 } from "./workspace/workspaceResourceState";
 import {
   WorkspaceResourceRecoveryCoordinator,
+  type ResourceCleanupHandlers,
+  type ResourceCleanupOutcome,
 } from "./workspace/workspaceResourceRecoveryCoordinator";
 import { buildReplaceWorkspaceEdit } from "./workspace/buildReplaceEdits";
 import { BottomDock } from "./workspace/panels/BottomDock";
@@ -1026,6 +1028,26 @@ import {
   planRearrange,
 } from "./workspace/rearrangeCleanupWorkflow";
 
+interface ResourceCleanupRecoveryView {
+  readonly recoveryId: string;
+  readonly fileKey: string;
+  readonly nextStage: string;
+  readonly error: string;
+  readonly completedStageCount: number;
+  readonly attemptCount: number;
+}
+
+interface TabPolicyLifecycleReceiptView {
+  readonly status: "applied" | "no-op" | "aborted" | "stale";
+  readonly layoutRevision: number;
+  readonly activeKey: string | null;
+  readonly evictedCount: number;
+  readonly cleanupCount: number;
+  readonly cleanupCommittedCount: number;
+  readonly cleanupRecoveryCount: number;
+  readonly openResourceCount: number;
+}
+
 export function CodeWorkspaceTab({
   tabId,
   workspace,
@@ -1133,6 +1155,7 @@ export function CodeWorkspaceTab({
   const [tabPolicy, setTabPolicy] = useState<WorkspaceTabPolicyV3>(() => ({ ...DEFAULT_WORKSPACE_TAB_POLICY_V3 }));
   const tabPolicyRef = useRef(tabPolicy);
   tabPolicyRef.current = tabPolicy;
+  const tabPolicyTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [tabPolicyRevision, setTabPolicyRevision] = useState(0);
   // §8.26.3 AA2: Monotonic layout revision and base revision for tab policy transactions (§ED-TABS-001)
   const layoutRevision = useCodeWorkspaceStore(
@@ -1141,9 +1164,17 @@ export function CodeWorkspaceTab({
   const [baseLayoutRevision, setBaseLayoutRevision] = useState(0);
 
   const openTabPolicySettings = useCallback(() => {
+    tabPolicyTriggerRef.current = document.activeElement instanceof HTMLButtonElement
+      ? document.activeElement
+      : null;
     setBaseLayoutRevision(selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).layoutRevision);
     setTabPolicySettingsOpen(true);
   }, [workspaceInstanceId]);
+
+  const closeTabPolicySettings = useCallback(() => {
+    setTabPolicySettingsOpen(false);
+    requestAnimationFrame(() => tabPolicyTriggerRef.current?.focus());
+  }, []);
 
   // §8.26.2 AA1: Root workspace clipboard session handle with permission adapter (§8.27.2 BB1 / ED-CLIP-002)
   const clipboardHandle = useMemo(() => acquireClipboardStore(workspaceInstanceId), [workspaceInstanceId]);
@@ -1774,6 +1805,7 @@ export function CodeWorkspaceTab({
   const [activeEditorFontSizes, setActiveEditorFontSizes] = useState<Record<EditorGroupId, number>>({});
   const [editorAppearanceSettingsOpen, setEditorAppearanceSettingsOpen] = useState(false);
   const [tabPolicySettingsOpen, setTabPolicySettingsOpen] = useState(false);
+  const [tabPolicyReceipt, setTabPolicyReceipt] = useState<TabPolicyLifecycleReceiptView | null>(null);
   const [columnSelectionMode, setColumnSelectionMode] = useState(false);
   const [treeFontSize, setTreeFontSizeState] = useState(() => readCodeWorkspaceTreeFontSize());
   const [roots, setRoots] = useState<CodeWorkspaceRootInfo[]>(() => initialRoots(workspace));
@@ -2094,6 +2126,8 @@ export function CodeWorkspaceTab({
   const resourceRecoveryCoordinatorRef = useRef<WorkspaceResourceRecoveryCoordinator>(
     new WorkspaceResourceRecoveryCoordinator(workspaceInstanceId),
   );
+  const resourceRecoveryHandlersRef = useRef(new Map<string, ResourceCleanupHandlers>());
+  const [resourceCleanupRecoveries, setResourceCleanupRecoveries] = useState<readonly ResourceCleanupRecoveryView[]>([]);
   const workspaceStyleControllerRef = useRef<WorkspaceStyleController>(
     createWorkspaceStyleController({
       workspaceId: workspaceInstanceId,
@@ -2108,6 +2142,9 @@ export function CodeWorkspaceTab({
   // their writeback/watcher/LSP side effects instead of resurrecting state.
   useEffect(() => {
     resourceRecoveryCoordinatorRef.current = new WorkspaceResourceRecoveryCoordinator(workspaceInstanceId);
+    resourceRecoveryHandlersRef.current.clear();
+    setResourceCleanupRecoveries([]);
+    setTabPolicyReceipt(null);
     const registry = saveTransactionRegistryRef.current;
     return () => {
       registry.discardWorkspace(workspaceInstanceId);
@@ -2217,6 +2254,55 @@ export function CodeWorkspaceTab({
     onRestart: invalidateSemanticAfterLspRestart,
     visible,
   });
+
+  const observeResourceCleanupOutcome = useCallback((
+    outcome: ResourceCleanupOutcome,
+    handlers: ResourceCleanupHandlers,
+  ) => {
+    if (outcome.status === "retained") return;
+    if (outcome.status === "committed") {
+      if (outcome.recoveryId) {
+        resourceRecoveryHandlersRef.current.delete(outcome.recoveryId);
+        setResourceCleanupRecoveries((current) => current.filter(
+          (recovery) => recovery.recoveryId !== outcome.recoveryId,
+        ));
+      }
+      return;
+    }
+
+    resourceRecoveryHandlersRef.current.set(outcome.recoveryId, handlers);
+    setResourceCleanupRecoveries((current) => {
+      const previous = current.find((recovery) => recovery.recoveryId === outcome.recoveryId);
+      const next: ResourceCleanupRecoveryView = {
+        recoveryId: outcome.recoveryId,
+        fileKey: outcome.fileKey,
+        nextStage: outcome.nextStage,
+        error: outcome.failedStages[0]?.error ?? outcome.message,
+        completedStageCount: outcome.completedStages.length,
+        attemptCount: (previous?.attemptCount ?? 0) + 1,
+      };
+      return [...current.filter((recovery) => recovery.recoveryId !== outcome.recoveryId), next];
+    });
+  }, []);
+
+  const replayResourceCleanup = useCallback(async (recoveryId: string) => {
+    const handlers = resourceRecoveryHandlersRef.current.get(recoveryId);
+    if (!handlers) {
+      setStatusMessage(`Cleanup recovery ${recoveryId} is no longer available`);
+      return;
+    }
+    const outcome = await resourceRecoveryCoordinatorRef.current.replayRecoveryById(recoveryId, handlers);
+    if (!outcome) {
+      setStatusMessage(`Cleanup recovery ${recoveryId} was not found`);
+      return;
+    }
+    observeResourceCleanupOutcome(outcome, handlers);
+    setStatusMessage(outcome.status === "committed"
+      ? `Completed resource cleanup recovery ${recoveryId}`
+      : outcome.status === "committed-with-recovery"
+        ? outcome.message
+        : `Resource ${outcome.fileKey} is still retained by an editor view`);
+  }, [observeResourceCleanupOutcome, setStatusMessage]);
   // §8.20.3 W2: provider-owned Project Analysis snapshot (phase/progress/
   // modules/classpath fingerprint). The generation resync rides the statuses
   // identity — a restart refreshes them, which re-probes on the new session.
@@ -5753,7 +5839,7 @@ export function CodeWorkspaceTab({
       const closedTree = currentUi.layoutTreeV2;
       const closedLeaf = findLeafNode(closedTree, groupId);
 
-      const outcome = await coordinator.executeResourceCleanup(key, {
+      const cleanupHandlers: ResourceCleanupHandlers = {
         didClose: async () => {
           if (file) await closeLspDocumentAndWait(file);
         },
@@ -5808,13 +5894,15 @@ export function CodeWorkspaceTab({
             );
           }
         },
-      });
+      };
+      const outcome = await coordinator.executeResourceCleanup(key, cleanupHandlers);
+      observeResourceCleanupOutcome(outcome, cleanupHandlers);
 
       if (outcome.status === "committed-with-recovery") {
         setStatusMessage(outcome.message);
       }
     },
-    [activeEditorGroupId, closeLayoutTabInLeaf, closeLspDocumentAndWait, workspaceInstanceId],
+    [activeEditorGroupId, closeLayoutTabInLeaf, closeLspDocumentAndWait, observeResourceCleanupOutcome, workspaceInstanceId],
   );
   closeFileRef.current = closeFile;
 
@@ -15624,6 +15712,17 @@ export function CodeWorkspaceTab({
         data-clipboard-consumer-count={clipboardSnapshot.consumerCount}
         data-tab-policy-limit={tabPolicy.limitPerLeaf}
         data-tab-policy-order={tabPolicy.order}
+        data-tab-policy-receipt-status={tabPolicyReceipt?.status}
+        data-tab-policy-receipt-layout-revision={tabPolicyReceipt?.layoutRevision}
+        data-tab-policy-receipt-active-key={tabPolicyReceipt?.activeKey ?? undefined}
+        data-tab-policy-receipt-evicted-count={tabPolicyReceipt?.evictedCount}
+        data-tab-policy-receipt-cleanup-count={tabPolicyReceipt?.cleanupCount}
+        data-tab-policy-receipt-cleanup-committed-count={tabPolicyReceipt?.cleanupCommittedCount}
+        data-tab-policy-receipt-cleanup-recovery-count={tabPolicyReceipt?.cleanupRecoveryCount}
+        data-tab-policy-receipt-open-resource-count={tabPolicyReceipt?.openResourceCount}
+        data-open-resource-count={Object.keys(openFiles).length}
+        data-active-editor-key={activeKey ?? undefined}
+        data-resource-recovery-count={resourceCleanupRecoveries.length}
         data-reopen-stack-count={closedTabsStack.length}
         className="relative h-full w-full min-h-0 flex flex-col overflow-hidden bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)]"
       >
@@ -15873,6 +15972,41 @@ export function CodeWorkspaceTab({
           onClick={openTabPolicySettings}
         />
       </header>
+
+      {resourceCleanupRecoveries.length > 0 && (
+        <div
+          data-testid="workspace-resource-cleanup-recovery"
+          role="status"
+          aria-live="polite"
+          className="shrink-0 border-b border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-[11px]"
+        >
+          {resourceCleanupRecoveries.map((recovery) => (
+            <div
+              key={recovery.recoveryId}
+              data-testid="workspace-resource-cleanup-recovery-item"
+              data-recovery-id={recovery.recoveryId}
+              data-next-stage={recovery.nextStage}
+              data-completed-stage-count={recovery.completedStageCount}
+              data-attempt-count={recovery.attemptCount}
+              className="flex min-w-0 items-center gap-2"
+            >
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+              <span className="min-w-0 flex-1 truncate">
+                Cleanup paused at {recovery.nextStage} for {recovery.fileKey}: {recovery.error}
+              </span>
+              <button
+                type="button"
+                data-testid="workspace-resource-cleanup-retry"
+                className="taomni-btn h-6 shrink-0 px-2"
+                aria-label={`Retry resource cleanup for ${recovery.fileKey}`}
+                onClick={() => void replayResourceCleanup(recovery.recoveryId)}
+              >
+                Retry
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="flex-1 min-h-0 flex">
         {!languagePanelOpen && (
@@ -16648,10 +16782,12 @@ export function CodeWorkspaceTab({
             title: openFiles[key]?.title ?? key,
             dirty: !!openFiles[key]?.dirty,
             pinned: (selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).editorGroups[activeEditorGroupId]?.pinnedKeys ?? []).includes(key),
+            preview: selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).editorGroups[activeEditorGroupId]?.previewKey === key,
           }))}
-          onApply={(nextPolicyRaw) => {
+          onApply={async (nextPolicyRaw) => {
             const currentUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
-            void applyWorkspaceTabPolicyTransaction({
+            const cleanupOutcomes: ResourceCleanupOutcome[] = [];
+            const result = await applyWorkspaceTabPolicyTransaction({
               workspaceInstanceId,
               nextPolicyRaw,
               currentPolicy: tabPolicyRef.current,
@@ -16663,7 +16799,12 @@ export function CodeWorkspaceTab({
               getLiveLayoutRevision: () => selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).layoutRevision,
               confirmDirtyClose: async (dirtyKeys) => {
                 const names = dirtyKeys.map((k) => openFilesRef.current[k]?.title ?? k).join(", ");
-                return window.confirm(`The following files have unsaved changes:\n${names}\n\nApply tab limit policy and discard changes?`);
+                return confirmAppDialog({
+                  title: "Apply editor tab policy",
+                  message: `The following files have unsaved changes:\n${names}\n\nApply tab limit policy and discard changes?`,
+                  confirmLabel: "Apply and discard",
+                  danger: true,
+                });
               },
               onEvictClosedFile: async (evictedKey) => {
                 const file = openFilesRef.current[evictedKey];
@@ -16672,7 +16813,7 @@ export function CodeWorkspaceTab({
                 const currentTree = currentUiNow.layoutTreeV2;
                 const activeLeaf = findLeafNode(currentTree, activeEditorGroupId);
 
-                await coordinator.executeResourceCleanup(evictedKey, {
+                const cleanupHandlers: ResourceCleanupHandlers = {
                   didClose: async () => {
                     if (file) await closeLspDocumentAndWait(file);
                   },
@@ -16727,7 +16868,10 @@ export function CodeWorkspaceTab({
                       );
                     }
                   },
-                });
+                };
+                const outcome = await coordinator.executeResourceCleanup(evictedKey, cleanupHandlers);
+                cleanupOutcomes.push(outcome);
+                observeResourceCleanupOutcome(outcome, cleanupHandlers);
               },
               commitAtomicUpdate: ({ nextGroups, policy }) => {
                 const committedGroups = Object.fromEntries(
@@ -16791,11 +16935,25 @@ export function CodeWorkspaceTab({
                   persistenceIssue,
                 };
               },
-            }).then((result) => {
-              setStatusMessage(result.message);
             });
+            const liveUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+            setTabPolicyReceipt({
+              status: result.status,
+              layoutRevision: liveUi.layoutRevision,
+              activeKey: liveUi.activeKey,
+              evictedCount: result.allEvictedKeys.length,
+              cleanupCount: cleanupOutcomes.length,
+              cleanupCommittedCount: cleanupOutcomes.filter((outcome) => outcome.status === "committed").length,
+              cleanupRecoveryCount: cleanupOutcomes.filter((outcome) => outcome.status === "committed-with-recovery").length,
+              openResourceCount: Object.keys(openFilesRef.current).length,
+            });
+            const recoveryOutcome = cleanupOutcomes.find((outcome) => outcome.status === "committed-with-recovery");
+            setStatusMessage(recoveryOutcome?.status === "committed-with-recovery"
+              ? `${result.message}; ${recoveryOutcome.message}`
+              : result.message);
+            return result.status === "applied" || result.status === "no-op";
           }}
-          onClose={() => setTabPolicySettingsOpen(false)}
+          onClose={closeTabPolicySettings}
         />
       )}
       {intelligenceSettingsOpen && (

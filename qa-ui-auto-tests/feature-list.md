@@ -5536,9 +5536,10 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog]
+components: [CodeWorkspaceTab, WorkspaceTabPolicySettingsDialog, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/WorkspaceTabPolicySettingsDialog.tsx
   - src/components/editor/workspace/Breadcrumbs.tsx
   - src/components/editor/workspace/ProjectFactsStatusBadge.tsx
   - src/components/editor/workspace/EditorGroup.tsx
@@ -5690,6 +5691,14 @@ controls:
     optional: true
   - id: tab-policy-close
     selector: '[data-testid="workspace-tab-policy-close"]'
+    kind: interactive
+    optional: true
+  - id: resource-cleanup-recovery
+    selector: '[data-testid="workspace-resource-cleanup-recovery"]'
+    kind: display
+    optional: true
+  - id: resource-cleanup-retry
+    selector: '[data-testid="workspace-resource-cleanup-retry"]'
     kind: interactive
     optional: true
   - id: split-down

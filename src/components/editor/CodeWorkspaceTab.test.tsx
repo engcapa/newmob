@@ -4274,6 +4274,93 @@ describe("CodeWorkspaceTab", () => {
     expect(
       selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-close-recovery").openFiles[fileKey],
     ).toBeDefined();
+
+    const recovery = screen.getByTestId("workspace-resource-cleanup-recovery");
+    expect(recovery).toHaveAttribute("role", "status");
+    const recoveryItem = screen.getByTestId("workspace-resource-cleanup-recovery-item");
+    expect(recoveryItem).toHaveAttribute("data-recovery-id", "resource-recovery-instance-close-recovery-1");
+    expect(recoveryItem).toHaveAttribute("data-next-stage", "didClose");
+    expect(recoveryItem).toHaveAttribute("data-attempt-count", "1");
+    expect(recovery).toHaveTextContent("didClose transport failed");
+
+    const retry = screen.getByRole("button", { name: `Retry resource cleanup for ${fileKey}` });
+    fireEvent.click(retry);
+    await waitFor(() => expect(lspMocks.lspCloseDocument).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByTestId("workspace-resource-cleanup-recovery")).not.toBeInTheDocument());
+    expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-close-recovery").openFiles[fileKey],
+    ).toBeUndefined();
+    expect(useAppStore.getState().statusMessage).toContain("Completed resource cleanup recovery");
+  });
+
+  it("exposes and replays cleanup recovery from a committed tab policy eviction", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-policy-recovery",
+      workspaceInstanceId: "instance-policy-recovery",
+      name: "Policy Recovery",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "A.cs" },
+    };
+    const firstKey = "root:app:A.cs";
+    const secondKey = "root:app:B.cs";
+    workspaceMocks.workspaceListDir.mockResolvedValue([
+      entry("A.cs", "A.cs"),
+      entry("B.cs", "B.cs"),
+    ]);
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => (
+      file(path, path === "A.cs" ? "class A {}" : "class B {}")
+    ));
+    lspMocks.lspDetectServers.mockResolvedValue([csharpStatus({ available: true, active: true })]);
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({ available: true, active: true }));
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / A.cs");
+    const secondRow = (await screen.findAllByTestId("code-workspace-tree-file")).find(
+      (row) => row.getAttribute("data-path") === "B.cs",
+    );
+    expect(secondRow).toBeDefined();
+    fireEvent.click(secondRow!);
+    await screen.findByTitle("app / B.cs");
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-policy-recovery")
+        .editorGroups.primary.openOrder,
+    ).toEqual([firstKey, secondKey]));
+
+    lspMocks.lspCloseDocument.mockRejectedValueOnce(new Error("policy didClose failed"));
+    fireEvent.click(screen.getByTestId("code-workspace-tab-policy-settings"));
+    fireEvent.change(await screen.findByTestId("workspace-tab-policy-limit"), {
+      target: { value: "1" },
+    });
+    fireEvent.click(screen.getByTestId("workspace-tab-policy-apply"));
+
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-policy-recovery")
+        .editorGroups.primary.openOrder,
+    ).toEqual([secondKey]));
+    const root = screen.getByTestId("code-workspace-tab");
+    await waitFor(() => expect(root).toHaveAttribute("data-tab-policy-receipt-status", "applied"));
+    expect(root).toHaveAttribute("data-tab-policy-receipt-evicted-count", "1");
+    expect(root).toHaveAttribute("data-tab-policy-receipt-cleanup-count", "1");
+    expect(root).toHaveAttribute("data-tab-policy-receipt-cleanup-recovery-count", "1");
+    expect(root).toHaveAttribute("data-resource-recovery-count", "1");
+    expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-policy-recovery").openFiles[firstKey],
+    ).toBeDefined();
+    expect(screen.getByTestId("workspace-resource-cleanup-recovery")).toHaveTextContent(
+      "policy didClose failed",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: `Retry resource cleanup for ${firstKey}` }));
+    await waitFor(() => expect(lspMocks.lspCloseDocument).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(root).toHaveAttribute("data-resource-recovery-count", "0"));
+    expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-policy-recovery").openFiles[firstKey],
+    ).toBeUndefined();
+    expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-policy-recovery").openFiles[secondKey],
+    ).toBeDefined();
   });
 
   it("closes the active editor tab with Ctrl+F4", async () => {
