@@ -156,6 +156,7 @@ vi.mock("../../lib/runtime", async (importOriginal) => ({
 const clipboardMocks = vi.hoisted(() => {
   let inMemoryClipboard = "";
   return {
+    probeClipboardCapabilities: vi.fn(async () => null),
     readText: vi.fn(async () => inMemoryClipboard),
     readTextResult: vi.fn(async () => ({ ok: true, text: inMemoryClipboard })),
     writeText: vi.fn(async (text: string) => {
@@ -5827,6 +5828,7 @@ end_of_record
 
     it("ED-CLIP-003: cross-split multi-caret copy in primary and paste in secondary with single undo (different files)", async () => {
       resetWorkspaceClipboardStores();
+      const baselineConsumerCount = 0;
       const workspace: CodeWorkspaceTabInfo = {
         repoRoot: "/repo/app",
         workspaceId: "ws-clip-split-diff",
@@ -5924,6 +5926,8 @@ end_of_record
           EditorSelection.cursor(11), // before "let b = 0;"
         ], 0),
       });
+      const destinationSelectionBeforePaste = secondaryView!.state.selection;
+      expect(destinationSelectionBeforePaste.ranges.map((range) => range.head)).toEqual([0, 11]);
 
       // Focus secondary pane and execute paste
       fireEvent.mouseDown(secondaryPane!);
@@ -5941,6 +5945,8 @@ end_of_record
       // Assert target text in secondary view has distributed segments
       await waitFor(() => {
         expect(secondaryView!.state.doc.toString()).toBe("const x = 10;let a = 0;\nconst y = 20;let b = 0;\n");
+        expect(secondaryView!.state.selection.ranges.map((range) => range.head)).toEqual([13, 37]);
+        expect(primaryView!.state.doc.toString()).toBe("const x = 10;\nconst y = 20;\n");
       });
 
       // Single undo restores pre-paste state. Drive the production entry
@@ -5949,6 +5955,7 @@ end_of_record
       fireEvent.keyDown(secondaryPane!, { key: "z", ctrlKey: true });
       await waitFor(() => {
         expect(secondaryView!.state.doc.toString()).toBe("let a = 0;\nlet b = 0;\n");
+        expect(secondaryView!.state.selection.eq(destinationSelectionBeforePaste, true)).toBe(true);
       });
 
       store.release();
@@ -5957,7 +5964,7 @@ end_of_record
 
       // After workspace unmount, consumer leases and slot are cleaned up
       const afterStore = acquireClipboardStore("instance-clip-split-diff");
-      expect(afterStore.getSnapshot().consumerCount).toBe(0);
+      expect(afterStore.getSnapshot().consumerCount).toBe(baselineConsumerCount);
       expect(afterStore.read()).toBeNull();
       afterStore.release();
       resetWorkspaceClipboardStores();
