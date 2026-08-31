@@ -68,6 +68,8 @@ export interface WorkspaceActionContext {
   focus: WorkspaceFocus;
   /** Live editor view when the context carries editor focus (§8.19.2). */
   editorView?: EditorView;
+  /** Stable mounted split/view identity used to select its action owner. */
+  editorViewId?: string;
   hasActiveFile?: boolean;
   hasSelection?: boolean;
   isDirty?: boolean;

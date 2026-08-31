@@ -2407,7 +2407,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           );
           return true;
         },
-      }));
+      }), { ownerViewId: viewId ?? fileKey });
       // §8.19.2 EditorActionBridge: register this mounted view so keyboard
       // dispatch knows the live view set; unmount releases it.
       bridgeRegistration = new EditorActionBridge(actionHost).registerView(sharedViewId);

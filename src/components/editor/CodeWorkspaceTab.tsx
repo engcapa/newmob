@@ -11961,6 +11961,7 @@ export function CodeWorkspaceTab({
     return {
       activeFileKey: activeKey ?? undefined,
       activeFilePath: activeFile?.path,
+      editorViewId: editorState ? activeEditorGroupId : undefined,
       hasActiveFile: !!editorState,
       hasSelection: editorState?.hasSelection ?? false,
       readOnly: editorState?.readOnly ?? false,
@@ -11970,6 +11971,7 @@ export function CodeWorkspaceTab({
     };
   }, [
     activeEditorCommandState,
+    activeEditorGroupId,
     activeFile?.path,
     activeKey,
     editorCommandContextRevision,

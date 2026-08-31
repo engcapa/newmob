@@ -466,6 +466,66 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       await Promise.resolve();
       expect(commandRunCount).toBe(0); // Zero dispatch to editor!
     });
+
+    it("§ED-VSPACE-001: routes the shared action definition to the focused split owner", async () => {
+      const host = new WorkspaceActionHost({ workspaceId: "ws-vspace-splits" });
+      const bridge = new EditorActionBridge(host);
+      bridge.registerView("primary");
+      bridge.registerView("secondary");
+
+      let primaryRuns = 0;
+      let secondaryRuns = 0;
+      const handlers = (owner: "primary" | "secondary") => ({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: () => {
+          if (owner === "primary") primaryRuns += 1;
+          else secondaryRuns += 1;
+          return true;
+        },
+      });
+
+      host.registerActions(buildEditorHostActions(handlers("primary")), { ownerViewId: "primary" });
+      host.registerActions(buildEditorHostActions(handlers("secondary")), { ownerViewId: "secondary" });
+
+      const focusedContext = {
+        focus: "editor" as const,
+        hasActiveFile: true,
+        editorViewId: "primary",
+      };
+      const paletteEvaluation = host.getSnapshot(focusedContext)
+        .find((item) => item.id === "editor.moveUp")?.evaluation;
+      const menuEvaluation = host.prepare("editor.moveUp", {
+        kind: "menu",
+        context: focusedContext,
+      });
+      expect(paletteEvaluation?.action).toBe(menuEvaluation.action);
+      await expect(host.executePrepared(menuEvaluation)).resolves.toMatchObject({ kind: "applied" });
+      expect(primaryRuns).toBe(1);
+      expect(secondaryRuns).toBe(0);
+
+      const result = host.dispatchKeydownV2({
+        event: {
+          key: "ArrowUp",
+          code: "ArrowUp",
+          shiftKey: false,
+          ctrlKey: false,
+          altKey: false,
+          metaKey: false,
+          preventDefault: () => {},
+          stopPropagation: () => {},
+        },
+        workspaceId: "ws-vspace-splits",
+        targetViewId: "primary",
+      });
+
+      expect(result).toMatchObject({ kind: "executed", actionId: "editor.moveUp" });
+      await Promise.resolve();
+      expect(primaryRuns).toBe(2);
+      expect(secondaryRuns).toBe(0);
+    });
   });
 
   describe("§ED-VSPACE-002: Real Display Geometry Page & Vertical Movement", () => {
