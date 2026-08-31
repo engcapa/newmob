@@ -382,7 +382,6 @@ import {
   buildSafeDeleteWorkspaceEdit,
   safeDeleteFileCount,
 } from "./workspace/safeDelete";
-import { executeCodeAction } from "./workspace/codeActionExecution";
 import { buildCapabilityEvidence, evidencePresentationLine } from "./workspace/capabilityEvidence";
 import { toProviderDiagnosticsV3 } from "./workspace/inspectionProviderAdapter";
 import {
@@ -392,9 +391,11 @@ import {
 } from "./workspace/intentionSession";
 import {
   CanonicalCodeActionService,
+  extractAffectedResourcesFromWorkspaceEdit,
   snapshotCodeActionContext,
   type CodeActionContextIdentity,
   type CodeActionProviderClient,
+  type CodeActionTransactionSnapshot,
   type ProviderActionV4,
 } from "./workspace/codeActionProviderAdapter";
 import type { MenuItem } from "../ContextMenu";
@@ -4083,6 +4084,18 @@ export function CodeWorkspaceTab({
     absolutePath: string,
   ): Promise<WorkspaceEditPathSnapshot | null> => {
     const normalizedPath = normalizeFsPath(absolutePath);
+    const open = Object.values(openFilesRef.current).find((file) => {
+      const path = absolutePathForOpenFile(file);
+      return path != null && fsPathEquals(path, normalizedPath);
+    });
+    if (open) return {
+      path: normalizedPath,
+      exists: true,
+      text: open.text,
+      encoding: open.encoding ?? "UTF-8",
+      bom: open.bom ?? false,
+      eol: open.eol ? (open.eol.toLowerCase() as "lf" | "crlf" | "cr") : undefined,
+    };
     for (const root of rootsRef.current) {
       const relative = relativePathWithinRoot(root.path, normalizedPath);
       if (relative === null) continue;
@@ -4095,18 +4108,6 @@ export function CodeWorkspaceTab({
         // Restoring a directory, symlink, or special node as a regular file
         // would be data loss. Those transactions remain deliberately ineligible.
         if (entry.fileType !== "file") return null;
-        const open = Object.values(openFilesRef.current).find((file) => {
-          const path = absolutePathForOpenFile(file);
-          return path != null && fsPathEquals(path, normalizedPath);
-        });
-        if (open) return {
-          path: normalizedPath,
-          exists: true,
-          text: open.text,
-          encoding: open.encoding ?? "UTF-8",
-          bom: open.bom ?? false,
-          eol: open.eol ? (open.eol.toLowerCase() as "lf" | "crlf" | "cr") : undefined,
-        };
         const file = await workspaceReadFile(root.path, relative);
         const eol = file.text.includes("\r\n") ? ("crlf" as const) : file.text.includes("\r") && !file.text.includes("\n") ? ("cr" as const) : ("lf" as const);
         return {
@@ -4121,18 +4122,6 @@ export function CodeWorkspaceTab({
         return null;
       }
     }
-    const open = Object.values(openFilesRef.current).find((file) => {
-      const path = absolutePathForOpenFile(file);
-      return path != null && fsPathEquals(path, normalizedPath);
-    });
-    if (open) return {
-      path: normalizedPath,
-      exists: true,
-      text: open.text,
-      encoding: open.encoding ?? "UTF-8",
-      bom: open.bom ?? false,
-      eol: open.eol ? (open.eol.toLowerCase() as "lf" | "crlf" | "cr") : undefined,
-    };
     try {
       const file = await workspaceReadLooseFile(normalizedPath);
       const eol = file.text.includes("\r\n") ? ("crlf" as const) : file.text.includes("\r") && !file.text.includes("\n") ? ("cr" as const) : ("lf" as const);
@@ -4178,6 +4167,52 @@ export function CodeWorkspaceTab({
       ? snapshots
       : null;
   }, [readWorkspaceEditPathSnapshot]);
+
+  const captureCodeActionTransactionSnapshot = useCallback(async (
+    edit: LspWorkspaceEdit,
+  ): Promise<CodeActionTransactionSnapshot | null> => {
+    const pathSnapshots = await captureWorkspaceEditPathSnapshots(edit);
+    if (!pathSnapshots) return null;
+    const byPath = new Map(pathSnapshots.map((snapshot) => [
+      fsPathComparisonKey(snapshot.path),
+      snapshot,
+    ]));
+    const resources = [];
+    for (const resource of extractAffectedResourcesFromWorkspaceEdit(edit)) {
+      if (!resource.path) return null;
+      const path = normalizeFsPath(resource.path);
+      const snapshot = byPath.get(fsPathComparisonKey(path));
+      if (!snapshot) return null;
+      resources.push({
+        uri: resource.uri || path,
+        path,
+        exists: snapshot.exists,
+        text: snapshot.text,
+        encoding: snapshot.encoding,
+        bom: snapshot.bom,
+        eol: snapshot.eol,
+      });
+    }
+    return { resources };
+  }, [captureWorkspaceEditPathSnapshots]);
+
+  const restoreCodeActionTransactionSnapshot = useCallback(async (
+    snapshot: CodeActionTransactionSnapshot,
+  ) => {
+    const byPath = new Map<string, WorkspaceEditPathSnapshot>();
+    for (const resource of snapshot.resources) {
+      const path = normalizeFsPath(resource.path);
+      byPath.set(fsPathComparisonKey(path), {
+        path,
+        exists: resource.exists,
+        text: resource.text,
+        encoding: resource.encoding,
+        bom: resource.bom,
+        eol: resource.eol,
+      });
+    }
+    await replayWorkspacePathSnapshotsRef.current([...byPath.values()]);
+  }, []);
 
   const absolutePathForBookmark = useCallback((bookmark: WorkspaceBookmark): string | null => {
     const open = openFilesRef.current[bookmark.fileKey];
@@ -8146,6 +8181,10 @@ export function CodeWorkspaceTab({
     semanticWorkspaceOnly?: boolean;
     /** Optional refactoring plan with completeness, conflicts, and required groups. */
     plan?: RefactorPlanV3;
+    /** Canonical transaction guard, invoked after preview and immediately before mutation. */
+    preflightMutation?: () => Promise<void> | void;
+    /** Reports the exact edit selected by the preview dialog. */
+    onActiveEditResolved?: (edit: LspWorkspaceEdit) => void;
   };
 
   const applyLspWorkspaceEditNow = useCallback(async (
@@ -8299,9 +8338,11 @@ export function CodeWorkspaceTab({
             });
           }
         : undefined,
-      preflightMutation: options.semanticGeneration == null || options.semanticRevision == null
-        ? undefined
-        : () => {
+      preflightMutation: options.preflightMutation
+        || (options.semanticGeneration != null && options.semanticRevision != null)
+        ? async () => {
+          await options.preflightMutation?.();
+          if (options.semanticGeneration == null || options.semanticRevision == null) return;
           const current = semanticIndex.current();
           const semanticToken = {
             generation: options.semanticGeneration!,
@@ -8313,7 +8354,8 @@ export function CodeWorkspaceTab({
           if (!valid) {
             throw new Error("Semantic result became stale before changes were applied; run the action again");
           }
-        },
+        }
+        : undefined,
       validateOperationPaths: options.semanticWorkspaceOnly || (options.semanticGeneration != null && options.semanticRevision != null)
         ? (operations) => validateSemanticWorkspaceEditPaths(
           operations,
@@ -8323,6 +8365,10 @@ export function CodeWorkspaceTab({
       createFile: (operation) => applyLspResourceOperation(operation),
       renameFile: (operation) => applyLspResourceOperation(operation),
       deleteFile: (operation) => applyLspResourceOperation(operation),
+      onActiveEditResolved: (activeEdit) => {
+        resolvedEdit = activeEdit;
+        options.onActiveEditResolved?.(activeEdit);
+      },
     });
     let outcomes = await applyWorkspaceEdit(edit, buildHooks(true));
     // §8.19.1: per-operation effect ledger with an explicit resume boundary.
@@ -8804,106 +8850,130 @@ export function CodeWorkspaceTab({
         return { ok: false, message, retryable: resolveOutcome.retryable };
       }
       if (intentionCandidateId) session?.markResolved(intentionCandidateId);
-      const executableAction: LspCodeAction = {
-        ...action,
-        title: resolveOutcome.plan.title,
-        kind: resolveOutcome.plan.kind,
-        edit: resolveOutcome.plan.edit,
-        command: resolveOutcome.plan.command?.command ?? null,
-        commandArguments: resolveOutcome.plan.command?.arguments ?? null,
-      };
       assertSemanticCurrent();
+      const executablePlan = resolveOutcome.plan;
+      let refactorPlan: RefactorPlanV3 | undefined;
+      const isRefactorAction = executablePlan.kind.startsWith("refactor")
+        || executablePlan.title.toLowerCase().includes("refactor");
+      if (executablePlan.edit && isRefactorAction) {
+        const refactorKind = executablePlan.kind.includes("extract")
+          ? "extract"
+          : executablePlan.kind.includes("inline")
+            ? "inline"
+            : executablePlan.kind.includes("change-signature")
+              ? "change-signature"
+              : executablePlan.kind.includes("move")
+                ? "move"
+                : "other";
+        const evidence = buildCapabilityEvidence({
+          capabilityId: `refactor.action:${executablePlan.kind || "custom"}`,
+          languageId: descriptor.languageId ?? "java",
+          provider: {
+            id: descriptor.languageId ?? "jdtls",
+            version: null,
+            generation: semanticToken?.generation ?? lspSessionGeneration(),
+          },
+          projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
+          uri: context.document.uri,
+          revision: file.documentRevision ?? 0,
+          scope: "project",
+          complete: false,
+          reason: "provider code action edit",
+        });
+        refactorPlan = buildRefactorPlan({
+          actionId: intentionCandidateId ?? executablePlan.actionId,
+          kind: refactorKind,
+          evidence,
+          edit: executablePlan.edit,
+          roots: rootsRef.current,
+          completeness: {
+            value: "partial",
+            source: "protocol-bounded",
+            proof: "provider code action edit",
+          },
+        });
+        const gate = refactorApplyGate(refactorPlan);
+        if (!gate.allowed) {
+          const message = `Refactoring blocked: ${gate.reason}`;
+          setStatusMessage(message);
+          return { ok: false, message, retryable: false };
+        }
+        if (gate.requiresConfirm) {
+          const confirmed = await confirmAppDialog({
+            title: "Refactoring Warning",
+            message: gate.reason ?? "This refactoring produced warnings. Proceed?",
+            confirmLabel: "Proceed",
+          });
+          if (!confirmed) {
+            setStatusMessage("Refactoring cancelled");
+            return { ok: false, message: "Refactoring cancelled", retryable: false };
+          }
+        }
+      }
+
       let semanticEditApplied = false;
       let semanticCommandRevision: number | null = null;
-      const fileDescriptor = lspDescriptorForFile(file);
-      const result = await executeCodeAction(
-        executableAction,
-        {
-          languageId: fileDescriptor?.languageId ?? "java",
-          applyEdit: async (edit) => {
-            let plan: RefactorPlanV3 | undefined;
-            const isRefactorAction =
-              executableAction.kind?.startsWith("refactor") ||
-              executableAction.title.toLowerCase().includes("refactor");
-          if (isRefactorAction) {
-            const kindStr = executableAction.kind ?? "";
-            const refactorKind = kindStr.includes("extract")
-              ? "extract"
-              : kindStr.includes("inline")
-              ? "inline"
-              : kindStr.includes("change-signature")
-              ? "change-signature"
-              : kindStr.includes("move")
-              ? "move"
-              : "other";
-            const fileDescriptor = lspDescriptorForFile(file);
-            const docUri = fileDescriptor?.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? fileDescriptor?.filePath ?? file.path;
-            const evidence = buildCapabilityEvidence({
-              capabilityId: `refactor.action:${executableAction.kind ?? "custom"}`,
-              languageId: fileDescriptor?.languageId ?? "java",
-              provider: {
-                id: fileDescriptor?.languageId ?? "jdtls",
-                version: null,
-                generation: semanticToken?.generation ?? lspSessionGeneration(),
-              },
-              projectFingerprint: projectAnalysisSnapshot?.projectFingerprint ?? "",
-              uri: docUri,
-              revision: file.documentRevision ?? 0,
-              scope: "project",
-              complete: false,
-              reason: "provider code action edit",
-            });
-            plan = buildRefactorPlan({
-              actionId: intentionCandidateId ?? executableAction.title,
-              kind: refactorKind,
-              evidence,
-              edit,
-              roots: rootsRef.current,
-              completeness: {
-                value: "partial",
-                source: "protocol-bounded",
-                proof: "provider code action edit",
-              },
-            });
-            const gate = refactorApplyGate(plan);
-            if (!gate.allowed) {
-              setStatusMessage(`Refactoring blocked: ${gate.reason}`);
-              return [
-                {
-                  operationIndex: null,
-                  path: file.path,
-                  status: "failed",
-                  reason: gate.reason || "blocked by refactor gate",
-                },
-              ];
-            }
-            if (gate.requiresConfirm) {
-              const confirmed = await confirmAppDialog({
-                title: "Refactoring Warning",
-                message: gate.reason ?? "This refactoring produced warnings. Proceed?",
-                confirmLabel: "Proceed",
-              });
-              if (!confirmed) {
-                setStatusMessage("Refactoring cancelled");
-                return [
-                  {
-                    operationIndex: null,
-                    path: file.path,
-                    status: "skipped",
-                    reason: "cancelled by user",
-                  },
-                ];
-              }
-            }
+      const result = await canonicalCodeActionServiceRef.current!.applyPlan(executablePlan, {
+        getLiveDocumentText: (uri) => (
+          uri === context.document.uri ? openFilesRef.current[file.key]?.text ?? null : null
+        ),
+        getLiveDocumentRevision: (uri) => (
+          uri === context.document.uri ? openFilesRef.current[file.key]?.documentRevision ?? null : null
+        ),
+        verifyIdentity: () => {
+          const currentFile = openFilesRef.current[file.key];
+          if (!currentFile) {
+            return { valid: false, status: "stale", reason: "The target document was closed" };
           }
+          if (currentFile.documentRevision !== context.document.revision) {
+            return {
+              valid: false,
+              status: "stale",
+              reason: `Document revision changed from ${context.document.revision} to ${currentFile.documentRevision}`,
+            };
+          }
+          const currentDescriptor = lspDescriptorForFile(currentFile);
+          const currentUri = currentDescriptor?.documentUri
+            ?? lspFilesRef.current[currentFile.key]?.status?.uri
+            ?? currentDescriptor?.filePath
+            ?? currentFile.key;
+          if (currentUri !== context.document.uri) {
+            return { valid: false, status: "stale", reason: "The language-server document identity changed" };
+          }
+          const currentProviderGeneration = lspSessionGeneration();
+          if (currentProviderGeneration !== context.provider.generation) {
+            return {
+              valid: false,
+              status: "stale",
+              reason: `Provider generation changed from ${context.provider.generation} to ${currentProviderGeneration}`,
+            };
+          }
+          if ((projectAnalysisSnapshot?.projectFingerprint ?? "") !== context.provider.projectFingerprint) {
+            return { valid: false, status: "stale", reason: "Project analysis changed" };
+          }
+          if (
+            semanticToken
+            && !workspaceSemanticIndexBuildIsCurrent(semanticIndex.current(), semanticToken)
+          ) {
+            return { valid: false, status: "stale", reason: "The workspace semantic index changed" };
+          }
+          return { valid: true };
+        },
+        captureSnapshot: captureCodeActionTransactionSnapshot,
+        restoreSnapshot: restoreCodeActionTransactionSnapshot,
+        applyWorkspaceEdit: async (edit, transactionOptions) => {
+          let appliedEdit = edit;
           const outcomes = await applyLspWorkspaceEdit(edit, {
-            // The applier only opens the dialog for multi-file/resource edits;
-            // single-file quick fixes remain an immediate action.
             preview: true,
-            label: executableAction.title,
+            label: executablePlan.title,
             semanticGeneration: semanticToken?.generation,
             semanticRevision: semanticToken?.revision,
-            plan,
+            plan: refactorPlan,
+            recordHistory: false,
+            preflightMutation: transactionOptions?.onBeforeCommit,
+            onActiveEditResolved: (nextEdit) => {
+              appliedEdit = nextEdit;
+            },
           });
           semanticEditApplied = !outcomes.some((outcome) => (
             outcome.status === "failed" || outcome.status === "skipped"
@@ -8911,7 +8981,7 @@ export function CodeWorkspaceTab({
           if (semanticToken && semanticEditApplied) {
             semanticCommandRevision = semanticIndex.current().revision;
           }
-          return outcomes;
+          return { outcomes, appliedEdit };
         },
         executeCommand: async (command, argumentsValue) => {
           const descriptor = lspDescriptorForFile(file);
@@ -8946,31 +9016,57 @@ export function CodeWorkspaceTab({
           providerCommandQueueRef.current = pending.then(() => undefined, () => undefined);
           return pending;
         },
-      }, () => {
-        if (
-          semanticToken
-          && !workspaceSemanticIndexBuildIsCurrent(semanticIndex.current(), semanticToken)
-        ) {
-          return { valid: false, reason: "Refactor result became stale because the workspace changed" };
-        }
-        return { valid: true };
+        registerHistoryEntry: (entry) => {
+          workspaceEditHistory.push({
+            id: entry.id,
+            label: entry.label,
+            affectedPaths: entry.affectedUris,
+            undo: entry.undo,
+            redo: entry.redo,
+          });
+          setWorkspaceEditHistoryRevision((revision) => revision + 1);
+        },
+        registerRecoveryEntry: (entry) => {
+          workspaceEditHistory.push({
+            id: entry.id,
+            label: `Recover ${entry.label}`,
+            affectedPaths: entry.affectedUris,
+            undo: entry.recover,
+            redo: entry.recover,
+          });
+          setWorkspaceEditHistoryRevision((revision) => revision + 1);
+        },
       });
-      if (result.status === "executed-command") {
+      if (result.status === "applied") {
+        if (!executablePlan.edit && !executablePlan.command) {
+          const message = "Code action had no edit or command to apply";
+          setStatusMessage(message);
+          return { ok: false, message, retryable: false };
+        }
         markProviderSuppressionApplied(action, file);
-        setStatusMessage(`Executed code action: ${executableAction.title}`);
+        setStatusMessage(result.historyId
+          ? `Applied code action: ${executablePlan.title}; undo transaction ${result.historyId}`
+          : `Executed code action: ${executablePlan.title}`);
         return { ok: true, message: null, retryable: false };
-      } else if (result.status === "empty") {
-        const message = "Code action had no edit or command to apply";
+      }
+      if (result.status === "cancelled") {
+        const message = `Code action cancelled: ${result.reason}`;
         setStatusMessage(message);
-        return { ok: false, message, retryable: false };
+        return { ok: false, message, retryable: true };
       }
-      if (result.status === "applied-edit") {
-        // §8.20.4 naming rule: a provider suppression edit that applied
-        // successfully earns "Suppressed in source"; everything else stays
-        // "hidden locally".
-        markProviderSuppressionApplied(action, file);
+      if ("reason" in result) {
+        const message = `Code action ${result.status}: ${result.reason}`;
+        setStatusMessage(message);
+        return { ok: false, message, retryable: true };
       }
-      return { ok: true, message: null, retryable: false };
+      const recovery = result.recoveryId
+        ? result.recoveryState === "registered"
+          ? `; recovery ${result.recoveryId} is available through Undo Workspace Edit`
+          : `; recovery ${result.recoveryId} ${result.recoveryState}`
+        : "";
+      const message = `Code action failed: ${result.error}${recovery}`;
+      setStatusMessage(message);
+      return { ok: false, message, retryable: result.recoveryState !== "unavailable" };
     } catch (error) {
       const message = errorMessage(error);
       setStatusMessage(message);
@@ -8978,12 +9074,16 @@ export function CodeWorkspaceTab({
     }
   }, [
     applyLspWorkspaceEdit,
+    captureCodeActionTransactionSnapshot,
     lspCodeActionResolve,
     lspDescriptorForFile,
+    markProviderSuppressionApplied,
+    projectAnalysisSnapshot?.projectFingerprint,
+    restoreCodeActionTransactionSnapshot,
     semanticIndex.current,
-    semanticIndex.invalidate,
     setStatusMessage,
     updateLspStatusForFile,
+    workspaceEditHistory,
   ]);
 
   // §8.19.8 Generate Code: request provider source/generate CodeActions for

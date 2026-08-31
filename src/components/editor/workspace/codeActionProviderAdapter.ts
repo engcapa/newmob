@@ -673,52 +673,168 @@ export class CanonicalCodeActionService {
     options: { signal?: AbortSignal } = {},
   ): Promise<CodeActionApplyOutcome> {
     const startTime = Date.now();
-
     if (options.signal?.aborted) {
       return { status: "cancelled", reason: "Operation cancelled before execution" };
     }
 
-    // Step 1: Preview & pre-condition verification
-    const preview = this.previewPlan(plan, hooks);
-    const affectedUris = preview.affectedUris;
-
-    // Re-verify live owner and document revision before commit
-    const liveDocRevision = hooks.getLiveDocumentRevision(plan.document.uri);
-    if (liveDocRevision !== null && liveDocRevision !== plan.document.revision) {
+    const initialIdentity = verifyCodeActionApplyIdentity(plan, hooks);
+    if (!initialIdentity.valid) {
       return {
-        status: "stale",
-        reason: `Live document revision changed from ${plan.document.revision} to ${liveDocRevision}`,
+        status: initialIdentity.status,
+        reason: initialIdentity.reason,
+        affectedUris: extractAffectedUrisFromWorkspaceEdit(plan.edit),
+      };
+    }
+
+    const affectedUris = extractAffectedUrisFromWorkspaceEdit(plan.edit);
+    if (affectedUris.length === 0 && plan.edit) affectedUris.push(plan.document.uri);
+    if (plan.edit && (!hooks.captureSnapshot || !hooks.restoreSnapshot || !hooks.registerHistoryEntry)) {
+      return {
+        status: "failed",
+        error: "Canonical workspace-edit snapshot/history hooks are unavailable",
         affectedUris,
       };
     }
 
-    if (options.signal?.aborted) {
-      return { status: "cancelled", reason: "Operation cancelled before commit" };
+    const beforeSnapshot = plan.edit
+      ? await captureCodeActionSnapshot(hooks, plan.edit)
+      : null;
+    if (plan.edit && !beforeSnapshot) {
+      return {
+        status: "failed",
+        error: "Cannot capture every affected workspace resource before preview",
+        affectedUris,
+      };
     }
-
-    // Step 2: Commit WorkspaceEdit & Commands
-    const historyId = `ca-hist-${sha256Hex(`${plan.actionId}:${Date.now()}`).slice(0, 16)}`;
-    const recoveryId = `ca-rec-${sha256Hex(`${plan.actionId}:${plan.document.uri}:${Date.now()}`).slice(0, 16)}`;
+    const preview = beforeSnapshot
+      ? previewFromSnapshot(plan, beforeSnapshot)
+      : this.previewPlan(plan, hooks);
+    const historyCandidateId = `ca-hist-${sha256Hex(`${plan.actionId}:${Date.now()}`).slice(0, 16)}`;
+    const recoveryCandidateId = `ca-rec-${sha256Hex(`${plan.actionId}:${plan.document.uri}:${Date.now()}`).slice(0, 16)}`;
 
     let outcomes: WorkspaceEditApplyOutcome[] = [];
-    if (plan.edit) {
-      try {
-        outcomes = await hooks.applyWorkspaceEdit(plan.edit, { historyId, recoveryId });
-        const failedOutcome = outcomes.find((o) => o.status === "failed");
-        if (failedOutcome) {
-          return {
-            status: "failed",
-            error: (failedOutcome as any).reason || "WorkspaceEdit apply failed",
-            affectedUris,
-            outcomes,
-          };
-        }
-      } catch (err: unknown) {
+    let appliedEdit = plan.edit;
+    const recoverMutation = async (error: string): Promise<CodeActionApplyOutcome> => {
+      if (!plan.edit || !beforeSnapshot || !hooks.captureSnapshot || !hooks.restoreSnapshot) {
+        return { status: "failed", error, affectedUris, outcomes };
+      }
+
+      const partialSnapshot = await captureCodeActionSnapshot(hooks, plan.edit);
+      if (!partialSnapshot) {
         return {
           status: "failed",
-          error: `Failed to apply workspace edit: ${err instanceof Error ? err.message : String(err)}`,
+          error,
           affectedUris,
+          outcomes,
+          recoveryId: recoveryCandidateId,
+          recoveryState: "unavailable",
         };
+      }
+      const mutated = codeActionSnapshotMismatch(beforeSnapshot, partialSnapshot) !== null;
+      if (!mutated) return { status: "failed", error, affectedUris, outcomes };
+      const recover = async () => restoreAndVerifyCodeActionSnapshot(
+        plan.edit!,
+        partialSnapshot,
+        beforeSnapshot,
+        hooks,
+      );
+      try {
+        await recover();
+        return {
+          status: "failed",
+          error,
+          affectedUris,
+          outcomes,
+          recoveryId: recoveryCandidateId,
+          recoveryState: "performed",
+        };
+      } catch (recoveryError) {
+        if (hooks.registerRecoveryEntry) {
+          hooks.registerRecoveryEntry({
+            id: recoveryCandidateId,
+            label: plan.title,
+            affectedUris: [...affectedUris],
+            recover,
+          });
+          return {
+            status: "failed",
+            error: `${error}; automatic recovery failed: ${errorMessage(recoveryError)}`,
+            affectedUris,
+            outcomes,
+            recoveryId: recoveryCandidateId,
+            recoveryState: "registered",
+          };
+        }
+        return {
+          status: "failed",
+          error: `${error}; automatic recovery failed: ${errorMessage(recoveryError)}`,
+          affectedUris,
+          outcomes,
+          recoveryId: recoveryCandidateId,
+          recoveryState: "unavailable",
+        };
+      }
+    };
+
+    if (plan.edit) {
+      try {
+        const applyResult = await hooks.applyWorkspaceEdit(plan.edit, {
+          historyId: historyCandidateId,
+          recoveryId: recoveryCandidateId,
+          onBeforeCommit: async () => {
+            if (options.signal?.aborted) {
+              throw new Error("CODE_ACTION_CANCELLED: operation cancelled after preview");
+            }
+            const identity = verifyCodeActionApplyIdentity(plan, hooks);
+            if (!identity.valid) {
+              throw new Error(`CODE_ACTION_${identity.status.toUpperCase()}: ${identity.reason}`);
+            }
+            const liveSnapshot = await captureCodeActionSnapshot(hooks, plan.edit!);
+            if (!liveSnapshot) {
+              throw new Error("CODE_ACTION_CONFLICT: affected resources could not be re-read after preview");
+            }
+            const mismatch = codeActionSnapshotMismatch(beforeSnapshot!, liveSnapshot);
+            if (mismatch) {
+              throw new Error(`CODE_ACTION_CONFLICT: ${mismatch}`);
+            }
+          },
+        });
+        if (Array.isArray(applyResult)) {
+          outcomes = applyResult;
+        } else {
+          outcomes = [...applyResult.outcomes];
+          appliedEdit = applyResult.appliedEdit;
+        }
+        const rejected = outcomes.find((outcome) => (
+          outcome.status === "failed" || outcome.status === "skipped"
+        ));
+        if (rejected) {
+          if (rejected.operationIndex === null && !outcomes.some((outcome) => outcome.status.startsWith("applied"))) {
+            if (rejected.status === "skipped") {
+              return { status: "cancelled", reason: rejected.reason };
+            }
+            if (rejected.reason.startsWith("CODE_ACTION_CANCELLED:")) {
+              return { status: "cancelled", reason: rejected.reason.slice("CODE_ACTION_CANCELLED:".length).trim() };
+            }
+            if (rejected.reason.startsWith("CODE_ACTION_STALE:")) {
+              return {
+                status: "stale",
+                reason: rejected.reason.slice("CODE_ACTION_STALE:".length).trim(),
+                affectedUris,
+              };
+            }
+            if (rejected.reason.startsWith("CODE_ACTION_CONFLICT:")) {
+              return {
+                status: "conflict",
+                reason: rejected.reason.slice("CODE_ACTION_CONFLICT:".length).trim(),
+                affectedUris,
+              };
+            }
+          }
+          return recoverMutation(rejected.reason || "WorkspaceEdit apply failed");
+        }
+      } catch (err: unknown) {
+        return recoverMutation(`Failed to apply workspace edit: ${errorMessage(err)}`);
       }
     }
 
@@ -726,42 +842,55 @@ export class CanonicalCodeActionService {
       try {
         await hooks.executeCommand(plan.command.command, plan.command.arguments);
       } catch (err: unknown) {
-        return {
-          status: "failed",
-          error: `Provider command execution failed: ${err instanceof Error ? err.message : String(err)}`,
-          affectedUris,
-          outcomes,
-        };
+        return recoverMutation(`Provider command execution failed: ${errorMessage(err)}`);
       }
     }
 
-    // Step 3: Postcondition & Hash Verification
+    const afterSnapshot = plan.edit && hooks.captureSnapshot
+      ? await captureCodeActionSnapshot(hooks, plan.edit)
+      : null;
+    if (appliedEdit && !afterSnapshot) {
+      return recoverMutation("Cannot read every affected workspace resource after commit");
+    }
+
+    const changed = beforeSnapshot && afterSnapshot
+      ? codeActionSnapshotMismatch(beforeSnapshot, afterSnapshot) !== null
+      : false;
     const uriHashes: Record<string, CodeActionUriHashState> = {};
-    for (const uri of affectedUris) {
-      const postText = hooks.getLiveDocumentText(uri) ?? "";
-      const preHash = preview.preHashes[uri] ?? "";
-      const postHash = sha256Hex(postText);
-      const undoHash = preHash;
+    const committedUris = appliedEdit
+      ? extractAffectedUrisFromWorkspaceEdit(appliedEdit)
+      : affectedUris;
+    for (const uri of committedUris) {
+      const preHash = preview.preHashes[uri]
+        ?? codeActionSnapshotHash(beforeSnapshot?.resources.find((resource) => resource.uri === uri));
+      const postHash = codeActionSnapshotHash(afterSnapshot?.resources.find((resource) => resource.uri === uri));
       uriHashes[uri] = Object.freeze({
         uri,
         preHash,
         postHash,
-        undoHash,
+        undoHash: preHash,
       });
     }
 
-    // Step 4: History registration
-    if (hooks.registerHistoryEntry) {
-      hooks.registerHistoryEntry({
+    let historyId: string | null = null;
+    if (changed && plan.edit && appliedEdit && beforeSnapshot && afterSnapshot) {
+      historyId = historyCandidateId;
+      hooks.registerHistoryEntry!({
         id: historyId,
         label: plan.title,
-        affectedUris: [...affectedUris],
-        undo: async () => {
-          // Revert edit
-        },
-        redo: async () => {
-          // Re-apply edit
-        },
+        affectedUris: [...committedUris],
+        undo: () => restoreAndVerifyCodeActionSnapshot(
+          plan.edit!,
+          afterSnapshot,
+          beforeSnapshot,
+          hooks,
+        ),
+        redo: () => restoreAndVerifyCodeActionSnapshot(
+          plan.edit!,
+          beforeSnapshot,
+          afterSnapshot,
+          hooks,
+        ),
       });
     }
 
@@ -769,8 +898,8 @@ export class CanonicalCodeActionService {
       status: "applied",
       plan,
       historyId,
-      recoveryId,
-      affectedUris,
+      recoveryId: null,
+      affectedUris: committedUris,
       uriHashes: Object.freeze(uriHashes),
       outcomes: Object.freeze(outcomes),
       durationMs: Date.now() - startTime,
@@ -778,27 +907,45 @@ export class CanonicalCodeActionService {
   }
 }
 
-export function extractAffectedUrisFromWorkspaceEdit(edit: LspWorkspaceEdit | null | undefined): string[] {
+export interface CodeActionAffectedResource {
+  uri: string;
+  path: string | null;
+}
+
+export function extractAffectedResourcesFromWorkspaceEdit(
+  edit: LspWorkspaceEdit | null | undefined,
+): CodeActionAffectedResource[] {
   if (!edit) return [];
-  const uris = new Set<string>();
+  const resources: CodeActionAffectedResource[] = [];
+  const seen = new Set<string>();
+  const add = (uri: string, path: string | null) => {
+    const key = path || uri;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    resources.push({ uri, path });
+  };
   if (edit.documentEdits) {
     for (const doc of edit.documentEdits) {
-      if (doc.uri) uris.add(doc.uri);
+      add(doc.uri, doc.path);
     }
   }
   if (edit.operations) {
     for (const op of edit.operations) {
       if (op.kind === "text" && op.document?.uri) {
-        uris.add(op.document.uri);
+        add(op.document.uri, op.document.path);
       } else if (op.kind === "rename") {
-        if (op.oldUri) uris.add(op.oldUri);
-        if (op.newUri) uris.add(op.newUri);
+        add(op.oldUri, op.oldPath);
+        add(op.newUri, op.newPath);
       } else if ((op.kind === "create" || op.kind === "delete") && op.uri) {
-        uris.add(op.uri);
+        add(op.uri, op.path);
       }
     }
   }
-  return Array.from(uris);
+  return resources;
+}
+
+export function extractAffectedUrisFromWorkspaceEdit(edit: LspWorkspaceEdit | null | undefined): string[] {
+  return extractAffectedResourcesFromWorkspaceEdit(edit).map((resource) => resource.uri);
 }
 
 export interface PlanOnlyCodeActionResult {
@@ -830,8 +977,8 @@ export type CodeActionApplyOutcome =
   | {
       status: "applied";
       plan: ImmutableCodeActionPlan;
-      historyId: string;
-      recoveryId: string;
+      historyId: string | null;
+      recoveryId: string | null;
       affectedUris: readonly string[];
       uriHashes: Readonly<Record<string, CodeActionUriHashState>>;
       outcomes: readonly WorkspaceEditApplyOutcome[];
@@ -851,12 +998,45 @@ export type CodeActionApplyOutcome =
       error: string;
       affectedUris: readonly string[];
       outcomes?: readonly WorkspaceEditApplyOutcome[];
+      recoveryId?: string;
+      recoveryState?: "performed" | "registered" | "unavailable";
     };
+
+export interface CodeActionResourceSnapshot {
+  uri: string;
+  path: string;
+  exists: boolean;
+  text: string | null;
+  encoding?: string;
+  bom?: boolean;
+  eol?: "lf" | "crlf" | "cr";
+}
+
+export interface CodeActionTransactionSnapshot {
+  resources: readonly CodeActionResourceSnapshot[];
+}
+
+export interface CodeActionWorkspaceEditApplyResult {
+  outcomes: readonly WorkspaceEditApplyOutcome[];
+  appliedEdit: LspWorkspaceEdit;
+}
 
 export interface CodeActionApplyHooks {
   getLiveDocumentText: (uri: string) => string | null;
   getLiveDocumentRevision: (uri: string) => number | null;
-  applyWorkspaceEdit: (edit: LspWorkspaceEdit, options?: { historyId?: string; recoveryId?: string }) => Promise<WorkspaceEditApplyOutcome[]>;
+  verifyIdentity?: () =>
+    | { valid: true }
+    | { valid: false; status: "stale" | "conflict"; reason: string };
+  captureSnapshot?: (edit: LspWorkspaceEdit) => Promise<CodeActionTransactionSnapshot | null>;
+  restoreSnapshot?: (snapshot: CodeActionTransactionSnapshot) => Promise<void>;
+  applyWorkspaceEdit: (
+    edit: LspWorkspaceEdit,
+    options?: {
+      historyId?: string;
+      recoveryId?: string;
+      onBeforeCommit?: () => Promise<void> | void;
+    },
+  ) => Promise<WorkspaceEditApplyOutcome[] | CodeActionWorkspaceEditApplyResult>;
   executeCommand?: (command: string, args?: unknown[]) => Promise<unknown>;
   registerHistoryEntry?: (entry: {
     id: string;
@@ -865,4 +1045,121 @@ export interface CodeActionApplyHooks {
     undo: () => Promise<void>;
     redo: () => Promise<void>;
   }) => void;
+  registerRecoveryEntry?: (entry: {
+    id: string;
+    label: string;
+    affectedUris: string[];
+    recover: () => Promise<void>;
+  }) => void;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function verifyCodeActionApplyIdentity(
+  plan: ImmutableCodeActionPlan,
+  hooks: CodeActionApplyHooks,
+): { valid: true } | { valid: false; status: "stale" | "conflict"; reason: string } {
+  const liveDocRevision = hooks.getLiveDocumentRevision(plan.document.uri);
+  if (liveDocRevision !== null && liveDocRevision !== plan.document.revision) {
+    return {
+      valid: false,
+      status: "stale",
+      reason: `Live document revision changed from ${plan.document.revision} to ${liveDocRevision}`,
+    };
+  }
+  return hooks.verifyIdentity?.() ?? { valid: true };
+}
+
+function freezeCodeActionSnapshot(
+  snapshot: CodeActionTransactionSnapshot | null,
+): CodeActionTransactionSnapshot | null {
+  if (!snapshot) return null;
+  return Object.freeze({
+    resources: Object.freeze(snapshot.resources.map((resource) => Object.freeze({ ...resource }))),
+  });
+}
+
+async function captureCodeActionSnapshot(
+  hooks: CodeActionApplyHooks,
+  edit: LspWorkspaceEdit,
+): Promise<CodeActionTransactionSnapshot | null> {
+  if (!hooks.captureSnapshot) return null;
+  try {
+    return freezeCodeActionSnapshot(await hooks.captureSnapshot(edit));
+  } catch {
+    return null;
+  }
+}
+
+function codeActionSnapshotKey(resource: CodeActionResourceSnapshot): string {
+  return resource.path || resource.uri;
+}
+
+function codeActionSnapshotMismatch(
+  expected: CodeActionTransactionSnapshot,
+  current: CodeActionTransactionSnapshot,
+): string | null {
+  const currentByKey = new Map(current.resources.map((resource) => [codeActionSnapshotKey(resource), resource]));
+  for (const resource of expected.resources) {
+    const live = currentByKey.get(codeActionSnapshotKey(resource));
+    if (!live) return `${resource.uri} is no longer readable`;
+    if (
+      live.exists !== resource.exists
+      || live.text !== resource.text
+      || live.encoding !== resource.encoding
+      || live.bom !== resource.bom
+      || live.eol !== resource.eol
+    ) {
+      return `${resource.uri} no longer matches the previewed preimage`;
+    }
+  }
+  return null;
+}
+
+function codeActionSnapshotHash(resource: CodeActionResourceSnapshot | undefined): string {
+  if (!resource || !resource.exists || resource.text === null) {
+    return sha256Hex("CODE_ACTION_RESOURCE_MISSING");
+  }
+  return sha256Hex(resource.text);
+}
+
+function previewFromSnapshot(
+  plan: ImmutableCodeActionPlan,
+  snapshot: CodeActionTransactionSnapshot,
+): CodeActionPlanPreview {
+  const affectedUris = extractAffectedUrisFromWorkspaceEdit(plan.edit);
+  if (affectedUris.length === 0) affectedUris.push(plan.document.uri);
+  const preHashes = Object.fromEntries(affectedUris.map((uri) => [
+    uri,
+    codeActionSnapshotHash(snapshot.resources.find((resource) => resource.uri === uri)),
+  ]));
+  return {
+    plan,
+    affectedUris: Object.freeze(affectedUris),
+    requiresConfirmation: affectedUris.length > 1,
+    preHashes: Object.freeze(preHashes),
+  };
+}
+
+async function restoreAndVerifyCodeActionSnapshot(
+  edit: LspWorkspaceEdit,
+  expectedCurrent: CodeActionTransactionSnapshot,
+  target: CodeActionTransactionSnapshot,
+  hooks: CodeActionApplyHooks,
+): Promise<void> {
+  if (!hooks.captureSnapshot || !hooks.restoreSnapshot) {
+    throw new Error("Code-action snapshot replay is unavailable");
+  }
+  const current = await captureCodeActionSnapshot(hooks, edit);
+  if (!current) throw new Error("Cannot read resources before code-action replay");
+  if (codeActionSnapshotMismatch(target, current) === null) return;
+  const conflict = codeActionSnapshotMismatch(expectedCurrent, current);
+  if (conflict) throw new Error(`Code-action replay conflict: ${conflict}`);
+  await hooks.restoreSnapshot(target);
+  const restored = await captureCodeActionSnapshot(hooks, edit);
+  if (!restored) throw new Error("Cannot verify resources after code-action replay");
+  const mismatch = codeActionSnapshotMismatch(target, restored);
+  if (mismatch) throw new Error(`Code-action replay postcondition failed: ${mismatch}`);
 }

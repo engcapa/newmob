@@ -8,6 +8,7 @@ import {
   toProviderActionsV4,
   CanonicalCodeActionService,
   computeStableActionId,
+  extractAffectedResourcesFromWorkspaceEdit,
   isCommandAllowed,
   type CodeActionContextIdentity,
   type CodeActionCandidate,
@@ -812,6 +813,25 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
       createdAt: Date.now(),
     };
 
+    const memorySnapshotHooks = (liveFiles: Record<string, string>) => ({
+      captureSnapshot: async (edit: NonNullable<ImmutableCodeActionPlan["edit"]>) => ({
+        resources: extractAffectedResourcesFromWorkspaceEdit(edit).map((resource) => ({
+          uri: resource.uri,
+          path: resource.path ?? resource.uri,
+          exists: Object.hasOwn(liveFiles, resource.uri),
+          text: liveFiles[resource.uri] ?? null,
+        })),
+      }),
+      restoreSnapshot: async (snapshot: {
+        resources: readonly { uri: string; exists: boolean; text: string | null }[];
+      }) => {
+        for (const resource of snapshot.resources) {
+          if (resource.exists && resource.text !== null) liveFiles[resource.uri] = resource.text;
+          else delete liveFiles[resource.uri];
+        }
+      },
+    });
+
     it("previews multi-file edits, computes pre-hashes, and flags confirmation", () => {
       const liveFiles: Record<string, string> = {
         "file:///workspace/src/Service.java": "class OldService {}",
@@ -843,7 +863,9 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
       const outcome = await service.applyPlan(samplePlan, {
         getLiveDocumentText: (uri) => liveFiles[uri] ?? null,
         getLiveDocumentRevision: (uri) => (uri === "file:///workspace/src/Service.java" ? 3 : null),
-        applyWorkspaceEdit: async () => {
+        ...memorySnapshotHooks(liveFiles),
+        applyWorkspaceEdit: async (_edit, options) => {
+          await options?.onBeforeCommit?.();
           liveFiles["file:///workspace/src/Service.java"] = "class NewService {}";
           liveFiles["file:///workspace/src/Client.java"] = "new NewService();";
           return [
@@ -862,7 +884,7 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
       expect(outcome.status).toBe("applied");
       if (outcome.status === "applied") {
         expect(outcome.historyId).toMatch(/^ca-hist-/);
-        expect(outcome.recoveryId).toMatch(/^ca-rec-/);
+        expect(outcome.recoveryId).toBeNull();
         expect(outcome.affectedUris).toHaveLength(2);
         expect(executedCommandName).toBe("java.action.logRename");
         expect(registeredHistory).not.toBeNull();
@@ -877,6 +899,114 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
         expect(clientHash.preHash).not.toBe(clientHash.postHash);
         expect(clientHash.undoHash).toBe(clientHash.preHash);
       }
+    });
+
+    it("replays the canonical history entry across every affected resource", async () => {
+      const before = {
+        "file:///workspace/src/Service.java": "class OldService {}",
+        "file:///workspace/src/Client.java": "new OldService();",
+      };
+      const after = {
+        "file:///workspace/src/Service.java": "class NewService {}",
+        "file:///workspace/src/Client.java": "new NewService();",
+      };
+      const liveFiles: Record<string, string> = { ...before };
+      let registeredHistory: {
+        undo: () => Promise<void>;
+        redo: () => Promise<void>;
+      } | null = null;
+
+      const outcome = await service.applyPlan(samplePlan, {
+        getLiveDocumentText: (uri) => liveFiles[uri] ?? null,
+        getLiveDocumentRevision: () => 3,
+        ...memorySnapshotHooks(liveFiles),
+        applyWorkspaceEdit: async (_edit, options) => {
+          await options?.onBeforeCommit?.();
+          Object.assign(liveFiles, after);
+          return [
+            { operationIndex: 0, path: "/workspace/src/Service.java", status: "applied-open", dirty: true },
+            { operationIndex: 1, path: "/workspace/src/Client.java", status: "applied-open", dirty: true },
+          ];
+        },
+        registerHistoryEntry: (entry) => {
+          registeredHistory = entry;
+        },
+      });
+
+      expect(outcome.status).toBe("applied");
+      expect(registeredHistory).not.toBeNull();
+      await registeredHistory!.undo();
+      expect(liveFiles).toEqual(before);
+      await registeredHistory!.redo();
+      expect(liveFiles).toEqual(after);
+    });
+
+    it("rejects a preimage conflict after preview with zero edit and zero history", async () => {
+      const liveFiles: Record<string, string> = {
+        "file:///workspace/src/Service.java": "class OldService {}",
+        "file:///workspace/src/Client.java": "new OldService();",
+      };
+      const applyMutation = vi.fn();
+      const registerHistoryEntry = vi.fn();
+
+      const outcome = await service.applyPlan(samplePlan, {
+        getLiveDocumentText: (uri) => liveFiles[uri] ?? null,
+        getLiveDocumentRevision: () => 3,
+        ...memorySnapshotHooks(liveFiles),
+        applyWorkspaceEdit: async (_edit, options) => {
+          liveFiles["file:///workspace/src/Client.java"] = "new ConcurrentService();";
+          try {
+            await options?.onBeforeCommit?.();
+          } catch (error) {
+            return [{
+              operationIndex: null,
+              path: "WorkspaceEdit",
+              status: "failed" as const,
+              reason: error instanceof Error ? error.message : String(error),
+            }];
+          }
+          applyMutation();
+          return [];
+        },
+        registerHistoryEntry,
+      });
+
+      expect(outcome.status).toBe("conflict");
+      expect(applyMutation).not.toHaveBeenCalled();
+      expect(registerHistoryEntry).not.toHaveBeenCalled();
+      expect(liveFiles["file:///workspace/src/Service.java"]).toBe("class OldService {}");
+    });
+
+    it("restores all preimages after a partial commit failure and returns a performed recovery id", async () => {
+      const before: Record<string, string> = {
+        "file:///workspace/src/Service.java": "class OldService {}",
+        "file:///workspace/src/Client.java": "new OldService();",
+      };
+      const liveFiles = { ...before };
+      const registerHistoryEntry = vi.fn();
+
+      const outcome = await service.applyPlan(samplePlan, {
+        getLiveDocumentText: (uri) => liveFiles[uri] ?? null,
+        getLiveDocumentRevision: () => 3,
+        ...memorySnapshotHooks(liveFiles),
+        applyWorkspaceEdit: async (_edit, options) => {
+          await options?.onBeforeCommit?.();
+          liveFiles["file:///workspace/src/Service.java"] = "class NewService {}";
+          return [
+            { operationIndex: 0, path: "/workspace/src/Service.java", status: "applied-open", dirty: true },
+            { operationIndex: 1, path: "/workspace/src/Client.java", status: "failed", reason: "disk conflict" },
+          ];
+        },
+        registerHistoryEntry,
+      });
+
+      expect(outcome.status).toBe("failed");
+      if (outcome.status === "failed") {
+        expect(outcome.recoveryId).toMatch(/^ca-rec-/);
+        expect(outcome.recoveryState).toBe("performed");
+      }
+      expect(liveFiles).toEqual(before);
+      expect(registerHistoryEntry).not.toHaveBeenCalled();
     });
 
     it("detects live owner document revision changes before commit and rejects with stale", async () => {
@@ -910,13 +1040,22 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
     });
 
     it("surfaces provider command failures visibly without masking errors", async () => {
+      const liveFiles: Record<string, string> = {
+        "file:///workspace/src/Service.java": "text",
+        "file:///workspace/src/Client.java": "text",
+      };
       const outcome = await service.applyPlan(samplePlan, {
-        getLiveDocumentText: () => "text",
+        getLiveDocumentText: (uri) => liveFiles[uri] ?? null,
         getLiveDocumentRevision: () => 3,
-        applyWorkspaceEdit: async () => [{ operationIndex: 0, path: "/workspace/src/Service.java", status: "applied-open", dirty: true }],
+        ...memorySnapshotHooks(liveFiles),
+        applyWorkspaceEdit: async (_edit, options) => {
+          await options?.onBeforeCommit?.();
+          return [{ operationIndex: 0, path: "/workspace/src/Service.java", status: "applied-open", dirty: true }];
+        },
         executeCommand: async () => {
           throw new Error("LSP command execution timed out on language server");
         },
+        registerHistoryEntry: vi.fn(),
       });
 
       expect(outcome.status).toBe("failed");

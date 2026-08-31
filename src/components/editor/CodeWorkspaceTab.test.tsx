@@ -2135,6 +2135,11 @@ describe("CodeWorkspaceTab", () => {
     };
     workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
     workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "x=1"));
+    workspaceMocks.workspaceWriteFileEncoded.mockImplementation(async (
+      _rootPath: string,
+      path: string,
+      text: string,
+    ) => writeAck(file(path, text, { hash: `hash-${text}` })));
     lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({
       path: "/repo/app/src/main.ts",
       available: true,
@@ -2204,7 +2209,11 @@ describe("CodeWorkspaceTab", () => {
       },
     });
 
-    renderWorkspace(workspace);
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+    renderWorkspace(workspace, { onCommandsChange });
     await screen.findByTitle("app / src/main.ts");
     await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
 
@@ -2219,6 +2228,112 @@ describe("CodeWorkspaceTab", () => {
       useCodeWorkspaceStore.getState(),
       "instance-actions",
     ).openFiles["root:app:src/main.ts"]?.text).toBe("x =1"));
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("undo transaction"));
+
+    await waitFor(() => expect(
+      registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.enabled,
+    ).toBe(true));
+    await act(async () => {
+      await registrationRef.current!.executeAction("workspace.undoWorkspaceEdit");
+    });
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-actions",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe("x=1"));
+
+    await waitFor(() => expect(
+      registrationRef.current?.items.find((item) => item.id === "workspace.redoWorkspaceEdit")?.enabled,
+    ).toBe(true));
+    await act(async () => {
+      await registrationRef.current!.executeAction("workspace.redoWorkspaceEdit");
+    });
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-actions",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe("x =1"));
+  });
+
+  it("cancels a multi-file code-action preview with zero edits and zero history", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-actions-cancel",
+      workspaceInstanceId: "instance-actions-cancel",
+      name: "Actions cancel",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceListDir.mockImplementation(async (_root: string, path: string) => (
+      path === "src"
+        ? [entry("main.ts", "src/main.ts"), entry("other.ts", "src/other.ts")]
+        : [entry("src", "src", "dir")]
+    ));
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => (
+      path === "src/other.ts" ? file(path, "y=2") : file(path, "x=1")
+    ));
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({ codeAction: true }),
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status,
+      actions: [{
+        title: "Update two files",
+        kind: "quickfix",
+        isPreferred: true,
+        edit: {
+          documentEdits: [
+            {
+              uri: "file:///repo/app/src/main.ts",
+              path: "/repo/app/src/main.ts",
+              edits: [{
+                range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } },
+                newText: " ",
+              }],
+            },
+            {
+              uri: "file:///repo/app/src/other.ts",
+              path: "/repo/app/src/other.ts",
+              edits: [{
+                range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } },
+                newText: " ",
+              }],
+            },
+          ],
+        },
+        command: null,
+        commandArguments: null,
+        raw: { title: "Update two files", kind: "quickfix" },
+      }],
+    });
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Update two files" }));
+    const preview = await screen.findByTestId("refactoring-preview-dialog");
+    expect(within(preview).getByText("/repo/app/src/main.ts")).toBeInTheDocument();
+    expect(within(preview).getByText("/repo/app/src/other.ts")).toBeInTheDocument();
+    fireEvent.click(within(preview).getByTestId("refactoring-preview-cancel"));
+
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("Code action cancelled"));
+    expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-actions-cancel",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe("x=1");
+    expect(workspaceMocks.workspaceWriteFileEncoded).not.toHaveBeenCalled();
+    expect(
+      registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.enabled,
+    ).toBe(false);
   });
 
   it("keeps a failed Alt+Enter resolve visible and retries the frozen candidate", async () => {
@@ -2264,6 +2379,11 @@ describe("CodeWorkspaceTab", () => {
     };
     workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
     workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "x=1"));
+    workspaceMocks.workspaceWriteFileEncoded.mockImplementation(async (
+      _rootPath: string,
+      path: string,
+      text: string,
+    ) => writeAck(file(path, text, { hash: `hash-${text}` })));
     lspMocks.lspOpenDocument.mockResolvedValue(status);
     lspMocks.lspCodeActions.mockResolvedValue({ status, actions: [deferredAction] });
     lspMocks.lspCodeActionResolve
@@ -2953,7 +3073,7 @@ describe("CodeWorkspaceTab", () => {
     });
 
     await waitFor(() => expect(useAppStore.getState().statusMessage).toContain(
-      "Semantic result became stale before changes were applied",
+      "Code action stale: Live document revision changed from 0 to 1",
     ));
     expect(workspaceMocks.workspaceApplyResourceOperation).not.toHaveBeenCalled();
   });
