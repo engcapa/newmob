@@ -170,6 +170,7 @@ export interface WorkspaceLspSessionController {
   waitForSyncQueue: (key: string) => Promise<void>;
   saveDocument: (file: OpenFileState, text: string) => Promise<void>;
   closeDocument: (file: OpenFileState) => void;
+  closeDocumentAndWait: (file: OpenFileState) => Promise<void>;
   forgetDocument: (key: string) => void;
   updateStatus: (file: OpenFileState, status: LspDocumentStatus) => void;
 }
@@ -811,7 +812,7 @@ export function useWorkspaceLspSession({
     delete diagnosticsTimersRef.current[key];
   }, []);
 
-  const closeDocument = useCallback((file: OpenFileState) => {
+  const closeDocumentAndWait = useCallback(async (file: OpenFileState) => {
     const queue = syncQueuesRef.current[file.key];
     if (queue) {
       queue.closed = true;
@@ -821,9 +822,13 @@ export function useWorkspaceLspSession({
     }
     // Never opened by us (library source) → nothing to close on the server.
     const descriptor = file.library ? null : descriptorForFile(file);
-    if (descriptor) void lspCloseDocument(descriptor);
+    if (descriptor) await lspCloseDocument(descriptor);
     forgetDocument(file.key);
   }, [descriptorForFile, forgetDocument]);
+
+  const closeDocument = useCallback((file: OpenFileState) => {
+    void closeDocumentAndWait(file).catch((error) => onError(errorMessage(error)));
+  }, [closeDocumentAndWait, onError]);
 
   const sessionGeneration = useCallback(() => sessionGenerationRef.current, []);
 
@@ -844,6 +849,7 @@ export function useWorkspaceLspSession({
     waitForSyncQueue: waitForDocumentSyncQueue,
     saveDocument,
     closeDocument,
+    closeDocumentAndWait,
     forgetDocument,
     updateStatus,
   };

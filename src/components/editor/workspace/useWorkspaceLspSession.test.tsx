@@ -156,6 +156,28 @@ describe("useWorkspaceLspSession", () => {
     );
   });
 
+  it("keeps document identity retryable when awaited didClose fails", async () => {
+    const openFilesRef = { current: { [file.key]: file } };
+    const { result } = renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-close-recovery",
+      roots,
+      openFilesRef,
+      updateLspFiles: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    await act(async () => result.current.syncDocument(file, "open"));
+    expect(result.current.documentVersion(file.key)).toBe(1);
+
+    lspMocks.lspCloseDocument.mockRejectedValueOnce(new Error("didClose transport failed"));
+    await expect(result.current.closeDocumentAndWait(file)).rejects.toThrow("didClose transport failed");
+    expect(result.current.documentVersion(file.key)).toBe(1);
+
+    await result.current.closeDocumentAndWait(file);
+    expect(lspMocks.lspCloseDocument).toHaveBeenCalledTimes(2);
+    expect(result.current.documentVersion(file.key)).toBeNull();
+  });
+
   it("refreshes active open-file diagnostics when the server invalidates pull results", async () => {
     const openFilesRef = { current: { [file.key]: file } };
     const { result, unmount } = renderHook(() => useWorkspaceLspSession({

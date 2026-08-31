@@ -48,12 +48,15 @@ export type ResourceCleanupOutcome =
       readonly status: "committed";
       readonly fileKey: string;
       readonly completedStages: readonly ResourceCleanupStage[];
+      readonly recoveryId?: string;
     }
   | {
       readonly status: "committed-with-recovery";
       readonly fileKey: string;
+      readonly recoveryId: string;
       readonly completedStages: readonly ResourceCleanupStage[];
       readonly failedStages: readonly ResourceCleanupFailure[];
+      readonly nextStage: ResourceCleanupStage;
       readonly message: string;
     }
   | {
@@ -64,9 +67,11 @@ export type ResourceCleanupOutcome =
     };
 
 export interface ResourceRecoveryState {
+  readonly recoveryId: string;
   readonly fileKey: string;
   readonly completedStages: readonly ResourceCleanupStage[];
   readonly failedStages: readonly ResourceCleanupFailure[];
+  readonly nextStage: ResourceCleanupStage;
   readonly lastAttemptAt: number;
 }
 
@@ -75,7 +80,11 @@ export class WorkspaceResourceRecoveryCoordinator {
   private readonly leasesById = new Map<string, ResourceLease>();
   private readonly leaseIdsByFileKey = new Map<string, Set<string>>();
   private readonly recoveryByFileKey = new Map<string, ResourceRecoveryState>();
+  private readonly recoveryById = new Map<string, ResourceRecoveryState>();
+  private readonly completedRecoveryById = new Map<string, ResourceCleanupOutcome>();
+  private readonly cleanupInFlightByFileKey = new Map<string, Promise<ResourceCleanupOutcome>>();
   private leaseSequence = 0;
+  private recoverySequence = 0;
 
   constructor(workspaceInstanceId: string) {
     this.workspaceInstanceId = workspaceInstanceId;
@@ -234,6 +243,24 @@ export class WorkspaceResourceRecoveryCoordinator {
     fileKey: string,
     handlers: ResourceCleanupHandlers,
   ): Promise<ResourceCleanupOutcome> {
+    const inFlight = this.cleanupInFlightByFileKey.get(fileKey);
+    if (inFlight) return inFlight;
+
+    const execution = Promise.resolve().then(() => this.executeResourceCleanupStages(fileKey, handlers));
+    this.cleanupInFlightByFileKey.set(fileKey, execution);
+    try {
+      return await execution;
+    } finally {
+      if (this.cleanupInFlightByFileKey.get(fileKey) === execution) {
+        this.cleanupInFlightByFileKey.delete(fileKey);
+      }
+    }
+  }
+
+  private async executeResourceCleanupStages(
+    fileKey: string,
+    handlers: ResourceCleanupHandlers,
+  ): Promise<ResourceCleanupOutcome> {
     const previous = this.recoveryByFileKey.get(fileKey);
     const completedSet = new Set<ResourceCleanupStage>(previous?.completedStages ?? []);
     const failedStages: ResourceCleanupFailure[] = [];
@@ -248,11 +275,12 @@ export class WorkspaceResourceRecoveryCoordinator {
           completedSet.add(stage);
         } catch (error) {
           const errMessage = error instanceof Error ? error.message : String(error);
-          failedStages.push({
+          failedStages.push(Object.freeze({
             stage,
             error: errMessage,
             timestamp: Date.now(),
-          });
+          }));
+          break;
         }
       } else {
         // Stage has no custom handler -> treated as completed
@@ -263,31 +291,43 @@ export class WorkspaceResourceRecoveryCoordinator {
     const completedStages = Object.freeze(RESOURCE_CLEANUP_STAGES.filter((s) => completedSet.has(s)));
 
     if (failedStages.length > 0) {
+      const recoveryId = previous?.recoveryId
+        ?? `resource-recovery-${this.workspaceInstanceId}-${++this.recoverySequence}`;
+      const nextStage = failedStages[0].stage;
       const state: ResourceRecoveryState = Object.freeze({
+        recoveryId,
         fileKey,
         completedStages,
         failedStages: Object.freeze([...failedStages]),
+        nextStage,
         lastAttemptAt: Date.now(),
       });
       this.recoveryByFileKey.set(fileKey, state);
+      this.recoveryById.set(recoveryId, state);
 
       const stageNames = failedStages.map((f) => f.stage).join(", ");
       return {
         status: "committed-with-recovery",
         fileKey,
+        recoveryId,
         completedStages,
         failedStages: Object.freeze([...failedStages]),
-        message: `Resource cleanup completed with recovery required for stages: [${stageNames}] on ${fileKey}`,
+        nextStage,
+        message: `Resource cleanup committed with recovery ${recoveryId}; retry stages: [${stageNames}] on ${fileKey}`,
       };
     }
 
     // All stages succeeded
     this.recoveryByFileKey.delete(fileKey);
-    return {
+    if (previous) this.recoveryById.delete(previous.recoveryId);
+    const outcome: ResourceCleanupOutcome = {
       status: "committed",
       fileKey,
       completedStages,
+      ...(previous ? { recoveryId: previous.recoveryId } : {}),
     };
+    if (previous) this.completedRecoveryById.set(previous.recoveryId, outcome);
+    return outcome;
   }
 
   /**
@@ -300,6 +340,10 @@ export class WorkspaceResourceRecoveryCoordinator {
     return Object.freeze(Array.from(this.recoveryByFileKey.values()));
   }
 
+  getPendingRecoveryById(recoveryId: string): ResourceRecoveryState | null {
+    return this.recoveryById.get(recoveryId) ?? null;
+  }
+
   /**
    * Replay cleanup for a specific failed resource idempotently.
    */
@@ -309,7 +353,20 @@ export class WorkspaceResourceRecoveryCoordinator {
   ): Promise<ResourceCleanupOutcome | null> {
     const recovery = this.recoveryByFileKey.get(fileKey);
     if (!recovery) return null;
-    return this.executeResourceCleanup(fileKey, handlers);
+    return this.replayRecoveryById(recovery.recoveryId, handlers);
+  }
+
+  /**
+   * Replay a recovery transaction by its stable id. Completed transactions
+   * return their cached receipt without repeating any cleanup effects.
+   */
+  async replayRecoveryById(
+    recoveryId: string,
+    handlers: ResourceCleanupHandlers,
+  ): Promise<ResourceCleanupOutcome | null> {
+    const recovery = this.recoveryById.get(recoveryId);
+    if (recovery) return this.executeResourceCleanup(recovery.fileKey, handlers);
+    return this.completedRecoveryById.get(recoveryId) ?? null;
   }
 
   /**
@@ -319,10 +376,10 @@ export class WorkspaceResourceRecoveryCoordinator {
     handlers: ResourceCleanupHandlers,
   ): Promise<readonly ResourceCleanupOutcome[]> {
     const outcomes: ResourceCleanupOutcome[] = [];
-    const keys = Array.from(this.recoveryByFileKey.keys());
-    for (const key of keys) {
-      const outcome = await this.executeResourceCleanup(key, handlers);
-      outcomes.push(outcome);
+    const recoveries = Array.from(this.recoveryByFileKey.values());
+    for (const recovery of recoveries) {
+      const outcome = await this.replayRecoveryById(recovery.recoveryId, handlers);
+      if (outcome) outcomes.push(outcome);
     }
     return Object.freeze(outcomes);
   }
@@ -334,5 +391,8 @@ export class WorkspaceResourceRecoveryCoordinator {
     this.leasesById.clear();
     this.leaseIdsByFileKey.clear();
     this.recoveryByFileKey.clear();
+    this.recoveryById.clear();
+    this.completedRecoveryById.clear();
+    this.cleanupInFlightByFileKey.clear();
   }
 }

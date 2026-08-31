@@ -4188,7 +4188,7 @@ describe("CodeWorkspaceTab", () => {
     expect(screen.getByTestId("code-workspace-bottom-tab-problems")).not.toHaveAttribute("data-active");
   });
 
-  it("opens a shared buffer in a resizable editor split and collapses it", async () => {
+  it("retains a same-file split buffer until the final view closes, then releases it once", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
       workspaceId: "ws-split",
@@ -4196,12 +4196,15 @@ describe("CodeWorkspaceTab", () => {
       name: "Split",
       roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
       looseFiles: [],
-      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
     };
-    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "export const value = 1;"));
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/Program.cs", "class Program {}"));
+    lspMocks.lspDetectServers.mockResolvedValue([csharpStatus({ available: true, active: true })]);
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({ available: true, active: true }));
 
     renderWorkspace(workspace);
-    await screen.findAllByText("main.ts");
+    await screen.findAllByText("Program.cs");
+    await waitFor(() => expect(lspMocks.lspOpenDocument).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByTestId("code-workspace-split-right"));
 
     await waitFor(() => expect(
@@ -4222,9 +4225,55 @@ describe("CodeWorkspaceTab", () => {
     }
     expect(Object.keys(ui.openFiles)).toHaveLength(1);
 
-    fireEvent.click(screen.getByTestId("code-workspace-split-close"));
-    await waitFor(() => expect(screen.queryByTestId("code-workspace-editor-split")).not.toBeInTheDocument());
-    expect(screen.getAllByTestId("code-workspace-editor-pane")).toHaveLength(1);
+    const fileKey = "root:app:src/Program.cs";
+    fireEvent.click(within(screen.getAllByTestId("code-workspace-editor-pane")[0]).getByTitle("Close"));
+    await waitFor(() => expect(Object.values(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-split").editorGroups,
+    ).filter((group) => group.openOrder.includes(fileKey))).toHaveLength(1));
+    expect(lspMocks.lspCloseDocument).not.toHaveBeenCalled();
+    expect(selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-split").openFiles[fileKey]).toBeDefined();
+
+    const remainingPane = screen.getAllByTestId("code-workspace-editor-pane").find(
+      (pane) => within(pane).queryByTitle("Close") !== null,
+    );
+    expect(remainingPane).toBeDefined();
+    fireEvent.click(within(remainingPane!).getByTitle("Close"));
+    await waitFor(() => expect(lspMocks.lspCloseDocument).toHaveBeenCalledTimes(1));
+    expect(selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-split").openFiles[fileKey]).toBeUndefined();
+  });
+
+  it("keeps the committed layout and buffer recovery state when final-view didClose fails", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-close-recovery",
+      workspaceInstanceId: "instance-close-recovery",
+      name: "Close Recovery",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+    const fileKey = "root:app:src/Program.cs";
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/Program.cs", "class Program {}"));
+    lspMocks.lspDetectServers.mockResolvedValue([csharpStatus({ available: true, active: true })]);
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({ available: true, active: true }));
+    lspMocks.lspCloseDocument.mockRejectedValueOnce(new Error("didClose transport failed"));
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/Program.cs");
+    await waitFor(() => expect(lspMocks.lspOpenDocument).toHaveBeenCalledTimes(1));
+    fireEvent.keyDown(window, { key: "F4", ctrlKey: true });
+
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-close-recovery")
+        .editorGroups.primary.openOrder,
+    ).toHaveLength(0));
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toMatch(
+      /committed with recovery resource-recovery-instance-close-recovery-1/,
+    ));
+    expect(lspMocks.lspCloseDocument).toHaveBeenCalledTimes(1);
+    expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-close-recovery").openFiles[fileKey],
+    ).toBeDefined();
   });
 
   it("closes the active editor tab with Ctrl+F4", async () => {

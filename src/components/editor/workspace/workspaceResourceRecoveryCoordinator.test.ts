@@ -104,74 +104,91 @@ describe("§ED-TABS-003 WorkspaceResourceRecoveryCoordinator", () => {
     expect(bufferCleaned).toEqual(["target.rs"]);
   });
 
-  it("handles failure at any step by returning committed-with-recovery and supports idempotent replay", async () => {
-    const coordinator = new WorkspaceResourceRecoveryCoordinator("ws-test-failure");
-    let didCloseAttempts = 0;
-    let watcherAttempts = 0;
-    let bufferAttempts = 0;
-    let historyAttempts = 0;
+  it.each(RESOURCE_CLEANUP_STAGES)(
+    "records and idempotently replays a failure at %s without running later stages early",
+    async (failedStage) => {
+      const coordinator = new WorkspaceResourceRecoveryCoordinator(`ws-test-failure-${failedStage}`);
+      const attempts: Record<ResourceCleanupStage, number> = {
+        didClose: 0,
+        watcher: 0,
+        buffer: 0,
+        history: 0,
+      };
+      const failedIndex = RESOURCE_CLEANUP_STAGES.indexOf(failedStage);
+      const handlers = (fail: boolean): ResourceCleanupHandlers => Object.fromEntries(
+        RESOURCE_CLEANUP_STAGES.map((stage) => [stage, vi.fn(async () => {
+          attempts[stage] += 1;
+          if (fail && stage === failedStage) throw new Error(`${stage} cleanup failed`);
+        })]),
+      );
 
-    const failingHandlers: ResourceCleanupHandlers = {
-      didClose: vi.fn(async () => {
-        didCloseAttempts += 1;
-        throw new Error("LSP connection dropped");
-      }),
-      watcher: vi.fn(async () => {
-        watcherAttempts += 1;
-      }),
-      buffer: vi.fn(async () => {
-        bufferAttempts += 1;
-      }),
-      history: vi.fn(async () => {
-        historyAttempts += 1;
-      }),
+      const lease = coordinator.acquireLease(`fail-${failedStage}.java`, "editor-group");
+      const failed = await lease.release(handlers(true));
+
+      expect(failed.status).toBe("committed-with-recovery");
+      if (failed.status !== "committed-with-recovery") return;
+      expect(failed.recoveryId).toMatch(/^resource-recovery-/);
+      expect(failed.nextStage).toBe(failedStage);
+      expect(failed.completedStages).toEqual(RESOURCE_CLEANUP_STAGES.slice(0, failedIndex));
+      expect(failed.failedStages).toEqual([
+        expect.objectContaining({ stage: failedStage, error: `${failedStage} cleanup failed` }),
+      ]);
+
+      for (const [index, stage] of RESOURCE_CLEANUP_STAGES.entries()) {
+        expect(attempts[stage]).toBe(index <= failedIndex ? 1 : 0);
+      }
+
+      const pending = coordinator.getPendingRecovery(`fail-${failedStage}.java`);
+      expect(pending).toEqual(expect.objectContaining({
+        recoveryId: failed.recoveryId,
+        nextStage: failedStage,
+      }));
+      expect(await coordinator.replayRecoveryById("unknown-recovery", handlers(false))).toBeNull();
+
+      const replayed = await coordinator.replayRecoveryById(failed.recoveryId, handlers(false));
+      expect(replayed).toEqual(expect.objectContaining({
+        status: "committed",
+        recoveryId: failed.recoveryId,
+        completedStages: RESOURCE_CLEANUP_STAGES,
+      }));
+      for (const stage of RESOURCE_CLEANUP_STAGES) {
+        expect(attempts[stage]).toBe(stage === failedStage ? 2 : 1);
+      }
+
+      const replayedAgain = await coordinator.replayRecoveryById(failed.recoveryId, handlers(false));
+      expect(replayedAgain).toEqual(replayed);
+      for (const stage of RESOURCE_CLEANUP_STAGES) {
+        expect(attempts[stage]).toBe(stage === failedStage ? 2 : 1);
+      }
+      expect(coordinator.getPendingRecovery(`fail-${failedStage}.java`)).toBeNull();
+    },
+  );
+
+  it("coalesces concurrent cleanup for one resource so each stage executes once", async () => {
+    const coordinator = new WorkspaceResourceRecoveryCoordinator("ws-test-concurrent");
+    let releaseDidClose!: () => void;
+    const didCloseGate = new Promise<void>((resolve) => {
+      releaseDidClose = resolve;
+    });
+    const handlers: ResourceCleanupHandlers = {
+      didClose: vi.fn(() => didCloseGate),
+      watcher: vi.fn(),
+      buffer: vi.fn(),
+      history: vi.fn(),
     };
 
-    const lease = coordinator.acquireLease("fail.java", "editor-group");
-    const outcome1 = await lease.release(failingHandlers);
+    const first = coordinator.executeResourceCleanup("shared-concurrent.ts", handlers);
+    const second = coordinator.executeResourceCleanup("shared-concurrent.ts", handlers);
+    await vi.waitFor(() => expect(handlers.didClose).toHaveBeenCalledTimes(1));
+    releaseDidClose();
 
-    expect(outcome1.status).toBe("committed-with-recovery");
-    if (outcome1.status === "committed-with-recovery") {
-      expect(outcome1.completedStages).toEqual(["watcher", "buffer", "history"]);
-      expect(outcome1.failedStages).toHaveLength(1);
-      expect(outcome1.failedStages[0].stage).toBe("didClose");
-      expect(outcome1.failedStages[0].error).toContain("LSP connection dropped");
-    }
-
-    // Pending recovery state recorded
-    const pending = coordinator.getPendingRecovery("fail.java");
-    expect(pending).not.toBeNull();
-
-    // Now replay recovery with fixed didClose handler
-    const fixedHandlers: ResourceCleanupHandlers = {
-      didClose: vi.fn(async () => {
-        didCloseAttempts += 1;
-      }),
-      watcher: vi.fn(async () => {
-        watcherAttempts += 1;
-      }),
-      buffer: vi.fn(async () => {
-        bufferAttempts += 1;
-      }),
-      history: vi.fn(async () => {
-        historyAttempts += 1;
-      }),
-    };
-
-    const replayOutcome = await coordinator.replayRecovery("fail.java", fixedHandlers);
-    expect(replayOutcome?.status).toBe("committed");
-    if (replayOutcome?.status === "committed") {
-      expect(replayOutcome.completedStages).toEqual(RESOURCE_CLEANUP_STAGES);
-    }
-
-    // didClose was retried (total 2), but watcher, buffer, and history were NOT re-executed (total 1 each)!
-    expect(didCloseAttempts).toBe(2);
-    expect(watcherAttempts).toBe(1);
-    expect(bufferAttempts).toBe(1);
-    expect(historyAttempts).toBe(1);
-
-    // Pending recovery cleared
-    expect(coordinator.getPendingRecovery("fail.java")).toBeNull();
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+    expect(secondOutcome).toEqual(firstOutcome);
+    expect(firstOutcome.status).toBe("committed");
+    expect(handlers.didClose).toHaveBeenCalledTimes(1);
+    expect(handlers.watcher).toHaveBeenCalledTimes(1);
+    expect(handlers.buffer).toHaveBeenCalledTimes(1);
+    expect(handlers.history).toHaveBeenCalledTimes(1);
   });
 
   it("reconciles active keys by cleaning up unreferenced leases", async () => {

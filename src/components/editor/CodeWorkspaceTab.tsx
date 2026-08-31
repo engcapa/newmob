@@ -2206,6 +2206,7 @@ export function CodeWorkspaceTab({
     waitForSyncQueue: waitForLspDocumentSyncQueue,
     saveDocument: saveLspDocument,
     closeDocument: closeLspDocument,
+    closeDocumentAndWait: closeLspDocumentAndWait,
     updateStatus: updateLspStatusForFile,
   } = useWorkspaceLspSession({
     workspaceInstanceId,
@@ -5753,8 +5754,8 @@ export function CodeWorkspaceTab({
       const closedLeaf = findLeafNode(closedTree, groupId);
 
       const outcome = await coordinator.executeResourceCleanup(key, {
-        didClose: () => {
-          if (file) closeLspDocument(file);
+        didClose: async () => {
+          if (file) await closeLspDocumentAndWait(file);
         },
         watcher: () => {
           const pending = pendingExternalFileEventsRef.current.get(key);
@@ -5813,7 +5814,7 @@ export function CodeWorkspaceTab({
         setStatusMessage(outcome.message);
       }
     },
-    [activeEditorGroupId, closeLspDocument, closeLayoutTabInLeaf, workspaceInstanceId],
+    [activeEditorGroupId, closeLayoutTabInLeaf, closeLspDocumentAndWait, workspaceInstanceId],
   );
   closeFileRef.current = closeFile;
 
@@ -16672,8 +16673,8 @@ export function CodeWorkspaceTab({
                 const activeLeaf = findLeafNode(currentTree, activeEditorGroupId);
 
                 await coordinator.executeResourceCleanup(evictedKey, {
-                  didClose: () => {
-                    if (file) closeLspDocument(file);
+                  didClose: async () => {
+                    if (file) await closeLspDocumentAndWait(file);
                   },
                   watcher: () => {
                     const pending = pendingExternalFileEventsRef.current.get(evictedKey);
