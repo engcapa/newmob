@@ -4,7 +4,7 @@
 > Audit baseline: `5ac80fc4ef663bbcd6c04e11863697b2e4cc060b` (2026-08-29).
 > Historical source: [`code-workspace-ide-design.md`](../code-workspace-ide-design.md), which is an archive rather than a task queue.
 
-Current audit limitation: focused core suites pass (21 files/309 tests plus 3 mounted clipboard tests), but full `pnpm test` fails 5/3,425 tests and `pnpm build` fails TypeScript compilation across several reopened task modules. Consequently, no TypeScript production task is `done` at this baseline; a code-complete narrow task is at most `implemented` until the build gate is green. The only retained `done` card is the document-only ED-MULTIVIEW-001 ADR.
+Current audit limitation: focused core suites pass, but full `pnpm test` is not yet reproducibly green and the repo-wide TypeScript gate has been red. Following the 2026-08-31 maintainer decision (backlog section 3.1), the repo-wide `build` gate is held only by ED-GATE-003, ED-GATE-001, and ED-QA-001; every other card proves type correctness with a path-scoped `typecheck`. A feature card is therefore no longer capped at `implemented` by another card's parked module, but it is still capped by its own scoped typecheck and its own behavioural evidence. Live counts come from `task_board.py`, never from a number inlined in a document.
 
 ## 1. Product Goal And Claim Boundary
 
@@ -100,12 +100,13 @@ Every task owns stable acceptance IDs in its spec. Backlog metadata lists those 
 }
 ```
 
-Allowed evidence kinds are `code-audit`, `unit`, `build`, `rust`, `qa-lint`, `browser`, `native`, `provider`, `performance`, `accessibility`, `idea-comparison`, and `document`. Each `required_evidence` kind needs a matching final `checks` entry with `result: passed`, and the union of `acceptance` on passed checks must cover every acceptance ID on the task card. Checks are chronological, so an initial failure remains in the record while a later pass for the same kind establishes its final result. A check may use an empty acceptance list when it is a broad gate such as `build`; it still satisfies its required evidence kind. `unrun` is informational and can never satisfy a required kind or acceptance ID.
+Allowed evidence kinds are `code-audit`, `unit`, `typecheck`, `build`, `rust`, `qa-lint`, `browser`, `native`, `provider`, `performance`, `accessibility`, `idea-comparison`, and `document`. Each `required_evidence` kind needs a matching final `checks` entry with `result: passed`, and the union of `acceptance` on passed checks must cover every acceptance ID on the task card. Checks are chronological, so an initial failure remains in the record while a later pass for the same kind establishes its final result. A check may use an empty acceptance list when it is a broad gate such as `typecheck` or `build`; it still satisfies its required evidence kind. `unrun` is informational and can never satisfy a required kind or acceptance ID.
 
 Evidence rules:
 
 1. `code-audit` names the production consumer and traces the effect chain; import/export existence alone fails.
 2. `unit` and `build` include the exact command, exit/result, and focused count where available.
+2a. `typecheck` records the `typecheck_scope.py` invocation, the owned-path list, zero scoped errors, and the out-of-scope error count. A scope trimmed to avoid the card's own red files, or an error silenced by deleting an assertion or widening a closed union, does not qualify.
 3. `browser` asserts observable state/effect and undo, not only visibility, key presses, screenshots, or dev-only counters.
 4. `native` uses a packaged or Tauri runtime and a real OS boundary; browser VFS/stubs do not qualify.
 5. `provider` records provider id/version, JDK/tooling, fixture identity, request/result/cancel facts, and postcondition.

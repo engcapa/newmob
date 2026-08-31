@@ -38,7 +38,7 @@ If current code already satisfies the card, do not reimplement it; verify the pr
 
 For behavior changes, add a focused regression test that fails for the intended reason on the claimed baseline. Pure ADR, audit, catalog, or evidence tasks may use a deterministic failing check instead. Follow local patterns and avoid broad rewrites, especially in `CodeWorkspaceTab.tsx`.
 
-Always run focused checks. Run `pnpm build` for TypeScript contracts, production wiring, or UI changes, and relevant Rust tests for Rust/IPC changes. Use the repository `qa-ui-auto` skill when the task changes UI controls, user workflows, testcase YAML, feature ownership, or observation/evidence surfaces. Run native/provider/performance/accessibility/IDEA layers only in qualifying environments; record unavailable layers without fabricating substitutes.
+Always run focused checks. For TypeScript contracts, production wiring, or UI changes run the scoped gate — `python .agents/skills/code-workspace-idea-task/scripts/typecheck_scope.py --path <each path this card owns>` — and run repo-wide `pnpm build` only for the cards that still hold the `build` kind (ED-GATE-003, ED-GATE-001, ED-QA-001). Run relevant Rust tests for Rust/IPC changes. Use the repository `qa-ui-auto` skill when the task changes UI controls, user workflows, testcase YAML, feature ownership, or observation/evidence surfaces. Run native/provider/performance/accessibility/IDEA layers only in qualifying environments; record unavailable layers without fabricating substitutes.
 
 Before updating the board, review the final diff and re-check every acceptance ID against the actual production path. Preserve failed checks before successful reruns in chronological evidence.
 

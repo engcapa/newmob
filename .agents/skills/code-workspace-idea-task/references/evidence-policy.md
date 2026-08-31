@@ -56,7 +56,8 @@ Rules enforced by `task_board.py`:
 |---|---|
 | `code-audit` | Names the production entry and owner, then traces provider/effect, stale/cancel/failure, undo/recovery, and observation. Import/export existence alone fails. |
 | `unit` | Exact command, exit/result, and test count or named assertions. Mock-only tests prove only their modeled boundary. |
-| `build` | Exact build/typecheck command and exit 0 for the current task tree. |
+| `typecheck` | `typecheck_scope.py` (or an equivalent recorded command) over the paths this card owns, exit 0, with the owned-path list and the out-of-scope error count both recorded. Zero errors in the card's own paths is the gate; another card's red module is reported, not inherited. |
+| `build` | Exact repo-wide build command and exit 0 for the current task tree. Reserved for the gate and release cards that own the shared gate; a feature card uses `typecheck`. |
 | `rust` | Exact focused Rust command and result; use only real Rust/IPC coverage. |
 | `qa-lint` | QA catalog/lint/audit command and its counts. A clean lint does not prove behavior. |
 | `browser` | Mounted or E2E assertions for observable entry, effect/result, negative path, and undo/recovery where required. Visibility and screenshots alone fail. |
@@ -77,6 +78,7 @@ Do not use any of these to satisfy a stronger layer:
 - fake LSP responses for provider completeness or refactor safety;
 - QA observation hooks that inject state or execute the action they claim to observe;
 - a passing rerun that omits a still-failing card-specific path;
-- an old commit's evidence without re-running it against the current production path.
+- an old commit's evidence without re-running it against the current production path;
+- a `typecheck` scope narrowed to dodge the card's own red files, or one that silences an error by deleting the assertion, widening a closed union, or weakening a type the production path actually depends on. Scope names what the card owns; it never shrinks to fit what currently compiles.
 
 If a required layer cannot run, use `implemented` when the production outcome is complete or `blocked` when an external prerequisite prevents further work. Never encode `not run` as `passed`.

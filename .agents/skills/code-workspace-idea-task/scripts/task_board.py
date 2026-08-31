@@ -33,6 +33,7 @@ CLAIMABLE_STATUSES = {"ready", "implemented"}
 ALLOWED_EVIDENCE_KINDS = {
     "code-audit",
     "unit",
+    "typecheck",
     "build",
     "rust",
     "qa-lint",

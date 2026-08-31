@@ -16,7 +16,7 @@ The permission state is `unknown | granted | denied` with a monotonic generation
 - **Scope:** duplicate consumer ids, arbitrary detach order, idempotent detach, same path in separate workspaces, final root release.
 - **Contract:** consumer id is descriptive; token is authoritative. Closing a view changes exactly one lease.
 - **Acceptance:** `ED-CLIP-001-A1` duplicate ids have independent tokens; `A2` detach order cannot remove a later lease; `A3` final release clears the workspace slot once.
-- **Required evidence:** `code-audit`, `unit`, `build`.
+- **Required evidence:** `code-audit`, `unit`, `typecheck`.
 
 <a id="ed-clip-002"></a>
 ## ED-CLIP-002 Native Permission Epoch And External Effect Truth
@@ -26,7 +26,7 @@ The permission state is `unknown | granted | denied` with a monotonic generation
 - **Scope:** native/web permission adapter, pre/post-await generation guards, same-value generation stability, and visible workspace fallback. OS-specific automation belongs to ED-CLIP-004.
 - **Contract:** replace numeric `systemEffect` with an explicit `not-performed | performed | unknown` (or an equivalent typed result). A post-write stale generation cannot erase knowledge that a write was attempted/completed.
 - **Acceptance:** `ED-CLIP-002-A1` capability and permission are separate; `A2` denied-before-await has no system effect; `A3` generation change after write reports performed/unknown; `A4` fallback is visible and never labelled system success.
-- **Required evidence:** `code-audit`, `unit`, `build` after maintainer approval of the result contract.
+- **Required evidence:** `code-audit`, `unit`, `typecheck` after maintainer approval of the result contract.
 - **Review decision needed:** confirm the effect-state contract before this task is claimable.
 
 <a id="ed-clip-003"></a>
@@ -37,7 +37,7 @@ The permission state is `unknown | granted | denied` with a monotonic generation
 - **Scope:** workspace clipboard path and mounted browser editor state; system permission remains ED-CLIP-004.
 - **Contract:** paste is one CodeMirror transaction; source remains unchanged; destination selection and text are asserted before and after undo.
 - **Acceptance:** `ED-CLIP-003-A1` A-to-B paste changes expected destination text; `A2` one undo restores destination text/selection; `A3` split close returns lease count to its exact pre-split value.
-- **Required evidence:** `code-audit`, `unit`, `build`.
+- **Required evidence:** `code-audit`, `unit`, `typecheck`.
 
 <a id="ed-clip-004"></a>
 ## ED-CLIP-004 Behavioral And Native Clipboard Case
