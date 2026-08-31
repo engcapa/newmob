@@ -203,6 +203,7 @@ import {
   type WorkspaceDiskEffectLedgerEntryV4,
 } from "./workspace/workspaceRecovery";
 import {
+  applyTabPolicyGroupImagesToLayout,
   applyWorkspaceTabPolicyTransaction,
   enforceTabPolicy,
   pushClosedTab,
@@ -16728,8 +16729,25 @@ export function CodeWorkspaceTab({
                 });
               },
               commitAtomicUpdate: ({ nextGroups, policy }) => {
+                const committedGroups = Object.fromEntries(
+                  Object.entries(nextGroups).map(([groupId, group]) => [groupId, {
+                    id: groupId,
+                    openOrder: [...group.openOrder],
+                    pinnedKeys: [...group.pinnedKeys],
+                    activeKey: group.activeKey,
+                    previewKey: group.previewKey,
+                  }]),
+                ) as typeof currentUi.editorGroups;
+                const nextLayoutTreeV2 = applyTabPolicyGroupImagesToLayout(
+                  currentUi.layoutTreeV2,
+                  committedGroups,
+                );
+                const nextActiveGroup = committedGroups[currentUi.activeEditorGroupId];
                 useCodeWorkspaceStore.getState().patchInstance(workspaceInstanceId, {
-                  editorGroups: nextGroups as typeof currentUi.editorGroups,
+                  editorGroups: committedGroups,
+                  layoutTreeV2: nextLayoutTreeV2,
+                  openOrder: nextActiveGroup?.openOrder ?? currentUi.openOrder,
+                  activeKey: nextActiveGroup?.activeKey ?? currentUi.activeKey,
                   layoutRevision: currentUi.layoutRevision + 1,
                 });
                 setTabPolicy(policy);
@@ -16737,7 +16755,7 @@ export function CodeWorkspaceTab({
                 setTabPolicyRevision((r) => r + 1);
 
                 const persistableGroups = Object.fromEntries(
-                  (Object.entries(nextGroups) as Array<[EditorGroupId, typeof currentUi.editorGroups.primary]>)
+                  (Object.entries(committedGroups) as Array<[EditorGroupId, typeof currentUi.editorGroups.primary]>)
                     .map(([groupId, group]) => [groupId, {
                       ...group,
                       openOrder: group.openOrder.filter((key) => !libraryBuffersRef.current[key]),
@@ -16759,7 +16777,7 @@ export function CodeWorkspaceTab({
                   expandedRootIds,
                   expandedDirKeys,
                   editorGroups: persistableGroups,
-                  layoutTreeV2: currentUi.layoutTreeV2,
+                  layoutTreeV2: nextLayoutTreeV2,
                   tabPolicy: policy,
                 }), {
                   onIssue: (message) => {

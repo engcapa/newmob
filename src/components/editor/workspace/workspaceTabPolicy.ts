@@ -7,7 +7,12 @@
  * only computes decisions so property tests can pin the semantics.
  */
 
-import { getAllLeafNodes, type LayoutNode, type LeafGroupNode } from "./recursiveLayoutTree";
+import {
+  getAllLeafNodes,
+  setLeafTabs,
+  type LayoutNode,
+  type LeafGroupNode,
+} from "./recursiveLayoutTree";
 
 export interface WorkspaceTabPolicyV2 {
   schemaVersion: 2;
@@ -428,6 +433,17 @@ export interface TabPolicyPlan {
   readonly message: string;
 }
 
+export function applyTabPolicyGroupImagesToLayout(
+  layoutTree: LayoutNode,
+  groups: Readonly<Record<string, Pick<TabPolicyGroupImage, "openOrder" | "activeKey">>>,
+): LayoutNode {
+  let nextTree = layoutTree;
+  for (const [groupId, group] of Object.entries(groups)) {
+    nextTree = setLeafTabs(nextTree, groupId, group.openOrder, group.activeKey);
+  }
+  return nextTree;
+}
+
 export interface CreateTabPolicyPlanParams {
   workspaceInstanceId: string;
   nextPolicyRaw: unknown;
@@ -449,22 +465,24 @@ export interface CreateTabPolicyPlanParams {
  * unreferenced eviction keys, and base layout revision into an immutable TabPolicyPlan.
  */
 export function createTabPolicyPlan(params: CreateTabPolicyPlanParams): TabPolicyPlan {
-  const currentPolicy = params.currentPolicy ?? { ...DEFAULT_WORKSPACE_TAB_POLICY_V3 };
+  const currentPolicy = Object.freeze({
+    ...(params.currentPolicy ?? DEFAULT_WORKSPACE_TAB_POLICY_V3),
+  });
   const { policy } = migrateWorkspaceTabPolicy(params.nextPolicyRaw);
-  const normalizedPolicy: WorkspaceTabPolicyV3 = {
+  const normalizedPolicy: WorkspaceTabPolicyV3 = Object.freeze({
     ...policy,
     limitPerLeaf: Math.max(1, Math.min(50, Math.round(policy.limitPerLeaf))),
-  };
+  });
 
   const preGroups: Record<string, TabPolicyGroupImage> = {};
   for (const [gid, g] of Object.entries(params.currentGroups)) {
-    preGroups[gid] = {
+    preGroups[gid] = Object.freeze({
       id: gid,
       openOrder: Object.freeze([...g.openOrder]),
       pinnedKeys: Object.freeze([...g.pinnedKeys]),
       previewKey: g.previewKey,
       activeKey: g.activeKey,
-    };
+    });
   }
 
   const evictionsByGroup: Record<string, string[]> = {};
@@ -507,13 +525,13 @@ export function createTabPolicyPlan(params: CreateTabPolicyPlanParams): TabPolic
       ? null
       : group.previewKey;
 
-    postGroups[groupId] = {
+    postGroups[groupId] = Object.freeze({
       id: groupId,
       openOrder: Object.freeze(remainingOpenOrder),
       pinnedKeys: Object.freeze(group.pinnedKeys.filter((k) => !evicted.includes(k))),
       activeKey: nextActive,
       previewKey: nextPreview,
-    };
+    });
   }
 
   const uniqueEvictedKeys = Object.freeze(Array.from(new Set(allEvictedKeys)));
@@ -743,7 +761,7 @@ export async function applyWorkspaceTabPolicyTransaction(
     return {
       status: "applied",
       plan,
-      committedLayoutRevision: baseLayoutRevision,
+      committedLayoutRevision: baseLayoutRevision + 1,
       policy: plan.postPolicy,
       evictedKeysByGroup: {},
       allEvictedKeys: [],
@@ -833,4 +851,3 @@ export async function applyWorkspaceTabPolicyTransaction(
     persistenceIssue: commitOutcome?.persistenceIssue ?? null,
   };
 }
-

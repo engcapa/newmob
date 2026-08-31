@@ -3,6 +3,7 @@ import {
   CLOSED_TAB_STACK_LIMIT,
   DEFAULT_WORKSPACE_TAB_POLICY,
   DEFAULT_WORKSPACE_TAB_POLICY_V3,
+  applyTabPolicyGroupImagesToLayout,
   applyWorkspaceTabPolicyTransaction,
   buildReopenTreeRoute,
   computeWorkspaceTabPolicyApplication,
@@ -17,7 +18,7 @@ import {
   type WorkspaceTabPolicyV2,
   type WorkspaceTabPolicyV3,
 } from "./workspaceTabPolicy";
-import type { LayoutNode } from "./recursiveLayoutTree";
+import { getAllLeafNodes, type LayoutNode } from "./recursiveLayoutTree";
 
 function meta(key: string, overrides: Partial<TabEvictionMeta> = {}): TabEvictionMeta {
   return { key, dirty: false, pinned: false, preview: false, lastUsedAt: 0, ...overrides };
@@ -345,6 +346,8 @@ describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () =
         workspaceInstanceId: "ws-tab-tx-zero-evict",
         nextPolicyRaw: { limitPerLeaf: 10, order: "alphabetical" },
         currentPolicy: { ...DEFAULT_WORKSPACE_TAB_POLICY_V3, order: "open-order" },
+        baseLayoutRevision: 7,
+        currentLayoutRevision: 7,
         currentGroups: initialGroups,
         openFiles: { clean1: { dirty: false } },
         mruFileKeys: ["clean1"],
@@ -357,6 +360,9 @@ describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () =
       expect(committedResult).not.toBeNull();
       expect(committedResult.policy.order).toBe("alphabetical");
       expect(committedResult.evictedKeys).toHaveLength(0);
+      if (result.status === "applied") {
+        expect(result.committedLayoutRevision).toBe(8);
+      }
     });
 
     it("§8.23.3 X2 aborts with 'stale' status when layout revision changed concurrently", async () => {
@@ -400,6 +406,11 @@ describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () =
 
     describe("§ED-TABS-002 atomic TabPolicyPlan and commit receipt", () => {
       it("creates a frozen TabPolicyPlan capturing pre/post images, dirty keys, and unreferenced keys", () => {
+        const currentPolicy: WorkspaceTabPolicyV3 = {
+          ...DEFAULT_WORKSPACE_TAB_POLICY_V3,
+          order: "open-order",
+          limitPerLeaf: 10,
+        };
         const initialGroups = {
           primary: {
             openOrder: ["clean1", "dirty1", "pinned1"],
@@ -418,7 +429,7 @@ describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () =
         const plan = createTabPolicyPlan({
           workspaceInstanceId: "ws-plan-test",
           nextPolicyRaw: { limitPerLeaf: 1, order: "alphabetical" },
-          currentPolicy: { ...DEFAULT_WORKSPACE_TAB_POLICY_V3, order: "open-order", limitPerLeaf: 10 },
+          currentPolicy,
           baseLayoutRevision: 42,
           currentGroups: initialGroups,
           openFiles: {
@@ -436,8 +447,38 @@ describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () =
         expect(plan.prePolicy.order).toBe("open-order");
         expect(plan.postPolicy.order).toBe("alphabetical");
         expect(plan.postPolicy.limitPerLeaf).toBe(1);
+        expect(Object.isFrozen(plan.prePolicy)).toBe(true);
+        expect(Object.isFrozen(plan.postPolicy)).toBe(true);
+        expect(Object.isFrozen(plan.preGroups.primary)).toBe(true);
+        expect(Object.isFrozen(plan.postGroups.primary)).toBe(true);
         expect(plan.preGroups.primary.openOrder).toEqual(["clean1", "dirty1", "pinned1"]);
         expect(plan.postGroups.primary.openOrder).toHaveLength(1);
+        const postLayout = applyTabPolicyGroupImagesToLayout({
+          type: "split",
+          id: "root",
+          orientation: "horizontal",
+          ratios: [0.5, 0.5],
+          children: [
+            { type: "leaf", id: "primary", openFileKeys: initialGroups.primary.openOrder, activeKey: "dirty1" },
+            { type: "leaf", id: "secondary", openFileKeys: initialGroups.secondary.openOrder, activeKey: "clean2" },
+          ],
+        }, plan.postGroups);
+        expect(getAllLeafNodes(postLayout).map((leaf) => ({
+          id: leaf.id,
+          openOrder: leaf.openFileKeys,
+          activeKey: leaf.activeKey,
+        }))).toEqual([
+          {
+            id: "primary",
+            openOrder: [...plan.postGroups.primary.openOrder],
+            activeKey: plan.postGroups.primary.activeKey,
+          },
+          {
+            id: "secondary",
+            openOrder: [...plan.postGroups.secondary.openOrder],
+            activeKey: plan.postGroups.secondary.activeKey,
+          },
+        ]);
         expect(plan.dirtyEvictedKeys).toContain("dirty1");
         expect(plan.requiresConfirmation).toBe(true);
         // clean1 exists in both groups, evicted from primary but still referenced in secondary:
@@ -445,6 +486,8 @@ describe("§8.21.3 V2-B: computeWorkspaceTabPolicyApplication transaction", () =
         if (plan.postGroups.secondary.openOrder.includes("clean1")) {
           expect(plan.unreferencedEvictedKeys).not.toContain("clean1");
         }
+        currentPolicy.order = "mru";
+        expect(plan.prePolicy.order).toBe("open-order");
       });
 
       it("re-verifies live layout revision after async confirmation and aborts with zero mutations when stale", async () => {
