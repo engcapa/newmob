@@ -69,6 +69,48 @@ describe("ED-PERF-002: lspDetectServers caching & deduplication", () => {
     await lspDetectServers({ forceRefresh: true });
     expect(coreMocks.invoke).toHaveBeenCalledTimes(2);
   });
+
+  it("shares an in-flight request with a concurrent forced refresh", async () => {
+    let resolveDetection!: (value: LspServerStatus[]) => void;
+    coreMocks.invoke.mockImplementation(() => new Promise((resolve) => {
+      resolveDetection = resolve;
+    }));
+
+    const normal = lspDetectServers({ javaHome: "/jdk17" });
+    const forced = lspDetectServers({ javaHome: "/jdk17", forceRefresh: true });
+    expect(forced).toBe(normal);
+    expect(coreMocks.invoke).toHaveBeenCalledTimes(1);
+
+    resolveDetection([mockStatus]);
+    await expect(Promise.all([normal, forced])).resolves.toEqual([[mockStatus], [mockStatus]]);
+  });
+
+  it("does not repopulate cleared cache with an older in-flight response", async () => {
+    let resolveOld!: (value: LspServerStatus[]) => void;
+    let resolveFresh!: (value: LspServerStatus[]) => void;
+    coreMocks.invoke
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOld = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFresh = resolve;
+      }));
+
+    const old = lspDetectServers({ javaHome: "/jdk17" });
+    clearLspDetectCache();
+    const fresh = lspDetectServers({ javaHome: "/jdk17", forceRefresh: true });
+    expect(coreMocks.invoke).toHaveBeenCalledTimes(2);
+
+    resolveOld([{ ...mockStatus, displayName: "old" }]);
+    await expect(old).resolves.toMatchObject([{ displayName: "old" }]);
+    resolveFresh([{ ...mockStatus, displayName: "fresh" }]);
+    await expect(fresh).resolves.toMatchObject([{ displayName: "fresh" }]);
+
+    await expect(lspDetectServers({ javaHome: "/jdk17" })).resolves.toMatchObject([
+      { displayName: "fresh" },
+    ]);
+    expect(coreMocks.invoke).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("ED-QUERY-001: LSP cancellation identity", () => {

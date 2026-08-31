@@ -54,6 +54,7 @@ interface UseWorkspaceLspSessionOptions {
   updateLspFiles: LspFilesUpdater;
   onError: (message: string) => void;
   onRestart?: () => void;
+  visible?: boolean;
 }
 
 interface PendingDocumentSync {
@@ -147,7 +148,7 @@ export interface WorkspaceLspSessionController {
   serverStatuses: LspServerStatus[];
   commandPrefs: Record<string, string>;
   customCommands: Record<string, LspCustomCommandConfig>;
-  refreshServerStatuses: () => Promise<void>;
+  refreshServerStatuses: (forceRefresh?: boolean) => Promise<void>;
   updateCommandPref: (presetId: string, commandId: string) => void;
   updateCustomCommand: (presetId: string, patch: Partial<LspCustomCommandConfig>) => void;
   descriptorForFile: (file: OpenFileState) => LspDocumentDescriptor | null;
@@ -181,6 +182,7 @@ export function useWorkspaceLspSession({
   updateLspFiles,
   onError,
   onRestart,
+  visible = true,
 }: UseWorkspaceLspSessionOptions): WorkspaceLspSessionController {
   const [serverStatuses, setServerStatuses] = useState<LspServerStatus[]>([]);
   const [commandPrefs, setCommandPrefs] = useState<Record<string, string>>(() => readLspCommandPrefs());
@@ -199,6 +201,10 @@ export function useWorkspaceLspSession({
   const diagnosticsRequestSequenceRef = useRef<Record<string, number>>({});
   const syncQueuesRef = useRef<Record<string, DocumentSyncQueue>>({});
   const mountedRef = useRef(true);
+  const visibleRef = useRef(visible);
+  const serverRefreshSequenceRef = useRef(0);
+  const previousVisibleRef = useRef(visible);
+  visibleRef.current = visible;
 
   useEffect(() => {
     rootsRef.current = roots;
@@ -219,27 +225,46 @@ export function useWorkspaceLspSession({
     };
   }, []);
 
+  useEffect(() => {
+    serverRefreshSequenceRef.current += 1;
+  }, [visible]);
+
   useEffect(() => () => {
     void lspStopWorkspace(workspaceInstanceId);
   }, [workspaceInstanceId]);
 
-  const refreshServerStatuses = useCallback(async () => {
+  const refreshServerStatuses = useCallback(async (forceRefresh = false) => {
+    const requestSequence = ++serverRefreshSequenceRef.current;
+    const isCurrentRequest = () => (
+      mountedRef.current
+      && visibleRef.current
+      && serverRefreshSequenceRef.current === requestSequence
+    );
+    if (!isCurrentRequest()) return;
     try {
       const home = readLspJavaHome().trim();
+      if (!isCurrentRequest()) return;
       await lspSetJavaHome(home || null);
+      if (!isCurrentRequest()) return;
       await lspSetJavaVmargs(readLspJavaVmargs());
+      if (!isCurrentRequest()) return;
       await lspSetJavaSettings(readLspJavaSettings());
+      if (!isCurrentRequest()) return;
       await lspSetJavaBundles(readLspJavaBundles());
-      const statuses = await lspDetectServers({ javaHome: home || null });
-      if (mountedRef.current) setServerStatuses(statuses);
+      if (!isCurrentRequest()) return;
+      const statuses = await lspDetectServers({ javaHome: home || null, forceRefresh });
+      if (isCurrentRequest()) setServerStatuses(statuses);
     } catch (error) {
-      if (mountedRef.current) onError(errorMessage(error));
+      if (isCurrentRequest()) onError(errorMessage(error));
     }
   }, [onError]);
 
   useEffect(() => {
-    void refreshServerStatuses();
-  }, [refreshServerStatuses]);
+    const becameVisible = !previousVisibleRef.current;
+    previousVisibleRef.current = visible;
+    if (!visible) return;
+    void refreshServerStatuses(becameVisible);
+  }, [refreshServerStatuses, visible]);
 
   const restartWorkspaceServers = useCallback(() => {
     if (!mountedRef.current) return;
@@ -262,7 +287,7 @@ export function useWorkspaceLspSession({
     void lspStopWorkspace(workspaceInstanceId)
       .catch(() => undefined)
       .finally(() => {
-        if (mountedRef.current) void refreshServerStatuses();
+        if (mountedRef.current) void refreshServerStatuses(true);
       });
   }, [onRestart, refreshServerStatuses, updateLspFiles, workspaceInstanceId]);
 

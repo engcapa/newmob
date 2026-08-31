@@ -2190,6 +2190,7 @@ export function CodeWorkspaceTab({
     updateLspFiles: setLspFiles,
     onError: setStatusMessage,
     onRestart: invalidateSemanticAfterLspRestart,
+    visible,
   });
   // §8.20.3 W2: provider-owned Project Analysis snapshot (phase/progress/
   // modules/classpath fingerprint). The generation resync rides the statuses

@@ -181,6 +181,61 @@ describe("useWorkspaceLspSession", () => {
     unmount();
   });
 
+  it("ED-PERF-002-A1: skips server detection while hidden and refreshes when shown", async () => {
+    const onError = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ visible }) => useWorkspaceLspSession({
+        workspaceInstanceId: "workspace-hidden-detection",
+        roots,
+        openFilesRef: { current: {} },
+        updateLspFiles: vi.fn(),
+        onError,
+        visible,
+      }),
+      { initialProps: { visible: false } },
+    );
+
+    await act(async () => Promise.resolve());
+    expect(lspMocks.lspSetJavaHome).not.toHaveBeenCalled();
+    expect(lspMocks.lspDetectServers).not.toHaveBeenCalled();
+    expect(result.current.serverStatuses).toEqual([]);
+
+    rerender({ visible: true });
+    await waitFor(() => expect(lspMocks.lspDetectServers).toHaveBeenCalledOnce());
+    expect(lspMocks.lspDetectServers).toHaveBeenCalledWith({ javaHome: null, forceRefresh: true });
+    expect(result.current.serverStatuses).toEqual([]);
+  });
+
+  it("ED-PERF-002-A3: drops a slow detection result after the workspace is hidden", async () => {
+    let resolveJavaHome!: () => void;
+    lspMocks.lspSetJavaHome.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveJavaHome = resolve;
+    }));
+    const onError = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ visible }) => useWorkspaceLspSession({
+        workspaceInstanceId: "workspace-hidden-slow-detection",
+        roots,
+        openFilesRef: { current: {} },
+        updateLspFiles: vi.fn(),
+        onError,
+        visible,
+      }),
+      { initialProps: { visible: true } },
+    );
+
+    await waitFor(() => expect(lspMocks.lspSetJavaHome).toHaveBeenCalledOnce());
+    rerender({ visible: false });
+    resolveJavaHome();
+    await act(async () => Promise.resolve());
+    expect(lspMocks.lspDetectServers).not.toHaveBeenCalled();
+    expect(result.current.serverStatuses).toEqual([]);
+
+    rerender({ visible: true });
+    await waitFor(() => expect(lspMocks.lspDetectServers).toHaveBeenCalledOnce());
+    expect(lspMocks.lspDetectServers).toHaveBeenCalledWith({ javaHome: null, forceRefresh: true });
+  });
+
   it("records the file revision and provider session scope for diagnostics", async () => {
     const diagnostic: LspDiagnostic = {
       range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
