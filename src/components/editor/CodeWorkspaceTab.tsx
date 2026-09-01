@@ -5428,7 +5428,7 @@ export function CodeWorkspaceTab({
       if (!file || file.loading || file.saving || !file.dirty) return;
 
       const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
-      let formatError: string | null = null;
+      let saveActionError: string | null = null;
 
       const snapshotRevision = file.documentRevision ?? 0;
       const styleGeneration = workspaceStyleControllerRef.current.getGeneration();
@@ -5502,7 +5502,7 @@ export function CodeWorkspaceTab({
             try {
               return await formatFileText({ ...file, text: currentText });
             } catch (err) {
-              formatError = errorMessage(err);
+              saveActionError = `Format: ${errorMessage(err)}`;
               return null;
             }
           },
@@ -5555,22 +5555,34 @@ export function CodeWorkspaceTab({
               const planResult = await canonicalCodeActionServiceRef.current!.planAction(context, client, {
                 only: ["source.organizeImports"],
               });
+              if (!planResult.plan) {
+                const noAction = planResult.requestState === "ready"
+                  && planResult.outcome.state === "unresolved"
+                  && planResult.outcome.reason === "No actions returned";
+                if (planResult.requestState !== "unsupported" && !noAction) {
+                  const reason = "reason" in planResult.outcome
+                    ? planResult.outcome.reason
+                    : planResult.outcome.state;
+                  saveActionError = `Organize imports: ${reason}`;
+                }
+                return null;
+              }
 
               const validation = validateAndApplyOrganizeImportsPlan(
                 textToProcess,
                 context.document.uri,
                 planResult.plan,
+                context.document.revision,
               );
 
               if (validation.valid && validation.transformedText !== null) {
                 return validation.transformedText;
               }
-              if (!validation.valid && validation.status === "failed") {
-                formatError = validation.reason ?? "Organize imports validation failed";
-                throw new Error(formatError);
+              if (!validation.valid) {
+                saveActionError = `Organize imports: ${validation.reason ?? "plan validation failed"}`;
               }
             } catch (err) {
-              formatError = errorMessage(err);
+              saveActionError = `Organize imports: ${errorMessage(err)}`;
               return null;
             }
             return null;
@@ -5586,8 +5598,8 @@ export function CodeWorkspaceTab({
         if (wasStale) {
           setStatusMessage(`Saved previous snapshot of ${file.subtitle}; current changes remain unsaved`);
         } else {
-          setStatusMessage(formatError
-            ? `Saved ${file.subtitle}; format on save failed: ${formatError}`
+          setStatusMessage(saveActionError
+            ? `Saved ${file.subtitle}; save action issue: ${saveActionError}`
             : `Saved ${file.subtitle}`);
         }
         if (isJavaBuildFile(file.languagePath) && lspFilesRef.current[key]?.status?.active) {

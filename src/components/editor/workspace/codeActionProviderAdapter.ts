@@ -597,10 +597,12 @@ export class CanonicalCodeActionService {
       if (reqRes.state === "unsupported") reason = reqRes.reason;
       else if (reqRes.state === "failed" || reqRes.state === "malformed") reason = reqRes.message;
       else if (reqRes.state === "empty") reason = "Provider returned a null code-action response";
+      else if (reqRes.state === "timeout") reason = "Code-action request timed out";
       else if (reqRes.state === "cancelled") reason = "Code-action request was cancelled";
       else reason = "No actions returned";
       return {
         plan: null,
+        requestState: reqRes.state,
         outcome: {
           state: "unresolved",
           reason,
@@ -634,6 +636,7 @@ export class CanonicalCodeActionService {
 
     return {
       plan: resolveOutcome.state === "resolved" ? resolveOutcome.plan : null,
+      requestState: reqRes.state,
       outcome: resolveOutcome,
       effectCounters: { liveEdits: 0, diskWrites: 0, historyEntries: 0, commands: 0 },
     };
@@ -950,6 +953,7 @@ export function extractAffectedUrisFromWorkspaceEdit(edit: LspWorkspaceEdit | nu
 
 export interface PlanOnlyCodeActionResult {
   plan: ImmutableCodeActionPlan | null;
+  requestState: CodeActionProviderResultV4["state"];
   outcome: CodeActionResolveOutcome;
   effectCounters: {
     liveEdits: 0;

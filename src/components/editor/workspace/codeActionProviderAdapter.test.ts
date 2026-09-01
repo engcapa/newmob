@@ -672,6 +672,7 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
       });
 
       expect(planResult.outcome.state).toBe("resolved");
+      expect(planResult.requestState).toBe("ready");
       expect(planResult.plan).not.toBeNull();
       expect(planResult.plan?.title).toBe("Organize Imports");
       expect(planResult.plan?.edit?.documentEdits).toHaveLength(1);
@@ -695,8 +696,27 @@ describe("§8.21.4 V3 Intention session recovery and preconditions", () => {
       });
 
       expect(planResult.plan).toBeNull();
+      expect(planResult.requestState).toBe("ready");
       expect(planResult.outcome.state).toBe("unresolved");
       expect(planResult.effectCounters).toEqual({
+        liveEdits: 0,
+        diskWrites: 0,
+        historyEntries: 0,
+        commands: 0,
+      });
+
+      const failedResult = await service.planAction(sampleContext, {
+        requestCodeActions: vi.fn().mockRejectedValue(new Error("provider transport failed")),
+      }, {
+        only: ["source.organizeImports"],
+      });
+      expect(failedResult.plan).toBeNull();
+      expect(failedResult.requestState).toBe("failed");
+      expect(failedResult.outcome).toMatchObject({
+        state: "unresolved",
+        reason: expect.stringContaining("provider transport failed"),
+      });
+      expect(failedResult.effectCounters).toEqual({
         liveEdits: 0,
         diskWrites: 0,
         historyEntries: 0,

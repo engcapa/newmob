@@ -2712,6 +2712,41 @@ describe("CodeWorkspaceTab", () => {
       useCodeWorkspaceStore.getState(),
       "instance-action-save-plan",
     ).openFiles["root:app:src/main.ts"]?.dirty).toBe(false));
+
+    lspMocks.lspCodeActions.mockRejectedValueOnce(new Error("provider transport failed"));
+    const currentContent = rendered.container.querySelector<HTMLElement>(".cm-content");
+    const currentView = currentContent ? EditorView.findFromDOM(currentContent) : null;
+    expect(currentView).not.toBeNull();
+    act(() => {
+      currentView!.dispatch({
+        changes: { from: currentView!.state.doc.length, insert: "// second save\n" },
+      });
+    });
+    const secondText = `${dirtyText}// second save\n`;
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-action-save-plan",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe(secondText));
+
+    fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledTimes(2));
+    expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenLastCalledWith(
+      "/repo/app",
+      "src/main.ts",
+      secondText,
+      "hash-organized",
+      "UTF-8",
+      false,
+    );
+    expect(lspMocks.lspExecuteCommand).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseWrite(writeAck(file("src/main.ts", secondText, { hash: "hash-second-save" })));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain(
+      "save action issue: Organize imports: Code action request failed: provider transport failed",
+    ));
   });
 
   it("supersedes an older intention request when another entry opens", async () => {
