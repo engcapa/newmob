@@ -29,6 +29,10 @@ import type {
 import type { OpenFileEol } from "./editorGroupTypes";
 import {
   runSaveNormalizationPipeline,
+  type SavePlanDiskIdentity,
+  type SavePlanDocumentIdentity,
+  type SavePlanProjectIdentity,
+  type SavePlanProviderIdentity,
   type SaveNormalizationResult,
 } from "./saveNormalizationPipeline";
 import {
@@ -74,6 +78,10 @@ export interface SaveTransactionV2 {
   bufferVersion: number;
   styleGeneration: number;
   expectedDiskHash: string | null;
+  documentIdentity?: SavePlanDocumentIdentity;
+  diskIdentity?: SavePlanDiskIdentity;
+  providerIdentity?: SavePlanProviderIdentity;
+  projectIdentity?: SavePlanProjectIdentity;
   explicitOverride?: ExplicitIndentationOverride | null;
   policy: {
     eol?: OpenFileEol | "lf" | "crlf" | "cr";
@@ -490,6 +498,10 @@ export class WorkspaceStyleController {
       organizeImportsFn: options?.organizeImportsFn,
       expectedVersion: transaction.bufferVersion,
       getLatestBufferVersion: options?.getLatestBufferVersion,
+      documentIdentity: transaction.documentIdentity,
+      diskIdentity: transaction.diskIdentity,
+      providerIdentity: transaction.providerIdentity,
+      projectIdentity: transaction.projectIdentity,
     });
 
     if (normResult.cancelledDueToEdit) {
@@ -558,6 +570,7 @@ export class WorkspaceStyleController {
       bufferRevision: transaction.bufferVersion,
       styleGeneration: transaction.styleGeneration,
       expectedDiskHash: transaction.expectedDiskHash,
+      normalizationPlan: normResult.plan,
       policy: resolveWritePolicy({
         explicit: {
           eol: normResult.resolvedEol ?? resolvedEol ?? "lf",

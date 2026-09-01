@@ -5432,6 +5432,9 @@ export function CodeWorkspaceTab({
 
       const snapshotRevision = file.documentRevision ?? 0;
       const styleGeneration = workspaceStyleControllerRef.current.getGeneration();
+      const descriptor = lspDescriptorForFile(file);
+      const lspStatus = lspFilesRef.current[file.key]?.status ?? null;
+      const projectRoot = file.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
 
       const tx: SaveTransactionV2 = {
         id: `tx-save-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -5441,6 +5444,31 @@ export function CodeWorkspaceTab({
         bufferVersion: snapshotRevision,
         styleGeneration,
         expectedDiskHash: file.hash ?? null,
+        documentIdentity: {
+          uri: descriptor?.documentUri
+            ?? lspStatus?.uri
+            ?? descriptor?.filePath
+            ?? `file://${absPath}`,
+          path: absPath,
+          revision: snapshotRevision,
+          languageId: lspStatus?.languageId
+            ?? descriptor?.languageId
+            ?? "plaintext",
+        },
+        diskIdentity: {
+          mtimeMs: file.mtime,
+          sizeBytes: file.size,
+          exists: true,
+          sha256: file.hash ?? null,
+        },
+        providerIdentity: {
+          id: lspStatus?.presetId ?? null,
+          generation: lspStatus?.presetId ? lspSessionGeneration() : null,
+        },
+        projectIdentity: {
+          fingerprint: projectAnalysisSnapshot?.projectFingerprint ?? null,
+          rootUri: projectRoot ? `file://${normalizeFsPath(projectRoot.path)}` : null,
+        },
         explicitOverride: indentationOverridesRef.current[file.key] ?? null,
         policy: {
           eol: (file.eol?.toLowerCase() as "lf" | "crlf" | "cr") ?? "lf",
@@ -5585,8 +5613,12 @@ export function CodeWorkspaceTab({
       activeKey,
       commitOpenBufferPreparedSave,
       formatFileText,
+      findRoot,
       intelligencePreferences.formatOnSave,
+      lspDescriptorForFile,
+      lspSessionGeneration,
       promptReloadProject,
+      projectAnalysisSnapshot?.projectFingerprint,
       setStatusMessage,
       workspaceInstanceId,
     ],

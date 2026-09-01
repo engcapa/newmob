@@ -11,6 +11,7 @@ import {
   type PreparedSave,
   type SaveCommitResult,
 } from "./saveCommit";
+import type { ImmutableSavePlan } from "./saveNormalizationPipeline";
 import type { WorkspaceFile } from "../../../lib/editor/workspace";
 
 function fakeWrittenFile(hash: string): WorkspaceFile {
@@ -166,6 +167,79 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
       expect(outcome.file.hash).toBe("hash-saved-1");
       expect(outcome.savedRevision).toBe(1);
       expect(outcome.currentRevision).toBe(2);
+    }
+  });
+
+  it("carries the complete immutable normalization plan to the production commit boundary", async () => {
+    const ctrl = new WorkspaceStyleController({
+      workspaceId: "ws-plan",
+      roots: [{ path: "/project" }],
+      fileProvider: { readFile: async () => null },
+    });
+    const tx: SaveTransactionV2 = {
+      id: "tx-plan",
+      workspaceId: "ws-plan",
+      fileKey: "key-plan",
+      filePath: "/project/src/App.java",
+      bufferVersion: 7,
+      styleGeneration: 0,
+      expectedDiskHash: "disk-hash",
+      documentIdentity: {
+        uri: "file:///project/src/App.java",
+        path: "/project/src/App.java",
+        revision: 7,
+        languageId: "java",
+      },
+      diskIdentity: {
+        mtimeMs: 1700000000000,
+        sizeBytes: 18,
+        exists: true,
+        sha256: "disk-hash",
+      },
+      providerIdentity: { id: "jdtls", generation: 4 },
+      projectIdentity: { fingerprint: "project-fingerprint", rootUri: "file:///project" },
+      policy: { eol: "lf", encoding: "UTF-8", bom: false },
+      text: "class App {  \n}\n",
+    };
+
+    let normalizationPlan: ImmutableSavePlan | undefined;
+    const commit: PreparedSaveCommitter = vi.fn(async (prepared): Promise<SaveCommitResult> => {
+      normalizationPlan = Reflect.get(prepared, "normalizationPlan") as ImmutableSavePlan | undefined;
+      return {
+        kind: "saved-current",
+        transactionId: prepared.transactionId,
+        diskEffect: "committed",
+        memoryEffect: "saved-current",
+        providerEffect: "did-save",
+        file: fakeWrittenFile("written-hash"),
+      };
+    });
+
+    await ctrl.executeSaveTransaction(tx, commit, {
+      getLatestBufferVersion: () => 7,
+    });
+
+    expect(normalizationPlan).toBeDefined();
+    expect(Object.isFrozen(normalizationPlan)).toBe(true);
+    expect(normalizationPlan?.identity).toMatchObject({
+      document: { uri: "file:///project/src/App.java", revision: 7, languageId: "java" },
+      disk: { sha256: "disk-hash", exists: true },
+      provider: { id: "jdtls", generation: 4 },
+      project: { fingerprint: "project-fingerprint", rootUri: "file:///project" },
+      encoding: { charset: "UTF-8", bom: false },
+    });
+    expect(normalizationPlan?.stages.map((stage) => stage.stage)).toEqual([
+      "format",
+      "organize-imports",
+      "trim",
+      "final-newline",
+      "eol",
+      "charset-bom",
+    ]);
+    for (const stage of normalizationPlan?.stages ?? []) {
+      expect(stage.status).toBeTruthy();
+      expect(stage.beforeHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(stage.afterHash).toMatch(/^[a-f0-9]{64}$/);
     }
   });
 

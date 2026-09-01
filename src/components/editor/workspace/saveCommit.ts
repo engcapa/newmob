@@ -17,6 +17,7 @@ import {
 } from "../../../lib/editor/workspace";
 import type { OpenFileEol } from "./editorGroupTypes";
 import { sha256Hex, sha256HexBytes } from "./projectAnalysisModel";
+import type { ImmutableSavePlan } from "./saveNormalizationPipeline";
 
 export type SaveEol = "lf" | "crlf" | "cr";
 
@@ -55,6 +56,8 @@ export interface PreparedSave {
   styleGeneration: number;
   expectedDiskHash: string | null;
   policy: SaveCommitPolicy;
+  /** Six-stage prepare record when this write originated from the save pipeline. */
+  normalizationPlan?: ImmutableSavePlan;
 }
 
 /**
@@ -538,6 +541,7 @@ export function buildPreparedSave(input: {
   styleGeneration: number;
   expectedDiskHash: string | null;
   policy: SaveCommitPolicy;
+  normalizationPlan?: ImmutableSavePlan;
 }): PreparedSave {
   return { ...input, policy: { ...input.policy } };
 }
