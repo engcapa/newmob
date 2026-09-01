@@ -76,8 +76,9 @@ import {
 } from "@codemirror/language";
 import { openSearchPanel, search } from "@codemirror/search";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
-import { readTextResult, writeText } from "../../../lib/clipboard";
+import { readNativeTextResult, readTextResult, writeText } from "../../../lib/clipboard";
 import { codeViewExtensions } from "../../../lib/codeViewTheme";
+import { getAppPlatform, isTauriRuntime } from "../../../lib/runtime";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type {
   LspCompletionItem,
@@ -92,7 +93,18 @@ import type {
 } from "../../../lib/editor/lsp";
 import type { ParameterPopupView } from "./referenceInfoSession";
 import { languageForPath } from "../../git/diffLanguage";
-import { useWorkspaceClipboardSession, type WorkspaceClipboardHandle } from "./workspaceClipboardSession";
+import {
+  useWorkspaceClipboardSession,
+  type GuardedSystemReadResult,
+  type GuardedSystemWriteResult,
+  type WorkspaceClipboardHandle,
+} from "./workspaceClipboardSession";
+import {
+  createClipboardReadObservation,
+  createClipboardWriteObservation,
+  type ClipboardObservationOperation,
+  type ClipboardObservationRecord,
+} from "./clipboardObservationContract";
 import { createWorkspaceSearchPanel, WORKSPACE_SEARCH_STYLE } from "./editorSearchPanel";
 import {
   activeLspSnippetChoices,
@@ -217,6 +229,13 @@ interface CodeMirrorHostProps {
   clipboardHandle?: WorkspaceClipboardHandle | null;
   /** Surfaced when a clipboard operation degraded (system clipboard failed). */
   onClipboardUnavailable?: (message: string) => void;
+  /**
+   * ED-CLIP-004: typed, metadata-only observation of every settled guarded
+   * clipboard result. Carries outcome/effect/permission-epoch facts, never the
+   * clipboard payload, so packaged-runtime evidence can assert which enum
+   * member production actually chose.
+   */
+  onClipboardObservation?: (record: ClipboardObservationRecord) => void;
   diagnostics: LspDiagnostic[];
   highlights?: LspDocumentHighlight[];
   inlayHints?: LspInlayHint[];
@@ -360,10 +379,65 @@ const clipboardContextByView = new WeakMap<
   {
     workspaceId: string | null;
     onUnavailable: (message: string) => void;
+    /** ED-CLIP-004: typed metadata-only observation of the guarded result. */
+    onObservation?: (record: ClipboardObservationRecord) => void;
     /** Refcounted session handle (§8.18.4); null for legacy non-workspace views. */
     handle: WorkspaceClipboardHandle | null;
   }
 >();
+
+/**
+ * ED-CLIP-004: project one settled guarded clipboard result into the typed
+ * observation seam. Copy/cut report the local payload shape; paste reports the
+ * shape of whatever was actually inserted (OS text or workspace fallback).
+ */
+function reportClipboardWriteObservation(
+  view: EditorView,
+  operation: ClipboardObservationOperation,
+  result: GuardedSystemWriteResult,
+  payload: EditorClipboardPayload,
+  caretCount: number,
+): void {
+  const context = clipboardContextByView.get(view);
+  if (!context?.onObservation) return;
+  const handle = context.handle;
+  const snapshot = handle?.getSnapshot();
+  context.onObservation(createClipboardWriteObservation({
+    operation,
+    result,
+    payload: {
+      plainText: payload.plainText,
+      segments: payload.segments,
+      rectangular: payload.rectangular,
+    },
+    permission: snapshot?.permission ?? "unknown",
+    permissionGeneration: snapshot?.permissionGeneration ?? 0,
+    historyExclusion: snapshot?.exclusion ?? "recorded",
+    payloadRevision: snapshot?.payloadRevision ?? 0,
+    caretCount,
+  }));
+}
+
+function reportClipboardReadObservation(
+  view: EditorView,
+  operation: ClipboardObservationOperation,
+  result: GuardedSystemReadResult,
+  caretCount: number,
+): void {
+  const context = clipboardContextByView.get(view);
+  if (!context?.onObservation) return;
+  const handle = context.handle;
+  const snapshot = handle?.getSnapshot();
+  context.onObservation(createClipboardReadObservation({
+    operation,
+    result,
+    permission: snapshot?.permission ?? "unknown",
+    permissionGeneration: snapshot?.permissionGeneration ?? 0,
+    historyExclusion: snapshot?.exclusion ?? "recorded",
+    payloadRevision: snapshot?.payloadRevision ?? 0,
+    caretCount,
+  }));
+}
 
 type ClipboardStoreLike = Pick<WorkspaceClipboardHandle, "write" | "read" | "pasteFromHistory">
   & Partial<Pick<WorkspaceClipboardHandle, "historyExclusion">>;
@@ -434,6 +508,7 @@ function writeEditorSelectionToClipboard(view: EditorView): boolean {
   if (!payload) return false;
   const context = clipboardContextByView.get(view);
   const handle = context?.handle;
+  const caretCountAtCopy = view.state.selection.ranges.length;
   if (handle) {
     void handle.writeSystemClipboard(payload.plainText).then((res) => {
       if (!view.dom.isConnected) return;
@@ -467,6 +542,10 @@ function writeEditorSelectionToClipboard(view: EditorView): boolean {
           "System clipboard write effect is unknown — copy kept for in-workspace paste",
         );
       }
+      // Reported after the payload landed in the slot so the observation's
+      // revision/exclusion fields describe the committed state, not the
+      // pre-write one.
+      reportClipboardWriteObservation(view, "copy", res, payload, caretCountAtCopy);
     });
     return true;
   }
@@ -487,6 +566,16 @@ function writeEditorSelectionToClipboard(view: EditorView): boolean {
   return true;
 }
 
+function readCodeWorkspaceClipboardText() {
+  // Linux/WebKitGTK can return an old in-process clipboard value after the
+  // current X11 owner rejects conversion. Cross the Rust boundary there so a
+  // real denial stays observable. Keep the established macOS/Windows strategy
+  // in readTextResult(): those platforms are outside this card's native matrix.
+  return isTauriRuntime() && getAppPlatform() === "linux"
+    ? readNativeTextResult()
+    : readTextResult();
+}
+
 function pasteSystemClipboard(view: EditorView): boolean {
   if (view.composing || view.state.readOnly) return false;
   const docAtRequest = view.state.doc;
@@ -494,16 +583,21 @@ function pasteSystemClipboard(view: EditorView): boolean {
   const context = clipboardContextByView.get(view);
   const handle = context?.handle;
 
+  const caretCountAtPaste = view.state.selection.ranges.length;
+
   if (handle) {
-    void handle.readSystemClipboard().then((result) => {
+    void handle.readSystemClipboard({ readTextResult: readCodeWorkspaceClipboardText }).then((result) => {
       if (
         !view.dom.isConnected
         || view.composing
         || view.state.doc !== docAtRequest
         || !view.state.selection.eq(selectionAtRequest, true)
       ) {
+        // Stale/cancelled paste: no effect and, per the shared contract, no
+        // observation entry either.
         return;
       }
+      reportClipboardReadObservation(view, "paste", result, caretCountAtPaste);
       if (result.outcome === "success") {
         pasteEditorClipboardPayload(
           view,
@@ -539,7 +633,7 @@ function pasteSystemClipboard(view: EditorView): boolean {
     return true;
   }
 
-  void readTextResult()
+  void readCodeWorkspaceClipboardText()
     .then((result) => {
       if (
         !result.ok
@@ -593,9 +687,12 @@ function pasteAsPlainText(view: EditorView): boolean {
   const context = clipboardContextByView.get(view);
   const handle = context?.handle;
 
+  const caretCountAtPlainPaste = view.state.selection.ranges.length;
+
   if (handle) {
-    void handle.readSystemClipboard().then((result) => {
+    void handle.readSystemClipboard({ readTextResult: readCodeWorkspaceClipboardText }).then((result) => {
       if (!view.dom.isConnected || view.composing || view.state.doc !== docAtRequest) return;
+      reportClipboardReadObservation(view, "paste-plain", result, caretCountAtPlainPaste);
       const text = result.outcome === "success" ? result.text : result.fallbackSession?.plainText ?? "";
       if (!text) {
         context?.onUnavailable(
@@ -623,7 +720,7 @@ function pasteAsPlainText(view: EditorView): boolean {
     return true;
   }
 
-  void readTextResult()
+  void readCodeWorkspaceClipboardText()
     .then((result) => {
       if (!view.dom.isConnected || view.composing || view.state.doc !== docAtRequest) return;
       const session = workspaceStoreFor(context)?.read() ?? null;
@@ -662,6 +759,8 @@ function cutSystemClipboard(view: EditorView): boolean {
   const context = clipboardContextByView.get(view);
   const handle = context?.handle;
 
+  const caretCountAtCut = view.state.selection.ranges.length;
+
   if (handle) {
     void handle.writeSystemClipboard(payload.plainText).then((res) => {
       if (
@@ -695,6 +794,7 @@ function cutSystemClipboard(view: EditorView): boolean {
         context?.onUnavailable(reasonMsg);
         view.focus();
       }
+      reportClipboardWriteObservation(view, "cut", res, payload, caretCountAtCut);
     });
     return true;
   }
@@ -1566,6 +1666,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   clipboardWorkspaceId,
   clipboardHandle,
   onClipboardUnavailable,
+  onClipboardObservation,
   onComplete,
   onCompleteResolve,
   getCompletionIdentity,
@@ -1636,6 +1737,12 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   });
   onClipboardUnavailableRef.current = (message: string) => {
     onClipboardUnavailable?.(message);
+  };
+  const onClipboardObservationRef = useRef((record: ClipboardObservationRecord) => {
+    onClipboardObservation?.(record);
+  });
+  onClipboardObservationRef.current = (record: ClipboardObservationRecord) => {
+    onClipboardObservation?.(record);
   };
   const languageCompartment = useRef(new Compartment());
   const codeStyleCompartment = useRef(new Compartment());
@@ -2508,6 +2615,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     clipboardContextByView.set(view, {
       workspaceId: effectiveClipboardHandle?.workspaceId ?? clipboardWorkspaceId ?? null,
       onUnavailable: (message) => onClipboardUnavailableRef.current(message),
+      onObservation: (record) => onClipboardObservationRef.current(record),
       handle: effectiveClipboardHandle ?? null,
     });
     return () => {

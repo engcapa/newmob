@@ -5594,6 +5594,10 @@ controls:
     selector: '[data-testid="code-workspace-save-observation"]'
     kind: display
     optional: true       # metadata-only live region for the active file
+  - id: clipboard-observation
+    selector: '[data-testid="code-workspace-clipboard-observation"]'
+    kind: display
+    optional: true       # ED-CLIP-004 metadata-only clipboard outcome/effect seam
   - id: file-encoding-dialog
     selector: '[data-testid="file-encoding-dialog"]'
     kind: display

@@ -35,7 +35,9 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `hover` | selector | |
 | `drag_to` | `{from, to}` | Both selectors. |
 | `native_click` | `{selector}` | Native Linux/X11 only. Activates the exact test executable window and sends W3C pointer actions through its packaged WebKitGTK session; testcase assertions own the postcondition. |
+| `native_pointer_drag` | `{selector, from:{line,column}, to:{line,column}, modifiers?}` | Native Linux/X11 only. Resolves CodeMirror line/column positions through read-only DOM geometry, then sends a real modifier-aware W3C pointer drag to the packaged WebKitGTK session. The verb records geometry/transport only; testcase assertions own selection and edit postconditions. |
 | `native_set_writable` | `{path, writable}` | Native Linux only. Toggles owner-write permission for a path inside the current retained report root and records mode metadata; used for deterministic real-write failure/recovery evidence. |
+| `native_clipboard_owner` | `{action, text?}` | Native Linux/X11 only. Drives an out-of-process X11 CLIPBOARD selection owner. `grant` takes the selection with `text` (postcondition verified by an external read); `deny` replaces it with an owner that advertises standard text targets but rejects their conversion, causing an immediate real OS read failure; `suspend` retains the timeout-based unresponsive-owner fault; `resume` restores the last granted text; `release` terminates it. Teardown always kills the owner and records that the host selection was replaced - it is deliberately not republished, because an X11 selection needs a live owner and faking a restore would leak a process. |
 
 ## Keyboard
 
@@ -45,7 +47,7 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `type` | string | Types into the focused element. Prefer `fill` for inputs. |
 | `send_keys` | string | Same as `type`; semantic for terminal-pane interaction. |
 | `compose_text` | `{selector, text, during_key?}` | Browser-only composition lifecycle; optionally dispatches one composing key before committing text. Never substitutes for native IME evidence. |
-| `native_keys` | `{selector, keys}` | Native Linux/X11 only. Requires the selector to own focus, injects physical XTest keys through GTK/WebKitGTK, and records transport metadata; testcase assertions own the postcondition. |
+| `native_keys` | `{selector, keys, focus_prechecked?}` | Native Linux/X11 only. Requires the selector to own focus, injects physical XTest keys or chords such as `Control+v` through GTK/WebKitGTK, and records transport metadata. `focus_prechecked: true` is limited to a testcase that asserted DOM focus immediately before an external fault made WebDriver commands unavailable; the verb still activates and identifies the Taomni X11 window. Testcase assertions own the postcondition. |
 | `native_ime_keys` | `{selector, expected_engine, keys}` | Native Linux/X11 only. Injects physical XTest keys through the named configured fcitx5 engine and records an observation artifact; testcase assertions must verify the committed result. |
 | `press` | key string **or** `{key, selector?}` | E.g. `Enter`, `Control+Shift+F`. |
 | `select_option` | `{selector, label?, value?}` | At least one of label/value. |
@@ -96,6 +98,7 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `assert_file_exists` | path string **or** `{path, timeout_sec?}` | Native-only host filesystem existence check. |
 | `assert_file_receipt` | `{path, selector, encoding, bom, eol, expected_text, require_history?, timeout_sec?}` | Native-only: independently reads and hashes host bytes, validates encoding/BOM/EOL, then reconciles the result with the production receipt observation. |
 | `assert_file_sha256` | `{path, equals, timeout_sec?}` | Native-only: independently reads host bytes and requires an exact lowercase SHA-256 digest. |
+| `assert_system_clipboard` | `{equals \| contains \| readable, timeout_sec?}` | Native Linux/X11 only: reads the real CLIPBOARD selection from a separate process, never from the app's DOM or in-process state. The only step that can prove a copy actually crossed the OS boundary. An unresponsive owner is reported as unreadable, never as an empty string. Exactly one assertion key. |
 
 ## Last-resort escape hatch
 

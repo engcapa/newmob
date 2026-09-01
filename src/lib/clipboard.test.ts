@@ -1,12 +1,67 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+
+const clipboardTestMocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  tauri: false,
+  platform: "linux" as "linux" | "macos" | "windows" | "unknown",
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: clipboardTestMocks.invoke,
+}));
+
+vi.mock("./runtime", () => ({
+  getAppPlatform: () => clipboardTestMocks.platform,
+  isTauriRuntime: () => clipboardTestMocks.tauri,
+}));
+
 import {
   readClipboardImageFiles,
   readMultiFormat,
+  readNativeTextResult,
   readNativeClipboardImagePath,
   writeMultiFormat,
   writeText,
   writeImagePng,
 } from "./clipboard";
+
+beforeEach(() => {
+  clipboardTestMocks.invoke.mockReset().mockRejectedValue(new Error("browser runtime"));
+  clipboardTestMocks.tauri = false;
+  clipboardTestMocks.platform = "linux";
+});
+
+describe("clipboard.readNativeTextResult", () => {
+  it("returns the exact native IPC result without consulting Web Clipboard", async () => {
+    const webRead = vi.fn().mockResolvedValue("cached-webkit-value");
+    Object.defineProperty(globalThis, "navigator", {
+      value: { clipboard: { readText: webRead } },
+      configurable: true,
+    });
+    clipboardTestMocks.tauri = true;
+    clipboardTestMocks.invoke.mockResolvedValue("native-owner-value");
+
+    await expect(readNativeTextResult()).resolves.toEqual({
+      ok: true,
+      text: "native-owner-value",
+    });
+    expect(clipboardTestMocks.invoke).toHaveBeenCalledWith("clipboard_read_text");
+    expect(webRead).not.toHaveBeenCalled();
+  });
+
+  it("keeps native conversion failure observable instead of returning cached WebKit text", async () => {
+    const webRead = vi.fn().mockResolvedValue("cached-webkit-value");
+    Object.defineProperty(globalThis, "navigator", {
+      value: { clipboard: { readText: webRead } },
+      configurable: true,
+    });
+    clipboardTestMocks.tauri = true;
+    clipboardTestMocks.invoke.mockRejectedValue(new Error("X11 conversion refused"));
+
+    await expect(readNativeTextResult()).resolves.toEqual({ ok: false, text: "" });
+    expect(webRead).not.toHaveBeenCalled();
+  });
+});
 
 describe("clipboard.writeText", () => {
   beforeEach(() => {

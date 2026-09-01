@@ -171,11 +171,15 @@ vi.mock("../../lib/editor/dap", () => dapMocks);
  * every other test in this file has always run with); the Java debug test opts
  * in, since the Debug button is disabled outside the Tauri webview.
  */
-const runtimeState = vi.hoisted(() => ({ tauri: false }));
+const runtimeState = vi.hoisted(() => ({
+  tauri: false,
+  platform: "linux" as "linux" | "macos" | "windows" | "unknown",
+}));
 
 vi.mock("../../lib/runtime", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/runtime")>()),
   isTauriRuntime: () => runtimeState.tauri,
+  getAppPlatform: () => runtimeState.platform,
 }));
 
 const clipboardMocks = vi.hoisted(() => {
@@ -183,6 +187,7 @@ const clipboardMocks = vi.hoisted(() => {
   return {
     probeClipboardCapabilities: vi.fn(async () => null),
     readText: vi.fn(async () => inMemoryClipboard),
+    readNativeTextResult: vi.fn(async () => ({ ok: true, text: inMemoryClipboard })),
     readTextResult: vi.fn(async () => ({ ok: true, text: inMemoryClipboard })),
     writeText: vi.fn(async (text: string) => {
       inMemoryClipboard = text;
@@ -6959,6 +6964,107 @@ end_of_record
       expect(afterStore.getSnapshot().consumerCount).toBe(baselineConsumerCount);
       expect(afterStore.read()).toBeNull();
       afterStore.release();
+      resetWorkspaceClipboardStores();
+    });
+
+    it("ED-CLIP-004: projects typed copy/paste outcome, OS effect and fallback into the clipboard observation seam", async () => {
+      resetWorkspaceClipboardStores();
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-clip-observe",
+        workspaceInstanceId: "instance-clip-observe",
+        name: "Clipboard Observation",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "folder" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceReadFile.mockImplementation(async () => (
+        file("src/main.ts", "const x = 10;\nconst y = 20;\n")
+      ));
+
+      const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+      const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+        registrationRef.current = next;
+      });
+
+      renderWorkspace(workspace, { onCommandsChange });
+      await screen.findByTitle("app / src/main.ts");
+
+      const observation = screen.getByTestId("code-workspace-clipboard-observation");
+      // Live-region semantics exist before any clipboard operation ran.
+      expect(observation.getAttribute("role")).toBe("status");
+      expect(observation.getAttribute("aria-live")).toBe("polite");
+      expect(observation.getAttribute("aria-label")).toBe("Clipboard status");
+      expect(observation.getAttribute("data-outcome")).toBeNull();
+
+      const pane = screen.getAllByTestId("code-workspace-editor-pane")[0];
+      const view = EditorView.findFromDOM(pane.querySelector<HTMLElement>(".cm-editor")!);
+      expect(view).not.toBeNull();
+
+      // Two carets so the seam reports the real multi-caret shape.
+      view!.dispatch({
+        selection: EditorSelection.create([
+          EditorSelection.range(0, 13),
+          EditorSelection.range(14, 27),
+        ], 0),
+      });
+      fireEvent.mouseDown(pane);
+      await waitFor(() => expect(
+        registrationRef.current?.items.find((item) => item.id === "workspace.editor.copy")?.enabled,
+      ).toBe(true));
+      await act(async () => {
+        await registrationRef.current?.executeAction("workspace.editor.copy");
+      });
+
+      await waitFor(() => {
+        expect(observation.getAttribute("data-operation")).toBe("copy");
+        expect(observation.getAttribute("data-outcome")).toBe("success");
+        expect(observation.getAttribute("data-system-effect")).toBe("performed");
+      });
+      expect(observation.getAttribute("data-segment-count")).toBe("2");
+      expect(observation.getAttribute("data-caret-count")).toBe("2");
+      expect(observation.getAttribute("data-payload-length")).toBe(
+        String("const x = 10;\nconst y = 20;".length),
+      );
+      expect(observation.getAttribute("data-workspace-fallback")).toBe("false");
+      // Metadata only: the copied text never reaches the DOM seam.
+      expect(observation.outerHTML).not.toContain("const x = 10;");
+      expect(observation.textContent).toContain("system clipboard effect performed");
+
+      // Real OS read failure: the workspace slot answers and the seam reports
+      // unavailable + unknown effect + a visible fallback, never success.
+      // mockImplementationOnce, restored below: a leftover queued *Once value
+      // would otherwise leak into a later test's clipboard read.
+      const defaultNativeReadTextResult = clipboardMocks.readNativeTextResult.getMockImplementation();
+      runtimeState.tauri = true;
+      clipboardMocks.readNativeTextResult.mockImplementationOnce(async () => ({ ok: false, text: "" }));
+      clipboardMocks.readTextResult.mockClear();
+      view!.dispatch({ selection: EditorSelection.single(0) });
+      await waitFor(() => expect(
+        registrationRef.current?.items.find((item) => item.id === "workspace.editor.paste")?.enabled,
+      ).toBe(true));
+      await act(async () => {
+        await registrationRef.current?.executeAction("workspace.editor.paste");
+      });
+
+      await waitFor(() => {
+        expect(observation.getAttribute("data-operation")).toBe("paste");
+        expect(observation.getAttribute("data-outcome")).toBe("unavailable");
+      });
+      expect(observation.getAttribute("data-system-effect")).toBe("unknown");
+      expect(observation.getAttribute("data-workspace-fallback")).toBe("true");
+      expect(observation.textContent).toContain("workspace clipboard slot");
+      expect(clipboardMocks.readNativeTextResult).toHaveBeenCalledTimes(1);
+      expect(clipboardMocks.readTextResult).not.toHaveBeenCalled();
+      // The fallback really inserted the payload rather than reporting success.
+      expect(view!.state.doc.toString()).toContain("const x = 10;\nconst y = 20;const x = 10;");
+
+      // Drain any unconsumed one-shot and restore the shared mock so this test
+      // cannot alter a later test's clipboard behaviour.
+      clipboardMocks.readNativeTextResult.mockReset();
+      if (defaultNativeReadTextResult) {
+        clipboardMocks.readNativeTextResult.mockImplementation(defaultNativeReadTextResult);
+      }
       resetWorkspaceClipboardStores();
     });
 

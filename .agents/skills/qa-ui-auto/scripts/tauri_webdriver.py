@@ -292,6 +292,81 @@ class NativeSession:
         )
         return {"x": x, "y": y}
 
+    def pointer_drag(
+        self,
+        start: dict[str, int],
+        end: dict[str, int],
+        modifiers: list[str] | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Drag between viewport coordinates while holding W3C modifiers."""
+        modifier_names = modifiers or []
+        modifier_values: list[str] = []
+        for name in modifier_names:
+            value = self.MODIFIER_MAP.get(name)
+            if value is None:
+                raise WebDriverError(f"pointer_drag: unknown modifier {name!r}")
+            modifier_values.append(value)
+
+        pointer_core = [
+            {
+                "type": "pointerMove",
+                "duration": 100,
+                "x": int(start["x"]),
+                "y": int(start["y"]),
+                "origin": "viewport",
+            },
+            {"type": "pointerDown", "button": 0},
+            {
+                "type": "pointerMove",
+                "duration": 400,
+                "x": int(end["x"]),
+                "y": int(end["y"]),
+                "origin": "viewport",
+            },
+            {"type": "pause", "duration": 100},
+            {"type": "pointerUp", "button": 0},
+        ]
+        pointer_actions = (
+            [{"type": "pause", "duration": 0} for _ in modifier_values]
+            + pointer_core
+            + [{"type": "pause", "duration": 0} for _ in modifier_values]
+        )
+        key_actions: list[dict[str, Any]] = []
+        if modifier_values:
+            key_actions.extend(
+                {"type": "keyDown", "value": value} for value in modifier_values
+            )
+            key_actions.extend(
+                {"type": "pause", "duration": 0}
+                for _ in pointer_core
+            )
+            key_actions.extend(
+                {"type": "keyUp", "value": value}
+                for value in reversed(modifier_values)
+            )
+
+        actions: list[dict[str, Any]] = []
+        if key_actions:
+            actions.append({"type": "key", "id": "drag-keyboard", "actions": key_actions})
+        actions.append({
+            "type": "pointer",
+            "id": "native-drag-pointer",
+            "parameters": {"pointerType": "mouse"},
+            "actions": pointer_actions,
+        })
+        try:
+            self.request("POST", self.endpoint("/actions"), {"actions": actions})
+        finally:
+            # Release any input source left depressed by a failed driver action.
+            try:
+                self.request("DELETE", self.endpoint("/actions"))
+            except WebDriverError:
+                pass
+        return {
+            "start": {"x": int(start["x"]), "y": int(start["y"])},
+            "end": {"x": int(end["x"]), "y": int(end["y"])},
+        }
+
     def fill(self, selector: str, text: str) -> str:
         element = self.find(selector)
         contenteditable = self.execute(
@@ -405,11 +480,20 @@ class NativeSession:
         seq.append({"type": "pause", "duration": 30})
         seq.append({"type": "keyUp", "value": value})
         seq += [{"type": "keyUp", "value": m} for m in reversed(mods)]
-        self.request(
-            "POST",
-            self.endpoint("/actions"),
-            {"actions": [{"type": "key", "id": "keyboard", "actions": seq}]},
-        )
+        try:
+            self.request(
+                "POST",
+                self.endpoint("/actions"),
+                {"actions": [{"type": "key", "id": "keyboard", "actions": seq}]},
+            )
+        finally:
+            # WebKitWebDriver may retain pressedCharKey even after explicit
+            # keyUp events. Releasing all input sources keeps the next command
+            # independent, especially after Enter and clipboard shortcuts.
+            try:
+                self.request("DELETE", self.endpoint("/actions"))
+            except WebDriverError:
+                pass
         return f"pressed {combo}"
 
     def type_text(self, text: str) -> str:

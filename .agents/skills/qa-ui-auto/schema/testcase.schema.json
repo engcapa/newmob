@@ -152,8 +152,17 @@
     "native_click": {
      "$ref": "#/$defs/native_click_arg"
     },
+    "native_pointer_drag": {
+     "$ref": "#/$defs/native_pointer_drag_arg"
+    },
     "native_set_writable": {
      "$ref": "#/$defs/native_set_writable_arg"
+    },
+    "native_clipboard_owner": {
+     "$ref": "#/$defs/native_clipboard_owner_arg"
+    },
+    "assert_system_clipboard": {
+     "$ref": "#/$defs/assert_system_clipboard_arg"
     },
     "press": {
      "$ref": "#/$defs/press_arg"
@@ -652,6 +661,10 @@
       "type": "string",
       "minLength": 1
      }
+    },
+    "focus_prechecked": {
+     "type": "boolean",
+     "description": "Skip the immediate WebDriver focus probe only when the testcase asserted DOM focus immediately before an external fault that makes WebDriver commands unavailable."
     }
    }
   },
@@ -664,6 +677,81 @@
    "properties": {
     "selector": {
      "$ref": "#/$defs/selector"
+    }
+   }
+  },
+  "native_pointer_drag_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["selector", "from", "to"],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    },
+    "from": {
+     "$ref": "#/$defs/native_line_column"
+    },
+    "to": {
+     "$ref": "#/$defs/native_line_column"
+    },
+    "modifiers": {
+     "type": "array",
+     "uniqueItems": true,
+     "items": {
+      "enum": ["Alt", "Control", "Meta", "Shift"]
+     }
+    }
+   }
+  },
+  "native_line_column": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["line", "column"],
+   "properties": {
+    "line": {"type": "integer", "minimum": 1},
+    "column": {"type": "integer", "minimum": 0}
+   }
+  },
+  "native_clipboard_owner_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "action"
+   ],
+   "description": "Native-only: external X11 CLIPBOARD selection owner. grant takes the real selection; deny advertises standard text targets but rejects their conversion; suspend stops the owner so every client's read genuinely fails; resume restores the last granted text; release terminates it and records that the host selection was replaced.",
+   "properties": {
+    "action": {
+     "enum": ["grant", "deny", "suspend", "resume", "release"]
+    },
+    "text": {
+     "type": "string",
+     "minLength": 1
+    }
+   }
+  },
+  "assert_system_clipboard_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "oneOf": [
+    {"required": ["equals"]},
+    {"required": ["contains"]},
+    {"required": ["readable"]}
+   ],
+   "description": "Native-only: out-of-process read of the real X11 CLIPBOARD selection. Exactly one of equals/contains/readable.",
+   "properties": {
+    "equals": {
+     "type": "string"
+    },
+    "contains": {
+     "type": "string",
+     "minLength": 1
+    },
+    "readable": {
+     "type": "boolean"
+    },
+    "timeout_sec": {
+     "type": "number",
+     "exclusiveMinimum": 0
     }
    }
   },

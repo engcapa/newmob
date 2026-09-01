@@ -155,6 +155,7 @@
 - `[data-testid="code-workspace-editor"] .cm-content` — interactive [optional] — F25.5.editor-content
 - `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
 - `[data-testid="code-workspace-save-observation"]` — display [optional] — F25.5.save-observation
+- `[data-testid="code-workspace-clipboard-observation"]` — display [optional] — F25.5.clipboard-observation
 - `[data-testid="file-encoding-dialog"]` — display [optional] — F25.5.file-encoding-dialog
 - `[data-testid="file-encoding-select"]` — interactive [optional] — F25.5.file-encoding-select
 - `[data-testid="file-encoding-bom"]` — interactive [optional] — F25.5.file-encoding-bom

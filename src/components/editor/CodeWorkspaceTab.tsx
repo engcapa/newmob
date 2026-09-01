@@ -332,6 +332,7 @@ import {
   type EditorClipboardSession,
   WorkspaceClipboardSessionContext,
 } from "./workspace/workspaceClipboardSession";
+import type { ClipboardObservationRecord } from "./workspace/clipboardObservationContract";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
@@ -1588,6 +1589,11 @@ export function CodeWorkspaceTab({
   }>({ open: false, phase: "loading", candidates: [], error: null });
   // §8.19.5 Paste-from-History popup state (session-only ring snapshot).
   const [clipboardHistoryOpen, setClipboardHistoryOpen] = useState(false);
+  // ED-CLIP-004: last settled guarded clipboard result, projected as metadata
+  // only. This is the observation seam a packaged runtime asserts against; the
+  // prose status line cannot prove which typed enum member production chose.
+  const [latestClipboardObservation, setLatestClipboardObservation] =
+    useState<ClipboardObservationRecord | null>(null);
   const [clipboardHistoryEntries, setClipboardHistoryEntries] = useState<EditorClipboardSession[]>([]);
   const generateCodeContextRef = useRef<{
     file: OpenFileState;
@@ -6292,6 +6298,37 @@ export function CodeWorkspaceTab({
       case "error": return `Save failed for ${activeSaveObservationLabel}`;
       case "recovery": return `Save recovery required for ${activeSaveObservationLabel}`;
       default: return `${activeSaveObservationLabel} has no unsaved changes`;
+    }
+  })();
+  // ED-CLIP-004: the announcement names the outcome AND the system effect
+  // separately, because ownership and external effect are independent axes
+  // (ED-CLIP-002): a stale generation after a completed OS write still performed
+  // that write, and saying otherwise would be the collapse the spec forbids.
+  const clipboardAnnouncement = (() => {
+    const record = latestClipboardObservation;
+    if (!record) return "";
+    const action = record.operation === "cut"
+      ? "Cut"
+      : record.operation === "copy"
+        ? "Copy"
+        : "Paste";
+    const effect = record.systemEffect === "performed"
+      ? "system clipboard effect performed"
+      : record.systemEffect === "not-performed"
+        ? "no system clipboard effect"
+        : "system clipboard effect unknown";
+    switch (record.outcome) {
+      case "success":
+        return `${action} completed; ${effect}`;
+      case "denied":
+        return `${action} denied by the system clipboard; ${effect}`
+          + (record.usedWorkspaceFallback ? "; pasted from the workspace clipboard slot instead" : "");
+      case "stale-generation":
+        return `${action} ownership changed during the operation; ${effect}`
+          + (record.usedWorkspaceFallback ? "; pasted from the workspace clipboard slot instead" : "");
+      default:
+        return `${action} could not reach the system clipboard; ${effect}`
+          + (record.usedWorkspaceFallback ? "; pasted from the workspace clipboard slot instead" : "");
     }
   })();
   // Large-file mode (M6-B): above the size/line threshold, skip the per-edit
@@ -15687,6 +15724,7 @@ export function CodeWorkspaceTab({
     return (
       <EditorGroup
         onClipboardUnavailable={setStatusMessage}
+        onClipboardObservation={setLatestClipboardObservation}
         groupId={groupId}
         workspaceInstanceId={workspaceInstanceId}
         visible={visible}
@@ -16058,6 +16096,43 @@ export function CodeWorkspaceTab({
           className="sr-only"
         >
           {activeSaveAnnouncement}
+        </div>
+        {/*
+          ED-CLIP-004 clipboard observation seam. Metadata only: outcome, OS
+          effect, permission epoch, payload SHAPE and caret count. Never the
+          copied text — a runner must not be able to reconstruct the payload
+          from the DOM.
+        */}
+        <div
+          id="code-workspace-clipboard-observation"
+          data-testid="code-workspace-clipboard-observation"
+          role="status"
+          aria-label="Clipboard status"
+          aria-live="polite"
+          aria-atomic="true"
+          data-operation={latestClipboardObservation?.operation}
+          data-outcome={latestClipboardObservation?.outcome}
+          data-system-effect={latestClipboardObservation?.systemEffect}
+          data-permission={latestClipboardObservation?.permission ?? clipboardSnapshot.permission}
+          data-permission-generation={
+            latestClipboardObservation?.permissionGeneration ?? clipboardSnapshot.permissionGeneration
+          }
+          data-base-generation={latestClipboardObservation?.baseGeneration ?? undefined}
+          data-workspace-fallback={
+            latestClipboardObservation ? String(latestClipboardObservation.usedWorkspaceFallback) : undefined
+          }
+          data-segment-count={latestClipboardObservation?.segmentCount ?? undefined}
+          data-rectangular={
+            latestClipboardObservation ? String(latestClipboardObservation.rectangular) : undefined
+          }
+          data-payload-length={latestClipboardObservation?.payloadLength ?? undefined}
+          data-history-exclusion={latestClipboardObservation?.historyExclusion}
+          data-payload-revision={latestClipboardObservation?.payloadRevision ?? clipboardSnapshot.payloadRevision}
+          data-caret-count={latestClipboardObservation?.caretCount ?? undefined}
+          data-observed-at={latestClipboardObservation?.observedAt ?? undefined}
+          className="sr-only"
+        >
+          {clipboardAnnouncement}
         </div>
       <header className="h-10 shrink-0 flex items-center gap-2 overflow-x-auto px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]">
         <Braces className="w-4 h-4 text-[var(--taomni-accent)]" />

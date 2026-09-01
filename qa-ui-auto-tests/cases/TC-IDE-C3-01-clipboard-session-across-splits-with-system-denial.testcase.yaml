@@ -6,8 +6,9 @@ description: |
   Browser verifies cross-leaf plain paste through the workspace clipboard slot,
   history ring popup selection, single undo restoration, and lease cleanup upon unsplit.
   System-clipboard ownership, rectangular selection paste, and OS-level permission
-  denial/grant transitions remain NATIVE concerns (R9 manifest / BB11) and stay blocked
-  in browser-only test runs. Highest claim on green: L1 browser-wired plain-path.
+  denial/grant transitions remain NATIVE concerns (R9 manifest / BB11) and are proven
+  separately by TC-IDE-C3-02. Highest claim for this browser case alone: L2 observable
+  cross-view/history/undo behavior without an OS-boundary claim.
 covers: [F25.5]
 tags: [code-workspace, ide-c3, clipboard, split, p0]
 modes: [browser]
@@ -66,6 +67,9 @@ steps:
   - press:
       key: Control+v
       selector: '[data-testid="code-workspace-editor-pane"] >> nth=1 >> [data-testid="code-workspace-editor"] .cm-content'
+  # System-clipboard read/fallback settles asynchronously; wait before the
+  # exact text assertions instead of racing the production promise.
+  - wait: 1
   - eval_readonly:
       expression: 'document.querySelectorAll(".cm-content")[1]?.querySelectorAll(".cm-line")[3]?.textContent === "Browser preview uses an in-memory virtual local filesystem."'
       expect_truthy: true

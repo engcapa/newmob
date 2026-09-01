@@ -41,6 +41,7 @@ import {
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./CodeMirrorHost";
+import type { ClipboardObservationRecord } from "./clipboardObservationContract";
 import type { WorkspaceDocumentTransactionOwner } from "./workspaceDocumentTransactionOwner";
 import type { EditorAppearanceExtensionProfile } from "./editorAppearanceExtension";
 import { EditorBanner } from "./EditorBanner";
@@ -94,6 +95,8 @@ export interface EditorRevealTarget {
 interface EditorGroupProps {
   /** Clipboard degradation notices forwarded to the workspace status bar. */
   onClipboardUnavailable?: (message: string) => void;
+  /** ED-CLIP-004: typed guarded-clipboard observations for the workspace seam. */
+  onClipboardObservation?: (record: ClipboardObservationRecord) => void;
 
   groupId: EditorGroupId;
   workspaceInstanceId: string;
@@ -258,6 +261,7 @@ export function EditorGroup({
   workspaceInstanceId,
   visible,
   onClipboardUnavailable,
+  onClipboardObservation,
   readOnly = false,
   tabPolicy,
   lastUsedByKey,
@@ -818,6 +822,7 @@ export function EditorGroup({
                         documentRevision={activeFile.documentRevision ?? documentRevision}
                         clipboardWorkspaceId={workspaceInstanceId}
                         onClipboardUnavailable={onClipboardUnavailable}
+                        onClipboardObservation={onClipboardObservation}
                         workspaceActionHost={workspaceActionHost}
                         path={activeFile.languagePath}
                         doc={activeFile.text}
@@ -890,6 +895,7 @@ export function EditorGroup({
                       documentRevision={activeFile.documentRevision ?? documentRevision}
                       clipboardWorkspaceId={workspaceInstanceId}
                       onClipboardUnavailable={onClipboardUnavailable}
+                      onClipboardObservation={onClipboardObservation}
                       workspaceActionHost={workspaceActionHost}
                       path={activeFile.languagePath}
                       doc={activeFile.text}
