@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildPreparedSave,
+  buildFinalBytesReceipt,
   classifySaveWriteback,
   classifyUnknownDiskEffect,
   createSingleWriterSaveCommitter,
@@ -35,6 +36,15 @@ function preparedFixture(overrides: Partial<PreparedSave> = {}): PreparedSave {
     policy: { eol: "lf", encoding: "UTF-8", bom: false },
     ...overrides,
   };
+}
+
+function receiptFixture(prepared: PreparedSave = preparedFixture()): FinalBytesReceipt {
+  return buildFinalBytesReceipt(prepared, {
+    writtenHash: "hash-post",
+    writtenByteLength: 6,
+    intentHash: "hash-post",
+    oldHash: prepared.expectedDiskHash,
+  }, { committedAt: 1 });
 }
 
 describe("P0-S3 saveCommit pure helpers", () => {
@@ -227,6 +237,7 @@ describe("§8.18.1 six-kind SaveCommitResult taxonomy", () => {
       memoryEffect: "saved-current",
       providerEffect: "did-save",
       file,
+      receipt: receiptFixture(),
     };
     const stale: SaveCommitResult = {
       kind: "saved-stale-snapshot",
@@ -237,6 +248,7 @@ describe("§8.18.1 six-kind SaveCommitResult taxonomy", () => {
       file,
       savedRevision: 3,
       currentRevision: 4,
+      receipt: receiptFixture(),
     };
     const discarded: SaveCommitResult = {
       kind: "committed-writeback-discarded",
@@ -246,6 +258,8 @@ describe("§8.18.1 six-kind SaveCommitResult taxonomy", () => {
       providerEffect: "discarded",
       file,
       reason: "tab closed",
+      receipt: { ...receiptFixture(), recoveryId: txId },
+      recoveryId: txId,
     };
     for (const result of [savedCurrent, stale, discarded]) {
       expect(result.diskEffect).toBe("committed");
@@ -425,6 +439,60 @@ describe("§ED-SAVE-003: Single Writer Save Committer & Final Bytes Receipt", ()
       expect(result.bytes.length).toBe(5);
       expect(result.bytes[0]).toBe(104); // 'h'
       expect(result.byteLength).toBe(5);
+    });
+
+    it("normalizes EOL once and emits exactly one UTF-8 or UTF-16 BOM", () => {
+      const utf8 = encodeSaveBytes("\uFEFFa\r\nb\n", {
+        eol: "crlf",
+        encoding: "UTF-8",
+        bom: true,
+      });
+      expect(utf8.bytes).toEqual(new Uint8Array([
+        0xef, 0xbb, 0xbf,
+        0x61, 0x0d, 0x0a,
+        0x62, 0x0d, 0x0a,
+      ]));
+
+      const utf16le = encodeSaveBytes("\uFEFFA\n", {
+        eol: "crlf",
+        encoding: "UTF-16LE",
+        bom: true,
+      });
+      expect(utf16le.bytes).toEqual(new Uint8Array([
+        0xff, 0xfe,
+        0x41, 0x00,
+        0x0d, 0x00,
+        0x0a, 0x00,
+      ]));
+    });
+
+    it("builds a receipt from the native acknowledgement rather than decoded file metadata", () => {
+      const prepared = preparedFixture({
+        transactionId: "tx-native-ack",
+        text: "\uFEFFA\n",
+        policy: { eol: "crlf", encoding: "UTF-16LE", bom: true },
+      });
+      const receipt = buildFinalBytesReceipt(prepared, {
+        writtenHash: "native-post-hash",
+        writtenByteLength: 8,
+        intentHash: "native-intent-hash",
+        oldHash: "native-pre-hash",
+      }, {
+        historyId: "local-history-7",
+        committedAt: 123,
+      });
+      expect(receipt).toMatchObject({
+        receiptId: "receipt-tx-native-ack",
+        transactionId: "tx-native-ack",
+        writeCount: 1,
+        encodedBytesSha256: "native-intent-hash",
+        encodedByteLength: 8,
+        diskPreSha256: "native-pre-hash",
+        diskPostSha256: "native-post-hash",
+        historyId: "local-history-7",
+        committedAt: 123,
+      });
+      expect(receipt.finalTextSha256).toBe(encodeSaveBytes(prepared.text, prepared.policy).textSha256);
     });
 
     it("encodes UTF-16LE and UTF-16BE with correct byte order", () => {
@@ -620,6 +688,34 @@ describe("§ED-SAVE-003: Single Writer Save Committer & Final Bytes Receipt", ()
       expect(result.kind).toBe("conflict");
       expect(result.diskEffect).toBe("none");
       expect(result.memoryEffect).toBe("unchanged");
+    });
+
+    it("requires recovery for an unknown writer effect", async () => {
+      const committer = createSingleWriterSaveCommitter({
+        getLiveBoundary: () => ({
+          filePath: "/repo/app/a.ts",
+          documentRevision: 3,
+          styleGeneration: 7,
+        }),
+        writeToDisk: async () => {
+          throw Object.assign(new Error("write acknowledgement lost"), {
+            kind: "io",
+            effect: "unknown",
+            intentHash: "intended",
+            intentByteLength: 6,
+          });
+        },
+      });
+
+      const result = await committer(preparedFixture({ transactionId: "tx-unknown" }));
+      expect(result).toMatchObject({
+        kind: "failed",
+        diskEffect: "unknown",
+        memoryEffect: "unchanged",
+        providerEffect: "unknown",
+        recoveryId: "tx-unknown",
+      });
+      expect(result).not.toHaveProperty("receipt");
     });
   });
 });

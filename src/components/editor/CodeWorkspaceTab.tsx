@@ -181,10 +181,12 @@ import type {
   CompletionRequestToken,
 } from "./workspace/lspCompletion";
 import {
+  buildFinalBytesReceipt,
   buildPreparedSave,
   classifySaveWriteback,
   classifyUnknownDiskEffect,
   nextSaveTransactionId,
+  prepareSaveTextForWriter,
   resolveUnknownDiskResolution,
   resolveWritePolicy,
   saveCommitResultFromError,
@@ -4608,7 +4610,11 @@ export function CodeWorkspaceTab({
     const rawEol = request.policy.eol ?? "LF";
     const eol = (typeof rawEol === "string" ? rawEol.toLowerCase() : "lf") as "lf" | "crlf" | "cr";
 
-    const normalizedText = applyEditorEol(request.logicalText, eol.toUpperCase() as OpenFileEol);
+    const normalizedText = prepareSaveTextForWriter(request.logicalText, {
+      eol,
+      encoding: targetEncoding,
+      bom: targetBom,
+    });
 
     let rootPath: string | null = null;
     let relPath: string | null = null;
@@ -4773,6 +4779,7 @@ export function CodeWorkspaceTab({
     const registry = saveTransactionRegistryRef.current;
     const owner = registry.begin(prepared.workspaceId, prepared.fileKey, prepared.transactionId);
     try {
+      let historyId: string | undefined;
       // Snapshot current disk contents before bulk WorkspaceEdit writes.
       try {
         let oldText: string | null = null;
@@ -4794,13 +4801,18 @@ export function CodeWorkspaceTab({
           }
         }
         if (oldText != null && oldText.length <= 2 * 1024 * 1024) {
-          await historySnapshot(prepared.filePath, oldText, "replace").catch(() => null);
+          const historyEntry = await historySnapshot(prepared.filePath, oldText, "replace").catch(() => null);
+          if (historyEntry) historyId = `local-history-${historyEntry.id}`;
         }
       } catch {
         // Best-effort history; never block the edit write.
       }
 
       let ack: WorkspaceWriteAck;
+      const ownerBeforeWrite = registry.check(owner);
+      if (!ownerBeforeWrite.active) {
+        return cancelledSaveCommit(prepared, "pre-write", ownerBeforeWrite.reason);
+      }
       try {
         ack = await writeTextSnapshot({
           filePath: prepared.filePath,
@@ -4834,7 +4846,7 @@ export function CodeWorkspaceTab({
         // real on-disk hash before reporting anything.
         const observed = await readBackDiskSnapshot(prepared);
         const verification = classifyUnknownDiskEffect({
-          writtenHash: mapped.error.writtenHash,
+          writtenHash: mapped.error.intentHash ?? mapped.error.writtenHash,
           expectedOldHash: prepared.expectedDiskHash,
           observedHash: observed?.hash ?? null,
         });
@@ -4852,7 +4864,9 @@ export function CodeWorkspaceTab({
               hash: observed.hash,
             },
             writtenHash: mapped.error.writtenHash ?? observed.hash,
-            writtenByteLength: mapped.error.writtenByteLength ?? 0,
+            writtenByteLength: mapped.error.writtenByteLength ?? observed.size ?? 0,
+            intentHash: mapped.error.intentHash ?? mapped.error.writtenHash ?? observed.hash,
+            oldHash: mapped.error.oldHash ?? prepared.expectedDiskHash,
             atomicReplaceUsed: true,
           };
         } else if (verification.outcome === "none") {
@@ -4885,10 +4899,13 @@ export function CodeWorkspaceTab({
         }
       }
 
+      const receipt = buildFinalBytesReceipt(prepared, ack, { historyId });
+
       // Disk acknowledged. Watcher notify is generation-gated like every
       // other writeback side effect.
       if (!registry.check(owner).active) {
         recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
+        const recoveryId = prepared.transactionId;
         return {
           kind: "committed-writeback-discarded",
           transactionId: prepared.transactionId,
@@ -4897,6 +4914,9 @@ export function CodeWorkspaceTab({
           providerEffect: "discarded",
           file: ack.file,
           reason: "Closed-file write owner was discarded during the write",
+          receipt: { ...receipt, recoveryId },
+          historyId: receipt.historyId,
+          recoveryId,
         };
       }
       await lspWorkspaceDidChangeWatchedFiles(prepared.workspaceId, [{
@@ -4905,6 +4925,7 @@ export function CodeWorkspaceTab({
       }]).catch(() => 0);
       if (!registry.check(owner).active) {
         recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
+        const recoveryId = prepared.transactionId;
         return {
           kind: "committed-writeback-discarded",
           transactionId: prepared.transactionId,
@@ -4913,6 +4934,9 @@ export function CodeWorkspaceTab({
           providerEffect: "discarded",
           file: ack.file,
           reason: "Owner lost after watcher notify",
+          receipt: { ...receipt, recoveryId },
+          historyId: receipt.historyId,
+          recoveryId,
         };
       }
       // A settled closed-file write clears its own ledger row for this path
@@ -4927,6 +4951,8 @@ export function CodeWorkspaceTab({
         memoryEffect: "saved-current",
         providerEffect: "not-sent",
         file: ack.file,
+        receipt,
+        historyId: receipt.historyId,
       };
     } finally {
       registry.settle(owner);
@@ -4979,11 +5005,13 @@ export function CodeWorkspaceTab({
 
       mutateOpenBuffer(key, { saving: true, error: null }, "save-metadata");
 
+      let historyId: string | undefined;
       // Prepare-phase await: snapshot the previous on-disk contents before any
       // overwrite. Never mutates buffer text and never bumps a revision.
       if (prepared.filePath && fileAtPrepare.savedText.length <= 2 * 1024 * 1024) {
         const historyText = `${fileAtPrepare.bom ? "\uFEFF" : ""}${applyEditorEol(fileAtPrepare.savedText, fileAtPrepare.eol)}`;
-        await historySnapshot(prepared.filePath, historyText, "save").catch(() => null);
+        const historyEntry = await historySnapshot(prepared.filePath, historyText, "save").catch(() => null);
+        if (historyEntry) historyId = `local-history-${historyEntry.id}`;
       }
 
       // 2. Pre-write commit boundary (SYNCHRONOUS, NO AWAIT)
@@ -5027,7 +5055,7 @@ export function CodeWorkspaceTab({
             // the real on-disk hash before reporting anything.
             const observed = await readBackDiskSnapshot(prepared);
             const verification = classifyUnknownDiskEffect({
-              writtenHash: mapped.error.writtenHash,
+              writtenHash: mapped.error.intentHash ?? mapped.error.writtenHash,
               expectedOldHash: prepared.expectedDiskHash,
               observedHash: observed?.hash ?? null,
             });
@@ -5045,7 +5073,9 @@ export function CodeWorkspaceTab({
                   hash: observed.hash,
                 },
                 writtenHash: mapped.error.writtenHash ?? observed.hash,
-                writtenByteLength: mapped.error.writtenByteLength ?? 0,
+                writtenByteLength: mapped.error.writtenByteLength ?? observed.size ?? 0,
+                intentHash: mapped.error.intentHash ?? mapped.error.writtenHash ?? observed.hash,
+                oldHash: mapped.error.oldHash ?? prepared.expectedDiskHash,
                 atomicReplaceUsed: true,
               };
             } else if (verification.outcome === "none") {
@@ -5109,6 +5139,8 @@ export function CodeWorkspaceTab({
           }
         }
 
+        const receipt = buildFinalBytesReceipt(prepared, ack, { historyId });
+
         // Disk acknowledged. From here only committed kinds exist (§8.18.1).
         const ownerAfterWrite = registry.check(owner);
         if (!ownerAfterWrite.active) {
@@ -5116,6 +5148,7 @@ export function CodeWorkspaceTab({
           // discard writeback, watcher, git/semantic and LSP side effects and
           // leave a recovery row the user can Reopen/Acknowledge (§8.19.1).
           recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
+          const recoveryId = prepared.transactionId;
           return {
             kind: "committed-writeback-discarded",
             transactionId: prepared.transactionId,
@@ -5124,6 +5157,9 @@ export function CodeWorkspaceTab({
             providerEffect: "discarded",
             file: ack.file,
             reason: ownerAfterWrite.reason,
+            receipt: { ...receipt, recoveryId },
+            historyId: receipt.historyId,
+            recoveryId,
           };
         }
 
@@ -5135,6 +5171,7 @@ export function CodeWorkspaceTab({
           // Buffer closed while the writer was in flight: the disk write is
           // real, but no buffer or provider state may be resurrected.
           recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
+          const recoveryId = prepared.transactionId;
           return {
             kind: "committed-writeback-discarded",
             transactionId: prepared.transactionId,
@@ -5143,6 +5180,9 @@ export function CodeWorkspaceTab({
             providerEffect: "discarded",
             file: ack.file,
             reason: writeback.reason,
+            receipt: { ...receipt, recoveryId },
+            historyId: receipt.historyId,
+            recoveryId,
           };
         }
 
@@ -5158,6 +5198,7 @@ export function CodeWorkspaceTab({
         }
         if (!registry.check(owner).active) {
           recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
+          const recoveryId = prepared.transactionId;
           return {
             kind: "committed-writeback-discarded",
             transactionId: prepared.transactionId,
@@ -5166,6 +5207,9 @@ export function CodeWorkspaceTab({
             providerEffect: "discarded",
             file: ack.file,
             reason: "Owner lost after watcher notify",
+            receipt: { ...receipt, recoveryId },
+            historyId: receipt.historyId,
+            recoveryId,
           };
         }
         const normalized = normalizeEditorText(ack.file.text);
@@ -5198,6 +5242,7 @@ export function CodeWorkspaceTab({
           // Closed between merge and provider sync; skip didSave/didChange
           // and leave the committed recovery row for Reopen/Acknowledge.
           recordCommittedDiscardLedgerEntry(prepared, ack.writtenHash);
+          const recoveryId = prepared.transactionId;
           return {
             kind: "committed-writeback-discarded",
             transactionId: prepared.transactionId,
@@ -5206,6 +5251,9 @@ export function CodeWorkspaceTab({
             providerEffect: "discarded",
             file: ack.file,
             reason: "Owner lost after writeback merge",
+            receipt: { ...receipt, recoveryId },
+            historyId: receipt.historyId,
+            recoveryId,
           };
         }
         if (fileAtPrepare.ref.kind === "root") {
@@ -5227,6 +5275,8 @@ export function CodeWorkspaceTab({
               memoryEffect: "saved-current",
               providerEffect: "did-save",
               file: ack.file,
+              receipt,
+              historyId: receipt.historyId,
             };
           } catch {
             // Provider sync failed after the disk write: do not roll back or
@@ -5238,6 +5288,8 @@ export function CodeWorkspaceTab({
               memoryEffect: "saved-current",
               providerEffect: "failed",
               file: ack.file,
+              receipt,
+              historyId: receipt.historyId,
             };
           }
         }
@@ -5256,6 +5308,8 @@ export function CodeWorkspaceTab({
             file: ack.file,
             savedRevision: prepared.bufferRevision,
             currentRevision: latestNow.documentRevision ?? 0,
+            receipt,
+            historyId: receipt.historyId,
           };
         } catch {
           return {
@@ -5267,6 +5321,8 @@ export function CodeWorkspaceTab({
             file: ack.file,
             savedRevision: prepared.bufferRevision,
             currentRevision: latestNow.documentRevision ?? 0,
+            receipt,
+            historyId: receipt.historyId,
           };
         }
       } catch (err) {
@@ -5428,6 +5484,12 @@ export function CodeWorkspaceTab({
       if (!file || file.loading || file.saving || !file.dirty) return;
 
       const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
+      if (hasBlockingDiskEffectResolution(workspaceInstanceId, absPath)) {
+        setStatusMessage(
+          `Save blocked for ${file.subtitle}; verify the previous unknown disk result in the recovery center`,
+        );
+        return;
+      }
       let saveActionError: string | null = null;
 
       const snapshotRevision = file.documentRevision ?? 0;

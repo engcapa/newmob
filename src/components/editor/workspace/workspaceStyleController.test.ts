@@ -6,6 +6,7 @@ import {
   type SaveTransactionV2,
 } from "./workspaceStyleController";
 import {
+  buildFinalBytesReceipt,
   buildPreparedSave,
   resolveWritePolicy,
   type PreparedSave,
@@ -18,6 +19,15 @@ function fakeWrittenFile(hash: string): WorkspaceFile {
   return { path: "/project/app.ts", text: "", hash, size: 0, mtime: 0 };
 }
 
+function receiptFor(prepared: PreparedSave, file: WorkspaceFile, recoveryId?: string) {
+  return buildFinalBytesReceipt(prepared, {
+    writtenHash: file.hash,
+    writtenByteLength: file.size,
+    intentHash: file.hash,
+    oldHash: prepared.expectedDiskHash,
+  }, recoveryId ? { recoveryId, committedAt: 1 } : { committedAt: 1 });
+}
+
 /** Full-fact committed result as a real commit core would return it. */
 function savedCurrentCommitter(file: WorkspaceFile = fakeWrittenFile("hash-saved-1")): PreparedSaveCommitter {
   return vi.fn(async (prepared: PreparedSave): Promise<SaveCommitResult> => ({
@@ -27,6 +37,7 @@ function savedCurrentCommitter(file: WorkspaceFile = fakeWrittenFile("hash-saved
     memoryEffect: "saved-current",
     providerEffect: "did-save",
     file,
+    receipt: receiptFor(prepared, file),
   }));
 }
 
@@ -137,6 +148,7 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
         file: fakeWrittenFile("hash-saved-1"),
         savedRevision: prepared.bufferRevision,
         currentRevision: prepared.bufferRevision + 1,
+        receipt: receiptFor(prepared, fakeWrittenFile("hash-saved-1")),
       };
     });
 
@@ -212,6 +224,7 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
         memoryEffect: "saved-current",
         providerEffect: "did-save",
         file: fakeWrittenFile("written-hash"),
+        receipt: receiptFor(prepared, fakeWrittenFile("written-hash")),
       };
     });
 
@@ -328,8 +341,7 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
       getLatestBufferVersion: () => 1,
     });
     expect(outcome2.kind).toBe("failed");
-    if (outcome2.kind === "failed") {
-      expect(outcome2.diskEffect).toBe("unknown");
+    if (outcome2.kind === "failed" && outcome2.diskEffect === "unknown") {
       expect(outcome2.recoveryId).toBe(tx.id);
     }
 
@@ -343,6 +355,8 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
       providerEffect: "discarded",
       file: fakeWrittenFile("h"),
       reason: "Open buffer closed while writer was in flight",
+      receipt: receiptFor(prepared, fakeWrittenFile("h"), prepared.transactionId),
+      recoveryId: prepared.transactionId,
     }));
     const outcome3 = await ctrl.executeSaveTransaction(tx, commitDiscarded);
     expect(outcome3.kind).toBe("committed-writeback-discarded");

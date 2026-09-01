@@ -13,6 +13,7 @@ import {
   parseWorkspaceWriteError,
   WorkspaceWriteError,
   type WorkspaceFile,
+  type WorkspaceWriteAck,
   type WorkspaceWriteErrorData,
 } from "../../../lib/editor/workspace";
 import type { OpenFileEol } from "./editorGroupTypes";
@@ -79,19 +80,21 @@ export type ProviderEffect = "not-sent" | "did-save" | "did-change-current" | "d
  */
 export type SaveCommitResult =
   | { kind: "saved-current"; transactionId: string; diskEffect: "committed";
-      memoryEffect: "saved-current"; providerEffect: "did-save" | "not-sent" | "failed"; file: WorkspaceFile; receipt?: FinalBytesReceipt; historyId?: string; recoveryId?: string }
+      memoryEffect: "saved-current"; providerEffect: "did-save" | "not-sent" | "failed"; file: WorkspaceFile; receipt: FinalBytesReceipt; historyId?: string; recoveryId?: string }
   | { kind: "saved-stale-snapshot"; transactionId: string; diskEffect: "committed";
       memoryEffect: "kept-dirty"; providerEffect: "did-change-current" | "not-sent" | "failed";
-      file: WorkspaceFile; savedRevision: number; currentRevision: number; receipt?: FinalBytesReceipt; historyId?: string; recoveryId?: string }
+      file: WorkspaceFile; savedRevision: number; currentRevision: number; receipt: FinalBytesReceipt; historyId?: string; recoveryId?: string }
   | { kind: "committed-writeback-discarded"; transactionId: string; diskEffect: "committed";
-      memoryEffect: "writeback-discarded"; providerEffect: "discarded"; file: WorkspaceFile; reason: string; receipt?: FinalBytesReceipt; historyId?: string; recoveryId?: string }
+      memoryEffect: "writeback-discarded"; providerEffect: "discarded"; file: WorkspaceFile; reason: string; receipt: FinalBytesReceipt; historyId?: string; recoveryId: string }
   | { kind: "cancelled"; transactionId: string; diskEffect: "none";
       memoryEffect: "unchanged"; providerEffect: "not-sent"; phase: "prepare" | "pre-write"; reason: string }
   | { kind: "conflict"; transactionId: string; diskEffect: "none";
       memoryEffect: "unchanged"; providerEffect: "not-sent"; error: WorkspaceWriteErrorData }
-  | { kind: "failed"; transactionId: string; diskEffect: "none" | "unknown";
-      memoryEffect: "unchanged"; providerEffect: "not-sent" | "unknown";
-      error: WorkspaceWriteErrorData; recoveryId?: string; receipt?: FinalBytesReceipt; historyId?: string };
+  | { kind: "failed"; transactionId: string; diskEffect: "none";
+      memoryEffect: "unchanged"; providerEffect: "not-sent"; error: WorkspaceWriteErrorData }
+  | { kind: "failed"; transactionId: string; diskEffect: "unknown";
+      memoryEffect: "unchanged"; providerEffect: "unknown";
+      error: WorkspaceWriteErrorData; recoveryId: string };
 
 /** Prepare-phase output: either a frozen PreparedSave or a terminal failure. */
 export type PrepareSaveResult =
@@ -109,68 +112,76 @@ export interface EncodedSaveBytes {
 }
 
 /**
+ * Canonical logical text handed to the native byte writer. CodeMirror text is
+ * LF-normalized, while the save pipeline may already have applied the target
+ * EOL and represented the BOM as U+FEFF. Normalize idempotently and keep BOM
+ * ownership in the encoding policy so neither EOL nor BOM can be doubled.
+ */
+export function prepareSaveTextForWriter(text: string, policy: SaveCommitPolicy): string {
+  const withoutBom = text.startsWith("\uFEFF") ? text.slice(1) : text;
+  const lfText = withoutBom.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (policy.eol === "crlf") return lfText.replace(/\n/g, "\r\n");
+  if (policy.eol === "cr") return lfText.replace(/\n/g, "\r");
+  return lfText;
+}
+
+/**
  * Pure byte encoder verifying encoding compatibility and generating final SHA-256 hashes (§ED-SAVE-003).
  */
 export function encodeSaveBytes(text: string, policy: SaveCommitPolicy): EncodedSaveBytes {
   const encoding = (policy.encoding || "UTF-8").toUpperCase();
-  const textSha256 = sha256Hex(text);
+  const logicalText = prepareSaveTextForWriter(text, policy);
+  const textSha256 = sha256Hex(logicalText);
   let rawBytes: Uint8Array;
 
   if (encoding === "UTF-8") {
-    const encoded = new TextEncoder().encode(text);
-    if (policy.bom) {
-      if (encoded.length >= 3 && encoded[0] === 0xef && encoded[1] === 0xbb && encoded[2] === 0xbf) {
-        rawBytes = encoded;
-      } else {
-        const withBom = new Uint8Array(encoded.length + 3);
-        withBom[0] = 0xef;
-        withBom[1] = 0xbb;
-        withBom[2] = 0xbf;
-        withBom.set(encoded, 3);
-        rawBytes = withBom;
-      }
+    const encoded = new TextEncoder().encode(logicalText);
+    if (!policy.bom) {
+      rawBytes = encoded;
     } else {
-      if (encoded.length >= 3 && encoded[0] === 0xef && encoded[1] === 0xbb && encoded[2] === 0xbf) {
-        rawBytes = encoded.slice(3);
-      } else {
-        rawBytes = encoded;
-      }
+      rawBytes = new Uint8Array(encoded.length + 3);
+      rawBytes.set([0xef, 0xbb, 0xbf]);
+      rawBytes.set(encoded, 3);
     }
   } else if (encoding === "ISO-8859-1" || encoding === "LATIN1") {
-    rawBytes = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) {
-      const code = text.charCodeAt(i);
+    rawBytes = new Uint8Array(logicalText.length);
+    for (let i = 0; i < logicalText.length; i++) {
+      const code = logicalText.charCodeAt(i);
       if (code > 255) {
-        throw new WorkspaceWriteError("encoding", `Character '${text[i]}' at position ${i} cannot be represented in Latin-1.`, undefined, undefined, "none");
+        throw new WorkspaceWriteError("encoding", `Character '${logicalText[i]}' at position ${i} cannot be represented in Latin-1.`, undefined, undefined, "none");
       }
       rawBytes[i] = code & 0xff;
     }
   } else if (encoding === "US-ASCII" || encoding === "ASCII") {
-    rawBytes = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) {
-      const code = text.charCodeAt(i);
+    rawBytes = new Uint8Array(logicalText.length);
+    for (let i = 0; i < logicalText.length; i++) {
+      const code = logicalText.charCodeAt(i);
       if (code > 127) {
-        throw new WorkspaceWriteError("encoding", `Character '${text[i]}' at position ${i} cannot be represented in US-ASCII.`, undefined, undefined, "none");
+        throw new WorkspaceWriteError("encoding", `Character '${logicalText[i]}' at position ${i} cannot be represented in US-ASCII.`, undefined, undefined, "none");
       }
       rawBytes[i] = code & 0x7f;
     }
   } else if (encoding === "UTF-16LE") {
-    rawBytes = new Uint8Array(text.length * 2);
-    for (let i = 0; i < text.length; i++) {
-      const code = text.charCodeAt(i);
-      rawBytes[i * 2] = code & 0xff;
-      rawBytes[i * 2 + 1] = (code >> 8) & 0xff;
+    const offset = policy.bom ? 2 : 0;
+    rawBytes = new Uint8Array(logicalText.length * 2 + offset);
+    if (policy.bom) rawBytes.set([0xff, 0xfe]);
+    for (let i = 0; i < logicalText.length; i++) {
+      const code = logicalText.charCodeAt(i);
+      rawBytes[offset + i * 2] = code & 0xff;
+      rawBytes[offset + i * 2 + 1] = (code >> 8) & 0xff;
     }
   } else if (encoding === "UTF-16BE") {
-    rawBytes = new Uint8Array(text.length * 2);
-    for (let i = 0; i < text.length; i++) {
-      const code = text.charCodeAt(i);
-      rawBytes[i * 2] = (code >> 8) & 0xff;
-      rawBytes[i * 2 + 1] = code & 0xff;
+    const offset = policy.bom ? 2 : 0;
+    rawBytes = new Uint8Array(logicalText.length * 2 + offset);
+    if (policy.bom) rawBytes.set([0xfe, 0xff]);
+    for (let i = 0; i < logicalText.length; i++) {
+      const code = logicalText.charCodeAt(i);
+      rawBytes[offset + i * 2] = (code >> 8) & 0xff;
+      rawBytes[offset + i * 2 + 1] = code & 0xff;
     }
   } else {
     // Default fallback to UTF-8
-    rawBytes = new TextEncoder().encode(text);
+    rawBytes = new TextEncoder().encode(logicalText);
   }
 
   const bytesSha256 = sha256HexBytes(rawBytes);
@@ -179,6 +190,35 @@ export function encodeSaveBytes(text: string, policy: SaveCommitPolicy): Encoded
     textSha256,
     bytesSha256,
     byteLength: rawBytes.length,
+  };
+}
+
+/** Build the receipt from the real byte-writer acknowledgement. */
+export function buildFinalBytesReceipt(
+  prepared: PreparedSave,
+  ack: Pick<WorkspaceWriteAck, "writtenHash" | "writtenByteLength" | "intentHash" | "oldHash">,
+  options: {
+    historyId?: string;
+    recoveryId?: string;
+    committedAt?: number;
+  } = {},
+): FinalBytesReceipt {
+  const logicalText = prepareSaveTextForWriter(prepared.text, prepared.policy);
+  return {
+    receiptId: `receipt-${prepared.transactionId}`,
+    transactionId: prepared.transactionId,
+    workspaceId: prepared.workspaceId,
+    filePath: prepared.filePath,
+    writeCount: 1,
+    finalTextSha256: sha256Hex(logicalText),
+    encodedBytesSha256: ack.intentHash || ack.writtenHash,
+    encodedByteLength: ack.writtenByteLength,
+    policy: { ...prepared.policy },
+    diskPreSha256: ack.oldHash !== undefined ? ack.oldHash : prepared.expectedDiskHash,
+    diskPostSha256: ack.writtenHash,
+    ...(options.historyId ? { historyId: options.historyId } : {}),
+    ...(options.recoveryId ? { recoveryId: options.recoveryId } : {}),
+    committedAt: options.committedAt ?? Date.now(),
   };
 }
 
@@ -245,15 +285,27 @@ export function createSingleWriterSaveCommitter(
           error: parsed,
         };
       }
-      const recoveryId = options.generateRecoveryId ? options.generateRecoveryId(prepared) : undefined;
+      if (parsed.effect === "unknown") {
+        const recoveryId = options.generateRecoveryId
+          ? options.generateRecoveryId(prepared)
+          : prepared.transactionId;
+        return {
+          kind: "failed",
+          transactionId: prepared.transactionId,
+          diskEffect: "unknown",
+          memoryEffect: "unchanged",
+          providerEffect: "unknown",
+          error: parsed,
+          recoveryId,
+        };
+      }
       return {
         kind: "failed",
         transactionId: prepared.transactionId,
-        diskEffect: parsed.effect ?? "none",
+        diskEffect: "none",
         memoryEffect: "unchanged",
         providerEffect: "not-sent",
         error: parsed,
-        recoveryId,
       };
     }
 
@@ -261,21 +313,14 @@ export function createSingleWriterSaveCommitter(
     const liveAfter = options.getLiveAfterWrite ? options.getLiveAfterWrite() : options.getLiveBoundary();
     const writeback = classifySaveWriteback(prepared, liveAfter ? { documentRevision: liveAfter.documentRevision } : null);
 
-    const receipt: FinalBytesReceipt = {
-      receiptId: `receipt-${prepared.transactionId}`,
-      transactionId: prepared.transactionId,
-      workspaceId: prepared.workspaceId,
-      filePath: prepared.filePath,
-      writeCount: 1,
-      finalTextSha256: encoded.textSha256,
-      encodedBytesSha256: encoded.bytesSha256,
-      encodedByteLength: encoded.byteLength,
-      policy: prepared.policy,
-      diskPreSha256: prepared.expectedDiskHash,
-      diskPostSha256: writtenFile.hash || encoded.bytesSha256,
+    const receipt = buildFinalBytesReceipt(prepared, {
+      writtenHash: writtenFile.hash || encoded.bytesSha256,
+      writtenByteLength: encoded.byteLength,
+      intentHash: encoded.bytesSha256,
+      oldHash: prepared.expectedDiskHash,
+    }, {
       historyId: options.generateHistoryId ? options.generateHistoryId(prepared) : `hist-${prepared.transactionId}`,
-      committedAt: Date.now(),
-    };
+    });
 
     if (writeback.kind === "saved-current") {
       return {
@@ -305,6 +350,9 @@ export function createSingleWriterSaveCommitter(
       };
     }
 
+    const recoveryId = options.generateRecoveryId
+      ? options.generateRecoveryId(prepared)
+      : prepared.transactionId;
     return {
       kind: "committed-writeback-discarded",
       transactionId: prepared.transactionId,
@@ -313,8 +361,9 @@ export function createSingleWriterSaveCommitter(
       providerEffect: "discarded",
       file: writtenFile,
       reason: writeback.reason,
-      receipt,
+      receipt: { ...receipt, recoveryId },
       historyId: receipt.historyId,
+      recoveryId,
     };
   };
 }

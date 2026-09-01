@@ -60,6 +60,31 @@ const workspaceMocks = vi.hoisted(() => ({
   workspaceApplyResourceOperation: vi.fn(),
 }));
 
+const saveCommitObservations = vi.hoisted(() => ({
+  results: [] as unknown[],
+}));
+
+vi.mock("./workspace/workspaceStyleController", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./workspace/workspaceStyleController")>();
+  return {
+    ...actual,
+    createWorkspaceStyleController: (
+      ...args: Parameters<typeof actual.createWorkspaceStyleController>
+    ) => {
+      const controller = actual.createWorkspaceStyleController(...args);
+      const executeSaveTransaction = controller.executeSaveTransaction.bind(controller);
+      controller.executeSaveTransaction = async (
+        ...transactionArgs: Parameters<typeof executeSaveTransaction>
+      ) => {
+        const result = await executeSaveTransaction(...transactionArgs);
+        saveCommitObservations.results.push(result);
+        return result;
+      };
+      return controller;
+    },
+  };
+});
+
 const lspMocks = vi.hoisted(() => ({
   // This mock replaces the whole lsp module, so every value export
   // CodeWorkspaceTab imports must exist here. Keep the renderer-wide sequence
@@ -261,6 +286,15 @@ vi.mock("../../lib/editor/workspace", () => {
   };
   return {
     ...workspaceMocks,
+    parseWorkspaceWriteError: (error: unknown) => {
+      if (error && typeof error === "object" && "kind" in error && "message" in error) {
+        return error;
+      }
+      return {
+        kind: "io",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    },
     workspaceListDir: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceListDir(...args)),
     workspaceCompactChain: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceCompactChain(...args)),
     workspaceListFilesRecursive: (...args: unknown[]) => wrap(() => workspaceMocks.workspaceListFilesRecursive(...args)),
@@ -276,7 +310,7 @@ vi.mock("../../lib/ipc", () => ipcMocks);
 vi.mock("../../lib/git", () => gitMocks);
 
 const localHistoryMocks = vi.hoisted(() => ({
-  historySnapshot: vi.fn(async () => null),
+  historySnapshot: vi.fn<() => Promise<LocalHistoryEntry | null>>(async () => null),
   historyList: vi.fn<() => Promise<LocalHistoryEntry[]>>(async () => []),
   historyRead: vi.fn(async () => ""),
   formatLocalHistoryTime: vi.fn(() => "just now"),
@@ -502,6 +536,7 @@ describe("CodeWorkspaceTab", () => {
       codeWorkspaceByTab: {},
     });
     useCodeWorkspaceStore.setState({ byInstanceId: {} });
+    saveCommitObservations.results.length = 0;
     projectFactsMock.state.status = "idle";
     projectFactsMock.state.reason = null;
     projectFactsMock.state.generation = 0;
@@ -6340,11 +6375,25 @@ end_of_record
       };
       workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
       workspaceMocks.workspaceReadFile.mockResolvedValue(file(path, initialText));
+      localHistoryMocks.historySnapshot.mockResolvedValue({
+        id: 41,
+        path: `/repo/app/${path}`,
+        contentHash: "history-preimage-hash",
+        createdAt: 1_788_888_888,
+        reason: "save",
+        byteLen: initialText.length,
+      });
       workspaceMocks.workspaceWriteFileEncoded.mockImplementation(async (
         _root: string,
         writtenPath: string,
         text: string,
-      ) => writeAck(file(writtenPath, text, { hash: `hash-saved-${writtenPath}` })));
+      ) => writeAck(
+        file(writtenPath, text, { hash: `hash-saved-${writtenPath}` }),
+        {
+          intentHash: `hash-saved-${writtenPath}`,
+          oldHash: `hash-${writtenPath}`,
+        },
+      ));
 
       const rendered = renderWorkspace(workspace);
       await screen.findByTitle(`app / ${path}`);
@@ -6370,6 +6419,30 @@ end_of_record
         "UTF-8",
         false,
       ));
+      expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(saveCommitObservations.results).toHaveLength(1));
+      const result = saveCommitObservations.results[0];
+      expect(result).toMatchObject({
+        kind: "saved-current",
+        diskEffect: "committed",
+        historyId: "local-history-41",
+        receipt: {
+          workspaceId: "instance-editor-delete-save",
+          filePath: `/repo/app/${path}`,
+          writeCount: 1,
+          encodedBytesSha256: `hash-saved-${path}`,
+          encodedByteLength: savedText.length,
+          diskPreSha256: `hash-${path}`,
+          diskPostSha256: `hash-saved-${path}`,
+          historyId: "local-history-41",
+        },
+      });
+      expect((result as { receipt: { receiptId: string; transactionId: string; finalTextSha256: string } }).receipt)
+        .toMatchObject({
+          receiptId: expect.stringMatching(/^receipt-tx-save-/),
+          transactionId: expect.stringMatching(/^tx-save-/),
+          finalTextSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
     });
 
     it("cancels save with 0 disk writes when user edits buffer during historySnapshot await", async () => {
@@ -6603,6 +6676,81 @@ end_of_record
       });
       expect(hasBlockingDiskEffectResolution("instance-save-race-close", "/repo/app/src/main.ts")).toBe(false);
       resolveDiskEffectLedgerEntry("instance-save-race-close", ledgerRows[0].transactionId, "/repo/app/src/main.ts");
+    });
+
+    it("records unknown disk effects for recovery and blocks an automatic retry", async () => {
+      const path = "src/main.ts";
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-save-unknown-effect",
+        workspaceInstanceId: "instance-save-unknown-effect",
+        name: "Save Unknown Effect",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+      workspaceMocks.workspaceReadFile.mockResolvedValue(file(path, "initial\n"));
+      workspaceMocks.workspaceReadFileWithEncoding.mockResolvedValue(file(path, "foreign\n", {
+        hash: "foreign-disk-hash",
+      }));
+      workspaceMocks.workspaceWriteFileEncoded.mockRejectedValue(Object.assign(
+        new Error("atomic replace acknowledgement was lost"),
+        {
+          kind: "io",
+          effect: "unknown",
+          intentHash: "intended-new-hash",
+          intentByteLength: 16,
+          oldHash: `hash-${path}`,
+        },
+      ));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle(`app / ${path}`);
+      const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+      expect(content).not.toBeNull();
+      fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
+      await waitFor(() => expect(selectCodeWorkspaceUi(
+        useCodeWorkspaceStore.getState(),
+        "instance-save-unknown-effect",
+      ).openFiles[`root:app:${path}`]?.dirty).toBe(true));
+
+      fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+      await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("Save result unknown"));
+      expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledTimes(1);
+      expect(workspaceMocks.workspaceReadFileWithEncoding).toHaveBeenCalledWith(
+        "/repo/app",
+        path,
+        "UTF-8",
+      );
+
+      const ledgerRows = listDiskEffectLedgerEntries("instance-save-unknown-effect")
+        .filter((row) => row.path === `/repo/app/${path}`);
+      expect(ledgerRows).toHaveLength(1);
+      expect(ledgerRows[0]).toMatchObject({
+        transactionId: expect.stringMatching(/^tx-save-/),
+        expectedOldHash: `hash-${path}`,
+        intendedNewHash: "intended-new-hash",
+        observedHash: "foreign-disk-hash",
+        diskEffect: "unknown",
+        memoryEffect: "unchanged",
+        providerEffect: "unknown",
+        resolution: "foreign-blocked",
+      });
+      expect(hasBlockingDiskEffectResolution(
+        "instance-save-unknown-effect",
+        `/repo/app/${path}`,
+      )).toBe(true);
+
+      fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+      await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("Save blocked"));
+      expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledTimes(1);
+
+      resolveDiskEffectLedgerEntry(
+        "instance-save-unknown-effect",
+        ledgerRows[0].transactionId,
+        `/repo/app/${path}`,
+      );
     });
 
     it("§8.27.2 BB1 passes root clipboard handle via WorkspaceClipboardSessionContext to CodeMirror split instances", async () => {
