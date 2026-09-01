@@ -114,9 +114,15 @@ import {
   createLspOverlayChrome,
   createLspSemanticTokenChrome,
   LSP_INTELLIGENCE_THEME,
+  updateLspOverlayChrome,
+  updateLspSemanticTokenChrome,
 } from "./lspIntelligenceChrome";
 import { createLspHyperlinkExtension } from "./lspHyperlink";
-import { createGitEditorChrome, type GitLineChange } from "./gitEditorChrome";
+import {
+  createGitEditorChrome,
+  updateGitEditorChrome,
+  type GitLineChange,
+} from "./gitEditorChrome";
 import { createDebugEditorChrome, type DebugBreakpointMarker } from "./debugEditorChrome";
 import { createCoverageEditorChrome } from "./coverageEditorChrome";
 import {
@@ -1619,6 +1625,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   fileKeyRef.current = fileKey;
   const transactionOwnerRef = useRef(transactionOwner);
   transactionOwnerRef.current = transactionOwner;
+  const documentRevisionRef = useRef(documentRevision);
+  documentRevisionRef.current = documentRevision;
   // §8.18.2: the mount-once editor effect reads the live host through a ref so
   // editor.* actions register against the workspace controller's instance.
   const workspaceActionHostRef = useRef<WorkspaceActionHost | null>(workspaceActionHost);
@@ -1690,6 +1698,28 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const lastDocumentTextRef = useRef(doc);
   /** Last controlled prop snapshot; distinguishes stale lag from a real reload. */
   const lastPropDocumentTextRef = useRef(doc);
+  /** Local snapshots awaiting a controlled-prop echo, oldest first. */
+  const pendingLocalDocumentEchoesRef = useRef<Array<{
+    text: string;
+    expectedDocumentRevision: number;
+  }>>([]);
+  const lastLocalDocumentRevisionRef = useRef(documentRevision);
+  const rememberLocalDocumentEcho = (text: string): void => {
+    const expectedDocumentRevision = Math.max(
+      documentRevisionRef.current,
+      lastLocalDocumentRevisionRef.current,
+    ) + 1;
+    lastLocalDocumentRevisionRef.current = expectedDocumentRevision;
+    const pendingEchoes = pendingLocalDocumentEchoesRef.current;
+    const lastPendingEcho = pendingEchoes[pendingEchoes.length - 1];
+    if (
+      lastPendingEcho?.text !== text
+      || lastPendingEcho.expectedDocumentRevision !== expectedDocumentRevision
+    ) {
+      pendingEchoes.push({ text, expectedDocumentRevision });
+      if (pendingEchoes.length > 64) pendingEchoes.splice(0, pendingEchoes.length - 64);
+    }
+  };
   const lastSelectionRef = useRef<{ from: number; to: number } | null>(null);
   const selectionEmitTimerRef = useRef<number | null>(null);
   const renderedDiagnosticsRef = useRef(diagnostics);
@@ -1709,6 +1739,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const renderedOverlayRef = useRef({ highlights, inlayHints });
   const renderedSemanticTokensRef = useRef(semanticTokens);
   const renderedGitRef = useRef({ changes: gitChanges, blame: gitBlame });
+  const pendingGitUpdateFrameRef = useRef<number | null>(null);
   const renderedDebugRef = useRef({
     breakpoints: debugBreakpoints,
     currentLine: debugCurrentLine,
@@ -2288,14 +2319,40 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
                   });
                 });
                 if (deltas.length > 0) {
-                  transactionOwnerRef.current.dispatchTransaction(
+                  const sharedTransaction = transactionOwnerRef.current.dispatchTransaction(
                     fileKeyRef.current,
                     viewIdRef.current,
                     deltas,
                     "user-input",
                   );
+                  if (!sharedTransaction) {
+                    const rejectedView = update.view;
+                    const rejectedText = nextDoc;
+                    queueMicrotask(() => {
+                      const currentView = viewRef.current;
+                      const currentOwner = transactionOwnerRef.current;
+                      const currentFileKey = fileKeyRef.current;
+                      if (
+                        currentView !== rejectedView
+                        || !currentOwner
+                        || !currentFileKey
+                        || currentView.state.doc.toString() !== rejectedText
+                      ) return;
+                      const canonical = currentOwner.getDocument(currentFileKey);
+                      if (canonical === null || canonical === rejectedText) return;
+                      applyingExternalDocRef.current = true;
+                      try {
+                        applyDocumentSnapshotToView(currentView, canonical);
+                        lastDocumentTextRef.current = currentView.state.doc.toString();
+                      } finally {
+                        applyingExternalDocRef.current = false;
+                      }
+                    });
+                    return;
+                  }
                 }
               }
+              rememberLocalDocumentEcho(nextDoc);
               onChangeRef.current(
                 nextDoc,
                 lspPositionFromOffset(update.state.doc, update.state.selection.main.head),
@@ -2388,6 +2445,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           if (currentOwner.getDocument(fileKeyRef.current) !== view.state.doc.toString()) return false;
           const transaction = currentOwner.undo(fileKeyRef.current, viewIdRef.current);
           if (!transaction || !applySharedTransactionToView(view, transaction)) return false;
+          rememberLocalDocumentEcho(view.state.doc.toString());
           onChangeRef.current(
             view.state.doc.toString(),
             lspPositionFromOffset(view.state.doc, view.state.selection.main.head),
@@ -2402,6 +2460,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           if (currentOwner.getDocument(fileKeyRef.current) !== view.state.doc.toString()) return false;
           const transaction = currentOwner.redo(fileKeyRef.current, viewIdRef.current);
           if (!transaction || !applySharedTransactionToView(view, transaction)) return false;
+          rememberLocalDocumentEcho(view.state.doc.toString());
           onChangeRef.current(
             view.state.doc.toString(),
             lspPositionFromOffset(view.state.doc, view.state.selection.main.head),
@@ -2631,9 +2690,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     }
     renderedOverlayRef.current = { highlights, inlayHints };
     view.dispatch({
-      effects: overlayCompartment.current.reconfigure(
-        createLspOverlayChrome(view.state.doc, highlights, inlayHints),
-      ),
+      effects: updateLspOverlayChrome(highlights, inlayHints),
     });
   }, [highlights, inlayHints]);
 
@@ -2662,25 +2719,33 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     if (sameArrayOrBothEmpty(renderedSemanticTokensRef.current, semanticTokens)) return;
     renderedSemanticTokensRef.current = semanticTokens;
     view.dispatch({
-      effects: semanticTokensCompartment.current.reconfigure(
-        createLspSemanticTokenChrome(view.state.doc, semanticTokens),
-      ),
+      effects: updateLspSemanticTokenChrome(semanticTokens),
     });
   }, [semanticTokens]);
 
   useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
     const previous = renderedGitRef.current;
     if (sameArrayOrBothEmpty(previous.changes, gitChanges) && previous.blame === gitBlame) return;
-    renderedGitRef.current = { changes: gitChanges, blame: gitBlame };
-    view.dispatch({
-      effects: gitCompartment.current.reconfigure(createGitEditorChrome(
-        gitChanges,
-        gitBlame,
-        (change) => onGitChangeClickRef.current?.(change),
-      )),
+    const frame = window.requestAnimationFrame(() => {
+      if (pendingGitUpdateFrameRef.current !== frame) return;
+      pendingGitUpdateFrameRef.current = null;
+      const view = viewRef.current;
+      if (!view || !view.dom.isConnected) return;
+      renderedGitRef.current = { changes: gitChanges, blame: gitBlame };
+      view.dispatch({
+        effects: updateGitEditorChrome(
+          gitChanges,
+          gitBlame,
+          (change) => onGitChangeClickRef.current?.(change),
+        ),
+      });
     });
+    pendingGitUpdateFrameRef.current = frame;
+    return () => {
+      if (pendingGitUpdateFrameRef.current !== frame) return;
+      window.cancelAnimationFrame(frame);
+      pendingGitUpdateFrameRef.current = null;
+    };
   }, [gitBlame, gitChanges]);
 
   useEffect(() => {
@@ -2782,6 +2847,38 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     if (!view) return;
     const previousPropDocument = lastPropDocumentTextRef.current;
     lastPropDocumentTextRef.current = doc;
+    const pendingEchoes = pendingLocalDocumentEchoesRef.current;
+    lastLocalDocumentRevisionRef.current = Math.max(
+      lastLocalDocumentRevisionRef.current,
+      documentRevision,
+    );
+    let localEchoIndex = -1;
+    for (let index = pendingEchoes.length - 1; index >= 0; index -= 1) {
+      const entry = pendingEchoes[index]!;
+      if (
+        entry.text === doc
+        && entry.expectedDocumentRevision === documentRevision
+      ) {
+        localEchoIndex = index;
+        break;
+      }
+    }
+    if (localEchoIndex >= 0) {
+      pendingEchoes.splice(0, localEchoIndex + 1);
+      // A recognized echo acknowledges an earlier local transaction. During
+      // native character-level input, both the view and shared owner may have
+      // advanced again before React delivers this prop. Replacing the live
+      // document here can corrupt an in-flight CodeMirror change set; a later
+      // non-echo snapshot remains responsible for canonical reconciliation.
+      lastDocumentTextRef.current = view.state.doc.toString();
+      return;
+    }
+    while (
+      pendingEchoes.length > 0
+      && pendingEchoes[0]!.expectedDocumentRevision <= documentRevision
+    ) {
+      pendingEchoes.shift();
+    }
 
     const owner = transactionOwnerRef.current;
     if (owner && fileKeyRef.current) {
@@ -2834,7 +2931,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     } finally {
       applyingExternalDocRef.current = false;
     }
-  }, [doc]);
+  }, [doc, documentRevision]);
 
   useEffect(() => {
     if (!visible) return;

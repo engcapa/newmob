@@ -481,7 +481,11 @@ export class WorkspaceStyleController {
         ? (transaction.policy.eol.toLowerCase() as "lf" | "crlf" | "cr")
         : undefined;
 
-    const resolvedCharset = codeStyle.charset ?? transaction.policy.encoding ?? "UTF-8";
+    const policyCharset = transaction.policy.bom
+      && transaction.policy.encoding.trim().toLowerCase().replace(/_/g, "-") === "utf-8"
+      ? "UTF-8-BOM"
+      : transaction.policy.encoding;
+    const resolvedCharset = codeStyle.charset ?? policyCharset ?? "UTF-8";
 
     const normResult: SaveNormalizationResult = await runSaveNormalizationPipeline({
       text: transaction.text,

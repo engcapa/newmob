@@ -55,6 +55,20 @@ describe("§ED-SAVE-004: Save Behavior & Native Evidence Contract", () => {
       expect(result.hashMatches).toBe(false);
       expect(result.mismatches.length).toBeGreaterThan(0);
     });
+
+    it("hashes the observed disk bytes instead of trusting a re-encoding of disk text", () => {
+      const receipt = baseReceipt();
+      const diskText = "hello world\n";
+      const foreignBytes = new TextEncoder().encode(diskText);
+      foreignBytes[foreignBytes.length - 1] = 0x21;
+
+      const result = reconcileSaveObservationReceipt(receipt, diskText, foreignBytes);
+
+      expect(result.finalTextMatchesDisk).toBe(true);
+      expect(result.byteLengthMatches).toBe(true);
+      expect(result.hashMatches).toBe(false);
+      expect(result.matched).toBe(false);
+    });
   });
 
   describe("generateSaveEncodingMatrix", () => {

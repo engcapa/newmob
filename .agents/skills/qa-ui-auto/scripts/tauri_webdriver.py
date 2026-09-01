@@ -265,8 +265,62 @@ class NativeSession:
         )
         return f"double-clicked {selector}"
 
+    def pointer_click(self, selector: str) -> dict[str, int]:
+        """Click through W3C pointer actions instead of element /click."""
+        element = self.find(selector, interactive=True)
+        rect = self.request("GET", self.element_path(element, "/rect"))
+        x = int((rect.get("x", 0) + rect.get("width", 0) / 2)) if isinstance(rect, dict) else 0
+        y = int((rect.get("y", 0) + rect.get("height", 0) / 2)) if isinstance(rect, dict) else 0
+        self.request(
+            "POST",
+            self.endpoint("/actions"),
+            {
+                "actions": [
+                    {
+                        "type": "pointer",
+                        "id": "native-pointer",
+                        "parameters": {"pointerType": "mouse"},
+                        "actions": [
+                            {"type": "pointerMove", "duration": 100, "x": x, "y": y, "origin": "viewport"},
+                            {"type": "pointerDown", "button": 0},
+                            {"type": "pause", "duration": 80},
+                            {"type": "pointerUp", "button": 0},
+                        ],
+                    }
+                ]
+            },
+        )
+        return {"x": x, "y": y}
+
     def fill(self, selector: str, text: str) -> str:
         element = self.find(selector)
+        contenteditable = self.execute(
+            f"const el = document.querySelector({json.dumps(selector)});"
+            "return !!el?.isContentEditable;"
+        )
+        if contenteditable is True:
+            # WebKit accepts element /value for contenteditable nodes without
+            # dispatching the beforeinput/input events CodeMirror owns. Drive
+            # real key actions so the editor creates a normal transaction.
+            for _ in range(3):
+                self.request("POST", self.element_path(element, "/click"), {})
+                focused = self.execute(
+                    f"const el = document.querySelector({json.dumps(selector)});"
+                    "return !!el && document.activeElement === el;"
+                )
+                if focused is True:
+                    break
+                time.sleep(0.1)
+            else:
+                raise WebDriverError(f"contenteditable did not receive focus: {selector}")
+            self.press_combo("Control+a")
+            lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            for index, line in enumerate(lines):
+                if index:
+                    self.press_combo("Enter")
+                if line:
+                    self.type_text(line)
+            return f"filled contenteditable {selector}"
         try:
             self.request("POST", self.element_path(element, "/clear"), {})
         except WebDriverError:
@@ -359,11 +413,14 @@ class NativeSession:
         return f"pressed {combo}"
 
     def type_text(self, text: str) -> str:
-        """Type text into the focused element, one key event pair per char."""
+        """Type text into the focused element, one paced key pair per char."""
         seq: list[dict[str, Any]] = []
         for ch in text:
             seq.append({"type": "keyDown", "value": ch})
             seq.append({"type": "keyUp", "value": ch})
+            # Let WebKit deliver the input transaction and CodeMirror finish
+            # its scheduled measure before the next native character arrives.
+            seq.append({"type": "pause", "duration": 20})
         self.request(
             "POST",
             self.endpoint("/actions"),

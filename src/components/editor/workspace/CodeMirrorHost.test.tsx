@@ -8,6 +8,7 @@ import { CodeMirrorHost } from "./CodeMirrorHost";
 import { virtualSpaceOverflowField } from "./workspaceVirtualSpace";
 import { WorkspaceActionHost } from "./workspaceActionHost";
 import { WorkspaceDocumentTransactionOwner } from "./workspaceDocumentTransactionOwner";
+import type { GitLineChange } from "./gitEditorChrome";
 
 function renderEditor(
   doc: string,
@@ -915,6 +916,84 @@ describe("§8.26 ED-MULTIVIEW-002 shared document host wiring", () => {
     expect(owner.getHistoryState("shared.ts")).toMatchObject({ canUndo: true, canRedo: false });
   });
 
+  it("keeps a native replacement burst ahead of delayed controlled document echoes after undo", async () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    const actionHost = new WorkspaceActionHost({ workspaceId: "ws-shared-recovery" });
+    const initial = "café\nmatrix";
+    const onChange = vi.fn();
+    const rendered = render(
+      <CodeMirrorHost {...sharedProps(owner, "primary", initial, onChange, actionHost)} />,
+    );
+    const view = EditorView.findFromDOM(rendered.container.querySelector<HTMLElement>(".cm-editor")!);
+    expect(view).not.toBeNull();
+
+    view!.dispatch({ changes: { from: initial.length, to: initial.length, insert: "你" } });
+    await act(async () => {
+      const result = await actionHost.execute("workspace.undo", {
+        focus: "editor",
+        hasActiveFile: true,
+      });
+      expect(result.kind).toBe("applied");
+    });
+    expect(view!.state.doc.toString()).toBe(initial);
+    expect(owner.getDocument("shared.ts")).toBe(initial);
+
+    // Save/external synchronization has its own owner revision stream and
+    // does not advance the store's controlled documentRevision metadata.
+    expect(owner.replaceDocument(
+      "shared.ts",
+      "save-writer",
+      `C${initial.slice(1)}`,
+      "external-disk",
+    )).not.toBeNull();
+    expect(owner.replaceDocument(
+      "shared.ts",
+      "save-writer",
+      initial,
+      "external-disk",
+    )).not.toBeNull();
+    expect(view!.state.doc.toString()).toBe(initial);
+    expect(owner.getRevision("shared.ts")).toBe(4);
+
+    // WebDriver contenteditable fill emits character-level document updates.
+    // React may render the first controlled echo after the next character has
+    // already reached both the live view and the shared transaction owner.
+    view!.dispatch({ changes: { from: 0, to: initial.length, insert: "恢" } });
+    view!.dispatch({ changes: { from: 1, to: 1, insert: "复" } });
+    expect(view!.state.doc.toString()).toBe("恢复");
+    expect(owner.getDocument("shared.ts")).toBe("恢复");
+
+    // Model a later native transaction that has reached the shared owner but
+    // whose CodeMirror dispatch is still in flight. The delayed "恢" prop is
+    // only an acknowledgement and must not synchronously replace the view.
+    expect(owner.replaceDocument(
+      "shared.ts",
+      "primary",
+      "恢中",
+      "external-disk",
+    )).not.toBeNull();
+    expect(view!.state.doc.toString()).toBe("恢复");
+    expect(owner.getDocument("shared.ts")).toBe("恢中");
+
+    rendered.rerender(
+      <CodeMirrorHost
+        {...sharedProps(owner, "primary", "恢", onChange, actionHost)}
+        documentRevision={3}
+      />,
+    );
+    expect(view!.state.doc.toString()).toBe("恢复");
+    expect(owner.getDocument("shared.ts")).toBe("恢中");
+
+    rendered.rerender(
+      <CodeMirrorHost
+        {...sharedProps(owner, "primary", "恢复", onChange, actionHost)}
+        documentRevision={4}
+      />,
+    );
+    expect(view!.state.doc.toString()).toBe("恢复");
+    expect(owner.getDocument("shared.ts")).toBe("恢中");
+  });
+
   it("retains canonical text and history after a non-final unmount, then cleans up finally", () => {
     const owner = new WorkspaceDocumentTransactionOwner();
     const initial = "hello";
@@ -957,5 +1036,53 @@ describe("§8.26 ED-MULTIVIEW-002 shared document host wiring", () => {
       undoDepth: 0,
       redoDepth: 0,
     });
+  });
+});
+
+describe("ED-SAVE-004 editor recovery decoration synchronization", () => {
+  afterEach(() => cleanup());
+
+  it("reconfigures Git markers after a native replacement shortens the document", async () => {
+    const initial = "café\nmatrix";
+    const secondLineChange: GitLineChange = {
+      kind: "modified",
+      startLine: 1,
+      endLine: 1,
+      oldStartLine: 1,
+      oldEndLine: 1,
+      oldText: "old",
+      newText: "matrix",
+    };
+    const firstLineChange: GitLineChange = {
+      ...secondLineChange,
+      startLine: 0,
+      endLine: 0,
+      oldStartLine: 0,
+      oldEndLine: 0,
+      newText: "c",
+    };
+    const onChange = vi.fn();
+    const rendered = renderEditor(initial, onChange, { gitChanges: [secondLineChange] });
+    const view = EditorView.findFromDOM(rendered.container.querySelector<HTMLElement>(".cm-editor")!);
+    const dispatchSpy = vi.spyOn(view!, "dispatch");
+
+    expect(() => {
+      view!.dispatch({ changes: { from: 0, to: initial.length, insert: "c" } });
+      rendered.rerender(
+        <CodeMirrorHost
+          {...rendered.props}
+          doc="c"
+          documentRevision={1}
+          gitChanges={[firstLineChange]}
+        />,
+      );
+    }).not.toThrow();
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(view!.state.doc.toString()).toBe("c");
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+    expect(dispatchSpy.mock.calls.length).toBeGreaterThan(1);
+    expect(rendered.container.querySelector(".cm-git-change-modified")).toBeTruthy();
   });
 });

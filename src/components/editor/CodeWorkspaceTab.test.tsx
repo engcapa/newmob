@@ -5586,13 +5586,13 @@ describe("CodeWorkspaceTab", () => {
     };
     workspaceMocks.workspaceReadFile.mockResolvedValue(file(
       "src/main.txt",
-      "你好",
+      "café",
       { encoding: "UTF-8", bom: false },
     ));
     workspaceMocks.workspaceWriteFileEncoded.mockResolvedValue(writeAck(file(
       "src/main.txt",
-      "你好",
-      { encoding: "GBK", bom: false, hash: "hash-gbk" },
+      "café",
+      { encoding: "windows-1252", bom: false, hash: "hash-latin1" },
     )));
 
     renderWorkspace(workspace);
@@ -5602,7 +5602,7 @@ describe("CodeWorkspaceTab", () => {
 
     act(() => useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding?.());
     expect(await screen.findByTestId("file-encoding-dialog")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Encoding"), { target: { value: "GBK" } });
+    fireEvent.change(screen.getByLabelText("Encoding"), { target: { value: "ISO-8859-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Convert on Save" }));
 
     await waitFor(() => expect(
@@ -5614,9 +5614,9 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
       "/repo/app",
       "src/main.txt",
-      "你好",
+      "café",
       "hash-src/main.txt",
-      "GBK",
+      "ISO-8859-1",
       false,
     ));
     expect(workspaceMocks.workspaceWriteFile).not.toHaveBeenCalled();
@@ -5624,6 +5624,10 @@ describe("CodeWorkspaceTab", () => {
       selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-encoding-save")
         .openFiles["root:app:src/main.txt"]?.dirty,
     ).toBe(false));
+    expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-encoding-save")
+        .openFiles["root:app:src/main.txt"]?.encoding,
+    ).toBe("ISO-8859-1");
   });
 
   it("reloads the active file with an explicit encoding from the status action", async () => {
@@ -6409,6 +6413,8 @@ end_of_record
         expect(fileState?.text).toBe(savedText);
         expect(fileState?.dirty).toBe(true);
       });
+      expect(screen.getByTestId("code-workspace-save-observation")).toHaveAttribute("data-state", "dirty");
+      expect(screen.getByTestId("code-workspace-save-observation")).toHaveTextContent("Unsaved changes in App.java");
 
       fireEvent.keyDown(content!, { key: "s", code: "KeyS", ctrlKey: true });
       await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
@@ -6443,6 +6449,16 @@ end_of_record
           transactionId: expect.stringMatching(/^tx-save-/),
           finalTextSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         });
+      const saveObservation = screen.getByTestId("code-workspace-save-observation");
+      expect(saveObservation).toHaveAttribute("data-state", "saved");
+      expect(saveObservation).toHaveAttribute("data-result-kind", "saved-current");
+      expect(saveObservation).toHaveAttribute("data-receipt-id", expect.stringMatching(/^receipt-tx-save-/));
+      expect(saveObservation).toHaveAttribute("data-encoded-bytes-sha256", `hash-saved-${path}`);
+      expect(saveObservation).toHaveAttribute("data-write-count", "1");
+      expect(saveObservation).toHaveAttribute("data-dirty", "false");
+      expect(saveObservation).toHaveAccessibleName("Save status");
+      expect(saveObservation).toHaveAttribute("aria-live", "polite");
+      expect(saveObservation).toHaveTextContent("Saved App.java");
     });
 
     it("cancels save with 0 disk writes when user edits buffer during historySnapshot await", async () => {
@@ -6594,6 +6610,12 @@ end_of_record
       });
 
       expect(useAppStore.getState().statusMessage).toContain("current changes remain unsaved");
+      const staleObservation = screen.getByTestId("code-workspace-save-observation");
+      expect(staleObservation).toHaveAttribute("data-state", "stale");
+      expect(staleObservation).toHaveAttribute("data-result-kind", "saved-stale-snapshot");
+      expect(staleObservation).toHaveAttribute("data-dirty", "true");
+      expect(staleObservation).toHaveAttribute("data-encoded-bytes-sha256", "hash-saved-snapshot");
+      expect(staleObservation).toHaveTextContent("current changes remain unsaved");
 
       // P0-S3 stale-save ordering: the provider must never receive the stale
       // snapshot text via didSave; only the current buffer may be synced.
@@ -6723,6 +6745,13 @@ end_of_record
         path,
         "UTF-8",
       );
+      const recoveryObservation = screen.getByTestId("code-workspace-save-observation");
+      expect(recoveryObservation).toHaveAttribute("data-state", "recovery");
+      expect(recoveryObservation).toHaveAttribute("data-result-kind", "failed");
+      expect(recoveryObservation).toHaveAttribute("data-disk-effect", "unknown");
+      expect(recoveryObservation).toHaveAttribute("data-recovery-id", expect.stringMatching(/^tx-save-/));
+      expect(recoveryObservation).not.toHaveAttribute("data-receipt-id");
+      expect(recoveryObservation).toHaveTextContent("Save recovery required for main.ts");
 
       const ledgerRows = listDiskEffectLedgerEntries("instance-save-unknown-effect")
         .filter((row) => row.path === `/repo/app/${path}`);

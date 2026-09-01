@@ -345,6 +345,14 @@ controls:
     selector: '[data-testid="status-bar-message"]'
     kind: display
     optional: true       # transient status text (operation feedback)
+  - id: workspace-encoding
+    selector: '[data-testid="status-bar-workspace-encoding"]'
+    kind: interactive
+    optional: true       # active Code Workspace file only
+  - id: workspace-eol
+    selector: '[data-testid="status-bar-workspace-eol"]'
+    kind: interactive
+    optional: true       # active Code Workspace file only
 -->
 
 - 显示活跃连接数
@@ -5536,9 +5544,10 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, WorkspaceTabPolicySettingsDialog, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog]
+components: [CodeWorkspaceTab, WorkspaceTabPolicySettingsDialog, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog, FileEncodingDialog]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/FileEncodingDialog.tsx
   - src/components/editor/workspace/WorkspaceTabPolicySettingsDialog.tsx
   - src/components/editor/workspace/Breadcrumbs.tsx
   - src/components/editor/workspace/ProjectFactsStatusBadge.tsx
@@ -5581,6 +5590,30 @@ controls:
     selector: '[data-testid="code-workspace-file-status"]'
     kind: display
     optional: true       # dirty/saved indicator on the active tab strip
+  - id: save-observation
+    selector: '[data-testid="code-workspace-save-observation"]'
+    kind: display
+    optional: true       # metadata-only live region for the active file
+  - id: file-encoding-dialog
+    selector: '[data-testid="file-encoding-dialog"]'
+    kind: display
+    optional: true       # opened from the status-bar encoding action
+  - id: file-encoding-select
+    selector: '[data-testid="file-encoding-select"]'
+    kind: interactive
+    optional: true
+  - id: file-encoding-bom
+    selector: '[data-testid="file-encoding-bom"]'
+    kind: interactive
+    optional: true
+  - id: file-encoding-reload
+    selector: '[data-testid="file-encoding-reload"]'
+    kind: interactive
+    optional: true
+  - id: file-encoding-convert
+    selector: '[data-testid="file-encoding-convert"]'
+    kind: interactive
+    optional: true
   # Per-file IDEA-style diagnostics chrome. Provider-backed counts are covered
   # by unit/native/provider evidence; browser covers the typed no-provider UI.
   - id: highlighting-widget

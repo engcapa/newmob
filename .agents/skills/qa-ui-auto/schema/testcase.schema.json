@@ -146,6 +146,15 @@
     "native_ime_keys": {
      "$ref": "#/$defs/native_ime_keys_arg"
     },
+    "native_keys": {
+     "$ref": "#/$defs/native_keys_arg"
+    },
+    "native_click": {
+     "$ref": "#/$defs/native_click_arg"
+    },
+    "native_set_writable": {
+     "$ref": "#/$defs/native_set_writable_arg"
+    },
     "press": {
      "$ref": "#/$defs/press_arg"
     },
@@ -280,6 +289,74 @@
       }
      ],
      "description": "Native-only: host-side existence check."
+    },
+    "assert_file_receipt": {
+     "type": "object",
+     "required": [
+      "path",
+      "selector",
+      "encoding",
+      "bom",
+      "eol",
+      "expected_text"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "path": {
+       "type": "string",
+       "minLength": 1
+      },
+      "selector": {
+       "type": "string",
+       "minLength": 1
+      },
+      "encoding": {
+       "enum": ["UTF-8", "UTF-16LE", "UTF-16BE", "ISO-8859-1"]
+      },
+      "bom": {
+       "type": "boolean"
+      },
+      "eol": {
+       "enum": ["lf", "crlf", "cr"]
+      },
+      "expected_text": {
+       "type": "string"
+      },
+      "require_history": {
+       "type": "boolean",
+       "default": true
+      },
+      "timeout_sec": {
+       "type": "number",
+       "minimum": 1,
+       "maximum": 120
+      }
+     },
+     "description": "Native-only: independently hashes host bytes and reconciles encoding, BOM, EOL, length, disk hash, logical hash, and history identity with a production save receipt observation."
+    },
+    "assert_file_sha256": {
+     "type": "object",
+     "required": [
+      "path",
+      "equals"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "path": {
+       "type": "string",
+       "minLength": 1
+      },
+      "equals": {
+       "type": "string",
+       "pattern": "^[a-f0-9]{64}$"
+      },
+      "timeout_sec": {
+       "type": "number",
+       "minimum": 1,
+       "maximum": 120
+      }
+     },
+     "description": "Native-only: independently hashes host file bytes and compares the digest with an exact expected SHA-256."
     },
     "seed_storage": {
      "type": "object",
@@ -554,6 +631,56 @@
       "type": "string",
       "minLength": 1
      }
+    }
+   }
+  },
+  "native_keys_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "selector",
+    "keys"
+   ],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    },
+    "keys": {
+     "type": "array",
+     "minItems": 1,
+     "items": {
+      "type": "string",
+      "minLength": 1
+     }
+    }
+   }
+  },
+  "native_click_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "selector"
+   ],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    }
+   }
+  },
+  "native_set_writable_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "writable"
+   ],
+   "properties": {
+    "path": {
+     "type": "string",
+     "minLength": 1
+    },
+    "writable": {
+     "type": "boolean"
     }
    }
   },

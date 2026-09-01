@@ -34,6 +34,8 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `right_click` | same as click | Use before `assert_menu_items` / `click_menu`. |
 | `hover` | selector | |
 | `drag_to` | `{from, to}` | Both selectors. |
+| `native_click` | `{selector}` | Native Linux/X11 only. Activates the exact test executable window and sends W3C pointer actions through its packaged WebKitGTK session; testcase assertions own the postcondition. |
+| `native_set_writable` | `{path, writable}` | Native Linux only. Toggles owner-write permission for a path inside the current retained report root and records mode metadata; used for deterministic real-write failure/recovery evidence. |
 
 ## Keyboard
 
@@ -43,6 +45,7 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `type` | string | Types into the focused element. Prefer `fill` for inputs. |
 | `send_keys` | string | Same as `type`; semantic for terminal-pane interaction. |
 | `compose_text` | `{selector, text, during_key?}` | Browser-only composition lifecycle; optionally dispatches one composing key before committing text. Never substitutes for native IME evidence. |
+| `native_keys` | `{selector, keys}` | Native Linux/X11 only. Requires the selector to own focus, injects physical XTest keys through GTK/WebKitGTK, and records transport metadata; testcase assertions own the postcondition. |
 | `native_ime_keys` | `{selector, expected_engine, keys}` | Native Linux/X11 only. Injects physical XTest keys through the named configured fcitx5 engine and records an observation artifact; testcase assertions must verify the committed result. |
 | `press` | key string **or** `{key, selector?}` | E.g. `Enter`, `Control+Shift+F`. |
 | `select_option` | `{selector, label?, value?}` | At least one of label/value. |
@@ -84,6 +87,15 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `assert_attribute` | `{selector, name, equals}` | Read element attribute and assert exact match. E.g. `type=password`. |
 | `assert_disabled` | selector | Pass when element is disabled. |
 | `assert_enabled` | selector | Pass when element is enabled. |
+
+## Native filesystem assertions
+
+| Verb | Args | Notes |
+|------|------|-------|
+| `assert_file_contains` | `{path, contains, timeout_sec?}` | Native-only host re-read asserting decoded UTF-8 text contains a marker. |
+| `assert_file_exists` | path string **or** `{path, timeout_sec?}` | Native-only host filesystem existence check. |
+| `assert_file_receipt` | `{path, selector, encoding, bom, eol, expected_text, require_history?, timeout_sec?}` | Native-only: independently reads and hashes host bytes, validates encoding/BOM/EOL, then reconciles the result with the production receipt observation. |
+| `assert_file_sha256` | `{path, equals, timeout_sec?}` | Native-only: independently reads host bytes and requires an exact lowercase SHA-256 digest. |
 
 ## Last-resort escape hatch
 

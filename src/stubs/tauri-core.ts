@@ -2102,27 +2102,35 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       assertWorkspaceWritablePath(path);
       const expectedHash = (args?.expectedHash as string | null | undefined)?.trim();
       const currentBytes = new Uint8Array(await vfsReadBytes(target));
+      const oldHash = await sha256Bytes(currentBytes);
       if (expectedHash) {
-        const currentHash = await sha256Bytes(currentBytes);
-        if (currentHash !== expectedHash) {
-          throw new Error(`hash-mismatch: File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
+        if (oldHash !== expectedHash) {
+          throw new Error(`hash-mismatch: File changed on disk; expected hash ${expectedHash}, found ${oldHash}`);
         }
       }
       const encoding = (args?.encoding as string) || "UTF-8";
       const bytes = encodeStubText((args?.contents as string) ?? "", encoding, !!args?.bom);
+      const writtenHash = await sha256Bytes(bytes);
       const storedBytes = new Uint8Array(bytes.byteLength);
       storedBytes.set(bytes);
       await vfsWriteBytes(target, storedBytes.buffer);
       const entry = await vfsStat(target);
       const decoded = decodeStubBytes(bytes, encoding);
       return {
-        path: repoRoot ? relativeWorkspacePath(repoRoot, entry.path) : entry.path,
-        text: decoded.text,
-        encoding: decoded.encoding,
-        bom: decoded.bom,
-        size: entry.size,
-        mtime: entry.mtime,
-        hash: await sha256Bytes(bytes),
+        file: {
+          path: repoRoot ? relativeWorkspacePath(repoRoot, entry.path) : entry.path,
+          text: decoded.text,
+          encoding: decoded.encoding,
+          bom: decoded.bom,
+          size: entry.size,
+          mtime: entry.mtime,
+          hash: writtenHash,
+        },
+        writtenHash,
+        writtenByteLength: bytes.byteLength,
+        intentHash: writtenHash,
+        oldHash,
+        atomicReplaceUsed: false,
       } as T;
     }
     case "workspace_create_file": {

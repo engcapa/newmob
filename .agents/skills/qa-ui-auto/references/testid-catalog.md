@@ -154,6 +154,12 @@
 - `[data-testid="code-workspace-editor-tab-strip"]` — display [optional] — F25.5.editor-tab-strip
 - `[data-testid="code-workspace-editor"] .cm-content` — interactive [optional] — F25.5.editor-content
 - `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
+- `[data-testid="code-workspace-save-observation"]` — display [optional] — F25.5.save-observation
+- `[data-testid="file-encoding-dialog"]` — display [optional] — F25.5.file-encoding-dialog
+- `[data-testid="file-encoding-select"]` — interactive [optional] — F25.5.file-encoding-select
+- `[data-testid="file-encoding-bom"]` — interactive [optional] — F25.5.file-encoding-bom
+- `[data-testid="file-encoding-reload"]` — interactive [optional] — F25.5.file-encoding-reload
+- `[data-testid="file-encoding-convert"]` — interactive [optional] — F25.5.file-encoding-convert
 - `[data-testid="code-workspace-highlighting-widget"]` — display — F25.5.highlighting-widget
 - `[data-testid="highlighting-widget-prev-error"]` — interactive [optional] — F25.5.highlighting-widget-prev-error
 - `[data-testid="highlighting-widget-next-error"]` — interactive [optional] — F25.5.highlighting-widget-next-error
@@ -645,6 +651,8 @@
 
 - `[data-testid="status-bar"]` — display — F1.7.status-bar
 - `[data-testid="status-bar-message"]` — display [optional] — F1.7.status-message
+- `[data-testid="status-bar-workspace-encoding"]` — interactive [optional] — F1.7.workspace-encoding
+- `[data-testid="status-bar-workspace-eol"]` — interactive [optional] — F1.7.workspace-eol
 
 ## main/tabs (F1.5)
 

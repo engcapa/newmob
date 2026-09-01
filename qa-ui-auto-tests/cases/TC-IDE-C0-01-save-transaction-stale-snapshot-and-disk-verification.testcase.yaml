@@ -1,20 +1,16 @@
 id: TC-IDE-C0-01
-title: "Save transaction, dirty marker, stale snapshot recovery ledger"
+title: "Packaged save receipt byte matrix, failure recovery, and undo"
 description: |
-  §8.19.10 gate case C0 (native slice). Capability ids: workspace.save-transaction /
-  workspace.recovery-ledger / workspace.disk-hash.
-  Required mode: NATIVE — the G0 disk-effect proof re-reads the saved bytes from
-  the real host filesystem (assert_file_contains), which browser-VFS stubs can
-  never prove. The workspace enters via the app's own recent-workspaces
-  persistence (seed_storage) because the native folder picker is not WebDriver-
-  drivable; this exercises the same restore path an end user gets after
-  reopening a workspace.
-  Fixture ids: reset_db, workspace_root (temp dir seeded with README.md).
-  Highest claim on green: L1 native single-platform disk-effect evidence.
-  A browser run of this case must stay environment-blocked (workspace_root
-  skips there); it must never be marked passed from a stub.
-covers: [F25.1]
-tags: [code-workspace, ide-c0, save, recovery, native-gate, p1]
+  ED-SAVE-004 packaged Linux/WebKitGTK slice. It enters a real temporary
+  workspace through persisted recents, saves one deterministic two-line file
+  through UTF-8, UTF-8 BOM, UTF-16LE BOM, and ISO-8859-1 across LF and CRLF,
+  and after every save independently hashes the host bytes and reconciles them
+  with the production receipt. It then induces a real unrepresentable-character
+  encoding failure, verifies zero disk effect/focus retention, undoes the edit,
+  changes policy, and recovers through a successful save. No browser stub or
+  source text is accepted as native receipt evidence.
+covers: [F25.1, F25.5, F1.7]
+tags: [code-workspace, ide-c0, save, recovery, receipt, native-gate, accessibility, p0]
 modes: [native]
 fixtures: [reset_db, workspace_root]
 timeout_sec: 300
@@ -37,28 +33,250 @@ steps:
   - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.workspace_root}"]'
   - wait_for: '[data-testid="code-workspace-tab"]'
   - wait_for: '[data-testid="code-workspace-tree-file"][data-path="README.md"]'
-  - screenshot: tc-ide-c0-tree.png
-
-  # Open README.md into the active leaf.
+  # Open README.md into the active leaf and replace it with the matrix fixture.
   - click: '[data-testid="code-workspace-tree-file"][data-path="README.md"]'
   - wait_for: '[data-testid="code-workspace-editor-pane"]'
-  - assert_visible: '[data-testid="code-workspace-editor-tab-strip"]'
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: "café\nmatrix"
+  - wait: 0.5
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-state
+      equals: dirty
 
-  # Dirty the buffer, observe the dirty indicator, then save.
-  - click: '[data-testid="code-workspace-editor"] .cm-content'
-  - type: c0 disk verification marker
-  - assert_visible: '[data-testid="code-workspace-file-status"]'
-  - screenshot: tc-ide-c0-dirty.png
+  # UTF-8 without BOM: LF, then CRLF.
   - press: Control+s
-  # NOTE: file-status renders size + mtime (EditorGroup.tsx) — there is no
-  # "saved" transient text; the earlier `contains: saved` expectation was
-  # never validated in any mode. The authoritative save verification is the
-  # host-side disk re-read below (G0 disk-effect proof).
-  - assert_visible: '[data-testid="code-workspace-file-status"]'
-  - screenshot: tc-ide-c0-saved.png
-
-  # G0 disk effect: the write pipeline must have reached the real file.
-  - assert_file_contains:
+  - assert_file_receipt:
       path: "${fixture.workspace_root}/README.md"
-      contains: "c0 disk verification marker"
-      timeout_sec: 15
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: UTF-8
+      bom: false
+      eol: lf
+      expected_text: "café\nmatrix"
+      require_history: true
+  - click: '[data-testid="status-bar-workspace-eol"]'
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: UTF-8
+      bom: false
+      eol: crlf
+      expected_text: "café\nmatrix"
+
+  # UTF-8 BOM: CRLF, then LF.
+  - click: '[data-testid="status-bar-workspace-encoding"]'
+  - wait_for: '[data-testid="file-encoding-dialog"]'
+  - select_option: {selector: '[data-testid="file-encoding-select"]', value: UTF-8}
+  - native_click:
+      selector: '[data-testid="file-encoding-bom"]'
+  - eval_readonly:
+      expression: 'document.activeElement?.getAttribute("data-testid") === "file-encoding-bom" && document.activeElement?.checked'
+      expect_truthy: true
+  - wait: 0.2
+  - click: '[data-testid="file-encoding-convert"]'
+  - eval_readonly:
+      expression: 'document.querySelector("[data-testid\x3d\"status-bar-message\"]")?.textContent'
+      contains: 'save as UTF-8 BOM'
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: UTF-8
+      bom: true
+      eol: crlf
+      expected_text: "café\nmatrix"
+  - click: '[data-testid="status-bar-workspace-eol"]'
+  - click: '[data-testid="status-bar-workspace-eol"]'
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: UTF-8
+      bom: true
+      eol: lf
+      expected_text: "café\nmatrix"
+
+  # UTF-16LE BOM: LF, then CRLF.
+  - click: '[data-testid="status-bar-workspace-encoding"]'
+  - wait_for: '[data-testid="file-encoding-dialog"]'
+  - select_option: {selector: '[data-testid="file-encoding-select"]', value: UTF-16LE}
+  - wait: 0.2
+  - click: '[data-testid="file-encoding-convert"]'
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: UTF-16LE
+      bom: true
+      eol: lf
+      expected_text: "café\nmatrix"
+      # Native local history deduplicates the identical BOM+LF logical preimage;
+      # this row changes only its byte encoding from UTF-8 to UTF-16LE.
+      require_history: false
+  - click: '[data-testid="status-bar-workspace-eol"]'
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: UTF-16LE
+      bom: true
+      eol: crlf
+      expected_text: "café\nmatrix"
+      # The prior UTF-16LE LF preimage is the same latest logical history blob.
+      require_history: false
+
+  # Latin-1 without BOM: CRLF, then LF.
+  - click: '[data-testid="status-bar-workspace-encoding"]'
+  - wait_for: '[data-testid="file-encoding-dialog"]'
+  - select_option: {selector: '[data-testid="file-encoding-select"]', value: ISO-8859-1}
+  - wait: 0.2
+  - click: '[data-testid="file-encoding-convert"]'
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: ISO-8859-1
+      bom: false
+      eol: crlf
+      expected_text: "café\nmatrix"
+  - click: '[data-testid="status-bar-workspace-eol"]'
+  - click: '[data-testid="status-bar-workspace-eol"]'
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: ISO-8859-1
+      bom: false
+      eol: lf
+      expected_text: "café\nmatrix"
+
+  # Denying owner-write on the real workspace directory makes the atomic temp
+  # open fail at the native boundary. The old host-byte hash must remain exact;
+  # restoring permission and retrying proves real write-failure recovery.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Control+End
+  - type: "!"
+  - native_set_writable:
+      path: "${fixture.workspace_root}"
+      writable: false
+  - press: Control+s
+  - wait: 1
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-state
+      equals: error
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-result-kind
+      equals: failed
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-disk-effect
+      equals: none
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-dirty
+      equals: "true"
+  - eval_readonly:
+      expression: '!document.getElementById("code-workspace-save-observation")?.hasAttribute("data-receipt-id")'
+      expect_truthy: true
+  - assert_file_sha256:
+      path: "${fixture.workspace_root}/README.md"
+      equals: 10bb077efed7a101322b31e43e39fea7fd64c6078a57f02fdd6f01a61413143c
+  - native_set_writable:
+      path: "${fixture.workspace_root}"
+      writable: true
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: ISO-8859-1
+      bom: false
+      eol: lf
+      expected_text: "café\nmatrix!"
+      require_history: false
+  - press: Control+z
+  - wait: 0.5
+  - eval_readonly:
+      expression: 'JSON.stringify([document.querySelectorAll(".cm-line")[0]?.textContent, document.querySelectorAll(".cm-line")[1]?.textContent])'
+      contains: '["café","matrix"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-state
+      equals: dirty
+
+  # A separate Latin-1 encoding failure proves the pre-write zero-effect path.
+  # Undo restores the last representable text; changing policy then saves the
+  # recovered Unicode buffer.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Control+End
+  - type: 你
+  - press: Control+s
+  - wait: 1
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-state
+      equals: error
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-result-kind
+      equals: failed
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-disk-effect
+      equals: none
+  - eval_readonly:
+      expression: '!document.getElementById("code-workspace-save-observation")?.hasAttribute("data-receipt-id")'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'JSON.stringify({tag:document.activeElement?.tagName,className:document.activeElement?.className,testId:document.activeElement?.getAttribute("data-testid")})'
+      contains: 'cm-content'
+  - press: Control+z
+  - wait: 0.5
+  - eval_readonly:
+      expression: 'JSON.stringify([document.querySelectorAll(".cm-line")[0]?.textContent, document.querySelectorAll(".cm-line")[1]?.textContent])'
+      contains: '["café","matrix"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-state
+      # The prior recovered write committed matrix!, while this second undo
+      # returns the buffer to matrix. It must remain truthfully dirty.
+      equals: dirty
+  - click: '[data-testid="status-bar-workspace-encoding"]'
+  - wait_for: '[data-testid="file-encoding-dialog"]'
+  - select_option: {selector: '[data-testid="file-encoding-select"]', value: UTF-8}
+  - wait: 0.2
+  - click: '[data-testid="file-encoding-convert"]'
+  - eval_readonly:
+      expression: 'document.querySelector("[data-testid\x3d\"status-bar-message\"]")?.textContent'
+      contains: 'save as UTF-8'
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: "café\nmatrix\n恢复"
+  - wait: 0.5
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: data-state
+      equals: dirty
+  - press: Control+s
+  - assert_file_receipt:
+      path: "${fixture.workspace_root}/README.md"
+      selector: '[data-testid="code-workspace-save-observation"]'
+      encoding: UTF-8
+      bom: false
+      eol: lf
+      expected_text: "café\nmatrix\n恢复"
+      # The pre-save disk text is the same latest local-history blob created
+      # before the induced failure. Native history deduplicates it; Ctrl+Z
+      # above independently proves the editor undo/recovery contract.
+      require_history: false
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-save-observation"]'
+      name: aria-live
+      equals: polite
+  - eval_readonly:
+      expression: 'document.querySelector(".cm-content:focus")?.matches(".cm-content")'
+      expect_truthy: true
+  - screenshot: tc-ide-c0-native-save-matrix.png

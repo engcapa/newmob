@@ -344,6 +344,7 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                         break
                 else:
                     session = harness.create_session()
+                    nctx: NativeStepContext | None = None
                     try:
                         nctx = NativeStepContext(session, case_dir, cfg)
                         last_step, last_verb, last_args = 0, "<setup>", None
@@ -357,6 +358,8 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                             nctx.case_dir.mkdir(parents=True, exist_ok=True)
                             run_native_step(nctx, verb, args)
                     finally:
+                        if nctx is not None:
+                            nctx.restore_host_permissions()
                         console = []
                         with suppress(Exception):
                             console = session.console_entries()

@@ -443,6 +443,31 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
     expect(prepared.styleGeneration).toBe(7);
   });
 
+  it("preserves the file UTF-8 BOM policy through normalization when EditorConfig has no charset", async () => {
+    const ctrl = new WorkspaceStyleController({
+      workspaceId: "ws-bom",
+      roots: [{ path: "/project" }],
+      fileProvider: { readFile: vi.fn(async () => null) },
+    });
+    const commit = vi.fn(savedCurrentCommitter());
+
+    await ctrl.executeSaveTransaction({
+      id: "tx-bom",
+      workspaceId: "ws-bom",
+      fileKey: "main",
+      filePath: "/project/main.txt",
+      bufferVersion: 1,
+      styleGeneration: 0,
+      expectedDiskHash: null,
+      policy: { eol: "crlf", encoding: "UTF-8", bom: true },
+      text: "café\nmatrix",
+    }, commit, { getLatestBufferVersion: () => 1 });
+
+    const prepared = commit.mock.calls[0][0] as PreparedSave;
+    expect(prepared.policy).toEqual({ eol: "crlf", encoding: "UTF-8", bom: true });
+    expect(prepared.text).toBe("\uFEFFcafé\r\nmatrix");
+  });
+
   it("§8.21.3 V2-D: accepts EffectiveSavePolicyV4 and executes formatting before committing", async () => {
     const fileProvider = { readFile: vi.fn(async () => null) };
     const ctrl = new WorkspaceStyleController({

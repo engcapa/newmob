@@ -197,6 +197,11 @@ import {
   type SaveCommitResult,
 } from "./workspace/saveCommit";
 import {
+  createSaveObservationRecord,
+  type SaveObservationRecord,
+  type SaveObservationState,
+} from "./workspace/saveObservationContract";
+import {
   hasBlockingDiskEffectResolution,
   listDiskEffectLedgerEntries,
   recordDiskEffectLedgerEntry,
@@ -1513,7 +1518,11 @@ export function CodeWorkspaceTab({
     [workspaceInstanceId, diskEffectLedgerRevision],
   );
   const [fileEncodingDialogOpen, setFileEncodingDialogOpen] = useState(false);
+  const [saveObservations, setSaveObservations] = useState<Record<string, SaveObservationRecord>>({});
   const pendingWorkspaceRecoveryKeysRef = useRef(new Set<string>());
+  useEffect(() => {
+    setSaveObservations({});
+  }, [workspaceInstanceId]);
   const invalidateSemanticAfterLspRestart = useCallback(() => {
     semanticIndex.invalidate("language-server-restarted");
   }, [semanticIndex.invalidate]);
@@ -5213,7 +5222,7 @@ export function CodeWorkspaceTab({
           };
         }
         const normalized = normalizeEditorText(ack.file.text);
-        const savedBom = ack.file.bom ?? prepared.policy.bom;
+        const savedBom = prepared.policy.bom;
         const stale = writeback.kind === "saved-stale-snapshot";
 
         const latestNow = liveAfterWrite!;
@@ -5224,7 +5233,7 @@ export function CodeWorkspaceTab({
             savedText: normalized.text,
             text: latestNow.text,
             eol: (prepared.policy.eol.toUpperCase() as OpenFileEol) ?? normalized.eol,
-            encoding: ack.file.encoding ?? prepared.policy.encoding,
+            encoding: prepared.policy.encoding,
             bom: savedBom,
             hash: ack.writtenHash || ack.file.hash,
             mtime: ack.file.mtime,
@@ -5497,6 +5506,10 @@ export function CodeWorkspaceTab({
       const descriptor = lspDescriptorForFile(file);
       const lspStatus = lspFilesRef.current[file.key]?.status ?? null;
       const projectRoot = file.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
+      const saveDocumentUri = descriptor?.documentUri
+        ?? lspStatus?.uri
+        ?? descriptor?.filePath
+        ?? `file://${absPath}`;
 
       const tx: SaveTransactionV2 = {
         id: `tx-save-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -5507,10 +5520,7 @@ export function CodeWorkspaceTab({
         styleGeneration,
         expectedDiskHash: file.hash ?? null,
         documentIdentity: {
-          uri: descriptor?.documentUri
-            ?? lspStatus?.uri
-            ?? descriptor?.filePath
-            ?? `file://${absPath}`,
+          uri: saveDocumentUri,
           path: absPath,
           revision: snapshotRevision,
           languageId: lspStatus?.languageId
@@ -5652,6 +5662,17 @@ export function CodeWorkspaceTab({
           getLatestBufferVersion: () => openFilesRef.current[key]?.documentRevision ?? file.documentRevision ?? 0,
         },
       );
+
+      const latestAfterSave = openFilesRef.current[key] ?? null;
+      const observation = createSaveObservationRecord({
+        result: outcome,
+        fileKey: key,
+        filePath: absPath,
+        uri: saveDocumentUri,
+        bufferRevision: latestAfterSave?.documentRevision ?? snapshotRevision,
+        isDirty: latestAfterSave?.dirty ?? outcome.memoryEffect !== "saved-current",
+      });
+      setSaveObservations((current) => ({ ...current, [key]: observation }));
 
       if (outcome.kind === "saved-current" || outcome.kind === "saved-stale-snapshot") {
         const latestNow = openFilesRef.current[key];
@@ -6235,6 +6256,44 @@ export function CodeWorkspaceTab({
   }, [setStatusMessage, unsplitAllLayoutStore, workspaceInstanceId, workspaceUi.layoutTreeV2]);
 
   const activeFile = activeKey ? openFiles[activeKey] ?? null : null;
+  const latestSaveObservation = activeKey ? saveObservations[activeKey] ?? null : null;
+  const activeSaveObservationState: SaveObservationState = (() => {
+    if (activeFile?.saving) return "saving";
+    if (
+      activeFile
+      && latestSaveObservation
+      && latestSaveObservation.bufferRevision !== (activeFile.documentRevision ?? 0)
+    ) {
+      return activeFile.dirty ? "dirty" : "clean";
+    }
+    if (
+      activeFile
+      && latestSaveObservation
+      && latestSaveObservation.bufferRevision === (activeFile.documentRevision ?? 0)
+      && latestSaveObservation.state !== "saved"
+      && latestSaveObservation.state !== "clean"
+    ) {
+      return latestSaveObservation.state;
+    }
+    if (activeFile?.dirty) return "dirty";
+    return latestSaveObservation?.state ?? "clean";
+  })();
+  const activeSaveReceipt = latestSaveObservation?.latestReceipt ?? null;
+  const activeSaveObservationLabel = activeFile?.title
+    ?? latestSaveObservation?.filePath.split(/[\\/]/).pop()
+    ?? "active file";
+  const activeSaveAnnouncement = (() => {
+    switch (activeSaveObservationState) {
+      case "dirty": return `Unsaved changes in ${activeSaveObservationLabel}`;
+      case "saving": return `Saving ${activeSaveObservationLabel}`;
+      case "saved": return `Saved ${activeSaveObservationLabel}`;
+      case "stale": return `Saved previous snapshot of ${activeSaveObservationLabel}; current changes remain unsaved`;
+      case "conflict": return `Save conflict for ${activeSaveObservationLabel}`;
+      case "error": return `Save failed for ${activeSaveObservationLabel}`;
+      case "recovery": return `Save recovery required for ${activeSaveObservationLabel}`;
+      default: return `${activeSaveObservationLabel} has no unsaved changes`;
+    }
+  })();
   // Large-file mode (M6-B): above the size/line threshold, skip the per-edit
   // semantic-tokens / inlay-hint / document-highlight storm and their decoration
   // rebuilds. Lezer highlighting and on-demand features stay available.
@@ -15966,6 +16025,40 @@ export function CodeWorkspaceTab({
         data-reopen-stack-count={closedTabsStack.length}
         className="relative h-full w-full min-h-0 flex flex-col overflow-hidden bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)]"
       >
+        <div
+          id="code-workspace-save-observation"
+          data-testid="code-workspace-save-observation"
+          role="status"
+          aria-label="Save status"
+          aria-live="polite"
+          aria-atomic="true"
+          data-state={activeSaveObservationState}
+          data-result-kind={latestSaveObservation?.resultKind}
+          data-disk-effect={latestSaveObservation?.diskEffect}
+          data-memory-effect={latestSaveObservation?.memoryEffect}
+          data-provider-effect={latestSaveObservation?.providerEffect}
+          data-file-path={latestSaveObservation?.filePath}
+          data-uri={latestSaveObservation?.uri}
+          data-buffer-revision={activeFile?.documentRevision ?? latestSaveObservation?.bufferRevision}
+          data-dirty={activeFile?.dirty ?? latestSaveObservation?.isDirty ?? false}
+          data-receipt-id={activeSaveReceipt?.receiptId}
+          data-transaction-id={activeSaveReceipt?.transactionId ?? latestSaveObservation?.transactionId}
+          data-final-text-sha256={activeSaveReceipt?.finalTextSha256}
+          data-encoded-bytes-sha256={activeSaveReceipt?.encodedBytesSha256}
+          data-encoded-byte-length={activeSaveReceipt?.encodedByteLength}
+          data-disk-pre-sha256={activeSaveReceipt?.diskPreSha256 ?? undefined}
+          data-disk-post-sha256={activeSaveReceipt?.diskPostSha256}
+          data-write-count={activeSaveReceipt?.writeCount}
+          data-encoding={activeSaveReceipt?.policy.encoding}
+          data-bom={activeSaveReceipt ? String(activeSaveReceipt.policy.bom) : undefined}
+          data-eol={activeSaveReceipt?.policy.eol}
+          data-history-id={activeSaveReceipt?.historyId}
+          data-recovery-id={latestSaveObservation?.recoverySnapshotId ?? activeSaveReceipt?.recoveryId}
+          data-verified-at={latestSaveObservation?.lastVerifiedAt}
+          className="sr-only"
+        >
+          {activeSaveAnnouncement}
+        </div>
       <header className="h-10 shrink-0 flex items-center gap-2 overflow-x-auto px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]">
         <Braces className="w-4 h-4 text-[var(--taomni-accent)]" />
         <div className="min-w-0">
