@@ -5567,6 +5567,10 @@ controls:
     selector: '[data-testid="code-workspace-tree-add-folder"]'
     kind: interactive
     optional: true       # opens the folder prompt (browser VFS / native dialog)
+  - id: tree-root-row                 # expands a workspace root before listing children
+    selector: '[data-testid="code-workspace-tree-root"]'
+    kind: interactive
+    optional: true
   - id: tree-file-row                  # rows render via a shared component; exact id varies per file
     selector: '[data-testid="code-workspace-tree-file"]'
     kind: interactive

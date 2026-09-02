@@ -28,6 +28,12 @@ steps:
   - click: '[data-testid="code-workspace-tree-file"][data-path="README.md"]'
   - wait_for: '[data-testid="code-workspace-editor-pane"]'
 
+  # Seed the deterministic document before enabling virtual-space policy;
+  # this keeps setup input separate from the transaction under test.
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: prefixXXlongprefixX
+
   - click: '[data-testid="code-workspace-tab"]'
   - press: Control+Shift+N
   - wait_for:
@@ -43,9 +49,9 @@ steps:
   - click: '[data-testid="workspace-editor-appearance-apply"]'
   - wait: 1
 
-  - fill:
-      selector: '[data-testid="code-workspace-editor"] .cm-content'
-      value: prefixXXlongprefixX
+  # The packaged WebDriver key actions exercise the production transaction;
+  # the IME portion below crosses the real X11/GTK input boundary.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
   - press: Control+Home
   - press: ArrowRight
   - press: ArrowRight
@@ -89,6 +95,13 @@ steps:
       expect_truthy: true
   - press: Control+z
   - press: Control+Home
+  # Send one harmless physical key through the packaged WebKitGTK input
+  # boundary so the client-owned fcitx context receives FocusIn before the
+  # engine assertion below.
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      keys: [Escape]
+      focus_prechecked: true
   - native_ime_keys:
       selector: '[data-testid="code-workspace-editor"] .cm-content'
       expected_engine: wbpy

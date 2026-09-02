@@ -2326,6 +2326,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
               ]),
         ]),
         EditorView.domEventHandlers({
+          // WebKitGTK's WebDriver pointer path can deliver the editor mouse
+          // event without transferring DOM focus from the body. Keep the
+          // production pointer entry equivalent to a user click before
+          // CodeMirror resolves its selection position.
+          mousedown(_event, view) {
+            if (!view.hasFocus) view.focus();
+            return false;
+          },
           copy(event, view) {
             const payload = editorClipboardPayload(view.state);
             if (!payload) return false;

@@ -325,6 +325,9 @@ export const virtualSpaceClickHandler = EditorView.domEventHandlers({
   mousedown(event, view) {
     const mouse = event as MouseEvent;
     if (mouse.button !== 0) return false;
+    // WebKitGTK's native pointer path can leave focus on BODY. This handler
+    // may consume a click past EOL before later host handlers are reached.
+    if (!view.hasFocus) view.focus();
     const policy = view.state.facet(editorVirtualSpacePolicy);
     if (!policy.afterLineEnd && !policy.atFileBottom) return false;
     const pos = view.posAtCoords({ x: mouse.clientX, y: mouse.clientY });

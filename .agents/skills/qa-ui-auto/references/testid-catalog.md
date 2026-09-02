@@ -148,6 +148,7 @@
 ## code-workspace/editor-shell (F25.5)
 
 - `[data-testid="code-workspace-tree-add-folder"]` — interactive [optional] — F25.5.tree-add-folder
+- `[data-testid="code-workspace-tree-root"]` — interactive [optional] — F25.5.tree-root-row
 - `[data-testid="code-workspace-tree-file"]` — interactive [optional] — F25.5.tree-file-row
 - `[data-testid="code-workspace-editor-pane"]` — display — F25.5.editor-pane
 - `[data-testid="code-workspace-editor"]` — display [optional] — F25.5.editor-host

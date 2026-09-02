@@ -414,6 +414,29 @@ describe("CodeMirrorHost search", () => {
     expect(typeof request.paste).toBe("function");
   });
 
+  it("restores CodeMirror focus when a WebKit pointer leaves focus on body", () => {
+    const { content, container } = renderEditor("hello world", vi.fn(), {
+      appearance: {
+        fontFamily: "monospace",
+        fontSizePx: 14,
+        lineHeight: 1.5,
+        ligatures: false,
+        colorSchemeId: "default",
+        highContrast: false,
+        virtualSpace: { afterLineEnd: true, atFileBottom: true },
+      },
+    });
+    content.blur();
+    expect(document.activeElement).not.toBe(content);
+
+    const line = container.querySelector<HTMLElement>(".cm-line");
+    expect(line).not.toBeNull();
+    fireEvent.mouseDown(line!, { button: 0 });
+
+    const editor = container.querySelector<HTMLElement>(".cm-editor");
+    expect(editor?.contains(document.activeElement)).toBe(true);
+  });
+
   it("renders usage/inlay chrome, reports its viewport, and requests semantic selection", async () => {
     const onViewportChange = vi.fn();
     const onExpandSelection = vi.fn(async () => [{
