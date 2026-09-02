@@ -1565,6 +1565,38 @@ describe("§8.21.3 V2-E BasicCompletionPolicyV2", () => {
       });
     });
 
+    it("drops an in-flight provider response when the policy generation changes", async () => {
+      const controller = new WorkspaceCompletionPolicyController();
+      let releaseFetch: () => void = () => {};
+      const fetchReleased = new Promise<void>((resolve) => { releaseFetch = resolve; });
+      const source = createLspCompletionSource({
+        identity: () => ({
+          workspaceId: "ws-1",
+          fileKey: "main.ts",
+          filePath: "/repo/main.ts",
+          uri: "file:///repo/main.ts",
+          languageId: "typescript",
+          documentRevision: 1,
+          lspSessionGeneration: 1,
+        }),
+        fetch: async () => {
+          await fetchReleased;
+          return { status: status(true), isIncomplete: false, items: completionResult(["providerOnly"]).items };
+        },
+        triggerCharacters: () => [],
+        getDocumentRevision: () => 1,
+        reportDiagnostic: vi.fn(),
+        controller,
+      });
+      const state = EditorState.create({ doc: "pro" });
+      const pending = source(new CompletionContext(state, 3, true));
+      controller.update({ sortMode: "alphabetical" });
+      releaseFetch();
+
+      const result = await pending;
+      expect(result?.options.some((option) => option.label === "providerOnly")).toBe(false);
+    });
+
     it("handles 0, 1, many, incomplete and truncated results through createLspCompletionSource", async () => {
       const controller = new WorkspaceCompletionPolicyController();
       let returnIncomplete = false;
