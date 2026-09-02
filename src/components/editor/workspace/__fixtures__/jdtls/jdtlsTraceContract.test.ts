@@ -103,7 +103,6 @@ interface QuickFixTrace {
   appliedSha256: string | null;
   originalSha256: string | null;
   revertedRestoresOriginalHash: boolean;
-  providerHang?: { attempts: number };
   quickFixCancel?: { outcome: string; empty?: boolean };
 }
 
@@ -285,18 +284,25 @@ describe("§8.19.4 real jdtls trace contract", () => {
           expect(flagged, `broken classpath was not flagged in ${entry.fixture} diagnostics`).toBe(true);
           break;
         }
-        case "quickfix-provider-hang-recorded": {
+        case "quickfix-apply-undo": {
+          const assertion = entry.assert;
           const quickFix = trace.quickFix;
           expect(quickFix, `no quickFix record for ${entry.fixture}`).toBeDefined();
-          // The unresolved-type diagnostic itself IS real…
           expect(quickFix!.diagnosticMessage ?? "").toContain("cannot be resolved");
-          // …but jdt.ls 1.61 never ANSWERS textDocument/codeAction (hang on
-          // healthy and broken files alike). Record that honestly — an
-          // explicit provider-hang reason with at least one full-budget
-          // attempt — never fake a fix.
-          expect(quickFix!.satisfied).toBe(false);
-          expect(quickFix!.reason ?? "").toContain("provider-hang");
-          expect((quickFix!.providerHang?.attempts ?? 0)).toBeGreaterThanOrEqual(1);
+          expect(quickFix!.actionKind).toBe("quickfix");
+          const importTarget = assertion.importContains.split("import ")[1]?.split(";")[0] ?? assertion.importContains;
+          const providerPackage = importTarget.slice(0, Math.max(0, importTarget.lastIndexOf(".")));
+          expect(quickFix!.actionTitle ?? "").toContain(providerPackage);
+          expect(quickFix!.offeredTitles.some((title) => title.includes(providerPackage))).toBe(true);
+          expect(quickFix!.resolved).toBe(true);
+          expect(quickFix!.resolveFailure).toBeNull();
+          expect(quickFix!.importInsertText ?? "").toContain(assertion.importContains);
+          expect(quickFix!.originalSha256).toMatch(/^[0-9a-f]{64}$/);
+          expect(quickFix!.appliedSha256).toMatch(/^[0-9a-f]{64}$/);
+          expect(quickFix!.appliedSha256).not.toBe(quickFix!.originalSha256);
+          expect(quickFix!.revertedRestoresOriginalHash).toBe(true);
+          expect(quickFix!.satisfied).toBe(true);
+          expect(quickFix!.quickFixCancel?.outcome).toBe("rejected:-32800");
           break;
         }
         case "rename-provider-registered": {
