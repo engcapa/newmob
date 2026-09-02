@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearLspDetectCache,
   lspCancelReferenceRequest,
+  lspDeclaration,
   lspDefinition,
   lspDetectServers,
   nextLspRequestSequence,
@@ -181,6 +182,22 @@ describe("ED-QUERY-001: LSP cancellation identity", () => {
 
     resolveRequest(result);
     await request;
+  });
+
+  it("routes declaration through its dedicated native command with cancellation identity", async () => {
+    coreMocks.invoke.mockResolvedValue(result);
+
+    await lspDeclaration(descriptor, { line: 2, character: 7 }, {
+      cancelKey: "ws-query|root:App.java",
+      requestSeq: 19,
+    });
+
+    expect(coreMocks.invoke).toHaveBeenCalledWith("lsp_declaration", expect.objectContaining({
+      cancelKey: "ws-query|root:App.java",
+      requestSeq: 19,
+      line: 2,
+      character: 7,
+    }));
   });
 
   it("passes a sequence-aware explicit cancel to native", async () => {

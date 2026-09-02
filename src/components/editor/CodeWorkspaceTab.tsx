@@ -95,6 +95,7 @@ import {
   lspDocumentSymbols,
   lspDocumentHighlights,
   lspFormatting,
+  lspDeclaration,
   lspDefinition,
   lspCancelReferenceRequest,
   lspHover,
@@ -130,6 +131,7 @@ import {
   type LspCompletionResult,
   type LspDiagnostic,
   type LspDocumentDescriptor,
+  type LspDocumentStatus,
   type LspDocumentSymbol,
   type LspDocumentHighlight,
   type LspInlayHint,
@@ -607,6 +609,26 @@ export interface CodeWorkspaceGitManagerPayload {
     workspaceId?: string;
     roots: WorkspaceGitRoot[];
     activeRepoRoot: string | null;
+}
+
+type LspLocationOpenOptions = {
+  groupId?: EditorGroupId;
+  preview?: boolean;
+  isCurrent?: () => boolean;
+  /** Provider document that owns a virtual/library URI result. */
+  originFile?: OpenFileState;
+  /** Keep a semantic jump's history transaction until reveal succeeds. */
+  recordHistory?: boolean;
+  onRevealed?: (ref: CodeWorkspaceFileRef, position: LspPosition) => void;
+};
+
+function semanticLocationsFromResult(result: {
+  status: LspDocumentStatus;
+  locations: LspLocation[];
+}): LspLocation[] | null {
+  if (result.status.error) throw new Error(result.status.error);
+  if (!result.status.available || !result.status.active) return null;
+  return result.locations;
 }
 
 function breadcrumbSegmentsForFile(
@@ -7433,7 +7455,7 @@ export function CodeWorkspaceTab({
     info: LibraryBufferInfo,
     text: string,
     range: LspLocation["range"],
-    options: { groupId?: EditorGroupId; preview?: boolean; isCurrent?: () => boolean } = {},
+    options: LspLocationOpenOptions = {},
   ) => {
     if (options.isCurrent && !options.isCurrent()) return false;
     const file = makeLibraryFile(info, text);
@@ -7465,10 +7487,15 @@ export function CodeWorkspaceTab({
     if (options.isCurrent && !options.isCurrent()) return false;
     revealEditorLocation(key, range);
     if (options.isCurrent && !options.isCurrent()) return false;
-    recordNavigationLocation(ref, {
+    const position = {
       line: range.start.line,
       character: range.start.character,
-    }, { replaceSameFile: false });
+    };
+    if (options.onRevealed) {
+      options.onRevealed(ref, position);
+    } else if (options.recordHistory !== false) {
+      recordNavigationLocation(ref, position, { replaceSameFile: false });
+    }
     setStatusMessage(`Opened ${file.subtitle} (read-only)`);
     return true;
   }, [
@@ -7521,7 +7548,7 @@ export function CodeWorkspaceTab({
   const openLspLocation = useCallback(
     async (
       location: LspLocation,
-      options: { groupId?: EditorGroupId; preview?: boolean; isCurrent?: () => boolean } = {},
+      options: LspLocationOpenOptions = {},
     ) => {
       const openResolvedPath = async (path: string) => {
         if (options.isCurrent && !options.isCurrent()) return false;
@@ -7538,10 +7565,15 @@ export function CodeWorkspaceTab({
           if (options.isCurrent && !options.isCurrent()) return false;
           revealEditorLocation(fileKey(ref), location.range);
           if (options.isCurrent && !options.isCurrent()) return false;
-          recordNavigationLocation(ref, {
+          const position = {
             line: location.range.start.line,
             character: location.range.start.character,
-          }, { replaceSameFile: false });
+          };
+          if (options.onRevealed) {
+            options.onRevealed(ref, position);
+          } else if (options.recordHistory !== false) {
+            recordNavigationLocation(ref, position, { replaceSameFile: false });
+          }
           return true;
         }
         const loose = makeLooseFile(path);
@@ -7556,10 +7588,15 @@ export function CodeWorkspaceTab({
         if (options.isCurrent && !options.isCurrent()) return false;
         revealEditorLocation(fileKey(ref), location.range);
         if (options.isCurrent && !options.isCurrent()) return false;
-        recordNavigationLocation(ref, {
+        const position = {
           line: location.range.start.line,
           character: location.range.start.character,
-        }, { replaceSameFile: false });
+        };
+        if (options.onRevealed) {
+          options.onRevealed(ref, position);
+        } else if (options.recordHistory !== false) {
+          recordNavigationLocation(ref, position, { replaceSameFile: false });
+        }
         return true;
       };
 
@@ -7586,7 +7623,8 @@ export function CodeWorkspaceTab({
       }
       // Library sources ride the origin project's language-server session: prefer the
       // active buffer, and fall back to the origin project of a library buffer.
-      const origin = activeFile
+      const origin = options.originFile
+        ?? activeFile
         ?? Object.values(openFilesRef.current).find((item) => !item.loading)
         ?? null;
       const descriptor = origin ? lspDescriptorForFile(origin) : null;
@@ -11159,12 +11197,18 @@ export function CodeWorkspaceTab({
       title: "Go to Type Definition",
       category: "Navigation",
       keybinding: "Ctrl+Shift+B",
-      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
-        && (!activeCapabilities || !!activeCapabilities.typeDefinition),
-      run: () => {
-        const file = activeFile;
-        if (!file) return;
-        void goToTypeDefinitionRef.current(file, editorSelectionRef.current.start);
+      when: (context) => {
+        const target = resolveEditorTarget(context);
+        const capabilities = target.file
+          ? lspFilesRef.current[target.file.key]?.status?.capabilities
+          : null;
+        return context.focus !== "tree" && !!target.file && !target.file.loading
+          && (!capabilities || !!capabilities.typeDefinition);
+      },
+      run: (context) => {
+        const target = resolveEditorTarget(context);
+        if (!target.file || target.position === undefined) return;
+        void goToTypeDefinitionRef.current(target.file, target.position);
       },
     },
     {
@@ -11172,12 +11216,18 @@ export function CodeWorkspaceTab({
       title: "Go to Implementation",
       category: "Navigation",
       keybinding: "Ctrl+Alt+B",
-      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
-        && (!activeCapabilities || !!activeCapabilities.implementation),
-      run: () => {
-        const file = activeFile;
-        if (!file) return;
-        void goToImplementationRef.current(file, editorSelectionRef.current.start);
+      when: (context) => {
+        const target = resolveEditorTarget(context);
+        const capabilities = target.file
+          ? lspFilesRef.current[target.file.key]?.status?.capabilities
+          : null;
+        return context.focus !== "tree" && !!target.file && !target.file.loading
+          && (!capabilities || !!capabilities.implementation);
+      },
+      run: (context) => {
+        const target = resolveEditorTarget(context);
+        if (!target.file || target.position === undefined) return;
+        void goToImplementationRef.current(target.file, target.position);
       },
     },
     {
@@ -11379,14 +11429,41 @@ export function CodeWorkspaceTab({
       run: () => void openHierarchy("type"),
     },
     {
+      id: "workspace.gotoDeclaration",
+      title: "Go to Declaration",
+      category: "Navigation",
+      keybinding: "Ctrl+B",
+      keywords: ["declaration", "jump", "navigate"],
+      when: (context) => {
+        const target = resolveEditorTarget(context);
+        const capabilities = target.file
+          ? lspFilesRef.current[target.file.key]?.status?.capabilities
+          : null;
+        return context.focus !== "tree" && !!target.file && !target.file.loading
+          && (!capabilities || capabilities.declaration !== false);
+      },
+      run: (context) => {
+        const target = resolveEditorTarget(context);
+        if (!target.file || target.position === undefined) return;
+        void goToDeclarationRef.current(target.file, target.position);
+      },
+    },
+    {
       id: "workspace.gotoDefinition",
       title: "Go to Definition",
       category: "Navigation",
       keybinding: "F12",
       keywords: ["declaration", "jump", "navigate"],
-      when: (context) => context.focus === "editor"
-        && (!!activeCapabilities || !lspFilesRef.current[activeKey ?? ""]?.status)
-        && !!activeFile,
+      when: (context) => {
+        const target = resolveEditorTarget(context);
+        const capabilities = target.file
+          ? lspFilesRef.current[target.file.key]?.status?.capabilities
+          : null;
+        return context.focus === "editor"
+          && !!target.file
+          && !target.file.loading
+          && (!capabilities || !!capabilities.definition);
+      },
       run: (context) => {
         const target = resolveEditorTarget(context);
         if (!target.file || target.position === undefined) return;
@@ -13061,6 +13138,7 @@ export function CodeWorkspaceTab({
     locations: LspLocation[],
     emptyMessage: string,
     isCurrent?: () => boolean,
+    origin?: { file: OpenFileState; ref: CodeWorkspaceFileRef; position: LspPosition },
   ) => {
     if (!locations.length) {
       setStatusMessage(emptyMessage);
@@ -13070,12 +13148,24 @@ export function CodeWorkspaceTab({
     if (locations.length === 1) {
       setLocationPeek(null);
       if (isCurrent && !isCurrent()) return false;
-      return openLspLocation(locations[0], { isCurrent });
+      return openLspLocation(locations[0], {
+        isCurrent,
+        originFile: origin?.file,
+        recordHistory: !origin,
+        onRevealed: origin
+          ? (destinationRef, destinationPosition) => {
+            // Reveal is the irreversible boundary for this navigation. Keep
+            // the origin as the current entry, then add exactly one target.
+            recordNavigationLocation(origin.ref, origin.position);
+            recordNavigationLocation(destinationRef, destinationPosition, { replaceSameFile: false });
+          }
+          : undefined,
+      });
     }
     if (isCurrent && !isCurrent()) return false;
     setLocationPeek({ title, locations });
     return true;
-  }, [openLspLocation, setStatusMessage]);
+  }, [openLspLocation, recordNavigationLocation, setStatusMessage]);
 
   const goToDefinition = useCallback(
     async (file: OpenFileState, position: LspPosition) => {
@@ -13089,7 +13179,7 @@ export function CodeWorkspaceTab({
           fetcher: async ({ signal }) => {
             const result = await lspDefinition(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
-            return result.locations;
+            return semanticLocationsFromResult(result);
           },
           guards: query.guards,
         });
@@ -13101,11 +13191,13 @@ export function CodeWorkspaceTab({
           setStatusMessage(queryRes.error ?? "No definition found");
           return false;
         }
-        if (queryRes.items.length === 1) {
-          if (!query.isCurrent()) return false;
-          recordNavigationLocation(file.ref, position);
-        }
-        return navigateLocations("Definitions", queryRes.items, "No definition found", query.isCurrent);
+        return navigateLocations(
+          "Definitions",
+          queryRes.items,
+          "No definition found",
+          query.isCurrent,
+          { file, ref: file.ref, position },
+        );
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
@@ -13126,7 +13218,7 @@ export function CodeWorkspaceTab({
           fetcher: async ({ signal }) => {
             const result = await lspDefinition(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
-            return result.locations;
+            return semanticLocationsFromResult(result);
           },
           guards: query.guards,
         });
@@ -13134,6 +13226,10 @@ export function CodeWorkspaceTab({
           return false;
         }
         if (!query.isCurrent(queryRes.identity)) return false;
+        if (queryRes.status === "unavailable" || queryRes.status === "error") {
+          setStatusMessage(queryRes.error ?? "No definition found");
+          return false;
+        }
         if (!queryRes.items.length) {
           setStatusMessage("No definition found");
           return false;
@@ -13164,9 +13260,9 @@ export function CodeWorkspaceTab({
           kind: "declarations",
           identity: query.identity,
           fetcher: async ({ signal }) => {
-            const result = await lspDefinition(descriptor, position, query.lspOptions(signal));
+            const result = await lspDeclaration(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
-            return result.locations;
+            return semanticLocationsFromResult(result);
           },
           guards: query.guards,
         });
@@ -13178,11 +13274,13 @@ export function CodeWorkspaceTab({
           setStatusMessage(queryRes.error ?? "No declaration found");
           return false;
         }
-        if (queryRes.items.length === 1) {
-          if (!query.isCurrent()) return false;
-          recordNavigationLocation(file.ref, position);
-        }
-        return navigateLocations("Declarations", queryRes.items, "No declaration found", query.isCurrent);
+        return navigateLocations(
+          "Declarations",
+          queryRes.items,
+          "No declaration found",
+          query.isCurrent,
+          { file, ref: file.ref, position },
+        );
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
@@ -13208,7 +13306,7 @@ export function CodeWorkspaceTab({
           fetcher: async ({ signal }) => {
             const result = await lspTypeDefinition(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
-            return result.locations;
+            return semanticLocationsFromResult(result);
           },
           guards: query.guards,
         });
@@ -13220,11 +13318,13 @@ export function CodeWorkspaceTab({
           setStatusMessage(queryRes.error ?? "No type definition found");
           return false;
         }
-        if (queryRes.items.length === 1) {
-          if (!query.isCurrent()) return false;
-          recordNavigationLocation(file.ref, position);
-        }
-        return navigateLocations("Type definitions", queryRes.items, "No type definition found", query.isCurrent);
+        return navigateLocations(
+          "Type definitions",
+          queryRes.items,
+          "No type definition found",
+          query.isCurrent,
+          { file, ref: file.ref, position },
+        );
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
@@ -13250,7 +13350,7 @@ export function CodeWorkspaceTab({
           fetcher: async ({ signal }) => {
             const result = await lspImplementation(descriptor, position, query.lspOptions(signal));
             updateLspStatusForFile(file, result.status);
-            return result.locations;
+            return semanticLocationsFromResult(result);
           },
           guards: query.guards,
         });
@@ -13262,11 +13362,13 @@ export function CodeWorkspaceTab({
           setStatusMessage(queryRes.error ?? "No implementation found");
           return false;
         }
-        if (queryRes.items.length === 1) {
-          if (!query.isCurrent()) return false;
-          recordNavigationLocation(file.ref, position);
-        }
-        return navigateLocations("Implementations", queryRes.items, "No implementation found", query.isCurrent);
+        return navigateLocations(
+          "Implementations",
+          queryRes.items,
+          "No implementation found",
+          query.isCurrent,
+          { file, ref: file.ref, position },
+        );
       } catch (err) {
         setStatusMessage(errorMessage(err));
         return false;
@@ -13750,16 +13852,55 @@ export function CodeWorkspaceTab({
               queryContext.lspOptions(signal),
             );
             updateLspStatusForFile(live, res.status);
-            return res.locations;
+            return semanticLocationsFromResult(res);
           },
           guards: queryContext.guards,
         });
         if (queryRes.status === "cancelled" || queryRes.status === "stale") {
           semanticIndex.abandonBuild(buildToken);
+          if (referencesRequestSequenceRef.current === requestId) {
+            setReferencesResult({
+              loading: false,
+              origin: live.subtitle,
+              locations: [],
+              error: queryRes.status === "cancelled"
+                ? "References request cancelled"
+                : "References result became stale because the workspace changed",
+              semanticGeneration: null,
+              semanticRevision: null,
+            });
+          }
           return;
         }
-        if (referencesRequestSequenceRef.current !== requestId || !queryContext.isCurrent(queryRes.identity)) {
+        if (referencesRequestSequenceRef.current !== requestId) {
           semanticIndex.abandonBuild(buildToken);
+          return;
+        }
+        if (!queryContext.isCurrent(queryRes.identity)) {
+          semanticIndex.abandonBuild(buildToken);
+          setReferencesResult({
+            loading: false,
+            origin: live.subtitle,
+            locations: [],
+            error: "References result became stale because the workspace changed",
+            semanticGeneration: null,
+            semanticRevision: null,
+          });
+          return;
+        }
+        if (queryRes.status === "unavailable" || queryRes.status === "error") {
+          const message = queryRes.status === "error"
+            ? queryRes.error ?? "Language server failed to find references"
+            : "References are unavailable from the language server";
+          semanticIndex.failBuild(buildToken, message);
+          setReferencesResult({
+            loading: false,
+            origin: live.subtitle,
+            locations: [],
+            error: message,
+            semanticGeneration: null,
+            semanticRevision: null,
+          });
           return;
         }
         const locations: readonly LspLocation[] = queryRes.items ?? [];
@@ -13767,17 +13908,16 @@ export function CodeWorkspaceTab({
           kind: "references",
           resultCount: locations.length,
         });
-        if (!completion.accepted || queryRes.status === "error") {
-          if (referencesRequestSequenceRef.current === requestId) {
-            setReferencesResult({
-              loading: false,
-              origin: live.subtitle,
-              locations: [],
-              error: queryRes.error || "References result became stale because the workspace changed",
-              semanticGeneration: null,
-              semanticRevision: null,
-            });
-          }
+        if (!completion.accepted) {
+          const message = "References result became stale because the workspace changed";
+          setReferencesResult({
+            loading: false,
+            origin: live.subtitle,
+            locations: [],
+            error: message,
+            semanticGeneration: null,
+            semanticRevision: null,
+          });
           return;
         }
         if (referencesRequestSequenceRef.current !== requestId || !queryContext.isCurrent()) return;
@@ -13977,6 +14117,7 @@ export function CodeWorkspaceTab({
         clientY: request.clientY,
         bindings: {
           "workspace.gotoDefinition": prepareBinding("workspace.gotoDefinition"),
+          "workspace.gotoDeclaration": prepareBinding("workspace.gotoDeclaration"),
           "workspace.gotoTypeDefinition": prepareBinding("workspace.gotoTypeDefinition"),
           "workspace.gotoImplementation": prepareBinding("workspace.gotoImplementation"),
           "workspace.findReferences": prepareBinding("workspace.findReferences"),

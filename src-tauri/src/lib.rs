@@ -543,6 +543,7 @@ pub fn run() {
             lsp::lsp_hover,
             lsp::lsp_cancel_reference_request,
             lsp::lsp_definition,
+            lsp::lsp_declaration,
             lsp::lsp_type_definition,
             lsp::lsp_implementation,
             lsp::lsp_read_uri_contents,

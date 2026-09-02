@@ -1387,6 +1387,22 @@ export function lspDefinition(
   );
 }
 
+export function lspDeclaration(
+  descriptor: LspDocumentDescriptor,
+  position: LspPosition,
+  options?: LspReferenceRequestOptions,
+): Promise<LspLocationsResult> {
+  return invokeCancellable<LspLocationsResult>(
+    "lsp_declaration",
+    {
+      ...documentArgs(descriptor),
+      line: position.line,
+      character: position.character,
+    },
+    options,
+  );
+}
+
 export function lspTypeDefinition(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,

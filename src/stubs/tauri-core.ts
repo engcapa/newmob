@@ -1749,6 +1749,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       } as T;
     }
     case "lsp_definition":
+    case "lsp_declaration":
     case "lsp_type_definition":
     case "lsp_implementation":
     case "lsp_references": {

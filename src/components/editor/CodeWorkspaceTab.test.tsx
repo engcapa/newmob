@@ -113,6 +113,9 @@ const lspMocks = vi.hoisted(() => ({
   lspGetDiagnostics: vi.fn(),
   lspHover: vi.fn(),
   lspDefinition: vi.fn(),
+  lspDeclaration: vi.fn(),
+  lspTypeDefinition: vi.fn(),
+  lspImplementation: vi.fn(),
   lspPrepareRename: vi.fn(),
   lspRename: vi.fn(),
   lspReadUriContents: vi.fn(),
@@ -623,6 +626,9 @@ describe("CodeWorkspaceTab", () => {
     dapMocks.dapResolveJavaMainClasses.mockReset();
     lspMocks.lspHover.mockReset();
     lspMocks.lspDefinition.mockReset();
+    lspMocks.lspDeclaration.mockReset();
+    lspMocks.lspTypeDefinition.mockReset();
+    lspMocks.lspImplementation.mockReset();
     lspMocks.lspPrepareRename.mockReset();
     lspMocks.lspRename.mockReset();
     lspMocks.lspReadUriContents.mockReset();
@@ -6015,6 +6021,105 @@ describe("CodeWorkspaceTab", () => {
 
     // 8. Ctrl+Shift+F9 Recompile Active File
     expect(registrationRef.current?.items.find((item) => item.id === "workspace.recompileActiveFile")?.enabled).toBe(true);
+  });
+
+  it("routes every common semantic navigation command through the provider host", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-query-routing",
+      workspaceInstanceId: "instance-query-routing",
+      name: "Query routing",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/Program.cs",
+      uri: "file:///repo/app/src/Program.cs",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({
+        definition: true,
+        declaration: true,
+        typeDefinition: true,
+        implementation: true,
+        references: true,
+      }),
+    });
+    const target = {
+      uri: "file:///repo/app/src/Program.cs",
+      path: "/repo/app/src/Program.cs",
+      range: { start: { line: 1, character: 6 }, end: { line: 1, character: 13 } },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/Program.cs",
+      "class Program {\n  void Main() {}\n}\n",
+    ));
+    lspMocks.lspDetectServers.mockResolvedValue([csharpStatus({ available: true, active: true })]);
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status: activeStatus, diagnostics: [] });
+    lspMocks.lspDefinition.mockResolvedValue({ status: activeStatus, locations: [target] });
+    lspMocks.lspDeclaration.mockResolvedValue({ status: activeStatus, locations: [target] });
+    lspMocks.lspTypeDefinition.mockResolvedValue({ status: activeStatus, locations: [target] });
+    lspMocks.lspImplementation.mockResolvedValue({ status: activeStatus, locations: [target] });
+    lspMocks.lspReferences.mockResolvedValue({ status: activeStatus, locations: [target] });
+
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/Program.cs");
+    await waitFor(() => expect(registrationRef.current).not.toBeNull());
+    await waitFor(() => expect(registrationRef.current?.items.find(
+      (item) => item.id === "workspace.gotoDeclaration",
+    )?.enabled).toBe(true));
+
+    lspMocks.lspDefinition.mockClear();
+    lspMocks.lspDeclaration.mockClear();
+    lspMocks.lspTypeDefinition.mockClear();
+    lspMocks.lspImplementation.mockClear();
+    lspMocks.lspReferences.mockClear();
+
+    const queryCommands = [
+      ["workspace.gotoDefinition", lspMocks.lspDefinition],
+      ["workspace.gotoDeclaration", lspMocks.lspDeclaration],
+      ["workspace.gotoTypeDefinition", lspMocks.lspTypeDefinition],
+      ["workspace.gotoImplementation", lspMocks.lspImplementation],
+    ] as const;
+    for (const [commandId, provider] of queryCommands) {
+      await act(async () => {
+        await registrationRef.current?.executeAction(commandId);
+      });
+      await waitFor(() => expect(provider).toHaveBeenCalled());
+      expect(provider).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          signal: expect.anything(),
+          cancelKey: "instance-query-routing|root:app:src/Program.cs",
+          requestSeq: expect.any(Number),
+        }),
+      );
+    }
+
+    await act(async () => {
+      await registrationRef.current?.executeAction("workspace.findReferences");
+    });
+    fireEvent.click(await screen.findByTestId("usages-scope-confirm"));
+    await waitFor(() => expect(lspMocks.lspReferences).toHaveBeenCalled());
+    expect(lspMocks.lspReferences).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      true,
+      expect.objectContaining({
+        signal: expect.anything(),
+        cancelKey: "instance-query-routing|root:app:src/Program.cs",
+        requestSeq: expect.any(Number),
+      }),
+    );
   });
 
   it("ingests workspace test coverage report and renders coverage dock panel", async () => {

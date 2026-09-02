@@ -143,6 +143,7 @@
 - `[data-testid="editor-context-copy"]` — interactive [optional] — F25.3.context-copy
 - `[data-testid="editor-context-paste"]` — interactive [optional] — F25.3.context-paste
 - `[data-testid="editor-context-goto-definition"]` — interactive [optional] — F25.3.context-goto-definition
+- `[data-testid="editor-context-goto-declaration"]` — interactive [optional] — F25.3.context-goto-declaration
 - `[data-testid="editor-context-format"]` — interactive [optional] — F25.3.context-format
 
 ## code-workspace/editor-shell (F25.5)

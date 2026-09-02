@@ -6242,6 +6242,10 @@ controls:
     selector: '[data-testid="editor-context-goto-definition"]'
     kind: interactive
     optional: true
+  - id: context-goto-declaration
+    selector: '[data-testid="editor-context-goto-declaration"]'
+    kind: interactive
+    optional: true
   - id: context-format
     selector: '[data-testid="editor-context-format"]'
     kind: interactive

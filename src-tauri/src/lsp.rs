@@ -543,6 +543,7 @@ pub struct LspCapabilitySummary {
     pub signature_help: bool,
     pub hover: bool,
     pub definition: bool,
+    pub declaration: bool,
     pub type_definition: bool,
     pub implementation: bool,
     pub references: bool,
@@ -6105,6 +6106,40 @@ pub async fn lsp_definition(
 }
 
 #[tauri::command]
+pub async fn lsp_declaration(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    document_uri: Option<String>,
+    line: u32,
+    character: u32,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
+) -> Result<LspLocationsResult, String> {
+    lsp_location_request(
+        state,
+        workspace_id,
+        root_path,
+        file_path,
+        document_uri,
+        line,
+        character,
+        language_id,
+        server_command_id,
+        custom_server_command,
+        cancel_key,
+        request_seq,
+        "textDocument/declaration",
+        json!({}),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn lsp_references(
     state: State<'_, AppState>,
     workspace_id: String,
@@ -6195,10 +6230,16 @@ async fn lsp_location_request(
     };
     extra["textDocument"] = json!({ "uri": document.uri });
     extra["position"] = json!({ "line": line, "character": character });
-    let result = session
+    let result = match session
         .request_with_cancellation(method, extra, &cancellation)
         .await
-        .unwrap_or(Value::Null);
+    {
+        Ok(value) => value,
+        Err(error) => {
+            finish_reference_request(cancel_key.as_deref(), request_seq);
+            return Err(error);
+        }
+    };
     finish_reference_request(cancel_key.as_deref(), request_seq);
     let status = state
         .lsp
@@ -9778,6 +9819,7 @@ fn capability_summary_from(capabilities: &Value) -> LspCapabilitySummary {
         signature_help: has_provider(capabilities, "signatureHelpProvider"),
         hover: has_provider(capabilities, "hoverProvider"),
         definition: has_provider(capabilities, "definitionProvider"),
+        declaration: has_provider(capabilities, "declarationProvider"),
         type_definition: has_provider(capabilities, "typeDefinitionProvider"),
         implementation: has_provider(capabilities, "implementationProvider"),
         references: has_provider(capabilities, "referencesProvider"),
@@ -9976,6 +10018,7 @@ fn apply_dynamic_capability(
         }
         "textDocument/hover" => summary.hover = true,
         "textDocument/definition" => summary.definition = true,
+        "textDocument/declaration" => summary.declaration = true,
         "textDocument/typeDefinition" => summary.type_definition = true,
         "textDocument/implementation" => summary.implementation = true,
         "textDocument/references" => summary.references = true,
@@ -13082,6 +13125,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
             "completionProvider": { "triggerCharacters": [".", "::"], "resolveProvider": true },
             "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
             "hoverProvider": true,
+            "declarationProvider": true,
             "workspaceSymbolProvider": { "resolveProvider": true },
             "renameProvider": { "prepareProvider": true },
             "selectionRangeProvider": true,
@@ -13094,6 +13138,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert!(summary.signature_help);
         assert_eq!(summary.signature_trigger_characters, vec!["(", ","]);
         assert!(summary.hover);
+        assert!(summary.declaration);
         assert!(summary.rename);
         assert!(summary.selection_range);
         assert!(!summary.formatting);
