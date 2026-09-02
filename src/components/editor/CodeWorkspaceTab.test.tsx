@@ -713,9 +713,42 @@ describe("CodeWorkspaceTab", () => {
       status: documentStatus(),
       edit: { documentEdits: [], operations: [] },
     });
-    lspMocks.lspGetDiagnostics.mockResolvedValue({
-      status: documentStatus(),
-      diagnostics: [],
+    lspMocks.lspGetDiagnostics.mockImplementation(async (descriptor: {
+      workspaceId: string;
+      rootPath: string | null;
+      filePath: string;
+      documentUri?: string | null;
+    }) => {
+      const normalizedFilePath = descriptor.filePath.replace(/\\/g, "/");
+      const absolutePath = descriptor.rootPath && !normalizedFilePath.startsWith("/")
+        ? `${descriptor.rootPath.replace(/\/$/, "")}/${normalizedFilePath}`
+        : normalizedFilePath;
+      let openResultIndex = -1;
+      for (let index = lspMocks.lspOpenDocument.mock.calls.length - 1; index >= 0; index -= 1) {
+        const openedDescriptor = lspMocks.lspOpenDocument.mock.calls[index]?.[0] as typeof descriptor | undefined;
+        if (
+          openedDescriptor?.workspaceId === descriptor.workspaceId
+          && openedDescriptor.rootPath === descriptor.rootPath
+          && openedDescriptor.filePath === descriptor.filePath
+          && openedDescriptor.documentUri === descriptor.documentUri
+        ) {
+          openResultIndex = index;
+          break;
+        }
+      }
+      const openResult = openResultIndex >= 0
+        ? lspMocks.lspOpenDocument.mock.results[openResultIndex]
+        : undefined;
+      const openedStatus = openResult?.type === "return"
+        ? await openResult.value as LspDocumentStatus | undefined
+        : undefined;
+      return {
+        status: openedStatus ?? documentStatus({
+          path: absolutePath,
+          uri: descriptor.documentUri ?? `file://${absolutePath.startsWith("/") ? "" : "/"}${absolutePath}`,
+        }),
+        diagnostics: [],
+      };
     });
     workspaceMocks.workspaceListDir.mockResolvedValue([]);
     workspaceMocks.workspaceCompactChain.mockResolvedValue({ path: "", entries: [] });
@@ -2388,6 +2421,7 @@ describe("CodeWorkspaceTab", () => {
     };
     const status = documentStatus({
       path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
       available: true,
       active: true,
       capabilities: defaultCapabilities({ codeAction: true }),
@@ -2493,6 +2527,8 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspCodeActions.mockResolvedValue({ status, actions: [action] });
 
     const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalled());
     await waitFor(() => expect(rendered.container.querySelector(
       '[data-testid="code-workspace-lightbulb"]',
     )).toBeTruthy());
@@ -2834,6 +2870,8 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [diagnostic] });
 
     const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalled());
     await waitFor(() => expect(rendered.container.querySelector(
       '[data-testid="code-workspace-lightbulb"]',
     )).toBeTruthy());
@@ -2919,6 +2957,8 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [diagnostic] });
 
     const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalled());
     await waitFor(() => expect(rendered.container.querySelector(
       '[data-testid="code-workspace-lightbulb"]',
     )).toBeTruthy());
@@ -2955,8 +2995,12 @@ describe("CodeWorkspaceTab", () => {
       "src/Service.java",
       "class Service { List items; }",
     ));
-    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({
+    const status = documentStatus({
       path: "/repo/app/src/Service.java",
+      uri: "file:///repo/app/src/Service.java",
+      presetId: "java",
+      languageId: "java",
+      displayName: "Java",
       available: true,
       active: true,
       capabilities: {
@@ -2982,9 +3026,10 @@ describe("CodeWorkspaceTab", () => {
         completionTriggerCharacters: [],
         signatureTriggerCharacters: [],
       },
-    }));
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
     lspMocks.lspCodeActions.mockResolvedValue({
-      status: documentStatus({ available: true, active: true }),
+      status,
       actions: [{
         title: "Import 'List' (java.util.List)",
         kind: "quickfix",
@@ -3302,6 +3347,7 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.keyDown(window, { key: "Enter", altKey: true });
     fireEvent.click(await screen.findByRole("button", { name: "Rename file" }));
 
+    await waitFor(() => expect(confirmAppDialog).toHaveBeenCalled());
     await waitFor(() => expect(workspaceMocks.workspaceApplyResourceOperation).toHaveBeenCalled());
     await waitFor(() => expect(
       screen.getByTestId("code-workspace-editor").querySelector(".cm-content"),
