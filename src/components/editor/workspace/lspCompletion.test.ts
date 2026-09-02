@@ -1434,6 +1434,137 @@ describe("§8.21.3 V2-E BasicCompletionPolicyV2", () => {
       expect(ws2Pair.identity.lspSessionGeneration).toBe(4);
     });
 
+    it("keeps raw resolve/apply pairs attached after provider-relevance sorting", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const resolvedRaw: unknown[] = [];
+      const lessRelevant = {
+        ...completionResult(["fooBar"]).items[0],
+        insertText: "BAR",
+        raw: { id: "fooBar" },
+      };
+      const exact = {
+        ...completionResult(["foo"]).items[0],
+        insertText: "FOO",
+        raw: { id: "foo" },
+      };
+      const source = createLspCompletionSource({
+        identity: () => ({
+          workspaceId: "ws-1",
+          fileKey: "main.ts",
+          filePath: "/repo/main.ts",
+          uri: "file:///repo/main.ts",
+          languageId: "typescript",
+          documentRevision: 1,
+          lspSessionGeneration: 1,
+        }),
+        fetch: async () => ({
+          status: status(true),
+          isIncomplete: false,
+          items: [lessRelevant, exact],
+        }),
+        resolve: async (raw) => {
+          resolvedRaw.push(raw);
+          return raw && typeof raw === "object" && "id" in raw && raw.id === "foo"
+            ? exact
+            : lessRelevant;
+        },
+        triggerCharacters: () => [],
+        getDocumentRevision: () => 1,
+        reportDiagnostic: vi.fn(),
+      });
+      const state = EditorState.create({ doc: "foo" });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, 3, true));
+
+      expect(result?.options.map((option) => option.label)).toEqual(["foo", "fooBar"]);
+      const option = result!.options[0];
+      if (typeof option.apply === "function") option.apply(view, option, 0, 3);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(resolvedRaw).toEqual([{ id: "foo" }]);
+      expect(view.state.doc.toString()).toBe("FOO");
+      view.destroy();
+    });
+
+    it("rejects an old option after workspace, provider, or policy identity changes", async () => {
+      const assertOldOptionRejected = async (
+        change: (setIdentity: (next: CompletionRequestIdentity) => void, controller: WorkspaceCompletionPolicyController) => void,
+      ) => {
+        const { EditorView } = await import("@codemirror/view");
+        let liveIdentity: CompletionRequestIdentity = {
+          workspaceId: "ws-1",
+          fileKey: "main.ts",
+          filePath: "/repo/main.ts",
+          uri: "file:///repo/main.ts",
+          languageId: "typescript",
+          documentRevision: 1,
+          lspSessionGeneration: 1,
+        };
+        const controller = new WorkspaceCompletionPolicyController();
+        const item = {
+          ...completionResult(["newValue"]).items[0],
+          insertText: "NEW",
+          textEdit: {
+            range: { start: { line: 1, character: 0 }, end: { line: 1, character: 3 } },
+            newText: "NEW",
+          },
+          additionalTextEdits: [{
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+            newText: "import newValue;\n",
+          }],
+        };
+        const diagnostics: string[] = [];
+        const source = createLspCompletionSource({
+          identity: () => ({ ...liveIdentity }),
+          fetch: async () => ({ status: status(true), isIncomplete: false, items: [item] }),
+          triggerCharacters: () => [],
+          getDocumentRevision: () => liveIdentity.documentRevision,
+          reportDiagnostic: (kind) => diagnostics.push(kind),
+          controller,
+        });
+        const state = EditorState.create({ doc: "\nold" });
+        const view = new EditorView({ state });
+        const result = await source(new CompletionContext(state, 4, true));
+        change((next) => { liveIdentity = next; }, controller);
+
+        const option = result!.options[0];
+        const dispatchSpy = vi.spyOn(view, "dispatch");
+        if (typeof option.apply === "function") option.apply(view, option, 1, 4);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(dispatchSpy).not.toHaveBeenCalled();
+        expect(view.state.doc.toString()).toBe("\nold");
+        expect(diagnostics).toContain("identity-mismatch");
+        view.destroy();
+      };
+
+      await assertOldOptionRejected((setIdentity) => {
+        setIdentity({
+          workspaceId: "ws-2",
+          fileKey: "main.ts",
+          filePath: "/repo/main.ts",
+          uri: "file:///repo/main.ts",
+          languageId: "typescript",
+          documentRevision: 1,
+          lspSessionGeneration: 1,
+        });
+      });
+      await assertOldOptionRejected((setIdentity) => {
+        setIdentity({
+          workspaceId: "ws-1",
+          fileKey: "main.ts",
+          filePath: "/repo/main.ts",
+          uri: "file:///repo/main.ts",
+          languageId: "typescript",
+          documentRevision: 1,
+          lspSessionGeneration: 2,
+        });
+      });
+      await assertOldOptionRejected((_setIdentity, controller) => {
+        controller.update({ sortMode: "alphabetical" });
+      });
+    });
+
     it("handles 0, 1, many, incomplete and truncated results through createLspCompletionSource", async () => {
       const controller = new WorkspaceCompletionPolicyController();
       let returnIncomplete = false;

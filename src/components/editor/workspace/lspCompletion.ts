@@ -1844,6 +1844,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       requestId: `completion-${completionRequestIdCounter}`,
     };
     completionRequestStartedAt.set(token, performance.now());
+    const policyRevisionAtStart = hooks.controller?.getRevision?.() ?? 1;
     recordCompletionTelemetry(token, "fetching");
 
     // LSP responses are tied to a document version. Do not spend renderer time
@@ -1870,6 +1871,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         });
       });
       if (context.aborted) return null;
+      if ((hooks.controller?.getRevision?.() ?? 1) !== policyRevisionAtStart) {
+        recordCompletionTelemetry(token, "stale", { reason: "policy-changed-before-fetch" });
+        return completeAnyWord(context);
+      }
     }
 
     const triggerCharacter = triggerOnly
@@ -1908,6 +1913,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       result = null;
     }
     if (context.aborted) return null;
+    if ((hooks.controller?.getRevision?.() ?? 1) !== policyRevisionAtStart) {
+      recordCompletionTelemetry(token, "stale", { reason: "policy-changed-after-fetch" });
+      return completeAnyWord(context);
+    }
     // Validate the request identity again after the await: file switch,
     // document revision change or session restart invalidates the response.
     if (!isStillCurrent(token)) {
@@ -1958,7 +1967,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     const query = word ? context.state.doc.sliceString(word.from, context.pos) : "";
     const rawItems = result.items;
     const pairs: CompletionCandidatePair[] = [];
-    const policyRev = hooks.controller?.getRevision?.() ?? 1;
+    const policyRev = policyRevisionAtStart;
 
     // The server response is already relevance ordered. Mapping more entries
     // than the popup can consume only allocates closures/documentation helpers
@@ -1974,6 +1983,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       maxVisibleItems: MAX_COMPLETION_OPTIONS,
       documentation: { enabled: true, delayMs: 250 },
     };
+    const isCandidateStillCurrent = (candidateToken: CompletionRequestToken): boolean => (
+      isStillCurrent(candidateToken)
+      && (hooks.controller?.getRevision?.() ?? 1) === policyRev
+    );
     const maxItemsLimit = policy.maxVisibleItems ?? MAX_COMPLETION_OPTIONS;
     const maxItemsToProcess = Math.min(rawItems.length, maxItemsLimit);
     for (let i = 0; i < maxItemsToProcess; i += 1) {
@@ -2045,7 +2058,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             to,
             resolveFresh,
             token,
-            isStillCurrent,
+            isCandidateStillCurrent,
             hooks.getDocumentRevision,
             hooks.reportDiagnostic,
             hooks.onResolveGate,
@@ -2101,7 +2114,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       && mapped.length === 1
       && !result.isIncomplete
       && !result.truncated
-      && isStillCurrent(token)
+      && isCandidateStillCurrent(token)
     ) {
       const targetView = hooks.getView?.();
       if (targetView) {
@@ -2125,7 +2138,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             }
           }
           if (itemToCommit) {
-            if (!isStillCurrent(token)) return null;
+            if (!isCandidateStillCurrent(token)) return null;
             hooks.reportDiagnostic?.("auto-inserted-single");
             const applied = commitLspCompletion(
               targetView,
@@ -2133,7 +2146,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
               from,
               context.pos,
               token,
-              isStillCurrent,
+              isCandidateStillCurrent,
               hooks.reportDiagnostic,
               policy.excludedSymbols,
             );
