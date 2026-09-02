@@ -621,6 +621,16 @@ describe("createLspCompletionSource", () => {
       }));
       const source = createFixtureCompletionSource({
         fetch,
+        resolve: async () => ({
+          ...item,
+          textEdit: {
+            range: {
+              start: { line: 0, character: 10 },
+              end: { line: 0, character: 40 },
+            },
+            newText: "List",
+          },
+        }),
         triggerCharacters: () => [],
         reportDiagnostic: (kind, detail) => diagnostics.push(detail ? `${kind}:${detail}` : kind),
       });
@@ -633,6 +643,7 @@ describe("createLspCompletionSource", () => {
       if (typeof option.apply === "function") {
         option.apply(view, option, 10, 13);
       }
+      await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(dispatchSpy).not.toHaveBeenCalled();
       expect(view.state.doc.toString()).toBe("const a = Lis");
@@ -729,12 +740,22 @@ describe("createLspCompletionSource", () => {
           insertTextFormat: 2,
         }],
       }));
-      const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
+      const source = createFixtureCompletionSource({
+        fetch,
+        resolve: async () => ({
+          ...completionResult(["call"]).items[0],
+          label: "call",
+          insertText: "call(${1:first}, ${2:second})$0",
+          insertTextFormat: 2,
+        }),
+        triggerCharacters: () => [],
+      });
       const state = EditorState.create({ doc: "cal" });
       const view = new EditorView({ state });
       const result = await source(new CompletionContext(state, 3, true));
       const option = result!.options[0];
       if (typeof option.apply === "function") option.apply(view, option, 0, 3);
+      await new Promise((resolve) => setTimeout(resolve, 0));
       expect(view.state.doc.toString()).toBe("call(first, second)");
       expect(view.state.sliceDoc(
         view.state.selection.main.from,

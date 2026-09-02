@@ -1600,7 +1600,7 @@ function applyLspCompletion(
   onResolveGate?: ((request: CompletionResolveGateRequest) => void) | undefined,
   excludedSymbols?: readonly SymbolPatternRule[],
 ): void {
-  if (item.additionalTextEdits?.length || !resolve) {
+  if (item.additionalTextEdits?.length) {
     commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic, excludedSymbols);
     return;
   }
