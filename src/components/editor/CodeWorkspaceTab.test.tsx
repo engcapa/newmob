@@ -28,6 +28,10 @@ import { workspaceActionRegistry } from "./workspace/workspaceActionRegistry";
 import {
   WorkspaceLocationController,
 } from "./workspace/navigationHistoryModel";
+import {
+  clearGitSnapshotCache,
+  clearGitSnapshotInFlight,
+} from "./workspace/useWorkspaceGitSnapshots";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { globalEditorConfigResolver } from "./workspace/editorConfigResolver";
@@ -534,6 +538,8 @@ describe("CodeWorkspaceTab", () => {
     window.localStorage.clear();
     workspaceActionRegistry.clear();
     globalEditorConfigResolver.clearAll();
+    clearGitSnapshotCache();
+    clearGitSnapshotInFlight();
     vi.mocked(confirmAppDialog).mockReset().mockResolvedValue(true);
     vi.mocked(promptAppDialog).mockReset().mockResolvedValue(null);
     useAppStore.setState({
@@ -807,6 +813,8 @@ describe("CodeWorkspaceTab", () => {
     cleanup();
     workspaceActionRegistry.clear();
     globalEditorConfigResolver.clearAll();
+    clearGitSnapshotCache();
+    clearGitSnapshotInFlight();
   });
 
   it("mounts project facts for the workspace root and routes status refresh to the store", async () => {
