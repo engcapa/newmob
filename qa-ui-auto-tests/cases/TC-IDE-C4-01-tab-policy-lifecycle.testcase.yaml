@@ -4,10 +4,13 @@ description: |
   ED-TABS-004 browser lifecycle case. Builds a deterministic pinned + clean +
   dirty three-tab fixture in the browser VFS, previews exact victims, verifies
   dirty cancellation has zero effect, then confirms the same plan and matches
-  active-tab/layout/resource observations to the production receipt. Browser
-  mode has no honest didClose transport-failure fixture, so cleanup recovery
-  replay remains covered by mounted production tests and is not claimed by this
-  browser case. Highest green claim: A1-A3 browser-wired lifecycle.
+  active-tab/layout/resource observations to the production receipt. It also
+  observes that a fully committed cleanup leaves no recovery banner or replay
+  affordance behind. Browser mode has no honest didClose transport-failure
+  fixture -- all four cleanup stages resolve in the browser Tauri stub -- so the
+  A4 failure/replay branch is certified by the mounted production test and is
+  not claimed here. Highest green claim: A1-A3 browser-wired lifecycle plus the
+  negative recovery-surface observation.
 covers: [F25.5]
 tags: [code-workspace, ide-c4, tab-policy, lifecycle, accessibility, p0]
 modes: [browser]
@@ -169,6 +172,15 @@ steps:
       selector: '[data-testid="code-workspace-tab"]'
       name: data-resource-recovery-count
       equals: "0"
+  # A fully committed cleanup must leave no recovery surface behind. This is the
+  # honest browser-side observation of the recovery contract: the banner and its
+  # replay affordance are absent precisely because every stage succeeded. The
+  # failure branch itself has no browser-reachable transport (see the header
+  # note) and is certified by the mounted production test instead.
+  - assert_not_visible: '[data-testid="workspace-resource-cleanup-recovery"]'
+  - assert_count:
+      selector: '[data-testid="workspace-resource-cleanup-recovery-item"]'
+      equal: 0
   - assert_attribute:
       selector: '[data-testid="code-workspace-tab"]'
       name: data-reopen-stack-count

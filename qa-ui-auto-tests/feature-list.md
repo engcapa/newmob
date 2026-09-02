@@ -5734,6 +5734,10 @@ controls:
     selector: '[data-testid="workspace-resource-cleanup-recovery"]'
     kind: display
     optional: true
+  - id: resource-cleanup-recovery-item
+    selector: '[data-testid="workspace-resource-cleanup-recovery-item"]'
+    kind: display
+    optional: true       # one row per pending recovery; absent after a clean cleanup
   - id: resource-cleanup-retry
     selector: '[data-testid="workspace-resource-cleanup-retry"]'
     kind: interactive

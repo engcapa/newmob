@@ -190,6 +190,7 @@
 - `[data-testid="workspace-tab-policy-apply"]` — interactive [optional] — F25.5.tab-policy-apply
 - `[data-testid="workspace-tab-policy-close"]` — interactive [optional] — F25.5.tab-policy-close
 - `[data-testid="workspace-resource-cleanup-recovery"]` — display [optional] — F25.5.resource-cleanup-recovery
+- `[data-testid="workspace-resource-cleanup-recovery-item"]` — display [optional] — F25.5.resource-cleanup-recovery-item
 - `[data-testid="workspace-resource-cleanup-retry"]` — interactive [optional] — F25.5.resource-cleanup-retry
 - `[data-testid="code-workspace-split-down"]` — interactive [optional] — F25.5.split-down
 - `[data-testid="code-workspace-split-close"]` — interactive [optional] — F25.5.split-close
