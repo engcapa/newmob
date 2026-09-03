@@ -726,6 +726,8 @@
 - `[data-testid="app-titlebar"]` — display — F1.3.titlebar
 - `[data-testid="titlebar-tray"]` — display — F1.3.tray
 - `[data-testid="control-bar"]` — display — F1.3.control-bar
+- `[data-testid="window-drag-handle"]` — display — F1.3.window-drag-handle
+- `[data-testid="titlebar-actions-more"]` — interactive [optional] — F1.3.titlebar-actions-more
 - `[data-testid="theme-cycle"]` — interactive — F1.3.theme-cycle
 - `[data-testid="tab-split-view"]` — interactive — F1.3.split-view
 - `[data-testid="tab-multiexec-toggle"]` — interactive — F1.3.multiexec-toggle

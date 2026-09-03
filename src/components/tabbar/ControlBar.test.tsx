@@ -3,14 +3,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlBar } from "./ControlBar";
 import type { AppCommand } from "../menubar/commands";
 
+const windowMocks = vi.hoisted(() => ({
+  startDragging: vi.fn(async () => undefined),
+  toggleMaximize: vi.fn(async () => undefined),
+}));
 const tabBarMocks = vi.hoisted(() => ({ props: [] as Array<{ detailsRevealExternal?: boolean }> }));
 const openTabsMocks = vi.hoisted(() => ({ props: [] as Array<{ onDetachActiveTab?: () => void }> }));
 
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({
-    startDragging: vi.fn(async () => undefined),
-    toggleMaximize: vi.fn(async () => undefined),
-  }),
+  getCurrentWindow: () => windowMocks,
 }));
 
 vi.mock("../../lib/runtime", () => ({
@@ -143,6 +144,20 @@ describe("ControlBar settings button", () => {
     expect(tabBarMocks.props.at(-1)?.detailsRevealExternal).toBe(true);
     fireEvent.mouseLeave(button);
     expect(tabBarMocks.props.at(-1)?.detailsRevealExternal).toBe(false);
+  });
+
+  it("keeps a dedicated drag handle and preserves the maximize gesture", () => {
+    renderControlBar(vi.fn());
+    const handle = screen.getByTestId("window-drag-handle");
+
+    fireEvent.mouseDown(handle, { button: 0, detail: 1 });
+    expect(windowMocks.startDragging).toHaveBeenCalledTimes(1);
+
+    fireEvent.mouseDown(handle, { button: 0, detail: 2 });
+    expect(windowMocks.toggleMaximize).toHaveBeenCalledTimes(1);
+
+    fireEvent.mouseDown(screen.getByTestId("app-main-menu"), { button: 0, detail: 1 });
+    expect(windowMocks.startDragging).toHaveBeenCalledTimes(1);
   });
 
   it("forwards the active detach action into the More menu", () => {

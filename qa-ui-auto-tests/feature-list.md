@@ -54,6 +54,8 @@ status: done
 area: main/window
 components: [AppTitleBar, WindowControls, WindowResizeHandles, TitleBarTrayControls]
 files:
+  - src/components/tabbar/ControlBar.tsx
+  - src/components/window/WindowDragHandle.tsx
   - src/components/window/AppTitleBar.tsx
   - src/components/window/WindowControls.tsx
   - src/components/window/TitleBarTrayControls.tsx
@@ -67,6 +69,13 @@ controls:
   - id: control-bar
     selector: '[data-testid="control-bar"]'
     kind: display
+  - id: window-drag-handle
+    selector: '[data-testid="window-drag-handle"]'
+    kind: display    # dedicated native window-move target; presence is asserted in browser mode
+  - id: titlebar-actions-more
+    selector: '[data-testid="titlebar-actions-more"]'
+    kind: interactive
+    optional: true   # compact overflow control appears below the narrow-window breakpoint
   - id: theme-cycle
     selector: '[data-testid="theme-cycle"]'
     kind: interactive
@@ -96,7 +105,8 @@ controls:
 -->
 
 - 取消原生 decorations，前端自绘 `AppTitleBar` + `WindowControls`（最小化 / 最大化 / 关闭）
-- 标题栏托盘 `TitleBarTrayControls`：分组排列 — Voice (PTT) | View (主题循环 + 紧凑模式) | Terminal (Split + MultiExec) | Language (locale 切换)
+- 标题栏左侧固定 `WindowDragHandle`（48px）作为可识别的窗口移动锚点；Tab 数量不会挤掉该区域
+- 标题栏托盘 `TitleBarTrayControls`：常规宽度分组排列 — Voice (PTT) | View (主题循环) | Terminal (Split + MultiExec) | Language (locale 切换)；窄窗口收进 `More window actions`
 - `WindowResizeHandles` 在无 decorations 模式下提供 8 向窗口缩放（North/South/East/West/四个角）
 - 主菜单 / Sessions / View / Tunneling / Settings / Help / Exit 入口接入
 
