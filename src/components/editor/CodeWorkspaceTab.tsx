@@ -227,7 +227,6 @@ import {
   syncBottomDockToolWindows,
   unregisterAllToolWindows,
 } from "./workspace/toolWindowRegistry";
-import { planReformat } from "./workspace/reformatWorkflow";
 import { attachWorkspaceMouseDispatcher } from "./workspace/workspaceMouseDispatcher";
 import {
   createWorkspaceLocationController,
@@ -269,7 +268,11 @@ import {
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
 import { CodeStyleSettingsDialog } from "./workspace/CodeStyleSettingsDialog";
 import { WorkspaceTabPolicySettingsDialog } from "./workspace/WorkspaceTabPolicySettingsDialog";
-import { resolveEffectiveSavePolicy } from "./workspace/workspaceCodeStyleScheme";
+import {
+  buildFormatPlan,
+  filterFormattingRanges,
+  resolveEffectiveSavePolicy,
+} from "./workspace/workspaceCodeStyleScheme";
 import {
   BUILT_IN_SCHEME_ID,
   activeSchemeForLanguage,
@@ -5527,6 +5530,13 @@ export function CodeWorkspaceTab({
       ),
     });
     resolvedCodeStylesRef.current[file.key] = codeStyle;
+
+    const ranges = filterFormattingRanges(
+      file.text,
+      hasSelection && selection ? { startLine: selection.start.line, endLine: selection.end.line } : null,
+      true,
+    );
+    if (ranges.length === 0) return file.text;
 
     const result = useRange && selection
       ? await lspRangeFormatting(descriptor, {
@@ -11177,26 +11187,42 @@ export function CodeWorkspaceTab({
         return !!(activeCapabilities.formatting || activeCapabilities.rangeFormatting);
       },
       run: () => {
-        // §8.19.9 R8-D2: every invocation resolves through the planner —
+        // §8.19.9 R8-D2 / ED-STYLE-001: every invocation resolves through the format planner —
         // executable scopes delegate to the provider stage; everything else
         // surfaces a typed unavailable reason.
         const selection = editorSelectionRef.current;
         const hasSelection = !!selection && !selection.empty;
-        const decision = planReformat({
+        const absPath = activeFile
+          ? (absolutePathForOpenFile(activeFile) ?? activeFile.languagePath)
+          : null;
+        const capabilities = {
+          formatting: !!activeCapabilities?.formatting,
+          rangeFormatting: !!activeCapabilities?.rangeFormatting,
+          rearrangeSupported: false,
+          cleanupSupported: false,
+        };
+        const plan = buildFormatPlan({
           scope: hasSelection ? "selection" : "file",
-          targetPath: activeFile
-            ? (absolutePathForOpenFile(activeFile) ?? activeFile.languagePath)
-            : null,
-          languageId: activeLanguageId,
-          readOnly: !!activeFile?.library || workspaceResourceOperationLocked,
-          hasSelection,
-          capabilities: {
-            formatting: !!activeCapabilities?.formatting,
-            rangeFormatting: !!activeCapabilities?.rangeFormatting,
-          },
+          targets: absPath ? [absPath] : [],
+          excludedByPattern: [],
+          readOnlyPaths: new Set(activeFile?.library || workspaceResourceOperationLocked ? (absPath ? [absPath] : []) : []),
+          capabilities,
+          moduleFactsReady: false,
         });
-        if (decision.kind === "unavailable") {
-          setStatusMessage(decision.reason);
+        if (plan.state === "unavailable" || plan.stages.length === 0) {
+          if (!activeFile) {
+            setStatusMessage("No formattable file is open");
+          } else if (activeFile.library || workspaceResourceOperationLocked) {
+            setStatusMessage(`${absPath} is read-only and cannot be reformatted`);
+          } else if (hasSelection && !capabilities.rangeFormatting) {
+            setStatusMessage(capabilities.formatting
+              ? "The provider does not support range formatting — clear the selection to reformat the whole file"
+              : `No formatter provider for ${activeLanguageId ?? "this file type"} supports selection reformatting`);
+          } else if (!capabilities.formatting) {
+            setStatusMessage(`No formatter provider for ${activeLanguageId ?? "this file type"} is running`);
+          } else {
+            setStatusMessage("Formatting is unavailable for the current selection/file");
+          }
           return false;
         }
         void formatActiveFile();
