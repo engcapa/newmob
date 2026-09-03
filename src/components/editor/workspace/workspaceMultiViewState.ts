@@ -86,3 +86,38 @@ export function evaluateViewCloseResourceRetention(
     remainingLeaseCount: result.leaseCount,
   };
 }
+
+/**
+ * Coordinates document-level shared decorations and isolated per-view navigation states.
+ */
+export class WorkspaceMultiViewStateCoordinator {
+  private viewStates = new Map<string, ViewIsolatedState>();
+  private decorationsByFile = new Map<string, DocumentSharedDecorations>();
+  readonly leaseTracker = new WorkspaceDocumentLeaseTracker();
+
+  saveViewState(state: ViewIsolatedState): void {
+    this.viewStates.set(`${state.fileKey}::${state.viewId}`, state);
+  }
+
+  getViewState(fileKey: string, viewId: string): ViewIsolatedState | null {
+    return this.viewStates.get(`${fileKey}::${viewId}`) ?? null;
+  }
+
+  removeViewState(fileKey: string, viewId: string): void {
+    this.viewStates.delete(`${fileKey}::${viewId}`);
+  }
+
+  setDocumentDecorations(decorations: DocumentSharedDecorations): void {
+    this.decorationsByFile.set(decorations.fileKey, decorations);
+  }
+
+  getDocumentDecorations(fileKey: string): DocumentSharedDecorations | null {
+    return this.decorationsByFile.get(fileKey) ?? null;
+  }
+
+  clear(): void {
+    this.viewStates.clear();
+    this.decorationsByFile.clear();
+    this.leaseTracker.clear();
+  }
+}

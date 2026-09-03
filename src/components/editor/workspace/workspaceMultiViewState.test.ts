@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   WorkspaceDocumentLeaseTracker,
+  WorkspaceMultiViewStateCoordinator,
   evaluateViewCloseResourceRetention,
   type DocumentSharedDecorations,
   type ViewIsolatedState,
@@ -105,5 +106,128 @@ describe("§8.26 / ED-MULTIVIEW-003: Multi-View Shared Decoration & Per-View Sta
     expect(view1State.selectionHead).not.toBe(view2State.selectionHead);
     expect(view1State.scrollTop).not.toBe(view2State.scrollTop);
     expect(view1State.foldedLines).not.toEqual(view2State.foldedLines);
+  });
+
+  it("ED-MULTIVIEW-003-A1: diagnostics, breakpoints, and bookmarks synchronize across all views of a file", () => {
+    const coordinator = new WorkspaceMultiViewStateCoordinator();
+    const fileKey = "src/App.tsx";
+
+    coordinator.setDocumentDecorations({
+      fileKey,
+      diagnostics: [
+        {
+          message: "TS2304: Cannot find name 'foo'",
+          severity: 1,
+          code: "2304",
+          range: { start: { line: 1, character: 0 }, end: { line: 1, character: 3 } },
+          source: "typescript",
+        },
+      ],
+      debugBreakpoints: [
+        { line: 5, conditional: false, logpoint: false, enabled: true, verified: true },
+      ],
+      bookmarks: [
+        {
+          id: "bm-app",
+          fileKey,
+          pathLabel: "src/App.tsx",
+          line: 12,
+          character: 2,
+          label: "entry point",
+          createdAt: 2000,
+        },
+      ],
+    });
+
+    // Both views retrieve identical shared decorations for the document
+    const dec1 = coordinator.getDocumentDecorations(fileKey);
+    const dec2 = coordinator.getDocumentDecorations(fileKey);
+    expect(dec1).toBe(dec2);
+    expect(dec1?.diagnostics).toHaveLength(1);
+    expect(dec1?.debugBreakpoints).toHaveLength(1);
+    expect(dec1?.bookmarks).toHaveLength(1);
+  });
+
+  it("ED-MULTIVIEW-003-A2: caret, selection, scroll, and folds remain distinct per view through edits", () => {
+    const coordinator = new WorkspaceMultiViewStateCoordinator();
+    const fileKey = "src/App.tsx";
+
+    const viewA: ViewIsolatedState = {
+      viewId: "view-left",
+      fileKey,
+      caretLine: 10,
+      caretCharacter: 4,
+      selectionAnchor: 100,
+      selectionHead: 120,
+      scrollTop: 150,
+      scrollLeft: 0,
+      foldedLines: [20, 21, 22],
+    };
+
+    const viewB: ViewIsolatedState = {
+      viewId: "view-right",
+      fileKey,
+      caretLine: 50,
+      caretCharacter: 0,
+      selectionAnchor: 500,
+      selectionHead: 500,
+      scrollTop: 600,
+      scrollLeft: 10,
+      foldedLines: [],
+    };
+
+    coordinator.saveViewState(viewA);
+    coordinator.saveViewState(viewB);
+
+    const restoredA = coordinator.getViewState(fileKey, "view-left");
+    const restoredB = coordinator.getViewState(fileKey, "view-right");
+
+    expect(restoredA?.caretLine).toBe(10);
+    expect(restoredB?.caretLine).toBe(50);
+    expect(restoredA?.selectionHead).toBe(120);
+    expect(restoredB?.selectionHead).toBe(500);
+    expect(restoredA?.scrollTop).toBe(150);
+    expect(restoredB?.scrollTop).toBe(600);
+    expect(restoredA?.foldedLines).toEqual([20, 21, 22]);
+    expect(restoredB?.foldedLines).toEqual([]);
+  });
+
+  it("ED-MULTIVIEW-003-A3: close and reopen restores view state without releasing shared resources prematurely", () => {
+    const coordinator = new WorkspaceMultiViewStateCoordinator();
+    const fileKey = "src/App.tsx";
+
+    // View A and View B acquire leases
+    expect(coordinator.leaseTracker.acquireLease(fileKey, "view-left")).toBe(1);
+    expect(coordinator.leaseTracker.acquireLease(fileKey, "view-right")).toBe(2);
+
+    // Save state for View A before closing
+    coordinator.saveViewState({
+      viewId: "view-left",
+      fileKey,
+      caretLine: 42,
+      caretCharacter: 5,
+      selectionAnchor: 400,
+      selectionHead: 410,
+      scrollTop: 300,
+      scrollLeft: 0,
+      foldedLines: [50],
+    });
+
+    // Close View A: evaluate retention against lease tracker
+    const closeEvalA = evaluateViewCloseResourceRetention(coordinator.leaseTracker, fileKey, "view-left");
+    expect(closeEvalA.shouldReleaseDocumentResource).toBe(false);
+    expect(closeEvalA.remainingLeaseCount).toBe(1);
+
+    // Reopen View A: re-acquire lease and restore state
+    expect(coordinator.leaseTracker.acquireLease(fileKey, "view-left")).toBe(2);
+    const restoredState = coordinator.getViewState(fileKey, "view-left");
+    expect(restoredState?.caretLine).toBe(42);
+    expect(restoredState?.scrollTop).toBe(300);
+
+    // Now close View A then View B (the final view)
+    evaluateViewCloseResourceRetention(coordinator.leaseTracker, fileKey, "view-left");
+    const closeEvalB = evaluateViewCloseResourceRetention(coordinator.leaseTracker, fileKey, "view-right");
+    expect(closeEvalB.shouldReleaseDocumentResource).toBe(true);
+    expect(closeEvalB.remainingLeaseCount).toBe(0);
   });
 });
