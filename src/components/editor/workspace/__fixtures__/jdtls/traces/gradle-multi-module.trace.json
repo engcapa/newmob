@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "gradle-multi-module",
-  "generatedAt": "2026-08-26T05:31:30.259Z",
+  "generatedAt": "2026-09-03T15:00:26.153Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 4117,
+          "msTotal": 4858,
           "itemCount": 1,
           "isIncomplete": false,
           "satisfied": true,
@@ -46,7 +46,7 @@
         }
       ],
       "resolve": {
-        "ms": 331,
+        "ms": 293,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport org.example.gcore.GCore;\n\n"
@@ -67,7 +67,6 @@
     "declaredStaticDataChannel": false,
     "topLevelCapabilityKeys": [
       "callHierarchyProvider",
-      "codeActionProvider",
       "codeLensProvider",
       "declarationProvider",
       "definitionProvider",
@@ -95,7 +94,11 @@
     "hoverProviderDeclaredStatically": false,
     "signatureHelpProvenByScenarios": false,
     "hoverProvenByScenarios": false,
-    "dynamicRegistrations": []
+    "dynamicRegistrations": [
+      "textDocument/codeAction",
+      "textDocument/completion",
+      "textDocument/signatureHelp"
+    ]
   },
   "analysis": {
     "serverInfo": {
@@ -121,7 +124,7 @@
       }
     ],
     "importProgress": {
-      "events": 31,
+      "events": 30,
       "beginTokens": 8,
       "titles": [
         "Synchronizing projects",
@@ -138,6 +141,6 @@
     }
   },
   "analysisTiming": {
-    "firstCompletionSatisfiedMs": 7859
+    "firstCompletionSatisfiedMs": 8254
   }
 }

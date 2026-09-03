@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-broken-classpath",
-  "generatedAt": "2026-08-26T05:31:43.200Z",
+  "generatedAt": "2026-09-03T15:00:39.505Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 2345,
+          "msTotal": 2256,
           "itemCount": 0,
           "isIncomplete": false,
           "satisfied": true,
@@ -61,7 +61,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 202,
+          "msTotal": 169,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -80,7 +80,6 @@
     "declaredStaticDataChannel": false,
     "topLevelCapabilityKeys": [
       "callHierarchyProvider",
-      "codeActionProvider",
       "codeLensProvider",
       "declarationProvider",
       "definitionProvider",
@@ -108,7 +107,11 @@
     "hoverProviderDeclaredStatically": false,
     "signatureHelpProvenByScenarios": false,
     "hoverProvenByScenarios": false,
-    "dynamicRegistrations": []
+    "dynamicRegistrations": [
+      "textDocument/codeAction",
+      "textDocument/completion",
+      "textDocument/signatureHelp"
+    ]
   },
   "analysis": {
     "serverInfo": {
@@ -126,7 +129,7 @@
       }
     ],
     "importProgress": {
-      "events": 31,
+      "events": 32,
       "beginTokens": 10,
       "titles": [
         "Synchronizing projects",
@@ -145,7 +148,7 @@
     }
   },
   "analysisTiming": {
-    "firstCompletionSatisfiedMs": 5607
+    "firstCompletionSatisfiedMs": 5551
   },
   "diagnosticsSummary": {
     "count": 4,
