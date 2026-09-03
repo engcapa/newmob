@@ -137,4 +137,57 @@ describe("ED-REL-001: runnerReceipt execution receipt & signature boundary", () 
     expect(resDur.valid).toBe(false);
     expect(resDur.reason).toBe("timing-tampered");
   });
+
+  it("ED-REL-001-A1: supports DEFAULT_RUNNER_KEY_REGISTRY for official runners", () => {
+    import("./runnerReceipt").then(({ DEFAULT_RUNNER_KEY_REGISTRY }) => {
+      expect(DEFAULT_RUNNER_KEY_REGISTRY.keys["key-native-linux-01"]).toBeDefined();
+      expect(DEFAULT_RUNNER_KEY_REGISTRY.keys["key-browser-runner-01"]).toBeDefined();
+      expect(DEFAULT_RUNNER_KEY_REGISTRY.keys["key-perf-runner-01"]).toBeDefined();
+      expect(DEFAULT_RUNNER_KEY_REGISTRY.keys["key-audit-runner-01"]).toBeDefined();
+
+      const browserKey = DEFAULT_RUNNER_KEY_REGISTRY.keys["key-browser-runner-01"];
+      const receipt = createRunnerExecutionReceipt(
+        {
+          ...validReceiptParams,
+          keyId: browserKey.keyId,
+          purpose: "browser-runner",
+          runnerId: "qa-ui-auto-browser-runner",
+        },
+        browserKey,
+      );
+
+      const verification = verifyRunnerReceipt(receipt, DEFAULT_RUNNER_KEY_REGISTRY, "2026-08-29T12:00:00Z");
+      expect(verification.valid).toBe(true);
+      expect(verification.key?.keyId).toBe("key-browser-runner-01");
+    });
+  });
+
+  it("ED-REL-001-A3: prevents application and test code from self-attesting a release run", () => {
+    // Application or test code attempting to forge a receipt using an unauthorized secret key
+    const forgedReceipt = createRunnerExecutionReceipt(
+      { ...validReceiptParams, keyId: "key-native-linux-01" },
+      { ...activeNativeKey, secretOrPublicKey: "attacker-forged-secret" },
+    );
+
+    // Verifying against official registry fails with signature-mismatch
+    const verif = verifyRunnerReceipt(forgedReceipt, registry, "2026-08-29T12:00:00Z");
+    expect(verif.valid).toBe(false);
+    expect(verif.reason).toBe("signature-mismatch");
+  });
+
+  it("ED-REL-001-A2: artifact tampering fails cryptographic verification", () => {
+    const receipt = createRunnerExecutionReceipt(validReceiptParams, activeNativeKey);
+
+    // Tamper artifact sha256
+    const tamperedArtifacts = {
+      ...receipt,
+      artifacts: [
+        { path: "target/junit.xml", sha256: "sha256:corrupted-hash", bytes: 1024 },
+        receipt.artifacts[1],
+      ],
+    };
+    const res = verifyRunnerReceipt(tamperedArtifacts, registry, "2026-08-29T12:00:00Z");
+    expect(res.valid).toBe(false);
+    expect(res.reason).toBe("signature-mismatch");
+  });
 });

@@ -22,6 +22,47 @@ export interface RunnerKeyRegistry {
   keys: Record<string, RunnerKeyRecord>;
 }
 
+export const DEFAULT_RUNNER_KEY_REGISTRY: RunnerKeyRegistry = {
+  keys: {
+    "key-native-linux-01": {
+      keyId: "key-native-linux-01",
+      issuer: "taomni-linux-native-runner",
+      purpose: "native-runner",
+      secretOrPublicKey: "secret-key-native-42",
+      validFrom: "2026-01-01T00:00:00Z",
+      validUntil: "2028-12-31T23:59:59Z",
+      revoked: false,
+    },
+    "key-browser-runner-01": {
+      keyId: "key-browser-runner-01",
+      issuer: "taomni-browser-runner",
+      purpose: "browser-runner",
+      secretOrPublicKey: "secret-key-browser-taomni",
+      validFrom: "2026-01-01T00:00:00Z",
+      validUntil: "2028-12-31T23:59:59Z",
+      revoked: false,
+    },
+    "key-perf-runner-01": {
+      keyId: "key-perf-runner-01",
+      issuer: "taomni-perf-runner",
+      purpose: "perf-runner",
+      secretOrPublicKey: "secret-key-perf-taomni",
+      validFrom: "2026-01-01T00:00:00Z",
+      validUntil: "2028-12-31T23:59:59Z",
+      revoked: false,
+    },
+    "key-audit-runner-01": {
+      keyId: "key-audit-runner-01",
+      issuer: "taomni-audit-runner",
+      purpose: "audit-runner",
+      secretOrPublicKey: "secret-key-audit-taomni",
+      validFrom: "2026-01-01T00:00:00Z",
+      validUntil: "2028-12-31T23:59:59Z",
+      revoked: false,
+    },
+  },
+};
+
 export interface RunnerArtifactEvidence {
   path: string;
   sha256: string;
@@ -66,7 +107,7 @@ export function computeReceiptCanonicalPayload(
   receipt: Omit<RunnerExecutionReceipt, "signature">,
 ): string {
   const sortedArtifacts = [...receipt.artifacts]
-    .sort((a, b) => a.path.localeCompare(b.path))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .map((a) => `${a.path}:${a.sha256}:${a.bytes}`)
     .join(",");
 

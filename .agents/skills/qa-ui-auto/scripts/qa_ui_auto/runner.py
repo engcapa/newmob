@@ -586,6 +586,22 @@ def main(argv: list[str] | None = None) -> int:
     reporter.write_junit(report_root, summary)
     print("\n" + md.read_text(encoding="utf-8"))
 
+    # ED-REL-001: emit runner-owned execution receipt
+    from .runner_receipt import emit_runner_receipt
+    try:
+        receipt_path = emit_runner_receipt(
+            report_root=report_root,
+            mode=mode,
+            executed_cmd=sys.argv,
+            started_at=started_iso,
+            finished_at=reporter.now_iso(),
+            duration_sec=duration,
+            exit_code=0 if summary["totals"]["failed"] == 0 else 1,
+        )
+        print(f"qa-ui-auto: runner receipt emitted: {receipt_path.name}")
+    except Exception as e:
+        print(f"qa-ui-auto: warning: failed to emit runner receipt: {e}", file=sys.stderr)
+
     keep = int(cfg.get("report", {}).get("keep_runs", 5))
     _rotate_runs(report_dir, keep)
 
