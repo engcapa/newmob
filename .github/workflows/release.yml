@@ -363,23 +363,13 @@ jobs:
       # Using MIT Kerberos (which fully supports IOV) fixes the build.
       #
       # arm64 : native Homebrew at /opt/homebrew
-      # x86_64: Homebrew under Rosetta 2 at /usr/local
+      # x86_64: Homebrew bottle unpacked under /usr/local
       # -----------------------------------------------------------------------
       - name: Install MIT Kerberos (arm64 – native)
         run: brew install krb5
 
       - name: Install MIT Kerberos (x86_64 – Rosetta 2)
-        run: |
-          set -euo pipefail
-          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
-            sudo softwareupdate --install-rosetta --agree-to-license
-          fi
-          # Bootstrap x86_64 Homebrew if it isn't already present
-          if [ ! -x /usr/local/bin/brew ]; then
-            arch -x86_64 /bin/bash -c \
-              "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          fi
-          arch -x86_64 /usr/local/bin/brew install krb5
+        run: bash scripts/install-krb5-macos-x86_64.sh
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -666,6 +656,7 @@ jobs:
         if: steps.meta.outputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.meta.outputs.tag }}
         shell: bash
         run: |
