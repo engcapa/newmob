@@ -69,6 +69,8 @@ export interface RunnerArtifactEvidence {
   bytes: number;
 }
 
+import type { ReleaseBundleIdentity } from "./bundleIdentity";
+
 export interface RunnerExecutionReceipt {
   receiptId: string;
   runnerId: string;
@@ -84,6 +86,9 @@ export interface RunnerExecutionReceipt {
   stderrDigest: string;
   artifacts: readonly RunnerArtifactEvidence[];
   signature: string;
+  sourceIdentityDigest?: string;
+  testPlanIdentityDigest?: string;
+  bundleIdentity?: ReleaseBundleIdentity;
 }
 
 export interface ReceiptVerificationResult {
@@ -111,7 +116,7 @@ export function computeReceiptCanonicalPayload(
     .map((a) => `${a.path}:${a.sha256}:${a.bytes}`)
     .join(",");
 
-  return [
+  const parts = [
     `id:${receipt.receiptId}`,
     `runner:${receipt.runnerId}`,
     `key:${receipt.keyId}`,
@@ -124,7 +129,16 @@ export function computeReceiptCanonicalPayload(
     `out:${receipt.stdoutDigest}`,
     `err:${receipt.stderrDigest}`,
     `artifacts:[${sortedArtifacts}]`,
-  ].join("|");
+  ];
+
+  if (receipt.sourceIdentityDigest) {
+    parts.push(`src:${receipt.sourceIdentityDigest}`);
+  }
+  if (receipt.testPlanIdentityDigest) {
+    parts.push(`test:${receipt.testPlanIdentityDigest}`);
+  }
+
+  return parts.join("|");
 }
 
 /**
@@ -151,20 +165,7 @@ export function computeReceiptSignature(payload: string, secretKey: string): str
  * Enforces duration computation and startedAt <= finishedAt invariants.
  */
 export function createRunnerExecutionReceipt(
-  params: {
-    receiptId: string;
-    runnerId: string;
-    keyId: string;
-    purpose: RunnerKeyPurpose;
-    executedCommand: string;
-    commandDigest: string;
-    startedAt: string;
-    finishedAt: string;
-    exitCode: number;
-    stdoutDigest: string;
-    stderrDigest: string;
-    artifacts: readonly RunnerArtifactEvidence[];
-  },
+  params: Omit<RunnerExecutionReceipt, "signature" | "durationMs">,
   keyRecord: RunnerKeyRecord,
 ): RunnerExecutionReceipt {
   const startEpoch = Date.parse(params.startedAt);

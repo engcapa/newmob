@@ -50,7 +50,7 @@ export function computeSourceIdentityDigest(files: readonly TrackedSourceFile[])
   digest: string;
   totalBytes: number;
 } {
-  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  const sorted = [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   let totalBytes = 0;
 
   const lines: string[] = [];

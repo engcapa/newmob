@@ -82,7 +82,7 @@ def compute_receipt_canonical_payload(receipt: dict[str, Any]) -> str:
         finish_epoch = _parse_iso(receipt["finishedAt"])
         dur = int(round((finish_epoch - start_epoch) * 1000))
 
-    return "|".join([
+    parts = [
         f"id:{receipt['receiptId']}",
         f"runner:{receipt['runnerId']}",
         f"key:{receipt['keyId']}",
@@ -95,7 +95,14 @@ def compute_receipt_canonical_payload(receipt: dict[str, Any]) -> str:
         f"out:{receipt['stdoutDigest']}",
         f"err:{receipt['stderrDigest']}",
         f"artifacts:[{artifacts_str}]",
-    ])
+    ]
+
+    if receipt.get("sourceIdentityDigest"):
+        parts.append(f"src:{receipt['sourceIdentityDigest']}")
+    if receipt.get("testPlanIdentityDigest"):
+        parts.append(f"test:{receipt['testPlanIdentityDigest']}")
+
+    return "|".join(parts)
 
 
 def compute_receipt_signature(payload: str, secret_key: str) -> str:
@@ -291,7 +298,7 @@ def emit_runner_receipt(
     receipt_id = f"receipt-{run_dir_name}"
     eff_runner_id = runner_id or f"qa-ui-auto-{mode}-runner"
 
-    params = {
+    params: dict[str, Any] = {
         "receiptId": receipt_id,
         "runnerId": eff_runner_id,
         "keyId": effective_key_id,
@@ -305,6 +312,24 @@ def emit_runner_receipt(
         "stderrDigest": stderr_digest,
         "artifacts": artifacts,
     }
+
+    # ED-REL-002: Bind source, test plan, and release bundle identity
+    try:
+        from .bundle_identity import inspect_repository_identities
+        repo_root = report_root.resolve()
+        for parent in (repo_root, *repo_root.parents):
+            if (parent / "package.json").is_file():
+                repo_root = parent
+                break
+
+        id_info = inspect_repository_identities(repo_root, mode=mode)
+        bundle_id_record = id_info.get("bundleIdentity")
+        if bundle_id_record:
+            params["sourceIdentityDigest"] = bundle_id_record["sourceIdentityDigest"]
+            params["testPlanIdentityDigest"] = bundle_id_record["testPlanIdentityDigest"]
+            params["bundleIdentity"] = bundle_id_record
+    except Exception as e:
+        print(f"qa-ui-auto: warning: identity inspection skipped: {e}", file=sys.stderr)
 
     receipt = create_runner_execution_receipt(params, key_record)
 
