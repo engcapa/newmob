@@ -101,5 +101,56 @@ describe("ED-REL-003: releasePlanValidator channel and artifact root constraints
       expect(compliance.invalidArtifacts).toHaveLength(1);
       expect(compliance.invalidArtifacts[0].reason).toContain("Absolute artifact paths are forbidden");
     });
+
+    it("ED-REL-003-A1: resolves deterministic requirements for a valid release channel", () => {
+      import("./releasePlanValidator").then(({ resolveChannelRequirements }) => {
+        const reqs = resolveChannelRequirements("linux-daily-editor", samplePlan);
+        expect(reqs.platform).toBe("linux");
+        expect(reqs.requiredCapabilities).toEqual(["C0-save-pipeline", "C3-clipboard-session", "C4-tab-policy"]);
+        expect(reqs.requiredEvidenceLayers).toEqual(["unit", "browser"]);
+        expect(reqs.evidenceRoots).toEqual(["qa-ui-auto-report", "evidence"]);
+      });
+    });
+
+    it("ED-REL-003-A2: unknown channel or cross-channel input fails closed", () => {
+      import("./releasePlanValidator").then(({ resolveChannelRequirements }) => {
+        expect(() => resolveChannelRequirements("unknown-windows-channel", samplePlan)).toThrow(
+          "Release channel 'unknown-windows-channel' not found",
+        );
+
+        const unknownComp = evaluateChannelCompliance(
+          "nonexistent-channel",
+          samplePlan,
+          ["C0-save-pipeline"],
+          ["unit"],
+          ["evidence/runs/summary.json"],
+        );
+        expect(unknownComp.compliant).toBe(false);
+        expect(unknownComp.invalidArtifacts[0].reason).toContain("not found in release plan");
+      });
+    });
+
+    it("ED-REL-003-A3: rejects alternate roots and enforces approved evidence roots strictly", () => {
+      const alternateRootArtifacts = [
+        "artifacts/other/test.png",
+        "var/log/taomni.log",
+        "qa-ui-auto-report/../../../root-escape.png",
+      ];
+
+      for (const art of alternateRootArtifacts) {
+        const res = validateArtifactPath(art, allowedRoots);
+        expect(res.valid).toBe(false);
+      }
+
+      const compliance = evaluateChannelCompliance(
+        "linux-daily-editor",
+        samplePlan,
+        ["C0-save-pipeline", "C3-clipboard-session", "C4-tab-policy"],
+        ["unit", "browser"],
+        alternateRootArtifacts,
+      );
+      expect(compliance.compliant).toBe(false);
+      expect(compliance.invalidArtifacts.length).toBe(3);
+    });
   });
 });

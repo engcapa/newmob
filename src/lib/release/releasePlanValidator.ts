@@ -6,11 +6,16 @@
 
 import type { EvidenceLayer } from "../../components/editor/workspace/editorReleaseScope";
 
+export const DEFAULT_EVIDENCE_ROOTS: readonly string[] = [
+  "qa-ui-auto-report",
+  "evidence",
+];
+
 export interface ReleaseChannelConfig {
   platform: "linux" | "macos" | "windows" | "cross-platform";
   requiredCapabilities: readonly string[];
   requiredEvidenceLayers: readonly EvidenceLayer[];
-  evidenceRoots: readonly string[];
+  evidenceRoots?: readonly string[];
   performanceBudget?: {
     typingP95Ms?: number;
     localActionP95Ms?: number;
@@ -20,6 +25,32 @@ export interface ReleaseChannelConfig {
 export interface ReleasePlan {
   version: number;
   releaseChannels: Record<string, ReleaseChannelConfig>;
+}
+
+/**
+ * Resolves deterministic requirements for a specific channel from a release plan.
+ */
+export function resolveChannelRequirements(
+  channelName: string,
+  plan: ReleasePlan,
+): {
+  platform: ReleaseChannelConfig["platform"];
+  requiredCapabilities: readonly string[];
+  requiredEvidenceLayers: readonly EvidenceLayer[];
+  evidenceRoots: readonly string[];
+  performanceBudget?: ReleaseChannelConfig["performanceBudget"];
+} {
+  const channel = plan.releaseChannels[channelName];
+  if (!channel) {
+    throw new Error(`Release channel '${channelName}' not found in release plan`);
+  }
+  return {
+    platform: channel.platform,
+    requiredCapabilities: channel.requiredCapabilities,
+    requiredEvidenceLayers: channel.requiredEvidenceLayers,
+    evidenceRoots: channel.evidenceRoots && channel.evidenceRoots.length > 0 ? channel.evidenceRoots : DEFAULT_EVIDENCE_ROOTS,
+    performanceBudget: channel.performanceBudget,
+  };
 }
 
 export interface ArtifactPathValidationResult {
@@ -118,10 +149,11 @@ export function evaluateChannelCompliance(
 
   const verifiedLayerSet = new Set(verifiedLayers);
   const missingLayers = channel.requiredEvidenceLayers.filter((l) => !verifiedLayerSet.has(l));
+  const roots = channel.evidenceRoots && channel.evidenceRoots.length > 0 ? channel.evidenceRoots : DEFAULT_EVIDENCE_ROOTS;
 
   const invalidArtifacts: Array<{ path: string; reason: string }> = [];
   for (const art of artifacts) {
-    const check = validateArtifactPath(art, channel.evidenceRoots);
+    const check = validateArtifactPath(art, roots);
     if (!check.valid) {
       invalidArtifacts.push({ path: art, reason: check.message || "Invalid artifact path" });
     }
