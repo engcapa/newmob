@@ -64,7 +64,8 @@
      "ssh_required",
      "sftp_required",
      "jdtls_required",
-     "workspace_root"
+     "workspace_root",
+     "java_sample_projects"
     ]
    },
    "uniqueItems": true
