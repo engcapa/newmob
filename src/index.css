@@ -824,6 +824,45 @@ select.taomni-input:not(.appearance-none):not([multiple]) {
   max-width: min(220px, 28vw);
 }
 
+/* Keep a visible, stable window-move target outside the scrollable tab strip. */
+.taomni-window-drag-handle {
+  width: 48px;
+  color: var(--taomni-text-muted);
+  cursor: grab;
+  border-left: 1px solid color-mix(in srgb, var(--taomni-divider) 55%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--taomni-divider) 55%, transparent);
+  transition: var(--taomni-transition);
+}
+.taomni-window-drag-handle:hover {
+  color: var(--taomni-text);
+  background: var(--taomni-hover);
+}
+.taomni-window-drag-handle:active {
+  cursor: grabbing;
+}
+
+/* The full tray is useful at normal widths; at the app's narrow-window range
+   its controls are available from the compact overflow menu instead. */
+.taomni-titlebar-actions-overflow {
+  display: none;
+}
+.taomni-titlebar-actions-menu {
+  max-height: calc(100vh - 12px);
+  overflow-y: auto;
+}
+
+@media (max-width: 960px) {
+  .taomni-titlebar-tray {
+    display: none;
+  }
+  .taomni-titlebar-actions-overflow {
+    display: flex;
+  }
+  .taomni-tab-details-button {
+    display: none;
+  }
+}
+
 /* Tab-action slot buttons (the ex-floating toolbar, now docked in the control
    bar / detached window bar) blend into the chrome; add the hover affordance
    their inline styles can't express. */

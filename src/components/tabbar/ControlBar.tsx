@@ -33,6 +33,7 @@ import { TabBar } from "./TabBar";
 import { OpenTabsMenu } from "./OpenTabsMenu";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
 import { WindowControls } from "../window/WindowControls";
+import { WindowDragHandle } from "../window/WindowDragHandle";
 import { TitleBarTrayControls } from "../window/TitleBarTrayControls";
 import { CaptureIndicators } from "../capture/CaptureIndicators";
 import { useSessionImportExport } from "../menubar/useSessionImportExport";
@@ -232,6 +233,7 @@ export function ControlBar({
           <BarButton testId="app-main-menu" title={t("compactTitleBar.mainMenu")} icon={<Menu className="w-4 h-4" />} onClick={openMainMenu} />
         )}
       </div>
+      <WindowDragHandle />
       <div className="min-w-0 flex-1 self-stretch">
         <TabBar
           onStartLocalTerminal={onStartLocalTerminal}
@@ -253,7 +255,7 @@ export function ControlBar({
         aria-label={t("tabs.detailsShortcutHint", { shortcut: IS_MAC ? "Cmd+Shift+H" : "Ctrl+Shift+H" })}
         title={t("tabs.detailsShortcutHint", { shortcut: IS_MAC ? "Cmd+Shift+H" : "Ctrl+Shift+H" })}
         data-active={detailsRevealHovered || undefined}
-        className="relative h-6 w-7 shrink-0 inline-flex items-center justify-center rounded hover:bg-[var(--taomni-hover)] data-[active=true]:bg-[var(--taomni-selected)]"
+        className="taomni-tab-details-button relative h-6 w-7 shrink-0 inline-flex items-center justify-center rounded hover:bg-[var(--taomni-hover)] data-[active=true]:bg-[var(--taomni-selected)]"
         onMouseEnter={() => setDetailsRevealHovered(true)}
         onMouseLeave={() => setDetailsRevealHovered(false)}
         onFocus={() => setDetailsRevealHovered(true)}
@@ -265,10 +267,7 @@ export function ControlBar({
       {/* Open-tabs `⋯` overflow — also hosts the Screenshot actions. Sits at the
           right end of the tab-action group. */}
       <TabMore onDetachActiveTab={onDetachActiveTab} />
-      <div
-        className={IS_MAC ? "w-3 self-stretch shrink-0" : "w-6 self-stretch shrink-0"}
-        data-window-drag
-      />
+      <div className={IS_MAC ? "w-2 self-stretch shrink-0" : "w-3 self-stretch shrink-0"} />
       {/* Divider between the tab-related buttons and the main-window controls. */}
       <div aria-hidden="true" className="taomni-control-divider self-stretch shrink-0" />
       <TitleBarTrayControls />
