@@ -2004,6 +2004,8 @@ export function CodeWorkspaceTab({
     secondary: false,
   });
   const [occurrenceSession, setOccurrenceSession] = useState<OccurrenceHighlightSession | null>(null);
+  const occurrenceSessionRef = useRef<OccurrenceHighlightSession | null>(occurrenceSession);
+  occurrenceSessionRef.current = occurrenceSession;
   const [dismissedBannerKeys, setDismissedBannerKeys] = useState<Set<string>>(new Set());
   useEffect(() => {
     setDismissedBannerKeys(new Set());
@@ -6817,8 +6819,13 @@ export function CodeWorkspaceTab({
     const currentRev = activeFile ? (lspDocumentEpochRef.current[activeFile.key] ?? 0) : -1;
     if (!activeFile || !isOccurrenceSessionValid(occurrenceSession, activeFile.key, currentRev)) {
       setOccurrenceSession(null);
+      occurrenceSessionRef.current = null;
+      setHighlightsByGroup((current) => ({
+        ...current,
+        [activeEditorGroupId]: [],
+      }));
     }
-  }, [activeFile, occurrenceSession]);
+  }, [activeEditorGroupId, activeFile, occurrenceSession]);
 
   useEffect(() => {
     const groupId = activeEditorGroupId;
@@ -10121,11 +10128,13 @@ export function CodeWorkspaceTab({
     if (highlights.length === 0) {
       setStatusMessage(`No occurrences found for "${word}"`);
       setOccurrenceSession(null);
+      occurrenceSessionRef.current = null;
       return;
     }
 
     const session = createOccurrenceSession(file.key, rev, word, highlights, position);
     setOccurrenceSession(session);
+    occurrenceSessionRef.current = session;
     setHighlightsByGroup((current) => ({
       ...current,
       [activeEditorGroupId]: highlights,
@@ -10142,28 +10151,32 @@ export function CodeWorkspaceTab({
   ]);
 
   const navigateOccurrence = useCallback((direction: "next" | "previous") => {
-    if (!occurrenceSession || !activeFile || occurrenceSession.fileKey !== activeFile.key) {
+    const session = occurrenceSessionRef.current;
+    if (!session || !activeFile || session.fileKey !== activeFile.key) {
       setStatusMessage("No active occurrence highlight session");
       return;
     }
-    const { session: nextSession, current } = stepOccurrence(occurrenceSession, direction);
+    const { session: nextSession, current } = stepOccurrence(session, direction);
     setOccurrenceSession(nextSession);
+    occurrenceSessionRef.current = nextSession;
     if (current) {
       revealEditorLocation(activeFile.key, current.range);
     }
     setStatusMessage(formatOccurrenceStatus(nextSession));
-  }, [activeFile, occurrenceSession, revealEditorLocation, setStatusMessage]);
+  }, [activeFile, revealEditorLocation, setStatusMessage]);
 
   const clearHighlightUsages = useCallback(() => {
-    if (!occurrenceSession) return false;
+    const session = occurrenceSessionRef.current;
+    if (!session) return false;
     setOccurrenceSession(null);
+    occurrenceSessionRef.current = null;
     setHighlightsByGroup((current) => ({
       ...current,
       [activeEditorGroupId]: [],
     }));
     setStatusMessage("Occurrence highlights cleared");
     return true;
-  }, [activeEditorGroupId, occurrenceSession, setStatusMessage]);
+  }, [activeEditorGroupId, setStatusMessage]);
 
   const compareWithClipboard = useCallback(async () => {
     const file = activeFile;
@@ -11739,7 +11752,7 @@ export function CodeWorkspaceTab({
       category: "Navigate",
       keybinding: "Ctrl+Alt+Down",
       keywords: ["next", "occurrence", "highlight"],
-      when: (context) => context.focus === "editor" && !!occurrenceSession,
+      when: (context) => context.focus === "editor" && !!occurrenceSessionRef.current,
       run: () => navigateOccurrence("next"),
     },
     {
@@ -11748,7 +11761,7 @@ export function CodeWorkspaceTab({
       category: "Navigate",
       keybinding: "Ctrl+Alt+Up",
       keywords: ["previous", "occurrence", "highlight"],
-      when: (context) => context.focus === "editor" && !!occurrenceSession,
+      when: (context) => context.focus === "editor" && !!occurrenceSessionRef.current,
       run: () => navigateOccurrence("previous"),
     },
     {
@@ -11757,7 +11770,7 @@ export function CodeWorkspaceTab({
       category: "Navigate",
       keybinding: "Escape",
       keywords: ["clear", "highlight", "escape"],
-      when: (context) => context.focus === "editor" && !!occurrenceSession,
+      when: (context) => context.focus === "editor" && !!occurrenceSessionRef.current,
       run: clearHighlightUsages,
     },
     {
@@ -12428,6 +12441,7 @@ export function CodeWorkspaceTab({
     workspaceEditHistoryState,
     workspaceUi.layoutTreeV2,
     coverageReport,
+    occurrenceSession,
   ]);
 
   const commandFocusForTarget = useCallback((target: EventTarget | null): WorkspaceFocus => {

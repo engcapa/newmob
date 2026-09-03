@@ -1,0 +1,108 @@
+id: TC-IDE-NAV-02
+title: "Highlight usages in file, occurrence stepping with wrap, and escape clearance"
+description: |
+  ED-NAV-002 browser slice. Opens a file in browser-VFS workspace, populates
+  repeating symbol occurrences, activates explicit Highlight Usages (Ctrl+Shift+F7),
+  steps forward and backward through occurrences with wrap (Ctrl+Alt+Down / Ctrl+Alt+Up),
+  asserts status feedback and CodeMirror occurrence decorations, and clears
+  highlights via Escape. Verifies keyboard-only traversal, status announcements,
+  and editor focus retention.
+  Highest claim on green: L1 browser-wired occurrence highlight workflow.
+covers: [F25.5]
+tags: [code-workspace, ide-nav, occurrence-highlight, navigation, accessibility, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 120
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+
+  # Populate repeating occurrences of symbol "item" into the editor
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: "item\nsecond item\nthird item"
+  - wait: 0.5
+
+  # Position caret at the beginning of the document (on the first "item")
+  - press:
+      key: Control+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+
+  # Trigger workspace.highlightUsagesInFile via Ctrl+Shift+F7 (ED-NAV-002-A1)
+  - press:
+      key: Control+Shift+F7
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="status-bar-message"]'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Occurrence 1 of 3"
+  - eval_readonly:
+      expression: "document.querySelectorAll('.cm-lsp-usage-text').length > 0"
+      expect_truthy: true
+
+  # Advance to next occurrence via Ctrl+Alt+Down (ED-NAV-002-A2)
+  - press:
+      key: Control+Alt+ArrowDown
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Occurrence 2 of 3"
+
+  # Advance to 3rd occurrence
+  - press:
+      key: Control+Alt+ArrowDown
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Occurrence 3 of 3"
+
+  # Advance past last occurrence to wrap to occurrence 1 (ED-NAV-002-A2 wrap)
+  - press:
+      key: Control+Alt+ArrowDown
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Occurrence 1 of 3"
+
+  # Step backwards with wrap to occurrence 3 via Ctrl+Alt+Up (ED-NAV-002-A2)
+  - press:
+      key: Control+Alt+ArrowUp
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Occurrence 3 of 3"
+
+  # Accessibility assertion: editor retains focus, textbox role and aria-multiline are exposed
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      name: role
+      equals: textbox
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      name: aria-multiline
+      equals: "true"
+  - eval_readonly:
+      expression: "document.activeElement?.closest('.cm-editor') !== null"
+      expect_truthy: true
+
+  # Clear highlights with Escape (ED-NAV-002-A3)
+  - press:
+      key: Escape
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Occurrence highlights cleared"
+  - eval_readonly:
+      expression: "document.querySelectorAll('.cm-lsp-usage-text').length === 0"
+      expect_truthy: true
