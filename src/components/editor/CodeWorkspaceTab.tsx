@@ -5554,7 +5554,11 @@ export function CodeWorkspaceTab({
       });
     updateLspStatusForFile(file, result.status);
     if (!result.edits.length) return file.text;
-    return applyLspTextEditsToString(file.text, result.edits);
+    const filteredEdits = result.edits.filter((edit) => (
+      ranges.some((range) => edit.range.start.line >= range.startLine && edit.range.end.line <= range.endLine)
+    ));
+    if (!filteredEdits.length) return file.text;
+    return applyLspTextEditsToString(file.text, filteredEdits);
   }, [absolutePathForOpenFile, findRoot, lspDescriptorForFile, updateLspStatusForFile, workspaceInstanceId]);
 
   const promptReloadProject = useCallback(

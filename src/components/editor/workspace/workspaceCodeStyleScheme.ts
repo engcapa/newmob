@@ -254,18 +254,30 @@ const FORMATTER_ON_MARKERS = ["@formatter:on", "fmt: on", "# fmt: on"];
  */
 export function findFormatterMarkerRanges(lines: readonly string[]): Array<{ from: number; to: number | null }> {
   const ranges: Array<{ from: number; to: number | null }> = [];
-  let open: number | null = null;
+  let openIndex: number | null = null;
+  let depth = 0;
+
   lines.forEach((line, index) => {
-    if (open !== null && FORMATTER_ON_MARKERS.some((marker) => line.includes(marker))) {
-      ranges.push({ from: open, to: index });
-      open = null;
-      return;
-    }
-    if (open === null && FORMATTER_OFF_MARKERS.some((marker) => line.includes(marker))) {
-      open = index;
+    const hasOff = FORMATTER_OFF_MARKERS.some((marker) => line.includes(marker));
+    const hasOn = FORMATTER_ON_MARKERS.some((marker) => line.includes(marker));
+
+    if (hasOff) {
+      if (depth === 0) {
+        openIndex = index;
+      }
+      depth += 1;
+    } else if (hasOn && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && openIndex !== null) {
+        ranges.push({ from: openIndex, to: index });
+        openIndex = null;
+      }
     }
   });
-  if (open !== null) ranges.push({ from: open, to: null });
+
+  if (openIndex !== null) {
+    ranges.push({ from: openIndex, to: null });
+  }
   return ranges;
 }
 

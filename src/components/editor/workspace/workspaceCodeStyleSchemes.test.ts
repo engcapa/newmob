@@ -239,6 +239,27 @@ describe("§8.19.9 R8-D1 code style scheme store", () => {
       const allRanges = filterFormattingRanges(text, { startLine: 0, endLine: 7 }, false);
       expect(allRanges).toEqual([{ startLine: 0, endLine: 7 }]);
     });
+
+    it("protects ranges under nested markers, unclosed markers, and exclusions", () => {
+      const text = [
+        "const a = 1;",
+        "// @formatter:off",
+        "const   b   =   2;",
+        "// @formatter:off nested",
+        "const   c   =   3;",
+        "// @formatter:on nested",
+        "const   d   =   4;",
+        "// @formatter:on",
+        "const e = 5;",
+      ].join("\n");
+
+      const ranges = filterFormattingRanges(text, null, true);
+      // Only line 0 and line 8 are eligible for formatting
+      expect(ranges).toEqual([
+        { startLine: 0, endLine: 0 },
+        { startLine: 8, endLine: 8 },
+      ]);
+    });
   });
 });
 
