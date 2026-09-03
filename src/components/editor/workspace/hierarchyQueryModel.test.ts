@@ -67,6 +67,97 @@ describe("§8.20.5 / ED-QUERY-003: hierarchyQueryModel", () => {
     expect(res.cancelled).toBe(false);
   });
 
+  it("ED-QUERY-003-A1: call and type prepare use host envelope and attach root metadata", async () => {
+    const queryHost = new WorkspaceSemanticQueryHost();
+    const position = { line: 10, character: 15 };
+    const spy = vi.spyOn(queryHost, "executeEnvelope").mockImplementation(async (request): Promise<any> => ({
+      queryId: request.identity.requestId ?? "req-1",
+      kind: request.kind,
+      status: "success",
+      truncated: false,
+      totalCount: 1,
+      durationMs: 2,
+      identity: {
+        workspaceId: request.identity.workspaceId ?? "ws-1",
+        fileKey: request.identity.fileKey ?? "src/App.java",
+        uri: request.identity.uri,
+        position: request.identity.position,
+        documentRevision: request.identity.documentRevision ?? 0,
+        lspSessionGeneration: request.identity.lspSessionGeneration ?? 0,
+        requestId: request.identity.requestId ?? "req-1",
+      },
+      items: [mockItem],
+    }));
+
+    // Test call prepare
+    const callRes = await executeHierarchyPrepare(
+      queryHost,
+      mockDescriptor,
+      position,
+      "call",
+      {
+        workspaceId: "ws-1",
+        fileKey: "src/App.java",
+        documentRevision: 2,
+        lspSessionGeneration: 3,
+        projectFingerprint: "fp-java",
+        requestId: "call-prep-1",
+      },
+    );
+    expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({
+      kind: "call-hierarchy",
+      identity: expect.objectContaining({
+        workspaceId: "ws-1",
+        fileKey: "src/App.java",
+        documentRevision: 2,
+        lspSessionGeneration: 3,
+        requestId: "call-prep-1",
+      }),
+    }));
+    expect(callRes.cancelled).toBe(false);
+    expect(callRes.root).toMatchObject({
+      fileKey: "src/App.java",
+      documentRevision: 2,
+      providerGeneration: 3,
+      projectFingerprint: "fp-java",
+      rootQueryId: "call-prep-1",
+    });
+
+    // Test type prepare
+    const typeRes = await executeHierarchyPrepare(
+      queryHost,
+      mockDescriptor,
+      position,
+      "type",
+      {
+        workspaceId: "ws-1",
+        fileKey: "src/App.java",
+        documentRevision: 4,
+        lspSessionGeneration: 5,
+        projectFingerprint: "fp-java",
+        requestId: "type-prep-1",
+      },
+    );
+    expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({
+      kind: "type-hierarchy",
+      identity: expect.objectContaining({
+        workspaceId: "ws-1",
+        fileKey: "src/App.java",
+        documentRevision: 4,
+        lspSessionGeneration: 5,
+        requestId: "type-prep-1",
+      }),
+    }));
+    expect(typeRes.cancelled).toBe(false);
+    expect(typeRes.root).toMatchObject({
+      fileKey: "src/App.java",
+      documentRevision: 4,
+      providerGeneration: 5,
+      projectFingerprint: "fp-java",
+      rootQueryId: "type-prep-1",
+    });
+  });
+
   it("blocks expanding nodes with stale providerGeneration", async () => {
     const queryHost = new WorkspaceSemanticQueryHost();
     const rootNode = createHierarchyRootNode(mockItem, {
@@ -159,5 +250,158 @@ describe("§8.20.5 / ED-QUERY-003: hierarchyQueryModel", () => {
     expect(res.children[0].depth).toBe(1);
     expect(res.children[0].item.name).toBe("main");
     expect(res.children[0].cycle).toBe(false);
+  });
+
+  it("ED-QUERY-003-A2: callers, callees, supertypes, and subtypes expand through the host", async () => {
+    const queryHost = new WorkspaceSemanticQueryHost();
+    const rootNode = createHierarchyRootNode(mockItem, {
+      descriptor: mockDescriptor,
+      item: mockItem,
+      providerGeneration: 1,
+    });
+    const spy = vi.spyOn(queryHost, "executeEnvelope").mockImplementation(async (request): Promise<any> => ({
+      queryId: request.identity.requestId ?? "req-1",
+      kind: request.kind,
+      status: "success",
+      truncated: false,
+      totalCount: 1,
+      durationMs: 2,
+      identity: {
+        workspaceId: request.identity.workspaceId ?? "ws-1",
+        fileKey: request.identity.fileKey ?? "src/App.java",
+        uri: request.identity.uri,
+        position: request.identity.position,
+        documentRevision: request.identity.documentRevision ?? 0,
+        lspSessionGeneration: request.identity.lspSessionGeneration ?? 0,
+        requestId: request.identity.requestId ?? "req-1",
+      },
+      items: [
+        {
+          item: { ...mockItem, name: "related" },
+          callRanges: [],
+          callSiteItem: mockItem,
+        },
+      ],
+    }));
+
+    const directions: Array<{ mode: "call" | "type"; direction: any; expectedKind: string }> = [
+      { mode: "call", direction: "callers", expectedKind: "call-hierarchy" },
+      { mode: "call", direction: "callees", expectedKind: "call-hierarchy" },
+      { mode: "type", direction: "supertypes", expectedKind: "type-hierarchy" },
+      { mode: "type", direction: "subtypes", expectedKind: "type-hierarchy" },
+    ];
+
+    for (const { mode, direction, expectedKind } of directions) {
+      const res = await executeHierarchyExpand(
+        queryHost,
+        mockDescriptor,
+        rootNode,
+        mode,
+        direction,
+        {
+          workspaceId: "ws-1",
+          fileKey: "src/App.java",
+          documentRevision: 1,
+          lspSessionGeneration: 1,
+          liveLspGeneration: () => 1,
+          requestId: `${mode}-${direction}-req`,
+        },
+      );
+      expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({
+        kind: expectedKind,
+        identity: expect.objectContaining({
+          workspaceId: "ws-1",
+          fileKey: "src/App.java",
+          requestId: `${mode}-${direction}-req`,
+        }),
+      }));
+      expect(res.children).toHaveLength(1);
+      expect(res.children[0].item.name).toBe("related");
+    }
+  });
+
+  it("ED-QUERY-003-A3: stale and superseded expansion returns no children and makes zero tree effect", async () => {
+    const queryHost = new WorkspaceSemanticQueryHost();
+    const rootNode = createHierarchyRootNode(mockItem, {
+      descriptor: mockDescriptor,
+      item: mockItem,
+      providerGeneration: 1,
+    });
+
+    // 1. Stale envelope status
+    vi.spyOn(queryHost, "executeEnvelope").mockResolvedValueOnce({
+      queryId: "stale-req",
+      kind: "call-hierarchy",
+      status: "stale",
+      truncated: false,
+      totalCount: 0,
+      durationMs: 1,
+      identity: {
+        workspaceId: "ws-1",
+        fileKey: "src/App.java",
+        uri: "file:///app/src/App.java",
+        position: { line: 10, character: 15 },
+        documentRevision: 1,
+        lspSessionGeneration: 1,
+        requestId: "stale-req",
+      },
+      items: [],
+    } as any);
+
+    const staleRes = await executeHierarchyExpand(
+      queryHost,
+      mockDescriptor,
+      rootNode,
+      "call",
+      "callers",
+      {
+        workspaceId: "ws-1",
+        fileKey: "src/App.java",
+        documentRevision: 1,
+        lspSessionGeneration: 1,
+        liveLspGeneration: () => 1,
+      },
+    );
+    expect(staleRes.stale).toBe(true);
+    expect(staleRes.cancelled).toBe(false);
+    expect(staleRes.children).toHaveLength(0);
+
+    // 2. Cancelled envelope status (superseded request)
+    vi.spyOn(queryHost, "executeEnvelope").mockResolvedValueOnce({
+      queryId: "cancelled-req",
+      kind: "call-hierarchy",
+      status: "cancelled",
+      truncated: false,
+      totalCount: 0,
+      durationMs: 1,
+      identity: {
+        workspaceId: "ws-1",
+        fileKey: "src/App.java",
+        uri: "file:///app/src/App.java",
+        position: { line: 10, character: 15 },
+        documentRevision: 1,
+        lspSessionGeneration: 1,
+        requestId: "cancelled-req",
+      },
+      items: [],
+    } as any);
+
+    const cancelledRes = await executeHierarchyExpand(
+      queryHost,
+      mockDescriptor,
+      rootNode,
+      "call",
+      "callers",
+      {
+        workspaceId: "ws-1",
+        fileKey: "src/App.java",
+        documentRevision: 1,
+        lspSessionGeneration: 1,
+        liveLspGeneration: () => 1,
+      },
+    );
+    expect(cancelledRes.cancelled).toBe(true);
+    expect(cancelledRes.stale).toBe(false);
+    expect(cancelledRes.children).toHaveLength(0);
   });
 });
