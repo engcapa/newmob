@@ -98,6 +98,7 @@ const dict = {
     minimize: "Minimize",
     maximize: "Maximize",
     close: "Close",
+    drag: "Drag window",
   },
   dbObjects: {
     copy: "Copy",
@@ -234,6 +235,7 @@ const dict = {
     disableSplit: "Disable terminal split view",
     enableMultiExec: "Enable MultiExec",
     disableMultiExec: "Disable MultiExec",
+    moreActions: "More window actions",
   },
   theme: {
     light: "Light",

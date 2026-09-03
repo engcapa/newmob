@@ -97,6 +97,7 @@ export const zhCN: DeepPartial<typeof en> = {
     minimize: "最小化",
     maximize: "最大化",
     close: "关闭",
+    drag: "拖动窗口",
   },
   dbObjects: {
     copy: "复制",
@@ -233,6 +234,7 @@ export const zhCN: DeepPartial<typeof en> = {
     disableSplit: "关闭终端分屏视图",
     enableMultiExec: "启用多终端同步执行",
     disableMultiExec: "关闭多终端同步执行",
+    moreActions: "更多窗口操作",
   },
   theme: {
     light: "浅色",
