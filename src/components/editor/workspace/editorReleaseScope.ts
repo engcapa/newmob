@@ -8,6 +8,18 @@ export type ReleaseScopePlatform = "linux" | "macos" | "windows" | "cross-platfo
 
 export type EvidenceLayer = "unit" | "browser" | "native" | "integration" | "perf";
 
+const VALID_EVIDENCE_LAYERS: readonly EvidenceLayer[] = [
+  "unit",
+  "browser",
+  "native",
+  "integration",
+  "perf",
+];
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 export interface DailyEditorScopeObservationPolicy {
   readOnly: boolean;
   productionDisabled: boolean;
@@ -50,6 +62,7 @@ export interface ReleaseScopeAuditResult {
   missingControls: string[];
   disallowedActionsEnforced: boolean;
   readOnlyEnforced: boolean;
+  productionDisabledEnforced: boolean;
   redactionEnforced: boolean;
 }
 
@@ -74,6 +87,10 @@ export function validateEditorReleaseScope(scope: unknown): ReleaseScopeValidati
     errors.push("Missing or invalid version string");
   }
 
+  if (!isNonEmptyString(s.description)) {
+    errors.push("Missing or invalid description");
+  }
+
   if (s.platform !== "linux" && s.platform !== "macos" && s.platform !== "windows" && s.platform !== "cross-platform") {
     errors.push(`Invalid platform: ${s.platform}`);
   }
@@ -90,8 +107,12 @@ export function validateEditorReleaseScope(scope: unknown): ReleaseScopeValidati
     if (s.observationPolicy.redaction !== "hashes-and-counts-only" && s.observationPolicy.redaction !== "full-redaction") {
       errors.push("observationPolicy.redaction must be 'hashes-and-counts-only' or 'full-redaction'");
     }
-    if (!Array.isArray(s.observationPolicy.disallowedActions) || s.observationPolicy.disallowedActions.length === 0) {
-      warnings.push("observationPolicy.disallowedActions should list mutation actions");
+    if (
+      !Array.isArray(s.observationPolicy.disallowedActions)
+      || s.observationPolicy.disallowedActions.length === 0
+      || s.observationPolicy.disallowedActions.some((action: unknown) => !isNonEmptyString(action))
+    ) {
+      errors.push("observationPolicy.disallowedActions must list non-empty mutation actions");
     }
   }
 
@@ -99,8 +120,13 @@ export function validateEditorReleaseScope(scope: unknown): ReleaseScopeValidati
     errors.push("Release scope must declare at least one capability");
   } else {
     const seenIds = new Set<string>();
+    const seenTestcases = new Set<string>();
     for (const cap of s.capabilities) {
-      if (!cap.id || typeof cap.id !== "string") {
+      if (!cap || typeof cap !== "object") {
+        errors.push("Capability entry must be an object");
+        continue;
+      }
+      if (!isNonEmptyString(cap.id)) {
         errors.push("Capability entry missing id");
       } else if (seenIds.has(cap.id)) {
         errors.push(`Duplicate capability id: ${cap.id}`);
@@ -108,17 +134,30 @@ export function validateEditorReleaseScope(scope: unknown): ReleaseScopeValidati
         seenIds.add(cap.id);
       }
 
-      if (!cap.testcaseId || typeof cap.testcaseId !== "string") {
-        errors.push(`Capability ${cap.id || "unknown"} missing testcaseId`);
+      if (!isNonEmptyString(cap.name)) {
+        errors.push(`Capability ${cap.id || "unknown"} missing name`);
       }
-      if (!Array.isArray(cap.controls) || cap.controls.length === 0) {
+      if (cap.priority !== "P0" && cap.priority !== "P1" && cap.priority !== "P2") {
+        errors.push(`Capability ${cap.id || "unknown"} has invalid priority`);
+      }
+      if (!isNonEmptyString(cap.testcaseId)) {
+        errors.push(`Capability ${cap.id || "unknown"} missing testcaseId`);
+      } else if (seenTestcases.has(cap.testcaseId)) {
+        errors.push(`Duplicate testcaseId: ${cap.testcaseId}`);
+      } else {
+        seenTestcases.add(cap.testcaseId);
+      }
+      if (!Array.isArray(cap.controls) || cap.controls.length === 0 || cap.controls.some((control: unknown) => !isNonEmptyString(control))) {
         errors.push(`Capability ${cap.id || "unknown"} must list at least one control`);
       }
-      if (!Array.isArray(cap.requiredEffects) || cap.requiredEffects.length === 0) {
+      if (!Array.isArray(cap.requiredEffects) || cap.requiredEffects.length === 0 || cap.requiredEffects.some((effect: unknown) => !isNonEmptyString(effect))) {
         errors.push(`Capability ${cap.id || "unknown"} must list at least one required effect`);
       }
-      if (!Array.isArray(cap.requiredLayers) || cap.requiredLayers.length === 0) {
+      if (!Array.isArray(cap.requiredLayers) || cap.requiredLayers.length === 0 || cap.requiredLayers.some((layer: unknown) => !VALID_EVIDENCE_LAYERS.includes(layer as EvidenceLayer))) {
         errors.push(`Capability ${cap.id || "unknown"} must list required evidence layers`);
+      }
+      if (!isNonEmptyString(cap.providerRequirement)) {
+        errors.push(`Capability ${cap.id || "unknown"} missing providerRequirement`);
       }
     }
   }
@@ -161,16 +200,25 @@ export function auditEditorReleaseScopeCompliance(
   }
 
   const readOnlyEnforced = scope.observationPolicy.readOnly === true;
+  const productionDisabledEnforced = scope.observationPolicy.productionDisabled === true;
   const redactionEnforced = scope.observationPolicy.redaction === "hashes-and-counts-only" || scope.observationPolicy.redaction === "full-redaction";
-  const disallowedActionsEnforced = Array.isArray(scope.observationPolicy.disallowedActions) && scope.observationPolicy.disallowedActions.length > 0;
+  const disallowedActionsEnforced = Array.isArray(scope.observationPolicy.disallowedActions)
+    && scope.observationPolicy.disallowedActions.length > 0
+    && scope.observationPolicy.disallowedActions.every(isNonEmptyString);
 
   return {
-    compliant: uncoveredCapabilities.length === 0 && missingControls.length === 0 && readOnlyEnforced && redactionEnforced,
+    compliant: uncoveredCapabilities.length === 0
+      && missingControls.length === 0
+      && disallowedActionsEnforced
+      && readOnlyEnforced
+      && productionDisabledEnforced
+      && redactionEnforced,
     coveredCapabilities,
     uncoveredCapabilities,
     missingControls,
     disallowedActionsEnforced,
     readOnlyEnforced,
+    productionDisabledEnforced,
     redactionEnforced,
   };
 }

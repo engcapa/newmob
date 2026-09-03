@@ -335,6 +335,11 @@ import {
   WorkspaceClipboardSessionContext,
 } from "./workspace/workspaceClipboardSession";
 import type { ClipboardObservationRecord } from "./workspace/clipboardObservationContract";
+import {
+  WorkspaceObservationBridge,
+  type WorkspaceObservationSnapshot,
+  type WorkspaceSaveObservationResult,
+} from "./workspace/workspaceObservationBridge";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
@@ -1100,6 +1105,27 @@ export function CodeWorkspaceTab({
     () => workspace.workspaceInstanceId ?? workspace.workspaceId ?? workspace.repoRoot?.trim() ?? tabId,
     [tabId, workspace.repoRoot, workspace.workspaceId, workspace.workspaceInstanceId],
   );
+  const observationBridge = useMemo(
+    () => new WorkspaceObservationBridge(workspaceInstanceId, import.meta.env.PROD),
+    [workspaceInstanceId],
+  );
+  const observationBridgeRef = useRef(observationBridge);
+  observationBridgeRef.current = observationBridge;
+  const [, setObservationRevision] = useState(0);
+  const publishWorkspaceObservation = useCallback((
+    update: (bridge: WorkspaceObservationBridge) => void,
+  ) => {
+    update(observationBridgeRef.current);
+    setObservationRevision((revision) => revision + 1);
+  }, []);
+  const workspaceObservation: WorkspaceObservationSnapshot = observationBridge.getSnapshot();
+  useEffect(() => {
+    const unsubscribe = observationBridge.subscribe(() => {
+      setObservationRevision((revision) => revision + 1);
+    });
+    setObservationRevision((revision) => revision + 1);
+    return unsubscribe;
+  }, [observationBridge]);
   const semanticIndex = useWorkspaceSemanticIndex(workspaceInstanceId);
   const referenceInfoController = useMemo(
     () => new ReferenceInfoController(workspaceInstanceId),
@@ -1216,6 +1242,16 @@ export function CodeWorkspaceTab({
     clipboardHandle.getSnapshot,
     clipboardHandle.getSnapshot,
   );
+  useEffect(() => {
+    const observeClipboard = (snapshot: typeof clipboardSnapshot) => {
+      publishWorkspaceObservation((bridge) => {
+        bridge.observeClipboardSession(snapshot.payloadRevision, snapshot.consumerCount);
+      });
+    };
+    const unsubscribe = clipboardHandle.subscribe(observeClipboard);
+    observeClipboard(clipboardHandle.getSnapshot());
+    return unsubscribe;
+  }, [clipboardHandle, publishWorkspaceObservation]);
   useEffect(() => {
     const detachAdapter = clipboardHandle.attachPermissionAdapter(createDefaultClipboardPermissionAdapter());
     return () => {
@@ -2098,7 +2134,17 @@ export function CodeWorkspaceTab({
     secondary: [],
   });
   const activeEditorGroupIdRef = useRef<EditorGroupId>("primary");
-  const documentTransactionOwnerRef = useRef(new WorkspaceDocumentTransactionOwner());
+  const documentTransactionOwnerRef = useRef(new WorkspaceDocumentTransactionOwner({
+    onTransaction: ({ fileKey, revision }) => {
+      publishWorkspaceObservation((bridge) => bridge.observeDocumentRevision(fileKey, revision));
+    },
+    onHistoryReceipt: ({ fileKey, revision }) => {
+      publishWorkspaceObservation((bridge) => bridge.observeHistoryReceipt(`${fileKey}:${revision}`));
+    },
+    onViewLeaseChanged: ({ delta }) => {
+      publishWorkspaceObservation((bridge) => bridge.observeLeaseDelta(delta));
+    },
+  }));
   const initialOpenedKeyRef = useRef<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const treePaneRef = useRef<HTMLElement | null>(null);
@@ -2411,7 +2457,14 @@ export function CodeWorkspaceTab({
     setExternalFileConflicts([]);
   }, [workspaceInstanceId]);
 
-  const semanticQueryHostRef = useRef(new WorkspaceSemanticQueryHost());
+  const semanticQueryHostRef = useRef(new WorkspaceSemanticQueryHost({
+    onRequest: ({ kind }) => {
+      publishWorkspaceObservation((bridge) => bridge.observeProviderRequest(kind));
+    },
+    onCancel: ({ kind }) => {
+      publishWorkspaceObservation((bridge) => bridge.observeProviderCancel(kind));
+    },
+  }));
   const workspaceInstanceIdRef = useRef(workspaceInstanceId);
   workspaceInstanceIdRef.current = workspaceInstanceId;
   const semanticQuerySequenceRef = useRef(0);
@@ -5701,6 +5754,25 @@ export function CodeWorkspaceTab({
         isDirty: latestAfterSave?.dirty ?? outcome.memoryEffect !== "saved-current",
       });
       setSaveObservations((current) => ({ ...current, [key]: observation }));
+      const observationResult: WorkspaceSaveObservationResult = outcome.diskEffect === "committed"
+        ? {
+          transactionId: outcome.transactionId,
+          diskEffect: outcome.diskEffect,
+          receipt: {
+            transactionId: outcome.receipt.transactionId,
+            encodedBytesSha256: outcome.receipt.encodedBytesSha256,
+            ...(outcome.receipt.historyId ? { historyId: outcome.receipt.historyId } : {}),
+          },
+        }
+        : {
+          transactionId: outcome.transactionId,
+          diskEffect: outcome.diskEffect,
+        };
+      publishWorkspaceObservation((bridge) => bridge.observeSaveResult({
+        result: observationResult,
+        fileKey: key,
+        bufferRevision: observation.bufferRevision,
+      }));
 
       if (outcome.kind === "saved-current" || outcome.kind === "saved-stale-snapshot") {
         const latestNow = openFilesRef.current[key];
@@ -5740,6 +5812,7 @@ export function CodeWorkspaceTab({
       intelligencePreferences.formatOnSave,
       lspDescriptorForFile,
       lspSessionGeneration,
+      publishWorkspaceObservation,
       promptReloadProject,
       projectAnalysisSnapshot?.projectFingerprint,
       setStatusMessage,
@@ -16185,6 +16258,9 @@ export function CodeWorkspaceTab({
         ref={rootRef}
         data-testid="code-workspace-tab"
         data-layout-revision={layoutRevision}
+        data-observation-status={workspaceObservation.observationStatus}
+        data-observation-revision={workspaceObservation.observationRevision}
+        data-observation-fresh={String(workspaceObservation.isFresh)}
         data-clipboard-revision={clipboardSnapshot.revision}
         data-clipboard-history-revision={clipboardSnapshot.historyRevision}
         data-clipboard-consumer-count={clipboardSnapshot.consumerCount}
@@ -16204,6 +16280,39 @@ export function CodeWorkspaceTab({
         data-reopen-stack-count={closedTabsStack.length}
         className="relative h-full w-full min-h-0 flex flex-col overflow-hidden bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)]"
       >
+        <div
+          id="code-workspace-observation"
+          data-testid="code-workspace-observation"
+          role="status"
+          aria-label="Workspace observation status"
+          aria-live="polite"
+          data-status={workspaceObservation.observationStatus}
+          data-source={workspaceObservation.source}
+          data-ready={String(workspaceObservation.isFresh)}
+          data-revision={workspaceObservation.observationRevision}
+          data-observed-at={workspaceObservation.observedAt || undefined}
+          data-document-revision-count={workspaceObservation.isFresh
+            ? Object.keys(workspaceObservation.documentRevisions).length
+            : undefined}
+          data-provider-request-count={workspaceObservation.isFresh
+            ? Object.values(workspaceObservation.providerRequestCounts).reduce((sum, count) => sum + count, 0)
+            : undefined}
+          data-provider-cancel-count={workspaceObservation.isFresh
+            ? Object.values(workspaceObservation.providerCancelCounts).reduce((sum, count) => sum + count, 0)
+            : undefined}
+          data-disk-write-count={workspaceObservation.isFresh ? workspaceObservation.diskWriteCount : undefined}
+          data-resource-lease-count={workspaceObservation.isFresh ? workspaceObservation.resourceLeaseCount : undefined}
+          data-history-receipt-count={workspaceObservation.isFresh ? workspaceObservation.historyReceiptCount : undefined}
+          data-clipboard-session-revision={workspaceObservation.isFresh
+            ? workspaceObservation.clipboardSessionRevision
+            : undefined}
+          data-clipboard-consumer-count={workspaceObservation.isFresh
+            ? workspaceObservation.clipboardConsumerCount
+            : undefined}
+          className="sr-only"
+        >
+          {workspaceObservation.isFresh ? "Workspace observation ready" : "Workspace observation unavailable"}
+        </div>
         <div
           id="code-workspace-save-observation"
           data-testid="code-workspace-save-observation"

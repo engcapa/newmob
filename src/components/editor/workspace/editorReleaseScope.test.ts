@@ -42,6 +42,7 @@ describe("§ED-QA-001: editorReleaseScope", () => {
     expect(audit.uncoveredCapabilities).toEqual([]);
     expect(audit.missingControls).toEqual([]);
     expect(audit.readOnlyEnforced).toBe(true);
+    expect(audit.productionDisabledEnforced).toBe(true);
     expect(audit.redactionEnforced).toBe(true);
   });
 

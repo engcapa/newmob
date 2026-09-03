@@ -45,6 +45,26 @@ export interface DocumentHistoryState {
 
 export type DocumentTransactionListener = (transaction: DocumentTransaction) => void;
 
+/** Metadata-only callbacks for the QA observation adapter. */
+export interface WorkspaceDocumentOwnerTransactionObservation {
+  readonly fileKey: string;
+  readonly revision: number;
+  readonly origin: DocumentTransactionOrigin;
+}
+
+export interface WorkspaceDocumentOwnerLeaseObservation {
+  readonly fileKey: string;
+  readonly viewId: string;
+  readonly activeViewCount: number;
+  readonly delta: 1 | -1;
+}
+
+export interface WorkspaceDocumentOwnerObserver {
+  readonly onTransaction?: (observation: WorkspaceDocumentOwnerTransactionObservation) => void;
+  readonly onHistoryReceipt?: (observation: WorkspaceDocumentOwnerTransactionObservation) => void;
+  readonly onViewLeaseChanged?: (observation: WorkspaceDocumentOwnerLeaseObservation) => void;
+}
+
 interface HistoryEntry {
   beforeText: string;
   afterText: string;
@@ -147,6 +167,8 @@ export class WorkspaceDocumentTransactionOwner {
   private listenersByFile = new Map<string, Set<DocumentTransactionListener>>();
   private documentsByFile = new Map<string, DocumentRecord>();
 
+  constructor(private readonly observer: WorkspaceDocumentOwnerObserver = {}) {}
+
   /** Create the document record once; later views never overwrite its text. */
   initializeDocument(fileKey: string, text: string, revision = 0): string {
     const existing = this.documentsByFile.get(fileKey);
@@ -167,7 +189,16 @@ export class WorkspaceDocumentTransactionOwner {
   /** Acquire a view lease and return the current canonical document text. */
   acquireView(fileKey: string, viewId: string, text: string, revision = 0): string {
     const canonical = this.initializeDocument(fileKey, text, revision);
-    this.documentsByFile.get(fileKey)!.views.add(viewId);
+    const record = this.documentsByFile.get(fileKey)!;
+    if (!record.views.has(viewId)) {
+      record.views.add(viewId);
+      this.notifyLeaseChanged({
+        fileKey,
+        viewId,
+        activeViewCount: record.views.size,
+        delta: 1,
+      });
+    }
     return canonical;
   }
 
@@ -175,6 +206,12 @@ export class WorkspaceDocumentTransactionOwner {
   releaseView(fileKey: string, viewId: string): boolean {
     const record = this.documentsByFile.get(fileKey);
     if (!record || !record.views.delete(viewId)) return false;
+    this.notifyLeaseChanged({
+      fileKey,
+      viewId,
+      activeViewCount: record.views.size,
+      delta: -1,
+    });
     if (record.views.size > 0) return false;
     this.documentsByFile.delete(fileKey);
     this.listenersByFile.delete(fileKey);
@@ -280,7 +317,17 @@ export class WorkspaceDocumentTransactionOwner {
       });
       record.redo = [];
     }
-    return this.publish(fileKey, sourceViewId, record, applied.changes, origin);
+    const transaction = this.publish(fileKey, sourceViewId, record, applied.changes, origin);
+    const observation = {
+      fileKey,
+      revision: transaction.revision,
+      origin: transaction.origin,
+    } satisfies WorkspaceDocumentOwnerTransactionObservation;
+    this.notifyObserver(this.observer.onTransaction, observation);
+    if (canRecordHistory(origin) || isHistoryReplay(origin)) {
+      this.notifyObserver(this.observer.onHistoryReceipt, observation);
+    }
+    return transaction;
   }
 
   /** Reconcile an external/store snapshot through the same incremental channel. */
@@ -304,7 +351,15 @@ export class WorkspaceDocumentTransactionOwner {
     record.undo.pop();
     record.redo.push(entry);
     record.text = applied.text;
-    return this.publish(fileKey, sourceViewId, record, applied.changes, "undo");
+    const transaction = this.publish(fileKey, sourceViewId, record, applied.changes, "undo");
+    const observation = {
+      fileKey,
+      revision: transaction.revision,
+      origin: transaction.origin,
+    } satisfies WorkspaceDocumentOwnerTransactionObservation;
+    this.notifyObserver(this.observer.onTransaction, observation);
+    this.notifyObserver(this.observer.onHistoryReceipt, observation);
+    return transaction;
   }
 
   redo(fileKey: string, sourceViewId: string): DocumentTransaction | null {
@@ -316,16 +371,60 @@ export class WorkspaceDocumentTransactionOwner {
     record.redo.pop();
     record.undo.push(entry);
     record.text = applied.text;
-    return this.publish(fileKey, sourceViewId, record, applied.changes, "redo");
+    const transaction = this.publish(fileKey, sourceViewId, record, applied.changes, "redo");
+    const observation = {
+      fileKey,
+      revision: transaction.revision,
+      origin: transaction.origin,
+    } satisfies WorkspaceDocumentOwnerTransactionObservation;
+    this.notifyObserver(this.observer.onTransaction, observation);
+    this.notifyObserver(this.observer.onHistoryReceipt, observation);
+    return transaction;
   }
 
   clear(fileKey?: string): void {
     if (fileKey) {
+      const record = this.documentsByFile.get(fileKey);
+      if (record) {
+        for (const viewId of record.views) {
+          this.notifyLeaseChanged({
+            fileKey,
+            viewId,
+            activeViewCount: 0,
+            delta: -1,
+          });
+        }
+      }
       this.listenersByFile.delete(fileKey);
       this.documentsByFile.delete(fileKey);
     } else {
+      for (const [currentFileKey, record] of this.documentsByFile) {
+        for (const viewId of record.views) {
+          this.notifyLeaseChanged({
+            fileKey: currentFileKey,
+            viewId,
+            activeViewCount: 0,
+            delta: -1,
+          });
+        }
+      }
       this.listenersByFile.clear();
       this.documentsByFile.clear();
+    }
+  }
+
+  private notifyLeaseChanged(observation: WorkspaceDocumentOwnerLeaseObservation): void {
+    this.notifyObserver(this.observer.onViewLeaseChanged, observation);
+  }
+
+  private notifyObserver<T>(
+    callback: ((observation: T) => void) | undefined,
+    observation: T,
+  ): void {
+    try {
+      callback?.(observation);
+    } catch {
+      // Observation must never change or interrupt the document owner.
     }
   }
 }

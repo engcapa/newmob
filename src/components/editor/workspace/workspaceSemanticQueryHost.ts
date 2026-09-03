@@ -35,6 +35,19 @@ export interface SemanticQueryLiveGuards {
   getLiveGeneration?: () => number;
 }
 
+/** Metadata-only provider lifecycle facts used by the release observation seam. */
+export interface WorkspaceSemanticQueryObservation {
+  readonly kind: SemanticQueryKind;
+  readonly queryId: string;
+  readonly workspaceId: string;
+  readonly fileKey: string;
+}
+
+export interface WorkspaceSemanticQueryObserver {
+  readonly onRequest?: (observation: WorkspaceSemanticQueryObservation) => void;
+  readonly onCancel?: (observation: WorkspaceSemanticQueryObservation) => void;
+}
+
 export interface SemanticQueryExecutionRequest<TItem> {
   kind: SemanticQueryKind;
   identity: Partial<SemanticQueryIdentity> & { uri: string; position: LspPosition };
@@ -63,6 +76,7 @@ interface ActiveQueryRecord {
   fileKey: string;
   lspSessionGeneration: number;
   controller: AbortController;
+  cancelNotified: boolean;
 }
 
 let querySequenceCounter = 0;
@@ -70,6 +84,8 @@ let querySequenceCounter = 0;
 export class WorkspaceSemanticQueryHost {
   private activeQueries = new Map<string, ActiveQueryRecord>();
   private activeByKind = new Map<SemanticQueryKind, string>();
+
+  constructor(private readonly observer: WorkspaceSemanticQueryObserver = {}) {}
 
   /**
    * §ED-QUERY-001: Execute semantic query with complete envelope passing,
@@ -168,6 +184,7 @@ export class WorkspaceSemanticQueryHost {
       const prev = this.activeQueries.get(previousQueryId);
       if (prev) {
         prev.controller.abort();
+        this.notifyCancel(prev);
         this.activeQueries.delete(previousQueryId);
       }
     }
@@ -180,9 +197,11 @@ export class WorkspaceSemanticQueryHost {
       fileKey,
       lspSessionGeneration,
       controller,
+      cancelNotified: false,
     };
     this.activeQueries.set(queryId, record);
     this.activeByKind.set(request.kind, queryId);
+    this.notifyRequest(record);
 
     const context: SemanticQueryContext = {
       ...fullIdentity,
@@ -323,6 +342,7 @@ export class WorkspaceSemanticQueryHost {
       };
     } catch (err) {
       if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+        this.notifyCancel(record);
         return {
           queryId,
           kind: request.kind,
@@ -395,6 +415,7 @@ export class WorkspaceSemanticQueryHost {
     const record = this.activeQueries.get(queryId);
     if (record) {
       record.controller.abort();
+      this.notifyCancel(record);
       this.activeQueries.delete(queryId);
       if (this.activeByKind.get(record.kind) === queryId) {
         this.activeByKind.delete(record.kind);
@@ -413,6 +434,7 @@ export class WorkspaceSemanticQueryHost {
     for (const record of Array.from(this.activeQueries.values())) {
       if (record.workspaceId === workspaceId && record.fileKey === fileKey) {
         record.controller.abort();
+        this.notifyCancel(record);
         this.activeQueries.delete(record.queryId);
         if (this.activeByKind.get(record.kind) === record.queryId) {
           this.activeByKind.delete(record.kind);
@@ -428,6 +450,7 @@ export class WorkspaceSemanticQueryHost {
         && (lspSessionGeneration === undefined || record.lspSessionGeneration === lspSessionGeneration)
       ) {
         record.controller.abort();
+        this.notifyCancel(record);
         this.activeQueries.delete(record.queryId);
         if (this.activeByKind.get(record.kind) === record.queryId) {
           this.activeByKind.delete(record.kind);
@@ -443,8 +466,37 @@ export class WorkspaceSemanticQueryHost {
   cancelAll(): void {
     for (const record of Array.from(this.activeQueries.values())) {
       record.controller.abort();
+      this.notifyCancel(record);
     }
     this.activeQueries.clear();
     this.activeByKind.clear();
+  }
+
+  private notifyRequest(record: ActiveQueryRecord): void {
+    try {
+      this.observer.onRequest?.({
+        kind: record.kind,
+        queryId: record.queryId,
+        workspaceId: record.workspaceId,
+        fileKey: record.fileKey,
+      });
+    } catch {
+      // Observation subscribers cannot affect query execution.
+    }
+  }
+
+  private notifyCancel(record: ActiveQueryRecord): void {
+    if (record.cancelNotified) return;
+    record.cancelNotified = true;
+    try {
+      this.observer.onCancel?.({
+        kind: record.kind,
+        queryId: record.queryId,
+        workspaceId: record.workspaceId,
+        fileKey: record.fileKey,
+      });
+    } catch {
+      // Observation subscribers cannot affect query execution.
+    }
   }
 }
