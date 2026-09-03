@@ -57,7 +57,7 @@ export function buildReleaseRollupManifest(params: {
   referenceTimeIso?: string;
 }): ReleaseRollupManifest {
   // Sort receipts deterministically by receiptId
-  const sortedReceipts = [...params.receipts].sort((a, b) => a.receiptId.localeCompare(b.receiptId));
+  const sortedReceipts = [...params.receipts].sort((a, b) => (a.receiptId < b.receiptId ? -1 : a.receiptId > b.receiptId ? 1 : 0));
 
   // Build receipt summary entries
   const receiptEntries: RollupReceiptEntry[] = [];

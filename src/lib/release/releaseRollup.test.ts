@@ -3,26 +3,13 @@ import {
   buildReleaseRollupManifest,
   verifyReleaseRollupManifest,
 } from "./releaseRollup";
-import { createRunnerExecutionReceipt, type RunnerKeyRecord, type RunnerKeyRegistry } from "./runnerReceipt";
+import { createRunnerExecutionReceipt, DEFAULT_RUNNER_KEY_REGISTRY } from "./runnerReceipt";
 import type { ReleaseBundleIdentity } from "./bundleIdentity";
 import type { ReleasePlan } from "./releasePlanValidator";
 
 describe("ED-REL-004: releaseRollup byte-identical manifest & smoke verification", () => {
-  const browserKey: RunnerKeyRecord = {
-    keyId: "key-browser-01",
-    issuer: "taomni-linux-browser-runner",
-    purpose: "browser-runner",
-    secretOrPublicKey: "secret-key-browser-123",
-    validFrom: "2026-01-01T00:00:00Z",
-    validUntil: "2026-12-31T23:59:59Z",
-    revoked: false,
-  };
-
-  const registry: RunnerKeyRegistry = {
-    keys: {
-      "key-browser-01": browserKey,
-    },
-  };
+  const browserKey = DEFAULT_RUNNER_KEY_REGISTRY.keys["key-browser-runner-01"];
+  const registry = DEFAULT_RUNNER_KEY_REGISTRY;
 
   const sampleBundle: ReleaseBundleIdentity = {
     bundleId: "taomni-linux-x64-v0.4.20",
@@ -47,14 +34,14 @@ describe("ED-REL-004: releaseRollup byte-identical manifest & smoke verification
     },
   };
 
-  it("produces byte-identical rollup manifests across multiple invocations", () => {
+  it("ED-REL-004-A2: produces byte-identical rollup manifests across multiple invocations", () => {
     const receipt1 = createRunnerExecutionReceipt(
       {
         receiptId: "receipt-smoke-01",
-        runnerId: "runner-linux-node20",
-        keyId: "key-browser-01",
+        runnerId: "qa-ui-auto-linux-browser-runner",
+        keyId: browserKey.keyId,
         purpose: "browser-runner",
-        executedCommand: "pnpm test qa-ui-auto",
+        executedCommand: "python -m qa_ui_auto.runner --mode browser --filter TC-IDE-C6-02",
         commandDigest: "sha256:cmd-digest",
         startedAt: "2026-08-29T11:00:00.000Z",
         finishedAt: "2026-08-29T11:00:02.000Z",
@@ -87,14 +74,14 @@ describe("ED-REL-004: releaseRollup byte-identical manifest & smoke verification
     expect(m1.overallStatus).toBe("PASS");
   });
 
-  it("verifies manifest integrity in --check mode", () => {
+  it("ED-REL-004-A3: verifies manifest integrity in --check mode", () => {
     const receipt1 = createRunnerExecutionReceipt(
       {
         receiptId: "receipt-smoke-01",
-        runnerId: "runner-linux-node20",
-        keyId: "key-browser-01",
+        runnerId: "qa-ui-auto-linux-browser-runner",
+        keyId: browserKey.keyId,
         purpose: "browser-runner",
-        executedCommand: "pnpm test qa-ui-auto",
+        executedCommand: "python -m qa_ui_auto.runner --mode browser --filter TC-IDE-C6-02",
         commandDigest: "sha256:cmd-digest",
         startedAt: "2026-08-29T11:00:00.000Z",
         finishedAt: "2026-08-29T11:00:02.000Z",
@@ -126,7 +113,7 @@ describe("ED-REL-004: releaseRollup byte-identical manifest & smoke verification
     expect(check.errors).toEqual([]);
   });
 
-  it("zero-entry receipt collection yields INCOMPLETE status (stable RED)", () => {
+  it("ED-REL-004-A4: zero-entry receipt collection yields INCOMPLETE status (stable RED)", () => {
     const manifest = buildReleaseRollupManifest({
       bundleIdentity: sampleBundle,
       plan: samplePlan,
@@ -138,14 +125,14 @@ describe("ED-REL-004: releaseRollup byte-identical manifest & smoke verification
     expect(manifest.channelRollups["linux-daily-editor"].status).toBe("INCOMPLETE");
   });
 
-  it("failing receipt (exitCode !== 0) yields FAIL status", () => {
+  it("ED-REL-004-A4: failing receipt (exitCode !== 0) yields FAIL status", () => {
     const failedReceipt = createRunnerExecutionReceipt(
       {
         receiptId: "receipt-smoke-fail",
-        runnerId: "runner-linux-node20",
-        keyId: "key-browser-01",
+        runnerId: "qa-ui-auto-linux-browser-runner",
+        keyId: browserKey.keyId,
         purpose: "browser-runner",
-        executedCommand: "pnpm test qa-ui-auto",
+        executedCommand: "python -m qa_ui_auto.runner --mode browser --filter TC-IDE-C6-02",
         commandDigest: "sha256:cmd-digest",
         startedAt: "2026-08-29T11:00:00.000Z",
         finishedAt: "2026-08-29T11:00:02.000Z",
