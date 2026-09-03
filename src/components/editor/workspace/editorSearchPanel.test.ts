@@ -235,4 +235,32 @@ describe("ED-FIND-002: selection / comments / strings search filtering", () => {
     expect(view.state.selection.ranges[0].from).toBe(0);
     expect(view.state.selection.ranges[0].to).toBe(3);
   });
+
+  it("ED-FIND-002-A3: edits that stale the query recompute fresh matching ranges before replace", () => {
+    const code = "const name = 'alice'; // alice in comment";
+    const state = EditorState.create({
+      doc: code,
+      extensions: [javascript()],
+    });
+    const query = new SearchQuery({
+      search: "alice",
+      caseSensitive: true,
+    });
+
+    const initialCommentMatches = getFilteredMatches(state, query, { contextFilter: "comments" });
+    expect(initialCommentMatches.length).toBe(1);
+    expect(initialCommentMatches[0].from).toBe(25);
+
+    // Edit doc by inserting text in front
+    const tr = state.update({
+      changes: { from: 0, insert: "/* preamble prefix */ " },
+    });
+    const updatedState = tr.state;
+
+    // Fresh recomputation on updated state yields new ranges shifted by prefix length
+    const updatedCommentMatches = getFilteredMatches(updatedState, query, { contextFilter: "comments" });
+    expect(updatedCommentMatches.length).toBe(1);
+    expect(updatedCommentMatches[0].from).toBe(25 + 22);
+    expect(updatedState.sliceDoc(updatedCommentMatches[0].from, updatedCommentMatches[0].to)).toBe("alice");
+  });
 });
