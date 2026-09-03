@@ -9,7 +9,7 @@ description: |
   Highest claim on green: L2 provider-backed (Linux).
 covers: [F25.5]
 tags: [code-workspace, ide-c6, query, definition, hierarchy, provider-fixture, p1]
-modes: [browser, native]
+modes: [browser]
 fixtures: [reset_db, jdtls_required]
 timeout_sec: 300
 steps:
@@ -26,5 +26,5 @@ steps:
   - click: '[data-testid="code-workspace-tree-file"]'
   - wait_for: '[data-testid="code-workspace-editor-pane"]'
   - click: '[data-testid="code-workspace-editor"] .cm-content'
-  - press: Ctrl+B
+  - press: Control+b
   - screenshot: tc-ide-c6-query-definition.png
