@@ -255,7 +255,7 @@ export const useProjectFactsStore = create<ProjectFactsState>((set, get) => ({
       const classpathFingerprintsByModule: Record<string, string> = {};
       const buildSystem: JavaProjectModuleV1["buildSystem"] =
         tool === "gradle" || provenance?.toolKind?.startsWith("gradle") ? "gradle" : "maven";
-      const convertedModules: JavaProjectModuleV1[] = rawModules.map((m) => {
+      const convertedModules: JavaProjectModuleV1[] = rawModules.map((m): JavaProjectModuleV1 => {
         dependenciesByModule[m.id] = m.dependencies;
         classpathFingerprintsByModule[m.id] = m.classpath.join(";");
         return {
@@ -266,11 +266,7 @@ export const useProjectFactsStore = create<ProjectFactsState>((set, get) => ({
           testRoots: m.testRoots,
           generatedRoots: [],
           excludedRoots: [],
-          outputDirectory: "",
-          testOutputDirectory: "",
-          dependencies: m.dependencies,
           dependencyFingerprint: m.classpath.join(";"),
-          isCurrent: true,
         };
       });
 
