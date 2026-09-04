@@ -113,17 +113,33 @@ describe("BackupSettingsPanel", () => {
     expect(screen.getByText("Delete")).toBeDefined();
   });
 
-  it("renders vault password verification input when vault is initialized", () => {
+  it("renders manual backup controls with Backup Now and Export to... buttons without requiring vault password during creation", () => {
     useVaultStore.setState({ state: "unlocked" });
     render(<BackupSettingsPanel />);
-    expect(screen.getByText("Vault Master Password Verification")).toBeDefined();
+
+    expect(screen.getByText("Manual Instant Backup")).toBeDefined();
+    expect(screen.getByText("Backup Now")).toBeDefined();
+    expect(screen.getByText("Export to...")).toBeDefined();
+    // Manual backup should not have vault master password requirement
+    expect(screen.queryByText("Vault Master Password Verification")).toBeNull();
   });
 
-  it("renders vault empty notice when vault is not initialized", () => {
-    useVaultStore.setState({ state: "empty" });
+  it("renders auto-backup toggle card and weekly retention hint", () => {
+    useBackupStore.setState({
+      policy: {
+        autoBackupEnabled: true,
+        frequency: "weekly",
+        customBackupDir: null,
+        maxRetainedCopies: 7,
+        defaultScope: "core",
+        lastBackupAt: null,
+      },
+    });
+
     render(<BackupSettingsPanel />);
+    expect(screen.getByText("Enable scheduled rolling backup in background")).toBeDefined();
     expect(
-      screen.getByText("Vault is not yet initialized; no master password required for this backup."),
+      screen.getByText("Weekly backup, defaults to keeping 7 weeks of historical snapshots"),
     ).toBeDefined();
   });
 });

@@ -66,14 +66,12 @@ export async function createBackup(params: {
   customOptions?: BackupCustomOptions;
   targetPath?: string;
   password?: string;
-  vaultPassword?: string;
 }): Promise<BackupResult> {
   return invoke<BackupResult>("backup_create", {
     scope: params.scope ?? "core",
     customOptions: params.customOptions ?? null,
     targetPath: params.targetPath ?? null,
     password: params.password ?? null,
-    vaultPassword: params.vaultPassword ?? null,
   });
 }
 

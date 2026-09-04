@@ -238,8 +238,8 @@ pub fn create_backup(
         }
     }
 
-    // 8. Server certificates / keys (full scope)
-    if scope == "full" {
+    // 8. Server certificates / keys (core and full scope)
+    if scope == "core" || scope == "full" {
         let ssh_key = app_data.join("ssh-server").join("host_ed25519");
         if ssh_key.is_file() {
             staged_files.push(StagedFile {

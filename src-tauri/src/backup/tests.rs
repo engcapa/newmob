@@ -334,3 +334,12 @@ fn test_backup_restore_vault_password_verification() {
     // 5. Correct password succeeds
     assert!(vault.verify_master_password(Some(vault_pw)).is_ok());
 }
+
+#[test]
+fn test_policy_defaults() {
+    let policy = super::policy::BackupPolicy::default();
+    assert!(policy.auto_backup_enabled);
+    assert_eq!(policy.frequency, "weekly");
+    assert_eq!(policy.max_retained_copies, 7);
+    assert_eq!(policy.default_scope, "core");
+}

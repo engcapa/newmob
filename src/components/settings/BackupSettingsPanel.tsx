@@ -3,7 +3,6 @@ import {
   Archive,
   Download,
   Upload,
-  FolderOpen,
   RefreshCw,
   Lock,
   Unlock,
@@ -12,12 +11,12 @@ import {
   CheckCircle2,
   HardDrive,
   Loader2,
+  FolderDown,
 } from "lucide-react";
 import { useT } from "../../lib/i18n";
 import { useBackupStore } from "../../stores/backupStore";
 import { useVaultStore } from "../../stores/vaultStore";
 import {
-  openLocalPath,
   selectFilePath,
   selectSaveDirectory,
   selectSaveFilePath,
@@ -51,7 +50,6 @@ export function BackupSettingsPanel() {
   const [scope, setScope] = useState<BackupScope>("core");
   const [usePassword, setUsePassword] = useState(false);
   const [password, setPassword] = useState("");
-  const [vaultPassword, setVaultPassword] = useState("");
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -96,27 +94,29 @@ export function BackupSettingsPanel() {
     }
   };
 
-  // Handle open folder in explorer/finder
-  const handleOpenFolder = async () => {
-    if (effectiveBackupDir) {
-      try {
-        await openLocalPath(effectiveBackupDir);
-      } catch (e) {
-        console.error("Failed to open path", e);
-      }
-    }
-  };
-
-  // Handle manual backup export
-  const handleCreateBackup = async () => {
+  // Handle instant backup directly into the configured backup directory
+  const handleBackupNow = async () => {
     setActionSuccess(null);
     setActionError(null);
     clearError();
 
-    if (vaultState !== "empty" && !vaultPassword.trim()) {
-      setActionError(t("backupSettings.vaultPasswordRequired"));
-      return;
+    try {
+      await triggerBackup({
+        scope,
+        password: usePassword && password.trim() ? password.trim() : undefined,
+      });
+      setActionSuccess(t("backupSettings.createSuccess"));
+    } catch (e) {
+      console.error("Failed to create backup", e);
+      setActionError(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  // Handle backup export to custom path chosen by user
+  const handleExportBackup = async () => {
+    setActionSuccess(null);
+    setActionError(null);
+    clearError();
 
     const nowStr = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
     const defaultName = `taomni_backup_${nowStr}.taobak`;
@@ -128,20 +128,11 @@ export function BackupSettingsPanel() {
         scope,
         targetPath: target,
         password: usePassword && password.trim() ? password.trim() : undefined,
-        vaultPassword: vaultState !== "empty" ? vaultPassword.trim() : undefined,
       });
       setActionSuccess(t("backupSettings.createSuccess"));
-      setVaultPassword("");
     } catch (e) {
-      console.error("Failed to create backup", e);
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("VAULT_BAD_PASSWORD")) {
-        setActionError(t("backupSettings.vaultBadPassword"));
-      } else if (msg.includes("VAULT_PASSWORD_REQUIRED")) {
-        setActionError(t("backupSettings.vaultPasswordRequired"));
-      } else {
-        setActionError(msg);
-      }
+      console.error("Failed to export backup", e);
+      setActionError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -322,24 +313,21 @@ export function BackupSettingsPanel() {
               {t("backupSettings.resetDefaultDir")}
             </button>
           )}
-          <button
-            type="button"
-            onClick={handleOpenFolder}
-            title={t("backupSettings.openDir")}
-            className="p-1.5 rounded bg-theme-surface border border-theme-border hover:border-accent text-theme-muted hover:text-theme-text transition-colors"
-          >
-            <FolderOpen className="w-4 h-4" />
-          </button>
         </div>
       </div>
 
       {/* Card 2: Manual Backup */}
       <div className="p-4 rounded-lg bg-theme-surface border border-theme-border space-y-4">
-        <div className="flex items-center gap-2">
-          <Download className="w-4 h-4 text-theme-muted" />
-          <h4 className="text-sm font-medium text-theme-text">
-            {t("backupSettings.createBackupTitle")}
-          </h4>
+        <div>
+          <div className="flex items-center gap-2">
+            <Download className="w-4 h-4 text-theme-muted" />
+            <h4 className="text-sm font-medium text-theme-text">
+              {t("backupSettings.createBackupTitle")}
+            </h4>
+          </div>
+          <p className="text-xs text-theme-muted mt-1">
+            {t("backupSettings.createBackupDesc")}
+          </p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -379,33 +367,6 @@ export function BackupSettingsPanel() {
           </div>
         </div>
 
-        {vaultState !== "empty" ? (
-          <div className="space-y-1.5 pt-2 border-t border-theme-border/40">
-            <label className="text-xs font-medium text-theme-muted flex items-center gap-1.5">
-              <ShieldCheck className="w-3.5 h-3.5 text-accent" />
-              <span>{t("backupSettings.vaultPasswordLabel")}</span>
-              <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="password"
-              placeholder={t("backupSettings.vaultPasswordPh")}
-              value={vaultPassword}
-              onChange={(e) => {
-                setVaultPassword(e.target.value);
-                setActionError(null);
-              }}
-              className="w-full px-3 py-1.5 text-xs bg-theme-bg border border-theme-border rounded text-theme-text focus:border-accent outline-none"
-            />
-            <p className="text-[11px] text-theme-muted">
-              {t("backupSettings.vaultPasswordHint")}
-            </p>
-          </div>
-        ) : (
-          <div className="pt-2 border-t border-theme-border/40 text-[11px] text-theme-muted italic">
-            {t("backupSettings.vaultEmptyNotice")}
-          </div>
-        )}
-
         {actionError && (
           <div className="text-xs text-red-500 bg-red-500/10 p-2.5 rounded border border-red-500/20 flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 flex-shrink-0" />
@@ -420,11 +381,20 @@ export function BackupSettingsPanel() {
           </div>
         )}
 
-        <div className="pt-2 flex justify-end">
+        <div className="pt-2 flex justify-end gap-2">
           <button
             type="button"
             disabled={creating}
-            onClick={handleCreateBackup}
+            onClick={handleExportBackup}
+            className="flex items-center gap-2 px-3 py-2 text-xs font-medium bg-theme-bg border border-theme-border hover:border-accent text-theme-text rounded disabled:opacity-50 transition-colors"
+          >
+            <FolderDown className="w-3.5 h-3.5" />
+            {t("backupSettings.exportTo")}
+          </button>
+          <button
+            type="button"
+            disabled={creating}
+            onClick={handleBackupNow}
             className="flex items-center gap-2 px-4 py-2 text-xs font-medium bg-accent text-accent-text rounded hover:opacity-90 disabled:opacity-50 transition-opacity"
           >
             {creating ? (
@@ -435,7 +405,7 @@ export function BackupSettingsPanel() {
             ) : (
               <>
                 <Download className="w-3.5 h-3.5" />
-                {t("backupSettings.exportNow")}
+                {t("backupSettings.backupNow")}
               </>
             )}
           </button>
@@ -445,24 +415,53 @@ export function BackupSettingsPanel() {
       {/* Card 3: Auto Backup Policy */}
       {policy && (
         <div className="p-4 rounded-lg bg-theme-surface border border-theme-border space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <RefreshCw className="w-4 h-4 text-theme-muted" />
-              <h4 className="text-sm font-medium text-theme-text">
-                {t("backupSettings.autoBackupTitle")}
-              </h4>
+          <div className="flex items-center gap-2">
+            <RefreshCw className="w-4 h-4 text-theme-muted" />
+            <h4 className="text-sm font-medium text-theme-text">
+              {t("backupSettings.autoBackupTitle")}
+            </h4>
+          </div>
+
+          {/* Enable toggle matching Screenshot 2 / AppProxyPanel style */}
+          <div
+            role="button"
+            tabIndex={0}
+            className={`flex items-center gap-3 rounded border p-3 cursor-pointer transition-colors ${
+              policy.autoBackupEnabled
+                ? "border-[var(--taomni-accent)]/40 bg-[var(--taomni-accent)]/5"
+                : "border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+            }`}
+            onClick={() =>
+              void updatePolicy({ autoBackupEnabled: !policy.autoBackupEnabled })
+            }
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                void updatePolicy({ autoBackupEnabled: !policy.autoBackupEnabled });
+              }
+            }}
+          >
+            <div className="flex-1">
+              <div className="text-[13px] font-semibold text-theme-text">
+                {t("backupSettings.enableAutoBackup")}
+              </div>
+              <div className="text-[11px] text-[var(--taomni-text-muted)] mt-0.5">
+                {t("backupSettings.weeklyRetainHint")}
+              </div>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={policy.autoBackupEnabled}
-                onChange={(e) =>
-                  void updatePolicy({ autoBackupEnabled: e.target.checked })
-                }
-                className="sr-only peer"
+            <div
+              className={`w-9 h-5 rounded-full transition-colors relative flex-shrink-0 ${
+                policy.autoBackupEnabled
+                  ? "bg-[var(--taomni-accent)]"
+                  : "bg-[var(--taomni-divider)]"
+              }`}
+            >
+              <div
+                className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform shadow-sm ${
+                  policy.autoBackupEnabled ? "translate-x-4" : "translate-x-0.5"
+                }`}
               />
-              <div className="w-9 h-5 bg-theme-border peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent" />
-            </label>
+            </div>
           </div>
 
           {policy.autoBackupEnabled && (

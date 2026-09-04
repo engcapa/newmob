@@ -7,11 +7,15 @@ pub const DEFAULT_FREQUENCY: &str = "weekly";
 pub const DEFAULT_SCOPE: &str = "core";
 pub const POLICY_FILE_NAME: &str = "backup_policy.json";
 
+fn default_auto_backup() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPolicy {
     /// Whether automatic background rolling backup is enabled.
-    #[serde(default)]
+    #[serde(default = "default_auto_backup")]
     pub auto_backup_enabled: bool,
     /// Backup frequency: "daily" | "weekly" | "on_exit".
     #[serde(default = "default_frequency")]
@@ -20,7 +24,7 @@ pub struct BackupPolicy {
     /// If None or empty, falls back to the system default path (`app_data/backups`).
     #[serde(default)]
     pub custom_backup_dir: Option<String>,
-    /// Maximum number of automatic backups to retain (FIFO rolling cleanup).
+    /// Maximum number of automatic backups to retain (FIFO rolling cleanup, defaults to 7).
     #[serde(default = "default_max_copies")]
     pub max_retained_copies: u32,
     /// Default backup scope: "core" | "full".
@@ -46,7 +50,7 @@ fn default_scope() -> String {
 impl Default for BackupPolicy {
     fn default() -> Self {
         Self {
-            auto_backup_enabled: false,
+            auto_backup_enabled: true,
             frequency: default_frequency(),
             custom_backup_dir: None,
             max_retained_copies: default_max_copies(),

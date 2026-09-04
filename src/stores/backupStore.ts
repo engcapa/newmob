@@ -35,7 +35,6 @@ interface BackupStore {
     customOptions?: BackupCustomOptions;
     targetPath?: string;
     password?: string;
-    vaultPassword?: string;
   }) => Promise<BackupResult>;
   inspectArchive: (path: string, password?: string) => Promise<BackupManifest>;
   performStageRestore: (

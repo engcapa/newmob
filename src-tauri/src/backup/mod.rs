@@ -24,13 +24,9 @@ pub async fn backup_create(
     custom_options: Option<BackupCustomOptions>,
     target_path: Option<String>,
     password: Option<String>,
-    vault_password: Option<String>,
 ) -> Result<BackupResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        state
-            .vault
-            .verify_master_password(vault_password.as_deref())?;
         engine::create_backup(&state, &app, &scope, custom_options, target_path, password)
     })
     .await
