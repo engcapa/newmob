@@ -153,6 +153,11 @@ impl LanChatState {
         }
     }
 
+    /// Perform a consistent SQLite online hot-backup of the lanchat database.
+    pub fn backup_to(&self, dest_path: &Path) -> Result<(), String> {
+        self.store.backup_to(dest_path)
+    }
+
     /// This node's stable id.
     pub async fn node_id(&self) -> String {
         self.node_id.read().await.clone()
