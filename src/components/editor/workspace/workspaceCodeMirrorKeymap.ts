@@ -395,6 +395,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       title: "Basic Completion",
       category: "Edit",
       defaultKeybinding: "Ctrl+Space",
+      secondary: ["Alt+/"],
       keywords: ["complete", "suggest", "popup", "intellisense"],
       requiresEditor: true,
       run: async () => {

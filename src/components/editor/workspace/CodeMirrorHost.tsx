@@ -868,6 +868,7 @@ export interface EditorCommandState {
   hasSelection: boolean;
   caretCount: number;
   occurrenceSessionActive: boolean;
+  completionActive: boolean;
 }
 
 export interface EditorCommandPort {
@@ -1024,6 +1025,7 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
       hasSelection: view.state.selection.ranges.some((range) => !range.empty),
       caretCount: view.state.selection.ranges.length,
       occurrenceSessionActive: view.state.field(occurrenceSessionField, false) ?? false,
+      completionActive: completionStatus(view.state) !== null,
     }),
   };
 }

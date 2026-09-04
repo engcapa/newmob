@@ -461,10 +461,7 @@ class NativeSession:
         "Command": "\ue03d",
     }
 
-    def press_combo(self, combo: str) -> str:
-        """Press a chord like `Control+s`, `Control+Shift+p`, or a bare
-        named key (`Enter`). Sends real key events through the W3C Actions
-        API so CodeMirror/keydown handlers in the native WebView see them."""
+    def _combo_actions(self, combo: str) -> list[dict[str, Any]]:
         parts = [p.strip() for p in combo.split("+") if p.strip()]
         if not parts:
             raise WebDriverError(f"press_combo: empty combo {combo!r}")
@@ -480,6 +477,23 @@ class NativeSession:
         seq.append({"type": "pause", "duration": 30})
         seq.append({"type": "keyUp", "value": value})
         seq += [{"type": "keyUp", "value": m} for m in reversed(mods)]
+        seq.append({"type": "pause", "duration": 30})
+        return seq
+
+    def press_combo(self, combo: str) -> str:
+        """Press a chord like `Control+s`, `Control+Shift+p`, or a bare
+        named key (`Enter`). Sends real key events through the W3C Actions
+        API so CodeMirror/keydown handlers in the native WebView see them."""
+        return self.press_combos([combo])
+
+    def press_combos(self, combos: list[str]) -> str:
+        """Send multiple chords in one W3C action request.
+
+        WebKitWebDriver can reset its connection after many back-to-back
+        /actions requests. A single input source preserves the same native
+        keydown/keyup semantics without exercising that driver failure.
+        """
+        seq = [action for combo in combos for action in self._combo_actions(combo)]
         try:
             self.request(
                 "POST",
@@ -494,7 +508,7 @@ class NativeSession:
                 self.request("DELETE", self.endpoint("/actions"))
             except WebDriverError:
                 pass
-        return f"pressed {combo}"
+        return f"pressed {len(combos)} combo(s)"
 
     def type_text(self, text: str) -> str:
         """Type text into the focused element, one paced key pair per char."""

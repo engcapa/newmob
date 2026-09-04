@@ -49,6 +49,7 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `compose_text` | `{selector, text, during_key?}` | Browser-only composition lifecycle; optionally dispatches one composing key before committing text. Never substitutes for native IME evidence. |
 | `native_keys` | `{selector, keys, focus_prechecked?}` | Native Linux/X11 only. Requires the selector to own focus, injects physical XTest keys or chords such as `Control+v` through GTK/WebKitGTK, and records transport metadata. `focus_prechecked: true` is limited to a testcase that asserted DOM focus immediately before an external fault made WebDriver commands unavailable; the verb still activates and identifies the Taomni X11 window. Testcase assertions own the postcondition. |
 | `native_ime_keys` | `{selector, expected_engine, keys}` | Native Linux/X11 only. Injects physical XTest keys through the named configured fcitx5 engine and records an observation artifact; testcase assertions must verify the committed result. |
+| `native_editor_performance` | `{selector, keys, max_p95_ms}` | Native packaged app only. Injects at least five ASCII keys through W3C WebDriver actions and records keydown-to-CodeMirror-DOM-mutation latency. The artifact also records the next animation frame as a diagnostic, but does not gate on it because a frame requested from CodeMirror's mutation observer is one frame later than the paint containing that mutation. Writes `native-editor-performance.json` and fails when p95 exceeds the supplied budget. |
 | `press` | key string **or** `{key, selector?}` | E.g. `Enter`, `Control+Shift+F`. |
 | `select_option` | `{selector, label?, value?}` | At least one of label/value. |
 | `upload_file` | `{selector, path}` | Hooks into a file input. |
@@ -98,6 +99,7 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `assert_file_exists` | path string **or** `{path, timeout_sec?}` | Native-only host filesystem existence check. |
 | `assert_file_receipt` | `{path, selector, encoding, bom, eol, expected_text, require_history?, timeout_sec?}` | Native-only: independently reads and hashes host bytes, validates encoding/BOM/EOL, then reconciles the result with the production receipt observation. |
 | `assert_file_sha256` | `{path, equals, timeout_sec?}` | Native-only: independently reads host bytes and requires an exact lowercase SHA-256 digest. |
+| `assert_native_process_delta` | `{pattern, baseline, max_delta, timeout_sec?}` | Native Linux only. Counts `/proc/*/cmdline` entries containing `pattern`, writes `native-process-observation.json`, and requires the count increase from `baseline` to remain within `0..max_delta`. |
 | `assert_system_clipboard` | `{equals \| contains \| readable, timeout_sec?}` | Native Linux/X11 only: reads the real CLIPBOARD selection from a separate process, never from the app's DOM or in-process state. The only step that can prove a copy actually crossed the OS boundary. An unresponsive owner is reported as unreadable, never as an empty string. Exactly one assertion key. |
 
 ## Last-resort escape hatch

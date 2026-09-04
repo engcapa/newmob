@@ -10,6 +10,7 @@ Fixtures are referenced from a testcase's `fixtures: [...]` list. Builtin set:
                     ${fixture.workspace_root}
 * java_sample_projects - expose in-repo sample Maven/Gradle project roots as
                     ${fixture.maven_single_root} / ${fixture.gradle_single_root}
+* java25_projects - create and compile isolated Maven + Gradle Java 25 projects
 
 Custom fixtures should live in this package and register via `register(name, fn)`.
 """
@@ -19,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from . import reset_db, ssh_required, sftp_required, jdtls_required, workspace_root, java_sample_projects
+from . import java25_projects, java_sample_projects, jdtls_required, reset_db, sftp_required, ssh_required, workspace_root
 
 
 class FixtureContext(Protocol):
@@ -43,6 +44,7 @@ REGISTRY: dict[str, Fixture] = {
     "jdtls_required": Fixture("jdtls_required", jdtls_required.setup),
     "workspace_root": Fixture("workspace_root", workspace_root.setup, workspace_root.teardown),
     "java_sample_projects": Fixture("java_sample_projects", java_sample_projects.setup),
+    "java25_projects": Fixture("java25_projects", java25_projects.setup),
 }
 
 

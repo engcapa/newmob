@@ -640,6 +640,18 @@ def _x11_keysyms_for_chord(chord: str) -> list[int]:
         "Shift": 0xFFE1,
         "Alt": 0xFFE9,
         "Meta": 0xFFE7,
+        "F1": 0xFFBE,
+        "F2": 0xFFBF,
+        "F3": 0xFFC0,
+        "F4": 0xFFC1,
+        "F5": 0xFFC2,
+        "F6": 0xFFC3,
+        "F7": 0xFFC4,
+        "F8": 0xFFC5,
+        "F9": 0xFFC6,
+        "F10": 0xFFC7,
+        "F11": 0xFFC8,
+        "F12": 0xFFC9,
     }
     parts = [part.strip() for part in chord.split("+") if part.strip()]
     if not parts:
@@ -698,6 +710,183 @@ def _inject_x11_keys(keys: list[str]) -> None:
             time.sleep(0.12)
     finally:
         x11.XCloseDisplay(display)
+
+
+def _process_count(pattern: str) -> int:
+    count = 0
+    proc = Path("/proc")
+    if not proc.is_dir():
+        raise StepError("native process observations require Linux /proc")
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if pattern in command:
+            count += 1
+    return count
+
+
+def _assert_native_process_delta(ctx: NativeStepContext, args: Any) -> str:
+    if not isinstance(args, dict) or not {"pattern", "baseline", "max_delta"} <= set(args):
+        raise StepError("assert_native_process_delta: expected {pattern, baseline, max_delta}")
+    pattern = str(args["pattern"])
+    baseline = int(args["baseline"])
+    max_delta = int(args["max_delta"])
+    timeout = float(args.get("timeout_sec", 10))
+    deadline = time.time() + timeout
+    count = _process_count(pattern)
+    while time.time() < deadline and count < baseline:
+        time.sleep(0.25)
+        count = _process_count(pattern)
+    delta = count - baseline
+    artifact = {
+        "pattern": pattern,
+        "baseline": baseline,
+        "observed": count,
+        "delta": delta,
+        "maxDelta": max_delta,
+        "source": "Linux /proc/*/cmdline",
+    }
+    (ctx.case_dir / "native-process-observation.json").write_text(
+        json.dumps(artifact, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    if delta < 0 or delta > max_delta:
+        raise StepError(
+            f"process count for {pattern!r} changed by {delta}; expected 0..{max_delta} "
+            f"(baseline={baseline}, observed={count})"
+        )
+    return f"process delta ok: {pattern!r} baseline={baseline} observed={count}"
+
+
+def _native_editor_performance(ctx: NativeStepContext, args: Any) -> str:
+    if not isinstance(args, dict) or not {"selector", "keys", "max_p95_ms"} <= set(args):
+        raise StepError("native_editor_performance: expected {selector, keys, max_p95_ms}")
+    selector = str(args["selector"])
+    keys = args["keys"]
+    max_p95_ms = float(args["max_p95_ms"])
+    if not isinstance(keys, list) or len(keys) < 5 or not all(
+        isinstance(key, str) and len(key) == 1 and key.isascii() for key in keys
+    ):
+        raise StepError("native_editor_performance: keys must contain at least five ASCII characters")
+    focused = ctx.session.execute(
+        f"const el = document.querySelector({json.dumps(selector)});"
+        "return !!el && (document.activeElement === el || el.contains(document.activeElement));"
+    )
+    if not focused:
+        raise StepError(f"native_editor_performance: target is not focused: {selector}")
+
+    installed = ctx.session.execute(
+        f"const el = document.querySelector({json.dumps(selector)});"
+        "if (!(el instanceof HTMLElement)) return false;"
+        "const view=el.cmTile?.root?.view ?? null;"
+        "const editorText=()=>view?.state?.doc?.toString?.() ?? null;"
+        "const state={pending:[],samples:[],keys:[],inputs:[],lastText:el.textContent ?? '',editorTextAtInstall:editorText()};"
+        "const keydown=(event)=>{"
+        " if(event.key.length===1&&!event.ctrlKey&&!event.metaKey&&!event.altKey){"
+        "   const pending={key:event.key,started:performance.now()}; state.pending.push(pending);"
+        "   state.keys.push({key:event.key,started:pending.started,text:el.textContent ?? '',editorText:editorText(),defaultPrevented:event.defaultPrevented});"
+        " }"
+        "};"
+        "const input=(event)=>state.inputs.push({type:event.type,data:event.data ?? null,inputType:event.inputType ?? null,text:el.textContent ?? '',editorText:editorText()});"
+        "const observer=new MutationObserver(()=>{"
+        " const text=el.textContent ?? ''; if(text===state.lastText)return; state.lastText=text;"
+        " const pending=state.pending.shift(); if(!pending)return;"
+        " const mutationLatencyMs=performance.now()-pending.started;"
+        " const sample={key:pending.key,text,editorText:editorText(),mutationLatencyMs,nextFrameLatencyMs:null};"
+        " state.samples.push(sample);"
+        " requestAnimationFrame(()=>{sample.nextFrameLatencyMs=performance.now()-pending.started;});"
+        "});"
+        "el.addEventListener('keydown',keydown,true); el.addEventListener('beforeinput',input,true); el.addEventListener('input',input,true);"
+        "observer.observe(el,{subtree:true,childList:true,characterData:true});"
+        "window.__QA_NATIVE_EDITOR_PERF__={state,cleanup:()=>{observer.disconnect();el.removeEventListener('keydown',keydown,true);el.removeEventListener('beforeinput',input,true);el.removeEventListener('input',input,true);}};"
+        "return true;"
+    )
+    if not installed:
+        raise StepError(f"native_editor_performance: selector not found: {selector}")
+    # WebDriver key actions are delivered by the packaged native webview's
+    # input source. XTest events are intentionally not used here: WebKitGTK
+    # marks synthetic X11 modifier events untrusted and drops them before DOM
+    # dispatch, which would measure the desktop harness rather than the editor.
+    ctx.session.type_text("".join(keys))
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        captured = int(ctx.session.execute(
+            "return window.__QA_NATIVE_EDITOR_PERF__?.state.samples.length ?? 0;"
+        ))
+        if captured >= len(keys):
+            break
+        time.sleep(0.01)
+    time.sleep(0.35)
+    performance_state = ctx.session.execute(
+        "const harness=window.__QA_NATIVE_EDITOR_PERF__;"
+        "if(!harness)return null;"
+        "const el=harness.state; const target=document.querySelector(" + json.dumps(selector) + ");"
+        "const view=target?.cmTile?.root?.view ?? null;"
+        "el.domTextAfterSettle=target?.textContent ?? null;"
+        "el.editorTextAfterSettle=view?.state?.doc?.toString?.() ?? null;"
+        "harness.cleanup(); return el;"
+    )
+    samples = performance_state.get("samples") if isinstance(performance_state, dict) else None
+    if not isinstance(samples, list) or len(samples) < len(keys) - 1:
+        raise StepError(
+            f"native_editor_performance: captured {len(samples) if isinstance(samples, list) else 0} "
+            f"paint samples for {len(keys)} physical keys"
+        )
+    latencies = sorted(
+        float(sample["mutationLatencyMs"])
+        for sample in samples
+        if "mutationLatencyMs" in sample
+    )
+    next_frame_latencies = sorted(
+        float(sample["nextFrameLatencyMs"])
+        for sample in samples
+        if isinstance(sample.get("nextFrameLatencyMs"), (int, float))
+    )
+    p95_index = max(0, min(len(latencies) - 1, int((len(latencies) * 0.95) + 0.9999) - 1))
+    p95 = latencies[p95_index]
+    artifact = {
+        "sampleCount": len(latencies),
+        "keydownCount": len(performance_state.get("keys", [])),
+        "pendingKeyCount": len(performance_state.get("pending", [])),
+        "editorTextAtInstall": performance_state.get("editorTextAtInstall"),
+        "domTextAfterSettle": performance_state.get("domTextAfterSettle"),
+        "editorTextAfterSettle": performance_state.get("editorTextAfterSettle"),
+        "keys": performance_state.get("keys", []),
+        "inputs": performance_state.get("inputs", []),
+        "samples": samples,
+        "latencyMs": latencies,
+        "p50Ms": latencies[len(latencies) // 2],
+        "p95Ms": p95,
+        "maxMs": latencies[-1],
+        "nextFrameLatencyMs": next_frame_latencies,
+        "nextFrameP95Ms": (
+            next_frame_latencies[p95_index]
+            if len(next_frame_latencies) == len(latencies)
+            else None
+        ),
+        "thresholdP95Ms": max_p95_ms,
+        "measurement": "native WebDriver keydown to CodeMirror DOM mutation",
+        "nextFrameMeasurement": (
+            "diagnostic only: requestAnimationFrame registered by MutationObserver; "
+            "when CodeMirror mutates during its own animation frame this is the following frame, "
+            "not the paint containing the mutation"
+        ),
+        "transport": "W3C WebDriver key actions -> GTK/WebKitGTK packaged app",
+    }
+    (ctx.case_dir / "native-editor-performance.json").write_text(
+        json.dumps(artifact, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    if p95 > max_p95_ms:
+        raise StepError(
+            f"native editor input p95 {p95:.2f} ms exceeds {max_p95_ms:.2f} ms "
+            f"({len(latencies)} samples)"
+        )
+    return f"native editor input p95={p95:.2f}ms ({len(latencies)} physical keys)"
 
 
 # --------------------------------------------------------------------------
@@ -1069,13 +1258,12 @@ def _do_native_set_writable(ctx: NativeStepContext, args: Any) -> str:
 
 @_verb("native_keys")
 def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
-    """Inject physical X11 keys into an already-focused native control."""
-    if platform.system() != "Linux" or not os.environ.get("DISPLAY"):
-        raise StepError("native_keys: requires a Linux X11 display")
+    """Inject native keys into an already-focused native control."""
     if not isinstance(args, dict):
         raise StepError("native_keys: expected {selector, keys}")
     selector = args.get("selector")
     keys = args.get("keys")
+    transport = str(args.get("transport", "x11"))
     if not isinstance(selector, str) or not selector:
         raise StepError("native_keys: selector must be a non-empty string")
     if not isinstance(keys, list) or not keys or not all(isinstance(key, str) for key in keys):
@@ -1091,10 +1279,34 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
             raise StepError(
                 f"native_keys: target must already have DOM focus before native injection: {selector}"
             )
+    ctx.session.execute(
+        "window.__QA_NATIVE_KEY_EVENTS__=[];"
+        "window.__QA_NATIVE_KEY_LISTENER__=(event)=>window.__QA_NATIVE_KEY_EVENTS__.push({"
+        "type:event.type,key:event.key,code:event.code,ctrlKey:event.ctrlKey,"
+        "altKey:event.altKey,shiftKey:event.shiftKey,metaKey:event.metaKey,"
+        "defaultPrevented:event.defaultPrevented});"
+        "window.addEventListener('keydown',window.__QA_NATIVE_KEY_LISTENER__,true);"
+        "window.addEventListener('keyup',window.__QA_NATIVE_KEY_LISTENER__,true);"
+    )
     time.sleep(0.25)
-    window_id, window_identity = _activate_x11_application(ctx.session.application)
-    _inject_x11_keys(keys)
+    window_id = None
+    window_identity = None
+    if transport == "webdriver":
+        ctx.session.press_combos(keys)
+    elif transport == "x11":
+        if platform.system() != "Linux" or not os.environ.get("DISPLAY"):
+            raise StepError("native_keys: X11 transport requires a Linux display")
+        window_id, window_identity = _activate_x11_application(ctx.session.application)
+        _inject_x11_keys(keys)
+    else:
+        raise StepError(f"native_keys: unsupported transport {transport!r}")
     time.sleep(0.5)
+    observed_events = ctx.session.execute(
+        "const events=window.__QA_NATIVE_KEY_EVENTS__ ?? [];"
+        "window.removeEventListener('keydown',window.__QA_NATIVE_KEY_LISTENER__,true);"
+        "window.removeEventListener('keyup',window.__QA_NATIVE_KEY_LISTENER__,true);"
+        "return events;"
+    )
     artifact = {
         "platform": platform.platform(),
         "display": os.environ.get("DISPLAY"),
@@ -1103,14 +1315,29 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
         "focused_selector": selector,
         "focus_verification": "testcase precondition" if focus_prechecked else "immediate DOM probe",
         "keys": keys,
-        "transport": "X11 XTest -> GTK/WebKitGTK",
+        "observed_events": observed_events,
+        "transport": (
+            "W3C WebDriver key actions -> GTK/WebKitGTK"
+            if transport == "webdriver"
+            else "X11 XTest -> GTK/WebKitGTK"
+        ),
         "result": "keys-injected; testcase DOM postcondition is authoritative",
     }
     (ctx.case_dir / "native-key-observation.json").write_text(
         json.dumps(artifact, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    return f"injected {len(keys)} X11 keys into focused native control"
+    return f"injected {len(keys)} {transport} keys into focused native control"
+
+
+@_verb("assert_native_process_delta")
+def _do_assert_native_process_delta(ctx: NativeStepContext, args: Any) -> str:
+    return _assert_native_process_delta(ctx, args)
+
+
+@_verb("native_editor_performance")
+def _do_native_editor_performance(ctx: NativeStepContext, args: Any) -> str:
+    return _native_editor_performance(ctx, args)
 
 
 @_verb("native_click")

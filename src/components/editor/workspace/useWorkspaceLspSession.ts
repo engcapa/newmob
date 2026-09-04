@@ -4,6 +4,7 @@ import {
   lspChangeDocument,
   lspCloseDocument,
   lspDetectServers,
+  lspDiscoverJavaBundles,
   lspGetDiagnostics,
   lspOpenDocument,
   lspSaveDocument,
@@ -16,6 +17,7 @@ import {
   type LspDiagnostic,
   type LspDocumentDescriptor,
   type LspDocumentStatus,
+  type LspJavaBundleConfig,
   type LspServerStatus,
 } from "../../../lib/editor/lsp";
 import type { CodeWorkspaceRootInfo } from "../../../types";
@@ -144,6 +146,27 @@ function nextErrorGeneration(
   return nextError && nextError !== previousError ? generation + 1 : generation;
 }
 
+async function resolveJavaBundles(): Promise<LspJavaBundleConfig> {
+  const configured = readLspJavaBundles();
+  if (configured.javaDebugPath.trim() && configured.javaTestPath.trim()) return configured;
+
+  try {
+    const discovered = await lspDiscoverJavaBundles();
+    return {
+      javaDebugPath: configured.javaDebugPath.trim()
+        || discovered.find((bundle) => bundle.id === "javaDebug")?.path
+        || "",
+      javaTestPath: configured.javaTestPath.trim()
+        || discovered.find((bundle) => bundle.id === "javaTest")?.path
+        || "",
+    };
+  } catch {
+    // Discovery is opportunistic. Explicit configuration and normal LSP startup
+    // must continue when no supported editor installation can be scanned.
+    return configured;
+  }
+}
+
 export interface WorkspaceLspSessionController {
   serverStatuses: LspServerStatus[];
   commandPrefs: Record<string, string>;
@@ -251,7 +274,9 @@ export function useWorkspaceLspSession({
       if (!isCurrentRequest()) return;
       await lspSetJavaSettings(readLspJavaSettings());
       if (!isCurrentRequest()) return;
-      await lspSetJavaBundles(readLspJavaBundles());
+      const javaBundles = await resolveJavaBundles();
+      if (!isCurrentRequest()) return;
+      await lspSetJavaBundles(javaBundles);
       if (!isCurrentRequest()) return;
       const statuses = await lspDetectServers({ javaHome: home || null, forceRefresh });
       if (isCurrentRequest()) setServerStatuses(statuses);

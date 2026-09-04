@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
 import { EditorSelection } from "@codemirror/state";
 import { undoDepth } from "@codemirror/commands";
+import { startCompletion } from "@codemirror/autocomplete";
 import { EditorView } from "@codemirror/view";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import { virtualSpaceOverflowField } from "./workspaceVirtualSpace";
@@ -294,6 +295,29 @@ describe("CodeMirrorHost search", () => {
       token: expect.any(Object),
       port: expect.any(Object),
     }));
+  });
+
+  it("publishes live completion state through the command port", async () => {
+    const registration = vi.fn();
+    const rendered = renderEditor("sout", vi.fn(), {
+      path: "src/App.java",
+      fileKey: "root:app:src/App.java",
+      onCommandPortChange: registration,
+    });
+    const view = EditorView.findFromDOM(rendered.container.querySelector(".cm-editor")!);
+    expect(view).not.toBeNull();
+    await waitFor(() => expect(
+      registration.mock.calls.find((call) => call[0].port),
+    ).toBeTruthy());
+    const { port } = registration.mock.calls.find((call) => call[0].port)![0];
+
+    expect(port.state().completionActive).toBe(false);
+    act(() => {
+      view!.dispatch({ selection: EditorSelection.cursor(view!.state.doc.length) });
+      startCompletion(view!);
+    });
+    await waitFor(() => expect(document.querySelector(".cm-tooltip-autocomplete")).not.toBeNull());
+    expect(port.state().completionActive).toBe(true);
   });
 
   it("runs Complete Statement from the command port on the caret line", async () => {

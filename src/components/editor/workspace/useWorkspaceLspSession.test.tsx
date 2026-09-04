@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/api/event", () => import("../../../stubs/tauri-event"));
 
 const lspMocks = vi.hoisted(() => ({
   lspDetectServers: vi.fn(),
+  lspDiscoverJavaBundles: vi.fn(),
   lspSetJavaHome: vi.fn(),
   lspSetJavaVmargs: vi.fn(),
   lspSetJavaSettings: vi.fn(),
@@ -101,6 +102,7 @@ describe("useWorkspaceLspSession", () => {
   beforeEach(() => {
     window.localStorage.clear();
     lspMocks.lspDetectServers.mockReset().mockResolvedValue([]);
+    lspMocks.lspDiscoverJavaBundles.mockReset().mockResolvedValue([]);
     lspMocks.lspSetJavaHome.mockReset().mockResolvedValue(undefined);
     lspMocks.lspSetJavaVmargs.mockReset().mockResolvedValue("-Xms1024m -Xmx1024m");
     lspMocks.lspSetJavaSettings.mockReset().mockResolvedValue(0);
@@ -111,6 +113,95 @@ describe("useWorkspaceLspSession", () => {
     lspMocks.lspCloseDocument.mockReset().mockResolvedValue(status);
     lspMocks.lspStopWorkspace.mockReset().mockResolvedValue(0);
     lspMocks.lspGetDiagnostics.mockReset().mockResolvedValue({ status, diagnostics: [] });
+  });
+
+  it("auto-configures discovered Java bundles without persisting machine paths", async () => {
+    const onError = vi.fn();
+    lspMocks.lspDiscoverJavaBundles.mockResolvedValue([
+      {
+        id: "javaDebug",
+        path: "/extensions/java-debug.jar",
+        version: "0.53.2",
+        source: "vscode: java-debug",
+      },
+      {
+        id: "javaTest",
+        path: "/extensions/java-test.jar",
+        version: "0.43.1",
+        source: "vscode: java-test",
+      },
+    ]);
+
+    renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-auto-java-bundles",
+      roots,
+      openFilesRef: { current: {} },
+      updateLspFiles: vi.fn(),
+      onError,
+    }));
+
+    await waitFor(() => expect(lspMocks.lspDetectServers).toHaveBeenCalledOnce());
+    expect(lspMocks.lspSetJavaBundles).toHaveBeenCalledWith({
+      javaDebugPath: "/extensions/java-debug.jar",
+      javaTestPath: "/extensions/java-test.jar",
+    });
+    expect(window.localStorage.getItem("taomni.codeWorkspace.lspJavaBundles.v1")).toBeNull();
+  });
+
+  it("preserves explicit Java bundle paths and fills only missing entries", async () => {
+    const onError = vi.fn();
+    window.localStorage.setItem("taomni.codeWorkspace.lspJavaBundles.v1", JSON.stringify({
+      javaDebugPath: "/configured/java-debug.jar",
+      javaTestPath: "",
+    }));
+    lspMocks.lspDiscoverJavaBundles.mockResolvedValue([
+      {
+        id: "javaDebug",
+        path: "/discovered/java-debug.jar",
+        version: "0.53.2",
+        source: "vscode: java-debug",
+      },
+      {
+        id: "javaTest",
+        path: "/discovered/java-test.jar",
+        version: "0.43.1",
+        source: "vscode: java-test",
+      },
+    ]);
+
+    renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-partial-java-bundles",
+      roots,
+      openFilesRef: { current: {} },
+      updateLspFiles: vi.fn(),
+      onError,
+    }));
+
+    await waitFor(() => expect(lspMocks.lspDetectServers).toHaveBeenCalledOnce());
+    expect(lspMocks.lspSetJavaBundles).toHaveBeenCalledWith({
+      javaDebugPath: "/configured/java-debug.jar",
+      javaTestPath: "/discovered/java-test.jar",
+    });
+  });
+
+  it("continues server detection when Java bundle discovery is unavailable", async () => {
+    lspMocks.lspDiscoverJavaBundles.mockRejectedValue(new Error("native discovery unavailable"));
+    const onError = vi.fn();
+
+    renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-no-java-bundle-discovery",
+      roots,
+      openFilesRef: { current: {} },
+      updateLspFiles: vi.fn(),
+      onError,
+    }));
+
+    await waitFor(() => expect(lspMocks.lspDetectServers).toHaveBeenCalledOnce());
+    expect(lspMocks.lspSetJavaBundles).toHaveBeenCalledWith({
+      javaDebugPath: "",
+      javaTestPath: "",
+    });
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("owns descriptor creation and the open/save/close document lifecycle", async () => {

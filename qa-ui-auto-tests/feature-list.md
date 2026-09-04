@@ -5070,6 +5070,14 @@ controls:
   - id: debug-panel
     selector: '[data-testid="debug-panel"]'
     kind: display
+  - id: debug-stop
+    selector: '[data-testid="debug-stop"]'
+    kind: interactive
+    optional: true       # enabled while a debug adapter session is active
+  - id: debug-current-line
+    selector: '.taomni-debug-current-line'
+    kind: display
+    optional: true       # CodeMirror decoration for the stopped stack frame
   - id: debug-active-configuration
     selector: '[data-testid="debug-active-configuration"]'
     kind: interactive
@@ -5589,6 +5597,14 @@ controls:
     selector: '[data-testid="code-workspace-tree-file"]'
     kind: interactive
     optional: true
+  - id: tree-filter
+    selector: '[data-testid="code-workspace-tree-filter"]'
+    kind: interactive
+    optional: true
+  - id: tree-flat-file-row
+    selector: '[data-testid="code-workspace-flat-file"]'
+    kind: interactive
+    optional: true
   - id: editor-pane
     selector: '[data-testid="code-workspace-editor-pane"]'
     kind: display
@@ -5604,6 +5620,10 @@ controls:
     selector: '[data-testid="code-workspace-editor"] .cm-content'
     kind: interactive
     optional: true
+  - id: editor-completion-popup
+    selector: '.cm-tooltip-autocomplete'
+    kind: display
+    optional: true       # CodeMirror-owned completion list while suggestions are active
   - id: file-status
     selector: '[data-testid="code-workspace-file-status"]'
     kind: display

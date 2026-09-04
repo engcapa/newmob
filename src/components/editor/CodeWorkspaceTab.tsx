@@ -1132,7 +1132,10 @@ export function CodeWorkspaceTab({
     update: (bridge: WorkspaceObservationBridge) => void,
   ) => {
     update(observationBridgeRef.current);
-    setObservationRevision((revision) => revision + 1);
+    // WorkspaceObservationBridge notifies the subscription below in dev/test.
+    // Its production instance is intentionally disabled, so forcing a React
+    // render here made every editor transaction rerender the whole workspace
+    // for telemetry that cannot change in the packaged app.
   }, []);
   const workspaceObservation: WorkspaceObservationSnapshot = observationBridge.getSnapshot();
   useEffect(() => {
@@ -12811,6 +12814,19 @@ export function CodeWorkspaceTab({
       const editorEventOwner = isEditorSurfaceKeyEvent(event.target)
         ? activeEditorCommandOwner()
         : null;
+      // Completion is an editor-local state machine. The workspace capture
+      // listener runs before CodeMirror, so it must yield these unmodified
+      // navigation/accept/cancel keys while the popup is active. Bare Tab
+      // always stays local: CodeMirror accepts completion/live templates and
+      // then falls through to indentation when neither applies.
+      if (editorEventOwner && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        if (logicalKey === "tab") return;
+        if (
+          !event.shiftKey
+          && editorEventOwner.port.state().completionActive
+          && ["arrowup", "arrowdown", "pageup", "pagedown", "enter", "escape"].includes(logicalKey)
+        ) return;
+      }
       const dispatchResult = actionsController.dispatchKeydownV2({
         event,
         workspaceId: workspaceInstanceId,

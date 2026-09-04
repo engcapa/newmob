@@ -65,7 +65,8 @@
      "sftp_required",
      "jdtls_required",
      "workspace_root",
-     "java_sample_projects"
+     "java_sample_projects",
+     "java25_projects"
     ]
    },
    "uniqueItems": true
@@ -149,6 +150,12 @@
     },
     "native_keys": {
      "$ref": "#/$defs/native_keys_arg"
+    },
+    "assert_native_process_delta": {
+     "$ref": "#/$defs/assert_native_process_delta_arg"
+    },
+    "native_editor_performance": {
+     "$ref": "#/$defs/native_editor_performance_arg"
     },
     "native_click": {
      "$ref": "#/$defs/native_click_arg"
@@ -666,7 +673,37 @@
     "focus_prechecked": {
      "type": "boolean",
      "description": "Skip the immediate WebDriver focus probe only when the testcase asserted DOM focus immediately before an external fault that makes WebDriver commands unavailable."
+    },
+    "transport": {
+     "enum": ["x11", "webdriver"],
+     "default": "x11",
+     "description": "Native key transport. WebDriver uses packaged-webview W3C key actions; x11 uses XTest."
     }
+   }
+  },
+  "assert_native_process_delta_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["pattern", "baseline", "max_delta"],
+   "properties": {
+    "pattern": {"type": "string", "minLength": 1},
+    "baseline": {"type": ["integer", "string"]},
+    "max_delta": {"type": "integer", "minimum": 0},
+    "timeout_sec": {"type": "number", "minimum": 0}
+   }
+  },
+  "native_editor_performance_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["selector", "keys", "max_p95_ms"],
+   "properties": {
+    "selector": {"$ref": "#/$defs/selector"},
+    "keys": {
+     "type": "array",
+     "minItems": 5,
+     "items": {"type": "string", "minLength": 1, "maxLength": 1}
+    },
+    "max_p95_ms": {"type": "number", "exclusiveMinimum": 0}
    }
   },
   "native_click_arg": {

@@ -6278,6 +6278,50 @@ end_of_record
   });
 
   describe("P0-J1 completion identity host containment", () => {
+    it("lets the completion popup own Arrow keys and Tab in the workspace capture phase", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const { startCompletion } = await import("@codemirror/autocomplete");
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-completion-keyboard",
+        workspaceInstanceId: "instance-completion-keyboard",
+        name: "Completion Keyboard",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/App.java" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+      workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/App.java", "sout"));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle("app / src/App.java");
+      const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+      expect(content).not.toBeNull();
+      const view = EditorView.findFromDOM(content!);
+      expect(view).not.toBeNull();
+      act(() => {
+        view!.dispatch({ selection: { anchor: view!.state.doc.length } });
+        startCompletion(view!);
+      });
+      await waitFor(() => {
+        const element = document.querySelector(".cm-tooltip-autocomplete");
+        expect(element).not.toBeNull();
+        return element!;
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      const selectedId = () => content!.getAttribute("aria-activedescendant");
+      const before = selectedId();
+
+      fireEvent.keyDown(content!, { key: "ArrowDown", code: "ArrowDown" });
+      await waitFor(() => expect(selectedId()).not.toBe(before));
+      fireEvent.keyDown(content!, { key: "Tab", code: "Tab" });
+
+      await waitFor(() => expect(view!.state.doc.toString()).toContain("System.out"));
+      expect(document.querySelector(".cm-tooltip-autocomplete")).toBeNull();
+    });
+
     it("never renders inactive-provider completion candidates in a mounted editor", async () => {
       const { EditorView } = await import("@codemirror/view");
       const { startCompletion } = await import("@codemirror/autocomplete");

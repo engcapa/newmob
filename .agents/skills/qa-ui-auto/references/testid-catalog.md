@@ -149,12 +149,16 @@
 ## code-workspace/editor-shell (F25.5)
 
 - `[data-testid="code-workspace-tree-add-folder"]` — interactive [optional] — F25.5.tree-add-folder
+- `[data-testid="code-workspace-tree-pane"]` — display [optional] — F25.5.tree-pane
 - `[data-testid="code-workspace-tree-root"]` — interactive [optional] — F25.5.tree-root-row
 - `[data-testid="code-workspace-tree-file"]` — interactive [optional] — F25.5.tree-file-row
+- `[data-testid="code-workspace-tree-filter"]` — interactive [optional] — F25.5.tree-filter
+- `[data-testid="code-workspace-flat-file"]` — interactive [optional] — F25.5.tree-flat-file-row
 - `[data-testid="code-workspace-editor-pane"]` — display — F25.5.editor-pane
 - `[data-testid="code-workspace-editor"]` — display [optional] — F25.5.editor-host
 - `[data-testid="code-workspace-editor-tab-strip"]` — display [optional] — F25.5.editor-tab-strip
 - `[data-testid="code-workspace-editor"] .cm-content` — interactive [optional] — F25.5.editor-content
+- `.cm-tooltip-autocomplete` — display [optional] — F25.5.editor-completion-popup
 - `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
 - `[data-testid="code-workspace-save-observation"]` — display [optional] — F25.5.save-observation
 - `[data-testid="code-workspace-clipboard-observation"]` — display [optional] — F25.5.clipboard-observation
@@ -179,12 +183,34 @@
 - `[data-testid="project-facts-refresh-btn"]` — interactive [optional] — F25.5.project-facts-refresh
 - `[data-testid="project-facts-loading-icon"]` — display [optional] — F25.5.project-facts-loading-icon
 - `[data-testid="project-facts-ready-icon"]` — display [optional] — F25.5.project-facts-ready-icon
+- `[data-testid="code-workspace-lsp-status-pill"]` — display [optional] — F25.5.lsp-status-pill
 - `[data-testid="project-facts-untrusted-icon"]` — display [optional] — F25.5.project-facts-untrusted-icon
 - `[data-testid="project-facts-stale-icon"]` — display [optional] — F25.5.project-facts-stale-icon
 - `[data-testid="project-facts-failed-icon"]` — display [optional] — F25.5.project-facts-failed-icon
 - `[data-testid="code-workspace-tree-new-file"]` — interactive [optional] — F25.5.tree-new-file
 - `[data-testid="code-workspace-search-everywhere"]` — display [optional] — F25.5.search-everywhere
+- `[data-testid="code-workspace-find-in-files-panel"]` — display [optional] — F25.5.find-panel
+- `[aria-label="Search query"]` — interactive [optional] — F25.5.find-query-input
+- `[aria-label="Include globs"]` — interactive [optional] — F25.5.find-include-globs
+- `[aria-label="Replace text"]` — interactive [optional] — F25.5.find-replace-input
+- `[data-testid="code-workspace-find-replace-all"]` — interactive [optional] — F25.5.find-replace-all
+- `[data-testid="code-workspace-find-run-search"]` — interactive [optional] — F25.5.find-run-search
+- `[data-testid="code-workspace-find-scope-select"]` — interactive [optional] — F25.5.find-scope-select
+- `[data-testid="code-workspace-find-module-select"]` — interactive [optional] — F25.5.find-module-select
+- `[data-testid="code-workspace-find-directory-input"]` — interactive [optional] — F25.5.find-directory-input
+- `[data-testid="code-workspace-find-scope-notice"]` — display [optional] — F25.5.find-scope-notice
+- `[data-testid="code-workspace-find-error"]` — display [optional] — F25.5.find-error
+- `[data-testid="code-workspace-find-file-group"]` — display [optional] — F25.5.find-file-group
+- `[data-testid="code-workspace-find-match-hit"]` — display [optional] — F25.5.find-match-hit
+- `[data-testid="code-workspace-replace-preview"]` — display [optional] — F25.5.replace-preview
+- `[data-testid="code-workspace-replace-counts"]` — display [optional] — F25.5.replace-counts
+- `[data-testid="code-workspace-replace-usage"]` — interactive [optional] — F25.5.replace-usage
+- `[data-testid="code-workspace-replace-file-toggle"]` — interactive [optional] — F25.5.replace-file-toggle
+- `[data-testid="code-workspace-replace-commit"]` — interactive [optional] — F25.5.replace-commit
+- `[data-testid="code-workspace-replace-cancel"]` — interactive [optional] — F25.5.replace-cancel
+- `[data-testid="code-workspace-replace-commit-error"]` — display [optional] — F25.5.replace-commit-error
 - `[data-testid="code-workspace-bottom-tab-terminal"]` — interactive [optional] — F25.5.bottom-dock-terminal-tab
+- `[data-testid="code-workspace-bottom-tab-search"]` — interactive [optional] — F25.5.bottom-dock-search-tab
 - `[data-testid="code-workspace-tab-policy-settings"]` — interactive [optional] — F25.5.tab-policy-settings
 - `[data-testid="workspace-tab-policy-settings-dialog"]` — display [optional] — F25.5.tab-policy-dialog
 - `[data-testid="workspace-tab-policy-limit"]` — interactive [optional] — F25.5.tab-policy-limit
@@ -300,6 +326,8 @@
 - `[data-testid^="tests-rerun-"]` — interactive [optional] — F25.1.tests-rerun
 - `[data-testid^="tests-failure-details-"]` — interactive [optional] — F25.1.tests-failure-details
 - `[data-testid="debug-panel"]` — display — F25.1.debug-panel
+- `[data-testid="debug-stop"]` — interactive [optional] — F25.1.debug-stop
+- `.taomni-debug-current-line` — display [optional] — F25.1.debug-current-line
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic
 - `[data-testid="debug-active-session"]` — interactive [optional] — F25.1.debug-active-session
