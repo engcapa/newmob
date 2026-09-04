@@ -264,7 +264,12 @@ export const SETTINGS_GROUPS: SettingsGroupDef[] = [
   {
     id: "security",
     titleKey: "settings.groupSecurity",
-    entryIds: ["vault", "backup"],
+    entryIds: ["vault"],
+  },
+  {
+    id: "backup",
+    titleKey: "settings.groupBackup",
+    entryIds: ["backup"],
   },
   {
     id: "network",

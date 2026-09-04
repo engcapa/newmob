@@ -2203,6 +2203,7 @@ export const zhCN: DeepPartial<typeof en> = {
     groupDatabase: "数据库",
     groupTerminal: "终端",
     groupSecurity: "安全",
+    groupBackup: "备份与恢复",
     groupNetwork: "网络",
     groupAi: "AI",
     appThemeTitle: "应用主题",

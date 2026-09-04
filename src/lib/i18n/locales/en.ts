@@ -2218,6 +2218,7 @@ const dict = {
     groupDatabase: "Database",
     groupTerminal: "Terminal",
     groupSecurity: "Security",
+    groupBackup: "Backup & Restore",
     groupNetwork: "Network",
     groupAi: "AI",
     appThemeTitle: "Application Theme",

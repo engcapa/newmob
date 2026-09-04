@@ -763,8 +763,18 @@ export function SettingsPanel() {
                 <VaultSettings />
               </section>
             </SettingsAnchor>
+          </SettingsGroup>
 
-            <SettingsAnchor id="backup" className="mt-4">
+          {/* —— Backup & Restore —— */}
+          <SettingsGroup
+            id="backup"
+            title={groupTitle("settings.groupBackup")}
+            expanded={!!expandedGroups.backup}
+            onToggle={() => toggleGroup("backup")}
+            matchCount={matchCountByGroup.backup ?? 0}
+            searching={searching}
+          >
+            <SettingsAnchor id="backup">
               <section className="mb-5 rounded-md border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] p-4">
                 <BackupSettingsPanel />
               </section>
