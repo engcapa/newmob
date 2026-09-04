@@ -5577,6 +5577,10 @@ controls:
     selector: '[data-testid="code-workspace-tree-add-folder"]'
     kind: interactive
     optional: true       # opens the folder prompt (browser VFS / native dialog)
+  - id: tree-pane
+    selector: '[data-testid="code-workspace-tree-pane"]'
+    kind: display
+    optional: true       # focusable project tree container
   - id: tree-root-row                 # expands a workspace root before listing children
     selector: '[data-testid="code-workspace-tree-root"]'
     kind: interactive
@@ -5732,6 +5736,18 @@ controls:
     selector: '[aria-label="Include globs"]'
     kind: interactive
     optional: true       # ED-FIND-003 include mask field
+  - id: find-replace-input
+    selector: '[aria-label="Replace text"]'
+    kind: interactive
+    optional: true       # ED-FIND-004 replacement field
+  - id: find-replace-all
+    selector: '[data-testid="code-workspace-find-replace-all"]'
+    kind: interactive
+    optional: true       # opens the replace preview; ED-FIND-004
+  - id: find-run-search
+    selector: '[data-testid="code-workspace-find-run-search"]'
+    kind: interactive
+    optional: true       # ED-FIND-003 run button
   - id: find-scope-select
     selector: '[data-testid="code-workspace-find-scope-select"]'
     kind: interactive
@@ -5760,10 +5776,42 @@ controls:
     selector: '[data-testid="code-workspace-find-match-hit"]'
     kind: display
     optional: true       # highlighted hit inside a match row
+  - id: replace-preview
+    selector: '[data-testid="code-workspace-replace-preview"]'
+    kind: display
+    optional: true       # structured replace preview dialog; ED-FIND-004
+  - id: replace-counts
+    selector: '[data-testid="code-workspace-replace-counts"]'
+    kind: display
+    optional: true       # included/total occurrences; ED-FIND-004
+  - id: replace-usage
+    selector: '[data-testid="code-workspace-replace-usage"]'
+    kind: interactive
+    optional: true       # per-occurrence exclusion checkbox; ED-FIND-004
+  - id: replace-file-toggle
+    selector: '[data-testid="code-workspace-replace-file-toggle"]'
+    kind: interactive
+    optional: true       # per-file exclusion checkbox; ED-FIND-004
+  - id: replace-commit
+    selector: '[data-testid="code-workspace-replace-commit"]'
+    kind: interactive
+    optional: true       # ED-FIND-004 commit
+  - id: replace-cancel
+    selector: '[data-testid="code-workspace-replace-cancel"]'
+    kind: interactive
+    optional: true       # ED-FIND-004 cancel (zero commit)
+  - id: replace-commit-error
+    selector: '[data-testid="code-workspace-replace-commit-error"]'
+    kind: display
+    optional: true       # precondition conflicts; ED-FIND-004 fail-closed
   - id: bottom-dock-terminal-tab       # dock tab ids are shared with F25.1/F25.2 panels; this owns the terminal tab id
     selector: '[data-testid="code-workspace-bottom-tab-terminal"]'
     kind: interactive
     optional: true
+  - id: bottom-dock-search-tab
+    selector: '[data-testid="code-workspace-bottom-tab-search"]'
+    kind: interactive
+    optional: true       # opens the Find in Files panel; ED-FIND-003/004
   - id: tab-policy-settings
     selector: '[data-testid="code-workspace-tab-policy-settings"]'
     kind: interactive

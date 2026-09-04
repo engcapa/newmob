@@ -433,7 +433,6 @@ import {
   type ResourceCleanupHandlers,
   type ResourceCleanupOutcome,
 } from "./workspace/workspaceResourceRecoveryCoordinator";
-import { buildReplaceWorkspaceEdit } from "./workspace/buildReplaceEdits";
 import { BottomDock } from "./workspace/panels/BottomDock";
 import {
   ReferencesPanel,
@@ -601,6 +600,13 @@ import {
 import type { ShellShortcutClaim } from "./workspace/shellShortcutRouter";
 import type { WorkspaceFocus } from "./workspace/workspaceActionRegistry";
 import type { WorkspaceSearchMatch } from "../../lib/editor/workspaceSearch";
+import {
+  replaceMatchAbsolutePath,
+  searchMatchesToReplaceInputs,
+  validateReplacePreconditions,
+  verifyReplaceMatchFreshness,
+  type FileRevisionGuard,
+} from "./workspace/replaceInFilesModel";
 import type {
   CodeWorkspaceFileRef,
   CodeWorkspaceLooseFileInfo,
@@ -17025,9 +17031,70 @@ export function CodeWorkspaceTab({
                 includePreset={searchIncludePreset}
                 queryPreset={searchQueryPreset}
                 onOpenMatch={openSearchMatch}
-                onReplaceMatches={async (matches, replacement) => {
-                  const edit = buildReplaceWorkspaceEdit(matches, replacement);
+                onReplaceMatches={async (matches, replacement, edit) => {
+                  void replacement;
+                  // ED-FIND-004 A2/A3: pre-commit recheck (dirty open buffers,
+                  // unreadable disk, matches moved since search) before the
+                  // shared WorkspaceEdit path applies anything.
+                  const byFile = new Map<string, WorkspaceSearchMatch[]>();
+                  for (const match of matches) {
+                    const absolute = replaceMatchAbsolutePath(match);
+                    const list = byFile.get(absolute);
+                    if (list) list.push(match);
+                    else byFile.set(absolute, [match]);
+                  }
+                  if (byFile.size === 0) {
+                    return { ok: false, message: "Nothing to replace" };
+                  }
+                  const guards: FileRevisionGuard[] = [];
+                  const diskTexts = new Map<string, string>();
+                  for (const absolute of byFile.keys()) {
+                    const open = Object.values(openFilesRef.current).find((file) => {
+                      const currentPath = absolutePathForOpenFile(file);
+                      return currentPath !== null && fsPathEquals(currentPath, absolute);
+                    });
+                    const containing = rootsRef.current.find(
+                      (root) => relativePathWithinRoot(root.path, absolute) !== null,
+                    );
+                    if (!containing) {
+                      return { ok: false, message: `Replace refused: ${absolute} is outside the workspace` };
+                    }
+                    let diskText: string | null = null;
+                    try {
+                      const relative = relativePathWithinRoot(containing.path, absolute) ?? "";
+                      const disk = await workspaceReadFile(containing.path, relative);
+                      diskText = disk.text;
+                    } catch {
+                      diskText = null;
+                    }
+                    if (diskText === null) {
+                      return { ok: false, message: `Replace refused: cannot read ${absolute}` };
+                    }
+                    diskTexts.set(absolute, diskText);
+                    guards.push({ path: absolute, isDirty: open?.dirty ?? false });
+                  }
+                  const modelMatches = searchMatchesToReplaceInputs(matches);
+                  const freshness = verifyReplaceMatchFreshness(diskTexts, modelMatches);
+                  const precondition = validateReplacePreconditions(guards);
+                  const conflicts = [
+                    ...precondition.conflicts,
+                    ...freshness.map((conflict) => ({
+                      path: conflict.path,
+                      reason: conflict.reason,
+                    })),
+                  ];
+                  if (conflicts.length > 0) {
+                    const message = `Replace blocked: ${conflicts.map((conflict) => `${conflict.path}: ${conflict.reason}`).join("; ")}`;
+                    setStatusMessage(message);
+                    return { ok: false, message };
+                  }
                   await applyLspWorkspaceEdit(edit);
+                  const fileCount = byFile.size;
+                  const appliedCount = matches.length;
+                  setStatusMessage(
+                    `Replaced ${appliedCount} occurrence${appliedCount === 1 ? "" : "s"} in ${fileCount} file${fileCount === 1 ? "" : "s"} — Ctrl+Z to undo`,
+                  );
+                  return { ok: true, appliedCount, fileCount };
                 }}
               />
             ),

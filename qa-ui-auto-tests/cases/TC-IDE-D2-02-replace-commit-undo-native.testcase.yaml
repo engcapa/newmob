@@ -1,0 +1,76 @@
+id: TC-IDE-D2-02-replace-commit-undo-native
+title: "Replace commit with preconditions and one undo in packaged app"
+description: |
+  §8.19.10 native gate case (ED-FIND-004 A3/A4). Enters a disposable
+  workspace_root through persisted recents, searches the seeded notes file
+  with the real ripgrep backend, opens the replace preview, commits, and
+  proves the file receipt changed on host disk; then one workspace undo
+  restores the original bytes. Dirty/disk preconditions run before apply;
+  preview exclusion and cancel are covered by unit tests and the browser
+  gate. Highest claim on green: L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-find, replace, native-gate, p1]
+modes: [native]
+fixtures: [reset_db, workspace_root]
+timeout_sec: 600
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  # Enter the disposable fixture root through persisted recents (no picker).
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-d2","name":"qa-root","roots":[{"id":"qa-root","name":"qa-root","path":"${fixture.workspace_root}","kind":"folder"}],"looseFiles":[],"lastActiveFile":{"kind":"root","rootId":"qa-root","path":"notes.txt"},"lastOpenedAt":1756100000000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.workspace_root}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - wait_for:
+      selector: '[data-testid="code-workspace-editor-pane"]'
+      timeout_sec: 60
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "scratch notes"
+      timeout_sec: 60
+  - click: '[data-testid="code-workspace-bottom-tab-search"]'
+  - wait_for: '[data-testid="code-workspace-find-in-files-panel"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-bottom-tab-search"]'
+      name: aria-selected
+      equals: "true"
+  - native_click:
+      selector: '[aria-label="Search query"]'
+  - native_keys:
+      selector: '[aria-label="Search query"]'
+      keys: ["Control+a", "s", "c", "r", "a", "t", "c", "h", "Enter"]
+  - click: '[data-testid="code-workspace-find-run-search"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-find-in-files-panel"]'
+      contains: "notes.txt"
+      timeout_sec: 60
+  - native_click:
+      selector: '[aria-label="Replace text"]'
+  - native_keys:
+      selector: '[aria-label="Replace text"]'
+      keys: ["Control+a", "s", "n", "a", "t", "c", "h"]
+  - click: '[data-testid="code-workspace-find-replace-all"]'
+  - wait_for: '[data-testid="code-workspace-replace-preview"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-replace-counts"]'
+      contains: "1 of 1"
+      timeout_sec: 10
+  - click: '[data-testid="code-workspace-replace-commit"]'
+  - assert_file_contains:
+      path: "${fixture.workspace_root}/notes.txt"
+      contains: "snatch notes"
+      timeout_sec: 30
+  - native_click:
+      selector: '[aria-label="Search query"]'
+  - native_keys:
+      selector: '[aria-label="Search query"]'
+      keys: ["Control+z"]
+  - assert_file_contains:
+      path: "${fixture.workspace_root}/notes.txt"
+      contains: "scratch notes"
+      timeout_sec: 30
+  - screenshot: tc-ide-d2-02-replace-undo.png

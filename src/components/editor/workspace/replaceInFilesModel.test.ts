@@ -3,6 +3,7 @@ import {
   buildReplaceInFilesWorkspaceEdit,
   createReplaceInFilesPlan,
   validateReplacePreconditions,
+  verifyReplaceMatchFreshness,
   type ReplaceInFilesMatch,
 } from "./replaceInFilesModel";
 
@@ -87,5 +88,30 @@ describe("ED-FIND-004: replaceInFilesModel preview, exclude, conflict guard, com
     ]);
     expect(hashCheck.canCommit).toBe(false);
     expect(hashCheck.conflicts[0].reason).toContain("hash mismatch");
+  });
+});
+
+describe("ED-FIND-004: replace match freshness against disk", () => {
+  const disk = new Map<string, string>([
+    ["/ws/a.ts", "const alpha = 1;\nconst beta = 2;\n"],
+    ["/ws/b.ts", "nothing here\n"],
+  ]);
+
+  it("passes when every match still sits on current disk text", () => {
+    const conflicts = verifyReplaceMatchFreshness(disk, [
+      { filePath: "/ws/a.ts", startLine: 0, startCharacter: 6, endLine: 0, endCharacter: 11, matchedText: "alpha" },
+    ]);
+    expect(conflicts).toEqual([]);
+  });
+
+  it("reports moved text, missing files, and unknown files", () => {
+    const conflicts = verifyReplaceMatchFreshness(disk, [
+      { filePath: "/ws/a.ts", startLine: 0, startCharacter: 6, endLine: 0, endCharacter: 11, matchedText: "ALPHA" },
+      { filePath: "/ws/gone.ts", startLine: 0, startCharacter: 0, endLine: 0, endCharacter: 3, matchedText: "x" },
+    ]);
+    expect(conflicts).toHaveLength(2);
+    expect(conflicts[0].path).toBe("/ws/a.ts");
+    expect(conflicts[0].reason).toContain("changed since search");
+    expect(conflicts[1].path).toBe("/ws/gone.ts");
   });
 });

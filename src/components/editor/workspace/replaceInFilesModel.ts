@@ -5,6 +5,7 @@
  */
 
 import type { LspFileTextEdits, LspTextEdit, LspWorkspaceEdit } from "../../../lib/editor/lsp";
+import type { WorkspaceSearchMatch } from "../../../lib/editor/workspaceSearch";
 import {
   buildWorkspaceEditPreview,
   filterWorkspaceEditByUsages,
@@ -19,6 +20,34 @@ export interface ReplaceInFilesMatch {
   endLine: number;
   endCharacter: number;
   matchedText: string;
+}
+
+/** Absolute host path for a search match (mirrors buildReplaceEdits). */
+export function replaceMatchAbsolutePath(match: WorkspaceSearchMatch): string {
+  return match.path
+    ? `${match.rootPath.replace(/\\/g, "/").replace(/\/+$/, "")}/${match.path.replace(/^\/+/, "")}`
+    : match.rootPath;
+}
+
+/**
+ * ED-FIND-004: shared search-match mapping used by the preview dialog owner
+ * and the commit owner so both sides agree on file paths, ranges, and the
+ * matched text the freshness recheck compares against disk.
+ */
+export function searchMatchesToReplaceInputs(matches: readonly WorkspaceSearchMatch[]): ReplaceInFilesMatch[] {
+  return matches.map((match) => {
+    const absolute = replaceMatchAbsolutePath(match);
+    const line = Math.max(0, match.lineNumber - 1);
+    return {
+      filePath: absolute,
+      fileUri: `file://${absolute}`,
+      startLine: line,
+      startCharacter: match.matchStart,
+      endLine: line,
+      endCharacter: match.matchEnd,
+      matchedText: Array.from(match.lineText).slice(match.matchStart, match.matchEnd).join(""),
+    };
+  });
 }
 
 export interface BuildReplaceEditParams {
@@ -101,6 +130,47 @@ export function validateReplacePreconditions(
     canCommit: conflicts.length === 0,
     conflicts,
   };
+}
+
+export interface ReplaceMatchFreshnessConflict {
+  path: string;
+  reason: string;
+}
+
+/**
+ * ED-FIND-004 A2: pre-commit recheck that every match still sits on current
+ * disk text. Catches external edits (and files deleted) between search and
+ * commit without trusting the preview snapshot. Pure and unit-tested; the
+ * caller supplies current disk text per affected path.
+ */
+export function verifyReplaceMatchFreshness(
+  diskTexts: ReadonlyMap<string, string>,
+  matches: readonly ReplaceInFilesMatch[],
+): ReplaceMatchFreshnessConflict[] {
+  const conflicts: ReplaceMatchFreshnessConflict[] = [];
+  for (const match of matches) {
+    const diskText = diskTexts.get(match.filePath);
+    if (diskText === undefined) {
+      conflicts.push({
+        path: match.filePath,
+        reason: "File is no longer readable on disk since search",
+      });
+      continue;
+    }
+    const lines = diskText.split("\n");
+    const line = lines[match.startLine];
+    if (
+      line === undefined ||
+      match.startLine !== match.endLine ||
+      Array.from(line).slice(match.startCharacter, match.endCharacter).join("") !== match.matchedText
+    ) {
+      conflicts.push({
+        path: match.filePath,
+        reason: `Match "${match.matchedText}" changed since search (line ${match.startLine + 1})`,
+      });
+    }
+  }
+  return conflicts;
 }
 
 export interface ReplaceInFilesPlan {

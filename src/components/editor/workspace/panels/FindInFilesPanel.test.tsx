@@ -4,6 +4,7 @@ import type {
   WorkspaceSearchEvent,
   WorkspaceSearchMatch,
 } from "../../../../lib/editor/workspaceSearch";
+import type { LspWorkspaceEdit } from "../../../../lib/editor/lsp";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
 import {
   DEFAULT_MATCHES_PER_FILE,
@@ -225,10 +226,11 @@ describe("FindInFilesPanel", () => {
     // Two matches in a.ts are hidden; b.ts remains.
     expect(screen.getAllByTestId("code-workspace-find-match-hit")).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Replace all matches" }));
-    expect(window.confirm).toHaveBeenCalled();
-    // Replace uses the full result set, not just currently visible rows.
-    expect(onReplaceMatches).toHaveBeenCalledWith(matches, "");
+    // ED-FIND-004: replace opens a structured preview instead of a bare
+    // confirm; the full result set (not just visible rows) is committed.
+    fireEvent.click(screen.getByRole("button", { name: "Preview replace all matches" }));
+    expect(await screen.findByTestId("code-workspace-replace-preview")).toBeInTheDocument();
+    expect(screen.getByTestId("code-workspace-replace-counts")).toHaveTextContent("3 of 3");
   });
 
   it("applies editor-style syntax classes on result lines once the language loads", async () => {
@@ -470,5 +472,93 @@ describe("ED-FIND-003: scope planning in FindInFilesPanel", () => {
     expect(screen.queryByText(/late needle/)).not.toBeInTheDocument();
     expect(await screen.findByTestId("code-workspace-find-error")).toBeInTheDocument();
     expect(screen.getByTestId("code-workspace-find-error")).toHaveTextContent(/G2 -> G3/);
+  });
+});
+
+describe("ED-FIND-004: replace preview commit flow in FindInFilesPanel", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  async function openPreview(
+    onReplaceMatches: (
+      matches: WorkspaceSearchMatch[],
+      replacement: string,
+      edit: LspWorkspaceEdit,
+    ) => Promise<{ ok: boolean; appliedCount?: number; fileCount?: number; message?: string }>,
+  ) {
+    render(
+      <FindInFilesPanel
+        roots={roots}
+        onOpenMatch={vi.fn()}
+        onReplaceMatches={onReplaceMatches}
+      />,
+    );
+    const emit = await runSearch();
+    const matches = [
+      searchMatch({ lineNumber: 1, lineText: "needle one", matchStart: 0, matchEnd: 6, column: 1 }),
+      searchMatch({ path: "src/b.ts", lineNumber: 3, lineText: "needle three", matchStart: 0, matchEnd: 6, column: 1 }),
+    ];
+    act(() => {
+      emit({ ...doneEvent(), kind: "batch", matches });
+      emit(doneEvent({ totalMatches: matches.length }));
+    });
+    fireEvent.change(screen.getByLabelText("Replace text"), { target: { value: "thread" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview replace all matches" }));
+    expect(await screen.findByTestId("code-workspace-replace-preview")).toBeInTheDocument();
+    return matches;
+  }
+
+  it("commits the filtered set and closes on success (A1/A3)", async () => {
+    const onReplaceMatches = vi.fn(
+      async (
+        _matches: WorkspaceSearchMatch[],
+        _replacement: string,
+        _edit: LspWorkspaceEdit,
+      ): Promise<{ ok: boolean; appliedCount?: number; fileCount?: number; message?: string }> =>
+        ({ ok: true as const, appliedCount: 1, fileCount: 1 }),
+    );
+    await openPreview(onReplaceMatches);
+
+    // Exclude the b.ts occurrence; only a.ts remains.
+    fireEvent.click(screen.getByLabelText("Include occurrence at C:/repo/app/src/b.ts:3"));
+    expect(screen.getByTestId("code-workspace-replace-counts")).toHaveTextContent("1 of 2");
+    fireEvent.click(screen.getByTestId("code-workspace-replace-commit"));
+
+    await waitFor(() => expect(onReplaceMatches).toHaveBeenCalledTimes(1));
+    const call = onReplaceMatches.mock.calls[0];
+    if (!call) throw new Error("expected onReplaceMatches to have been called");
+    const [filtered, replacement, edit] = call;
+    if (!filtered || replacement === undefined || !edit) {
+      throw new Error("expected commit arguments");
+    }
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].path).toBe("src/a.ts");
+    expect(replacement).toBe("thread");
+    expect(edit.documentEdits).toHaveLength(1);
+    await waitFor(() => expect(screen.queryByTestId("code-workspace-replace-preview")).not.toBeInTheDocument());
+  });
+
+  it("keeps the preview open and shows the blocker message on conflict (A2)", async () => {
+    const onReplaceMatches = vi.fn(
+      async () => ({ ok: false as const, message: "Replace blocked: dirty buffer" }),
+    );
+    await openPreview(onReplaceMatches);
+
+    fireEvent.click(screen.getByTestId("code-workspace-replace-commit"));
+    expect(await screen.findByTestId("code-workspace-replace-commit-error")).toBeInTheDocument();
+    expect(screen.getByTestId("code-workspace-replace-commit-error")).toHaveTextContent("dirty buffer");
+    // Zero commit: the dialog stays open for correction or cancel.
+    expect(screen.getByTestId("code-workspace-replace-preview")).toBeInTheDocument();
+    expect(onReplaceMatches).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels with zero backend effect (A2)", async () => {
+    const onReplaceMatches = vi.fn();
+    await openPreview(onReplaceMatches);
+
+    fireEvent.click(screen.getByTestId("code-workspace-replace-cancel"));
+    expect(screen.queryByTestId("code-workspace-replace-preview")).not.toBeInTheDocument();
+    expect(onReplaceMatches).not.toHaveBeenCalled();
   });
 });
