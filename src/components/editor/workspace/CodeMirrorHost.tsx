@@ -121,6 +121,7 @@ import {
   type CompletionRequestToken,
   type CompletionResolveGateRequest,
 } from "./lspCompletion";
+import type { CompletionScopeFactsState } from "./completionScopeAdapter";
 import { createDiagnosticChrome } from "./lspDiagnosticChrome";
 import {
   createLspOverlayChrome,
@@ -281,6 +282,8 @@ interface CodeMirrorHostProps {
   /** Live completion request identity (§8.16.2); null = typed unavailable. */
   getCompletionIdentity: () => CompletionRequestIdentity | null;
   onCompletionDiagnostic: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
+  /** ED-COMP-004: explicit completion that falls back for missing scope facts. */
+  onScopeFallback?: (state: CompletionScopeFactsState) => void;
   /**
    * §8.20.2 W1 single channel: the host only EMITS parameter trigger events
    * (typed signature-trigger char or an explicit nonce); the workspace-side
@@ -1671,6 +1674,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onCompleteResolve,
   getCompletionIdentity,
   onCompletionDiagnostic,
+  onScopeFallback,
   onParameterTrigger,
   onParameterInvalidate,
   onParameterEscape,
@@ -1789,6 +1793,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           triggerCharacters: () => completionTriggersRef.current,
           getDocumentRevision: () => getCompletionIdentityRef.current()?.documentRevision ?? -1,
           reportDiagnostic: (kind, detail) => onCompletionDiagnosticRef.current(kind, detail),
+          onScopeFallback: (state) => onScopeFallbackRef.current?.(state),
           onResolveGate: (request) => presentResolveGateRef.current?.(request),
           controller: completionControllerRef.current,
           getView: () => viewRef.current,
@@ -1882,6 +1887,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const onCompleteResolveRef = useRef(onCompleteResolve);
   const getCompletionIdentityRef = useRef(getCompletionIdentity);
   const onCompletionDiagnosticRef = useRef(onCompletionDiagnostic);
+  const onScopeFallbackRef = useRef(onScopeFallback);
   const onParameterTriggerRef = useRef(onParameterTrigger);
   const onParameterInvalidateRef = useRef(onParameterInvalidate);
   const onParameterEscapeRef = useRef(onParameterEscape);
@@ -1923,6 +1929,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onCompleteResolveRef.current = onCompleteResolve;
   getCompletionIdentityRef.current = getCompletionIdentity;
   onCompletionDiagnosticRef.current = onCompletionDiagnostic;
+  onScopeFallbackRef.current = onScopeFallback;
   onParameterTriggerRef.current = onParameterTrigger;
   onParameterInvalidateRef.current = onParameterInvalidate;
   onParameterEscapeRef.current = onParameterEscape;

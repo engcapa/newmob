@@ -17,6 +17,7 @@ import type {
 } from "../../../lib/editor/lsp";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import { isInsideStringOrComment } from "./syntaxContext";
+import type { CompletionScopeFactsState } from "./completionScopeAdapter";
 import {
   type BasicCompletionPolicyV2,
   type CompletionCaseMatching,
@@ -40,6 +41,14 @@ export interface CompletionRequestToken {
   documentRevision: number;
   lspSessionGeneration: number;
   requestId: string;
+  /**
+   * ED-COMP-004: the effective project scope recorded for this request.
+   * Resolved from the ready same-workspace facts snapshot at request build;
+   * a scope-facts-missing state (with its reason and generation) is recorded
+   * explicitly instead of guessing module/project scope. Absent only on
+   * document-scope requests that never consult facts.
+   */
+  projectScope?: CompletionScopeFactsState;
 }
 
 /** Live identity captured at request start; requestId is minted per request. */
@@ -75,6 +84,13 @@ export interface LspCompletionHooks {
   /** Observable acceptance diagnostics for status/QA surfaces. */
   reportDiagnostic: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
   /**
+   * ED-COMP-004: fired when an explicitly invoked completion resolves to
+   * scope-facts-missing, so the UI can name the missing prerequisite once
+   * instead of silently completing document-scoped. Typing/trigger popups
+   * never fire this: only deliberate invocations explain scope fallback.
+   */
+  onScopeFallback?: (state: CompletionScopeFactsState, reason: CompletionInvocationReason) => void;
+  /**
    * Resolve gate surface (§8.19.4). When wired, a resolve timeout/failure
    * presents Retry / Insert-without-import instead of inserting anything.
    * Hosts without a gate surface get the block-only behaviour: nothing is
@@ -97,6 +113,13 @@ export interface FixtureCompletionHooks {
   triggerCharacters?: () => string[];
   getDocumentRevision?: () => number;
   reportDiagnostic?: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
+  /**
+   * ED-COMP-004: effective project scope attached to the synthetic identity
+   * (ready scope or explicit scope-facts-missing). Absent means document
+   * scope without facts consultation.
+   */
+  projectScope?: CompletionScopeFactsState;
+  onScopeFallback?: (state: CompletionScopeFactsState, reason: CompletionInvocationReason) => void;
 }
 
 let completionRequestIdCounter = 0;
@@ -203,6 +226,12 @@ export interface RecordedCompletionInvocation extends CompletionInvocationEviden
   providerGeneration: number;
   reason: CompletionInvocationReason;
   at: number;
+  /**
+   * ED-COMP-004: the effective project scope recorded for this request
+   * (ready scope or explicit scope-facts-missing). Null when the request
+   * never consulted facts (document scope).
+   */
+  projectScope?: CompletionScopeFactsState | null;
 }
 
 interface LastBasicInvocation {
@@ -1901,6 +1930,13 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     });
     const requestedScope: CompletionInvocationRequest["requestedScope"] =
       invocationOrdinal >= 2 ? "expanded" : "default";
+    // ED-COMP-004: an explicit invocation that falls back for missing scope
+    // facts names its prerequisite once via the hook; typing/trigger popups
+    // stay silent. Fires before fetch so the reason is visible even when the
+    // provider itself is unavailable.
+    if (reason === "explicit" && token.projectScope?.status === "scope-facts-missing") {
+      hooks.onScopeFallback?.(token.projectScope, reason);
+    }
     let result: LspCompletionResult | null = null;
     try {
       result = await hooks.fetch(
@@ -1949,6 +1985,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         requestedScope,
         hooks.advertisesScopeExpansion?.() ?? false,
       ),
+      projectScope: token.projectScope ?? null,
       itemCount: result.items.length,
       isIncomplete: result.isIncomplete === true,
       at: Date.now(),
@@ -2191,6 +2228,7 @@ export function createFixtureCompletionSource(hooks: FixtureCompletionHooks): Co
     languageId: "fixture",
     documentRevision: 0,
     lspSessionGeneration: 0,
+    ...(hooks.projectScope !== undefined ? { projectScope: hooks.projectScope } : {}),
   };
   return createLspCompletionSource({
     identity: () => ({
@@ -2204,5 +2242,6 @@ export function createFixtureCompletionSource(hooks: FixtureCompletionHooks): Co
     triggerCharacters: () => hooks.triggerCharacters?.() ?? [],
     getDocumentRevision: hooks.getDocumentRevision ?? (() => identity.documentRevision),
     reportDiagnostic: hooks.reportDiagnostic ?? (() => {}),
+    onScopeFallback: hooks.onScopeFallback,
   });
 }

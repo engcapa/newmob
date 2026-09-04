@@ -55,6 +55,7 @@ import {
   type CompletionRequestIdentity,
   type CompletionRequestToken,
 } from "./lspCompletion";
+import type { CompletionScopeFactsState } from "./completionScopeAdapter";
 import type { QuickDocContent } from "./referenceDocumentation";
 import type { OpenFileViewModel } from "./editorGroupTypes";
 import { useContextMenu } from "../../ContextMenu";
@@ -221,7 +222,8 @@ interface EditorGroupProps {
     kind: CompletionAcceptanceDiagnostic,
     detail?: string,
   ) => void;
-  completionController?: LspCompletionController;
+  /** ED-COMP-004: explicit completion that falls back for missing scope facts. */
+  onScopeFallback?: (state: CompletionScopeFactsState) => void;  completionController?: LspCompletionController;
   /** §8.20.2 W1 single channel: file-scoped trigger event into the session. */
   onParameterTrigger?: (
     file: OpenFileViewModel,
@@ -346,6 +348,7 @@ export function EditorGroup({
   onCompleteResolve,
   onCompletionIdentity,
   onCompletionDiagnostic,
+  onScopeFallback,
   completionController,
   onParameterTrigger,
   onParameterInvalidate,
@@ -851,6 +854,7 @@ export function EditorGroup({
                         onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
                         getCompletionIdentity={() => onCompletionIdentity(activeFile)}
                         onCompletionDiagnostic={onCompletionDiagnostic}
+                        onScopeFallback={onScopeFallback}
                         onParameterTrigger={(event) => onParameterTrigger?.(activeFile, event)}
                         onParameterInvalidate={onParameterInvalidate}
                         onParameterEscape={onParameterEscape}
@@ -932,6 +936,7 @@ export function EditorGroup({
                       onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
                       getCompletionIdentity={() => onCompletionIdentity(activeFile)}
                       onCompletionDiagnostic={onCompletionDiagnostic}
+                      onScopeFallback={onScopeFallback}
                       onParameterTrigger={(event) => onParameterTrigger?.(activeFile, event)}
                       onParameterInvalidate={onParameterInvalidate}
                       onParameterEscape={onParameterEscape}

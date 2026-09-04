@@ -183,6 +183,10 @@ import type {
   CompletionRequestToken,
 } from "./workspace/lspCompletion";
 import {
+  resolveCompletionScopeFacts,
+  type CompletionScopeFactsState,
+} from "./workspace/completionScopeAdapter";
+import {
   buildFinalBytesReceipt,
   buildPreparedSave,
   classifySaveWriteback,
@@ -12927,17 +12931,24 @@ export function CodeWorkspaceTab({
       if (!live) return null;
       const descriptor = lspDescriptorForFile(live);
       if (!descriptor) return null;
+      const absPath = absolutePathForOpenFile(live) ?? live.path ?? file.path;
+      // ED-COMP-004: every request records its effective project scope from
+      // the ready same-workspace snapshot; unready/stale/degraded/cross-root
+      // facts resolve to an explicit scope-facts-missing state (document
+      // fallback) instead of guessed module/project scope.
+      const projectScope = resolveCompletionScopeFacts(projectFactsRoot, absPath, "module");
       return {
         workspaceId: workspaceInstanceId,
         fileKey: live.key,
-        filePath: absolutePathForOpenFile(live) ?? live.path ?? file.path,
+        filePath: absPath,
         uri: descriptor.documentUri ?? descriptor.filePath,
         languageId: descriptor.languageId ?? live.languagePath,
         documentRevision: live.documentRevision ?? 0,
         lspSessionGeneration: lspSessionGeneration(),
+        projectScope,
       };
     },
-    [absolutePathForOpenFile, lspDescriptorForFile, lspSessionGeneration, workspaceInstanceId],
+    [absolutePathForOpenFile, lspDescriptorForFile, lspSessionGeneration, projectFactsRoot, workspaceInstanceId],
   );
 
   const isCompletionTokenCurrent = useCallback(
@@ -12972,6 +12983,20 @@ export function CodeWorkspaceTab({
       setStatusMessage(`Completion import unavailable${detail ? ` (${detail})` : ""}`);
     }
   }, [setStatusMessage]);
+
+  // ED-COMP-004 A3: an explicitly invoked completion that falls back for
+  // missing scope facts names its prerequisite once. Silent unless the
+  // workspace actually has a project story (a discovered build system or a
+  // non-idle facts entry); plain loose-file editing stays quiet.
+  const reportCompletionScopeFallback = useCallback((
+    state: CompletionScopeFactsState,
+  ) => {
+    if (state.status !== "scope-facts-missing") return;
+    const discoveredCount = projectDescriptorDiscovery.discovery?.descriptors?.length ?? 0;
+    const hasProjectStory = discoveredCount > 0 || projectFacts.status !== "idle";
+    if (!hasProjectStory) return;
+    setStatusMessage(`Completion project scope unavailable (${state.reason}); using document scope`);
+  }, [projectDescriptorDiscovery.discovery, projectFacts.status, setStatusMessage]);
 
   const getLspCompletions = useCallback(
     async (
@@ -16206,6 +16231,7 @@ export function CodeWorkspaceTab({
         onComplete={getLspCompletions}
         onCompletionIdentity={completionIdentityForFile}
         onCompletionDiagnostic={reportCompletionDiagnostic}
+        onScopeFallback={reportCompletionScopeFallback}
         onCompleteResolve={resolveLspCompletion}
         onSelectionChange={(selection) => {
           if (groupId === activeEditorGroupId) {

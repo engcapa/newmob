@@ -181,4 +181,19 @@ describe("ED-COMP-004: completionScopeAdapter ready project scope facts", () => 
       expect(ws2Res.generation).toBe(1);
     }
   });
+
+  it("returns scope-facts-missing for cross-workspace files (ED-COMP-004 A2)", () => {
+    useProjectFactsStore.setState({
+      workspaces: {
+        "/ws1": readyEntryWs1,
+      },
+    });
+
+    const res = resolveCompletionScopeFacts("/ws1", "/ws2/app/src/main/kotlin/App.kt", "module");
+    expect(res.status).toBe("scope-facts-missing");
+    if (res.status === "scope-facts-missing") {
+      expect(res.fallbackScope).toBe("document");
+      expect(res.reason).toContain("/ws2/app/src/main/kotlin/App.kt");
+    }
+  });
 });

@@ -13,6 +13,7 @@ import {
   cancelLspSnippetSession,
   lspSnippetSessionInvalidator,
   parseLspSnippet,
+  recentCompletionInvocations,
   recentCompletionTelemetry,
   resetCompletionTelemetry,
   boostFromSortText,
@@ -1655,5 +1656,86 @@ describe("§8.21.3 V2-E BasicCompletionPolicyV2", () => {
         "testingLongFunction",
       ]);
     });
+  });
+});
+
+describe("ED-COMP-004: effective project scope recording", () => {
+  const readyScope = {
+    status: "ready",
+    scope: "module",
+    moduleId: "com.example:core",
+    sourceKind: "main",
+    dependencies: ["org.slf4j:slf4j-api:2.0.7"],
+    classpathFingerprint: "cp-core",
+    generation: 3,
+  } as const;
+  const missingScope = {
+    status: "scope-facts-missing",
+    requestedScope: "module",
+    reason: "Project facts not ready (state: loading)",
+    fallbackScope: "document",
+    generation: 0,
+  } as const;
+
+  it("records the effective project scope on the invocation ring (A3)", async () => {
+    resetCompletionTelemetry();
+    const fetch = vi.fn(async () => completionResult(["openFile"]));
+    const source = createFixtureCompletionSource({
+      fetch,
+      triggerCharacters: () => [],
+      projectScope: { ...readyScope, dependencies: [...readyScope.dependencies] },
+    });
+
+    await source(contextAt("op", 2, true));
+
+    const invocations = recentCompletionInvocations();
+    expect(invocations.length).toBeGreaterThanOrEqual(1);
+    const last = invocations[invocations.length - 1];
+    expect(last?.projectScope?.status).toBe("ready");
+    expect(last?.projectScope).toMatchObject({ moduleId: "com.example:core", generation: 3 });
+  });
+
+  it("fires onScopeFallback once for explicit missing-scope requests (A3)", async () => {
+    resetCompletionTelemetry();
+    const fetch = vi.fn(async () => completionResult(["openFile"]));
+    const onScopeFallback = vi.fn();
+    const source = createFixtureCompletionSource({
+      fetch,
+      triggerCharacters: () => [],
+      projectScope: { ...missingScope },
+      onScopeFallback,
+    });
+
+    await source(contextAt("op", 2, true));
+
+    expect(onScopeFallback).toHaveBeenCalledTimes(1);
+    expect(onScopeFallback).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "scope-facts-missing" }),
+      "explicit",
+    );
+  });
+
+  it("stays silent for typing popups and ready scopes (A3)", async () => {
+    resetCompletionTelemetry();
+    const fetch = vi.fn(async () => completionResult(["openFile"]));
+    const onScopeFallback = vi.fn();
+
+    const typingMissing = createFixtureCompletionSource({
+      fetch,
+      triggerCharacters: () => [],
+      projectScope: { ...missingScope },
+      onScopeFallback,
+    });
+    await typingMissing(contextAt("op", 2, false));
+    expect(onScopeFallback).not.toHaveBeenCalled();
+
+    const explicitReady = createFixtureCompletionSource({
+      fetch,
+      triggerCharacters: () => [],
+      projectScope: { ...readyScope, dependencies: [...readyScope.dependencies] },
+      onScopeFallback,
+    });
+    await explicitReady(contextAt("op", 2, true));
+    expect(onScopeFallback).not.toHaveBeenCalled();
   });
 });
