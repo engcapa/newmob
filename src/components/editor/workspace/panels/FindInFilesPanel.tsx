@@ -7,6 +7,7 @@ import {
   workspaceSearchCancel,
   workspaceSearchStart,
   type WorkspaceSearchMatch,
+  type WorkspaceSearchRoot,
 } from "../../../../lib/editor/workspaceSearch";
 import {
   highlightSearchLine,
@@ -17,6 +18,16 @@ import {
   pushWorkspaceSearchHistory,
   readWorkspaceSearchHistory,
 } from "../workspaceLayoutPersistence";
+import {
+  isFileInScopePlan,
+  planFindInFilesScope,
+  type FindInFilesScopeKind,
+  type FindInFilesScopePlan,
+} from "../findInFilesScopeModel";
+import {
+  useProjectFactsStore,
+  type WorkspaceProjectFactsEntry,
+} from "../../../../stores/projectFactsStore";
 
 interface FindInFilesPanelProps {
   roots: CodeWorkspaceRootInfo[];
@@ -173,6 +184,43 @@ export function FindInFilesPanel({
   const [summary, setSummary] = useState<SearchSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [replacing, setReplacing] = useState(false);
+  /** ED-FIND-003: selected search scope. Module scope requires ready facts. */
+  const [scopeKind, setScopeKind] = useState<FindInFilesScopeKind>("project");
+  const [scopeModuleId, setScopeModuleId] = useState("");
+  const [scopeDirectory, setScopeDirectory] = useState("");
+  const workspaceRoot = roots[0]?.path ?? "";
+  const factsEntry: WorkspaceProjectFactsEntry | null = useProjectFactsStore(
+    (state) => (workspaceRoot ? (state.workspaces[workspaceRoot] ?? null) : null),
+  );
+  const factsModules = factsEntry?.structure?.modules ?? [];
+
+  // ED-FIND-003 A1: the selected scope plan, rebuilt live so the panel can
+  // fail closed before touching the backend. startSearch consumes the same
+  // plan object the notice below renders.
+  const scopePlan: FindInFilesScopePlan = useMemo(() => {
+    const maskValue = splitGlobs(includeGlobs).join(",") || undefined;
+    const directoryInput = scopeDirectory.trim();
+    const targetDirectory = scopeKind !== "directory"
+      ? undefined
+      : !directoryInput
+        ? workspaceRoot || undefined
+        : /^(?:[a-zA-Z]:[\\/]|[/\\])/.test(directoryInput)
+          ? directoryInput
+          : workspaceRoot
+            ? `${workspaceRoot.replace(/\/+$/, "")}/${directoryInput.replace(/^\/+/, "")}`
+            : directoryInput;
+    return planFindInFilesScope(
+      {
+        kind: scopeKind,
+        workspaceRoot,
+        targetDirectory,
+        moduleId: scopeModuleId || factsModules[0]?.id,
+        fileMask: maskValue,
+        expectedGeneration: factsEntry?.generation,
+      },
+      factsEntry,
+    );
+  }, [factsEntry, factsModules, includeGlobs, scopeDirectory, scopeKind, scopeModuleId, workspaceRoot]);
   /** Per-file expand state: collapsed (default), numeric limit, or "all". */
   const [fileExpand, setFileExpand] = useState<Record<string, number | "all">>({});
   const [collapsedFiles, setCollapsedFiles] = useState<Record<string, boolean>>({});
@@ -244,13 +292,56 @@ export function FindInFilesPanel({
     setLanguagesByPath({});
     setStatus("searching");
 
+    // ED-FIND-003 A1: the scope plan is built live (scopePlan memo) so the
+    // notice below and the search consume one plan. Unresolved plans
+    // (module scope without ready facts) fail closed here with a visible
+    // reason and never reach the backend (A3).
+    const plan = scopePlan;
+    if (plan.status !== "ready") {
+      setStatus("error");
+      setError(plan.reason);
+      return;
+    }
+    // Project scope spans every workspace root; module/directory scopes use
+    // the exact plan roots. Client-side filtering below applies to
+    // facts-derived scopes only, so other roots' matches are never dropped.
+    const filterPlan = plan.kind === "project" ? null : plan;
+    const planStructure = factsEntry?.structure ?? null;
+    const searchRoots: WorkspaceSearchRoot[] = filterPlan === null
+      ? roots.map((root) => ({ id: root.id, name: root.name, path: root.path }))
+      : plan.roots.map((rootPath, index) => ({
+        id: `scope-${index}`,
+        name: rootPath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? rootPath,
+        path: rootPath,
+      }));
+
     const searchId = newWorkspaceSearchId();
     searchIdRef.current = searchId;
     try {
       const unlisten = await subscribeWorkspaceSearch(searchId, (event) => {
         if (searchIdRef.current !== searchId) return;
+        // ED-FIND-003 A4: facts-derived scopes stop publishing once the
+        // snapshot moves under a running search. Filesystem scopes are
+        // facts-independent and keep streaming.
+        if (filterPlan !== null && filterPlan.generation !== undefined) {
+          const liveGeneration = useProjectFactsStore
+            .getState()
+            .getWorkspaceFacts(workspaceRoot).generation;
+          if (liveGeneration !== filterPlan.generation) {
+            teardownSearch();
+            setStatus("error");
+            setError(
+              `Project facts changed during search (G${filterPlan.generation} -> G${liveGeneration}); run the search again`,
+            );
+            return;
+          }
+        }
         if (event.kind === "batch") {
           for (const match of event.matches) {
+            if (filterPlan !== null) {
+              const absolute = `${(match.rootPath ?? "").replace(/\/+$/, "")}/${(match.path ?? "").replace(/^\/+/, "")}`;
+              if (!isFileInScopePlan(absolute, filterPlan, planStructure)) continue;
+            }
             const key = groupKey(match);
             const group = groupsRef.current.get(key);
             if (group) group.matches.push(match);
@@ -282,7 +373,7 @@ export function FindInFilesPanel({
       unlistenRef.current = unlisten;
       await workspaceSearchStart(
         searchId,
-        roots.map((root) => ({ id: root.id, name: root.name, path: root.path })),
+        searchRoots,
         trimmed,
         {
           caseSensitive,
@@ -302,7 +393,7 @@ export function FindInFilesPanel({
         setError(err instanceof Error ? err.message : String(err));
       }
     }
-  }, [caseSensitive, excludeGlobs, includeGlobs, query, regexp, roots, teardownSearch, wholeWord, workspaceInstanceId]);
+  }, [caseSensitive, excludeGlobs, factsEntry, factsModules, includeGlobs, query, regexp, roots, scopeDirectory, scopeKind, scopeModuleId, teardownSearch, wholeWord, workspaceInstanceId, workspaceRoot]);
 
   const cancelSearch = useCallback(() => {
     const active = searchIdRef.current;
@@ -486,6 +577,51 @@ export function FindInFilesPanel({
             </button>
           ))}
         </div>
+        <label className="inline-flex h-6 items-center gap-1 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
+          <span className="sr-only">Search scope</span>
+          <select
+            aria-label="Search scope"
+            data-testid="code-workspace-find-scope-select"
+            value={scopeKind}
+            onChange={(event) => setScopeKind(event.target.value as FindInFilesScopeKind)}
+            className="h-full bg-transparent text-[11px] text-[var(--taomni-code-text)] outline-none"
+          >
+            <option value="project">Project</option>
+            <option value="module">Module</option>
+            <option value="directory">Directory</option>
+          </select>
+        </label>
+        {scopeKind === "module" && (
+          <label className="inline-flex h-6 min-w-24 items-center gap-0.5 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
+            <span className="sr-only">Search module</span>
+            <select
+              aria-label="Search module"
+              data-testid="code-workspace-find-module-select"
+              value={scopeModuleId || factsModules[0]?.id || ""}
+              onChange={(event) => setScopeModuleId(event.target.value)}
+              className="h-full min-w-0 flex-1 bg-transparent text-[11px] text-[var(--taomni-code-text)] outline-none"
+            >
+              {factsModules.length === 0 && <option value="">No modules</option>}
+              {factsModules.map((mod) => (
+                <option key={mod.id} value={mod.id}>{mod.id}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {scopeKind === "directory" && (
+          <label className="inline-flex h-6 w-40 items-center gap-0.5 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
+            <input
+              type="text"
+              value={scopeDirectory}
+              placeholder="subdir (empty = root)"
+              aria-label="Search directory"
+              data-testid="code-workspace-find-directory-input"
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-[var(--taomni-code-text)] outline-none placeholder:text-[var(--taomni-code-muted)]"
+              onChange={(event) => setScopeDirectory(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && void startSearch()}
+            />
+          </label>
+        )}
         <label className="inline-flex h-6 w-32 items-center gap-0.5 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
           <input
             type="search"
@@ -563,9 +699,17 @@ export function FindInFilesPanel({
           {summary.cancelled ? "Search cancelled — results are partial." : `Match limit reached (${MAX_TOTAL_MATCHES}) — refine the query to see everything.`}
         </div>
       )}
+      {scopePlan.status !== "ready" && (
+        <div
+          data-testid="code-workspace-find-scope-notice"
+          className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[10px] text-amber-500"
+        >
+          {scopePlan.reason} — switch scope or refresh project facts.
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-auto py-1">
         {error && (
-          <div className="mx-2 mb-1 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-500">{error}</div>
+          <div data-testid="code-workspace-find-error" className="mx-2 mb-1 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-500">{error}</div>
         )}
         {!error && groups.length === 0 && (
           <div className="px-3 py-2 text-[var(--taomni-code-muted)]">

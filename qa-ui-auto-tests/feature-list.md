@@ -5720,6 +5720,46 @@ controls:
     selector: '[data-testid="code-workspace-search-everywhere"]'
     kind: display
     optional: true       # Ctrl+Shift+N palette popup
+  - id: find-panel
+    selector: '[data-testid="code-workspace-find-in-files-panel"]'
+    kind: display
+    optional: true       # bottom-dock Search tab content (ED-FIND-003)
+  - id: find-query-input
+    selector: '[aria-label="Search query"]'
+    kind: interactive
+    optional: true       # ED-FIND-003 query field
+  - id: find-include-globs
+    selector: '[aria-label="Include globs"]'
+    kind: interactive
+    optional: true       # ED-FIND-003 include mask field
+  - id: find-scope-select
+    selector: '[data-testid="code-workspace-find-scope-select"]'
+    kind: interactive
+    optional: true       # Project / Module / Directory scope (ED-FIND-003)
+  - id: find-module-select
+    selector: '[data-testid="code-workspace-find-module-select"]'
+    kind: interactive
+    optional: true       # module picker from ready facts; ED-FIND-003
+  - id: find-directory-input
+    selector: '[data-testid="code-workspace-find-directory-input"]'
+    kind: interactive
+    optional: true       # ED-FIND-003 directory scope target
+  - id: find-scope-notice
+    selector: '[data-testid="code-workspace-find-scope-notice"]'
+    kind: display
+    optional: true       # unresolved scope reason; ED-FIND-003 fail-closed
+  - id: find-error
+    selector: '[data-testid="code-workspace-find-error"]'
+    kind: display
+    optional: true       # backend/stale search errors; ED-FIND-003
+  - id: find-file-group
+    selector: '[data-testid="code-workspace-find-file-group"]'
+    kind: display
+    optional: true       # one section per matched file
+  - id: find-match-hit
+    selector: '[data-testid="code-workspace-find-match-hit"]'
+    kind: display
+    optional: true       # highlighted hit inside a match row
   - id: bottom-dock-terminal-tab       # dock tab ids are shared with F25.1/F25.2 panels; this owns the terminal tab id
     selector: '[data-testid="code-workspace-bottom-tab-terminal"]'
     kind: interactive

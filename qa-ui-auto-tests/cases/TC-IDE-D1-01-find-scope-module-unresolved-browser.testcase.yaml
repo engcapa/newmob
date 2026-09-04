@@ -1,0 +1,37 @@
+id: TC-IDE-D1-01-find-scope-module-unresolved-browser
+title: "Find scope selector with unresolved module notice in browser"
+description: |
+  Browser gate case (ED-FIND-003 A1/A3). Opens the Find in Files panel,
+  asserts the Project/Module/Directory scope selector, switches to Module
+  scope, and proves fail-closed: the stub preview has no ready facts, so the
+  panel renders the unresolved scope notice with its reason and never starts
+  a backend search. Real search, masks, and cancel are covered by unit tests
+  and the native provider gate.
+covers: [F25.5]
+tags: [code-workspace, ide-find, find-scope, browser-gate, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - press: Control+Shift+F
+  - wait_for: '[data-testid="code-workspace-find-in-files-panel"]'
+  - assert_visible: '[data-testid="code-workspace-find-scope-select"]'
+  - select_option:
+      selector: '[data-testid="code-workspace-find-scope-select"]'
+      label: "Module"
+  - assert_visible: '[data-testid="code-workspace-find-scope-notice"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-find-scope-notice"]'
+      contains: "build backend"
+      timeout_sec: 10
+  - screenshot: tc-ide-d1-01-scope-unresolved.png
