@@ -232,3 +232,44 @@ describe("ED-USAGE-001: usages grouping, role classification & preview snippet",
     expect(snippet.highlightTo).toBe(14);
   });
 });
+
+describe("ED-USAGE-002: session records role/source/completeness evidence", () => {
+  const selection: UsagesScopeSelection = { ...DEFAULT_SCOPE_SELECTION, includeLibraries: true };
+
+  it("records declaration, workspace, and library rows with unknown roles (A1)", () => {
+    const session = new UsageQuerySession();
+    const snapshot = session.start({
+      symbol,
+      selection,
+      evidence: evidenceInput(),
+      locations: [
+        { uri: symbol.uri, path: "/repo/src/main/A.java", range: symbol.range },
+        location("/repo/src/main/B.java"),
+        {
+          uri: "jar:file:///root/.m2/lib.jar!/Lib.class",
+          path: null,
+          range: { start: { line: 1, character: 0 }, end: { line: 1, character: 3 } },
+        },
+      ],
+      workspaceRoots: ["/repo"],
+    });
+
+    const report = snapshot.usageEvidence;
+    expect(report).not.toBeNull();
+    expect(report?.totalFound).toBe(3);
+    expect(report?.roleCounts.declaration).toBe(1);
+    expect(report?.roleCounts.unknown).toBe(2);
+    expect(report?.ownershipCounts.workspace).toBe(2);
+    expect(report?.ownershipCounts.library).toBe(1);
+    expect(report?.completeness).toBe("complete");
+    expect(report?.providerGeneration).toBe(3);
+    session.dispose();
+  });
+
+  it("leaves loading snapshots without evidence (A1)", () => {
+    const session = new UsageQuerySession();
+    const loading = session.startLoading(symbol, selection);
+    expect(loading.usageEvidence).toBeNull();
+    session.dispose();
+  });
+});

@@ -84,6 +84,28 @@ export function classifyUsageOwnership(
 }
 
 /**
+ * ED-USAGE-002 A3: visible ownership/role/completeness suffix for the
+ * references status claim. Names exactly what the session proved so any
+ * downstream claim (including refactor decisions) stays bounded.
+ */
+export function formatUsageEvidenceSuffix(
+  report: ProviderUsageEvidenceReport | null,
+): string {
+  if (!report) return "";
+  const library = report.ownershipCounts.library + report.ownershipCounts.decompiled;
+  const parts = [
+    `${report.ownershipCounts.workspace} workspace`,
+    `${library} library`,
+  ];
+  if (report.ownershipCounts.external > 0) {
+    parts.push(`${report.ownershipCounts.external} external`);
+  }
+  const classified = report.totalFound - (report.roleCounts.unknown ?? 0);
+  const roles = classified > 0 ? `${classified} classified` : "roles unknown";
+  const scope = report.completeness === "complete" ? "" : `, ${report.completeness}`;
+  return ` (${parts.join(", ")}; ${roles}${scope})`;
+}
+/**
  * Builds structured provider usage evidence report without guessing missing roles.
  */
 export function buildProviderUsageEvidenceReport(

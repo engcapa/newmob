@@ -11,6 +11,11 @@ import {
   type UsageQueryV3,
   type UsageRole,
 } from "./semanticQueryEnvelope";
+import {
+  buildProviderUsageEvidenceReport,
+  type ProviderUsageCompleteness,
+  type ProviderUsageEvidenceReport,
+} from "./providerUsageEvidence";
 
 /**
  * §8.20.5 W4 shared usages session. ONE immutable snapshot backs the Find
@@ -63,6 +68,13 @@ export interface UsagesSessionSnapshot {
   pinned: boolean;
   state: "loading" | "ready" | "stale" | "failed";
   staleReason: string | null;
+  /**
+   * ED-USAGE-002 A1: provider role/source/completeness evidence recorded for
+   * the frozen result set. Roles stay unknown unless the provider classifies
+   * them; ownership resolves against the requesting workspace roots. Null
+   * for loading snapshots that hold no results yet.
+   */
+  usageEvidence: ProviderUsageEvidenceReport | null;
 }
 
 /** Identity inputs the staleness check compares against a live workspace. */
@@ -144,6 +156,18 @@ export interface StartUsagesSessionInput {
   evidence: Omit<BuildEvidenceInput, "capabilityId" | "complete" | "reason">;
   locations: readonly LspLocation[];
   isLibraryUri?: (uri: string) => boolean;
+  /**
+   * ED-USAGE-002: workspace roots the ownership classification resolves
+   * against. Omit only when unknown; file:// locations then classify as
+   * external (never guessed as workspace).
+   */
+  workspaceRoots?: readonly string[];
+  /**
+   * ED-USAGE-002: provider-side completeness of this answer. Started
+   * sessions are complete by construction (cancelled/stale answers return
+   * before start); pass through only what the fetch proved.
+   */
+  usageCompleteness?: ProviderUsageCompleteness;
 }
 
 const MAX_RECENT_SESSIONS = 10;
@@ -166,6 +190,18 @@ export class UsageQuerySession {
       evidence: input.evidence,
       results: scoped.map(toEnvelopeLocation),
     });
+    // ED-USAGE-002 A1: record role/source/completeness for the frozen set.
+    // Roles stay unknown (plain LSP classifies nothing); ownership resolves
+    // against the requesting roots; declaration is detected by symbol range.
+    const usageEvidence = buildProviderUsageEvidenceReport({
+      symbol: input.symbol,
+      locations: scoped,
+      workspaceRoots: input.workspaceRoots ?? [],
+      providerId: input.evidence.provider.id,
+      providerGeneration: input.evidence.provider.generation,
+      projectFingerprint: input.evidence.projectFingerprint,
+      completeness: input.usageCompleteness ?? "complete",
+    });
     sessionSequence += 1;
     this.current = Object.freeze({
       id: `${input.evidence.uri}:${sessionSequence}`,
@@ -176,6 +212,7 @@ export class UsageQuerySession {
       pinned: false,
       state: "ready",
       staleReason: null,
+      usageEvidence,
     });
     this.remember(this.current);
     return this.current;
@@ -219,6 +256,7 @@ export class UsageQuerySession {
       pinned: false,
       state: "loading",
       staleReason: null,
+      usageEvidence: null,
     });
     return this.current;
   }

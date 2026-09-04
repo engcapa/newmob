@@ -541,6 +541,7 @@ import {
   UsageQuerySession,
   type UsagesScopeSelection,
 } from "./workspace/usageQuerySession";
+import { formatUsageEvidenceSuffix } from "./workspace/providerUsageEvidence";
 import { UsagesScopeDialog } from "./workspace/UsagesScopeDialog";
 import { type LocationPeekState } from "./workspace/LocationPeek";
 import {
@@ -14111,6 +14112,8 @@ export function CodeWorkspaceTab({
           },
           locations,
           isLibraryUri: libraryUriClassifierForRoots(rootsRef.current, relativePathWithinRoot),
+          workspaceRoots: rootsRef.current.map((root) => root.path),
+          usageCompleteness: "complete",
         }) ?? null;
         if (referencesRequestSequenceRef.current !== requestId || !queryContext.isCurrent()) return;
         const scopedLocations = (snapshot?.envelope.results ?? []).map(({ role: _role, ...location }) => location);
@@ -14125,7 +14128,7 @@ export function CodeWorkspaceTab({
           symbolName,
           identity,
         });
-        setStatusMessage(`${scopedLocations.length} reference${scopedLocations.length === 1 ? "" : "s"} found${scopedLocations.length !== locations.length ? ` (${locations.length} unscoped)` : ""}`);
+        setStatusMessage(`${scopedLocations.length} reference${scopedLocations.length === 1 ? "" : "s"} found${scopedLocations.length !== locations.length ? ` (${locations.length} unscoped)` : ""}${formatUsageEvidenceSuffix(snapshot?.usageEvidence ?? null)}`);
       } catch (err) {
         if (
           referencesRequestSequenceRef.current !== requestId

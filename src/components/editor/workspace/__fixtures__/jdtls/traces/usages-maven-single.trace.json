@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "usages-maven-single",
+  "generatedAt": "2026-09-04T07:07:49.003Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21,
+        "version": "21.0.4"
+      }
+    },
+    "jdtls": {
+      "home": "~/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "workspace-symbol-App",
+      "file": "src/test/java/com/example/single/AppTest.java",
+      "expectDeclarationIn": "App.java",
+      "notes": "workspace symbol: declaration plus workspace usage rows expected",
+      "attempts": [
+        {
+          "ms": 6554,
+          "itemCount": 3
+        }
+      ],
+      "msTotal": 6554,
+      "itemCount": 3,
+      "satisfied": true,
+      "declarationHit": true,
+      "ownershipCounts": {
+        "workspace-or-external": 3
+      },
+      "locations": [
+        {
+          "uri": "file:///data-raw-ssd/code-src/person/taomni/src/components/editor/workspace/__fixtures__/jdtls/projects/maven-single/src/main/java/com/example/single/App.java",
+          "range": {
+            "start": {
+              "line": 5,
+              "character": 13
+            },
+            "end": {
+              "line": 5,
+              "character": 16
+            }
+          }
+        },
+        {
+          "uri": "file:///data-raw-ssd/code-src/person/taomni/src/components/editor/workspace/__fixtures__/jdtls/projects/maven-single/src/main/java/com/example/single/App.java",
+          "range": {
+            "start": {
+              "line": 46,
+              "character": 16
+            },
+            "end": {
+              "line": 46,
+              "character": 19
+            }
+          }
+        },
+        {
+          "uri": "file:///data-raw-ssd/code-src/person/taomni/src/components/editor/workspace/__fixtures__/jdtls/projects/maven-single/src/test/java/com/example/single/AppTest.java",
+          "range": {
+            "start": {
+              "line": 9,
+              "character": 26
+            },
+            "end": {
+              "line": 9,
+              "character": 29
+            }
+          }
+        }
+      ],
+      "locationsSha256": "40059940546b69cda63bb71016aa44ceec560ce2ec670fc33287a9d13a94ff57"
+    },
+    {
+      "id": "library-symbol-StringUtils",
+      "file": "src/main/java/com/example/single/App.java",
+      "expectDeclarationIn": "App.java",
+      "requireDeclaration": false,
+      "notes": "commons-lang3 FQN usage: the workspace usage row itself is the proof (JDT returns no jar declaration here)",
+      "attempts": [
+        {
+          "ms": 629,
+          "itemCount": 1
+        }
+      ],
+      "msTotal": 629,
+      "itemCount": 1,
+      "satisfied": true,
+      "declarationHit": true,
+      "ownershipCounts": {
+        "workspace-or-external": 1
+      },
+      "locations": [
+        {
+          "uri": "file:///data-raw-ssd/code-src/person/taomni/src/components/editor/workspace/__fixtures__/jdtls/projects/maven-single/src/main/java/com/example/single/App.java",
+          "range": {
+            "start": {
+              "line": 50,
+              "character": 12
+            },
+            "end": {
+              "line": 50,
+              "character": 48
+            }
+          }
+        }
+      ],
+      "locationsSha256": "66eee4ff0092883cbd1540fd0de84c12659860c29a6b6229d66dd684417cfa84"
+    }
+  ],
+  "failures": []
+}

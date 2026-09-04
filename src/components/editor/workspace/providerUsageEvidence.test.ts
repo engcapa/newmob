@@ -108,3 +108,24 @@ describe("ED-USAGE-002: providerUsageEvidence usage role, ownership, and complet
     });
   });
 });
+
+describe("ED-USAGE-002: evidence suffix for status claims", () => {
+  it("names workspace/library split with unknown roles", async () => {
+    const { formatUsageEvidenceSuffix, buildProviderUsageEvidenceReport } = await import("./providerUsageEvidence");
+    const report = buildProviderUsageEvidenceReport({
+      symbol: {
+        uri: "file:///workspace/src/A.java",
+        range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } },
+        displayName: "A",
+        providerSymbolId: null,
+      },
+      locations: [
+        { uri: "file:///workspace/src/A.java", path: "/workspace/src/A.java", range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } } },
+        { uri: "jar:file:///root/.m2/lib.jar!/L.class", path: null, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } } },
+      ],
+      workspaceRoots: ["/workspace"],
+    });
+    expect(formatUsageEvidenceSuffix(report)).toBe(" (1 workspace, 1 library; 1 classified)");
+    expect(formatUsageEvidenceSuffix(null)).toBe("");
+  });
+});
