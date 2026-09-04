@@ -5696,6 +5696,10 @@ controls:
     selector: '[data-testid="project-facts-ready-icon"]'
     kind: display
     optional: true
+  - id: lsp-status-pill
+    selector: '[data-testid="code-workspace-lsp-status-pill"]'
+    kind: display
+    optional: true       # per-file language-server state (LSP idle / Java / starting); ED-QUERY-004 native readiness signal
   - id: project-facts-untrusted-icon
     selector: '[data-testid="project-facts-untrusted-icon"]'
     kind: display

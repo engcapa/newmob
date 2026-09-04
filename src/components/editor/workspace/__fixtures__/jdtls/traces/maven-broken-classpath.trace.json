@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-broken-classpath",
-  "generatedAt": "2026-09-03T15:00:39.505Z",
+  "generatedAt": "2026-09-04T00:03:16.006Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 2256,
+          "msTotal": 2732,
           "itemCount": 0,
           "isIncomplete": false,
           "satisfied": true,
@@ -61,7 +61,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 169,
+          "msTotal": 204,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -148,7 +148,7 @@
     }
   },
   "analysisTiming": {
-    "firstCompletionSatisfiedMs": 5551
+    "firstCompletionSatisfiedMs": 6310
   },
   "diagnosticsSummary": {
     "count": 4,

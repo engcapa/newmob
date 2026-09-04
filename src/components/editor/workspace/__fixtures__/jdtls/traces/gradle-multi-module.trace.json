@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "gradle-multi-module",
-  "generatedAt": "2026-09-03T15:00:26.153Z",
+  "generatedAt": "2026-09-04T00:03:02.774Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 4858,
+          "msTotal": 4553,
           "itemCount": 1,
           "isIncomplete": false,
           "satisfied": true,
@@ -46,7 +46,7 @@
         }
       ],
       "resolve": {
-        "ms": 293,
+        "ms": 324,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport org.example.gcore.GCore;\n\n"
@@ -141,6 +141,6 @@
     }
   },
   "analysisTiming": {
-    "firstCompletionSatisfiedMs": 8254
+    "firstCompletionSatisfiedMs": 8130
   }
 }

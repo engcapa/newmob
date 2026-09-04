@@ -62,6 +62,7 @@ export function LspStatusPill({
   return (
     <span
       title={title}
+      data-testid="code-workspace-lsp-status-pill"
       data-active={status.active || undefined}
       data-error={!!state.error || (!status.active && !!status.error) || undefined}
       className="max-w-[50%] shrink-0 inline-flex min-w-0 items-center gap-1 rounded border border-[var(--taomni-code-border)] px-1.5 py-0.5 text-[11px] font-medium bg-[var(--taomni-code-bg)] text-[var(--taomni-code-text)] data-[active=true]:border-[var(--taomni-selected-border)] data-[active=true]:bg-[var(--taomni-selected)] data-[active=true]:font-semibold data-[active=true]:text-[var(--taomni-accent)] data-[error=true]:border-amber-500/50 data-[error=true]:text-amber-700 dark:data-[error=true]:text-amber-400"
