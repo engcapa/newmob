@@ -2,6 +2,7 @@ pub mod agent;
 pub mod ai;
 mod appearance;
 mod asr;
+pub mod backup;
 mod chat;
 mod config;
 mod dap;
@@ -93,6 +94,7 @@ pub fn run() {
             // Runs before the app-data dir is created so the directory rename
             // targets a non-existent destination on every platform.
             migrate::run(&app_data);
+            backup::restore::apply_pending_restore(&app_data);
 
             std::fs::create_dir_all(&app_data).ok();
 
@@ -920,6 +922,14 @@ pub fn run() {
             notes::commands::notes_set_prefs,
             notes::commands::notes_list_alerts,
             notes::commands::notes_ack_alert,
+            backup::backup_create,
+            backup::backup_inspect,
+            backup::backup_stage_restore,
+            backup::backup_get_policy,
+            backup::backup_set_policy,
+            backup::backup_list_history,
+            backup::backup_delete_item,
+            backup::backup_get_default_dir,
             exit_app,
         ])
         .build(tauri::generate_context!())

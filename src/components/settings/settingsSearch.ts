@@ -141,6 +141,14 @@ export const SETTINGS_SEARCH_ENTRIES: SettingsSearchEntry[] = [
     terms: ["vault", "password", "secret", "master password", "credentials", "credential vault", "encryption", "unlock", "startup unlock", "on demand unlock", "密钥库", "保险库", "密码", "凭据", "主密码", "加密", "解锁", "启动解锁", "按需解锁"],
   },
   {
+    id: "backup",
+    titleKeys: ["backupSettings.sectionTitle"],
+    terms: [
+      "backup", "restore", "database", "export", "import", "taobak", "snapshot",
+      "备份", "恢复", "还原", "数据库备份", "导出", "导入", "快照", "本地数据",
+    ],
+  },
+  {
     id: "app-proxy",
     titleKeys: ["settings.appProxyTitle"],
     terms: ["proxy", "socks", "socks5", "http proxy", "network", "vpn", "outbound", "代理", "网络", "出站"],
@@ -256,7 +264,7 @@ export const SETTINGS_GROUPS: SettingsGroupDef[] = [
   {
     id: "security",
     titleKey: "settings.groupSecurity",
-    entryIds: ["vault"],
+    entryIds: ["vault", "backup"],
   },
   {
     id: "network",

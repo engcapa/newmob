@@ -216,3 +216,37 @@ fn min_password_length_enforced() {
     let err = v.init("short").unwrap_err();
     assert!(err.contains("at least 8"));
 }
+
+#[test]
+fn test_verify_master_password_lifecycle() {
+    let (_d, v) = fresh_vault();
+    // 1. When vault is uninitialized, verify succeeds without password
+    assert!(!v.is_initialized().unwrap());
+    assert!(v.verify_master_password(None).is_ok());
+    assert!(v.verify_master_password(Some("any")).is_ok());
+
+    // 2. Initialize vault
+    v.init(PW).unwrap();
+    assert!(v.is_initialized().unwrap());
+
+    // 3. Unauthenticated / empty password fails with ERR_VAULT_PASSWORD_REQUIRED
+    assert_eq!(
+        v.verify_master_password(None).unwrap_err(),
+        ERR_VAULT_PASSWORD_REQUIRED
+    );
+    assert_eq!(
+        v.verify_master_password(Some("   ")).unwrap_err(),
+        ERR_VAULT_PASSWORD_REQUIRED
+    );
+
+    // 4. Bad password fails with ERR_VAULT_BAD_PASSWORD
+    assert_eq!(
+        v.verify_master_password(Some("wrong-password"))
+            .unwrap_err(),
+        ERR_VAULT_BAD_PASSWORD
+    );
+
+    // 5. Correct password succeeds
+    assert!(v.verify_master_password(Some(PW)).is_ok());
+    assert_eq!(v.status().unwrap().state, VaultStateKind::Unlocked);
+}

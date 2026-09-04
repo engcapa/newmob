@@ -17,6 +17,7 @@ pub const VAULT_REF_PREFIX: &str = "vault:";
 pub const ERR_VAULT_LOCKED: &str = "VAULT_LOCKED";
 pub const ERR_VAULT_EMPTY: &str = "VAULT_EMPTY";
 pub const ERR_VAULT_BAD_PASSWORD: &str = "VAULT_BAD_PASSWORD";
+pub const ERR_VAULT_PASSWORD_REQUIRED: &str = "VAULT_PASSWORD_REQUIRED";
 pub const ERR_VAULT_NOT_FOUND: &str = "VAULT_NOT_FOUND";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +139,76 @@ impl Vault {
             Self::now(),
         )
         .map_err(|e| e.to_string())?;
+
+        inner.root_key = Some(root_key);
+        let _ = db::touch_unlocked(&inner.conn, Self::now());
+        Ok(())
+    }
+
+    /// Perform a consistent SQLite online hot-backup of the vault database.
+    pub fn backup_to(&self, dest_path: &std::path::Path) -> Result<(), String> {
+        let inner = self.inner.lock().map_err(|e| e.to_string())?;
+        if dest_path.exists() {
+            let _ = std::fs::remove_file(dest_path);
+        }
+        let dest_str = dest_path.to_str().ok_or("invalid destination path")?;
+        inner
+            .conn
+            .execute("VACUUM INTO ?1", rusqlite::params![dest_str])
+            .map_err(|e| format!("vault backup failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Check if the vault has been initialized (i.e. master password has been set).
+    pub fn is_initialized(&self) -> Result<bool, String> {
+        let inner = self.inner.lock().map_err(|e| e.to_string())?;
+        let meta = db::get_meta(&inner.conn).map_err(|e| e.to_string())?;
+        Ok(meta.is_some())
+    }
+
+    /// Verify whether the provided master password is valid.
+    /// - If vault is uninitialized (empty), returns `Ok(())` without checking.
+    /// - If vault is initialized, requires a non-empty password and verifies it against the argon2id verifier.
+    /// - On success, keeps the vault unlocked.
+    pub fn verify_master_password(&self, password: Option<&str>) -> Result<(), String> {
+        let mut inner = self.inner.lock().map_err(|e| e.to_string())?;
+        let meta = match db::get_meta(&inner.conn).map_err(|e| e.to_string())? {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+
+        let pw = password.unwrap_or_default().trim();
+        if pw.is_empty() {
+            return Err(ERR_VAULT_PASSWORD_REQUIRED.to_string());
+        }
+
+        if meta.kdf != "argon2id" {
+            return Err(format!("unsupported kdf: {}", meta.kdf));
+        }
+        let params: StoredKdfParams =
+            serde_json::from_str(&meta.kdf_params).map_err(|e| e.to_string())?;
+
+        let root_key = crypto::derive_root_key(
+            pw,
+            &meta.kdf_salt,
+            params.m_cost,
+            params.t_cost,
+            params.p_cost,
+        )
+        .map_err(|e| e.to_string())?;
+
+        let nonce: [u8; crypto::NONCE_LEN] = meta
+            .verifier_nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| "verifier nonce shape".to_string())?;
+
+        let plaintext = crypto::aead_decrypt(&root_key, &nonce, &meta.verifier_ciphertext)
+            .map_err(|_| ERR_VAULT_BAD_PASSWORD.to_string())?;
+
+        if plaintext.as_slice() != crypto::VERIFIER_PLAINTEXT {
+            return Err(ERR_VAULT_BAD_PASSWORD.to_string());
+        }
 
         inner.root_key = Some(root_key);
         let _ = db::touch_unlocked(&inner.conn, Self::now());
