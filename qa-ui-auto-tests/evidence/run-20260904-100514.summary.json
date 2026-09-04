@@ -1,0 +1,39 @@
+{
+  "started_at": "2026-09-04T10:05:14+08:00",
+  "finished_at": "2026-09-04T10:05:44+08:00",
+  "duration_sec": 30.708197832107544,
+  "mode": "native",
+  "workers": 1,
+  "totals": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "cases": [
+    {
+      "id": "TC-IDE-C2-03-completion-choice-undo-native",
+      "title": "Basic completion choice and one undo over real JDT LS in packaged app",
+      "status": "passed",
+      "tags": [
+        "code-workspace",
+        "ide-c2",
+        "completion",
+        "native-gate",
+        "p1"
+      ],
+      "covers": [
+        "F25.5"
+      ],
+      "modes": [
+        "native"
+      ],
+      "duration_sec": 30.45183277130127,
+      "step_count": 20,
+      "worker_id": 0,
+      "failure": null,
+      "fixtures_skipped": null
+    }
+  ],
+  "schema": "qa-ui-auto.summary.v1"
+}

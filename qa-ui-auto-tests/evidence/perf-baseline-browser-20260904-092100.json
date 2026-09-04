@@ -1,0 +1,41 @@
+{
+ "kind": "perf-baseline",
+ "mode": "browser-renderer-proxy",
+ "collected_at": "2026-09-04T09:20:35+0800",
+ "base_url": "http://localhost:5001",
+ "normal_input_key_to_paint": {
+  "n": 205,
+  "p50_ms": 22.5,
+  "p95_ms": 171.5,
+  "max_ms": 241.5,
+  "dropped_outliers_ge_1000ms": 0,
+  "target_p95_ms": 50
+ },
+ "local_action_toggle_comment": {
+  "n": 40,
+  "p50_ms": 6.2,
+  "p95_ms": 15.4,
+  "max_ms": 17.2,
+  "dropped_outliers_ge_1000ms": 0,
+  "target_p95_ms": 100
+ },
+ "long_tasks": {
+  "count": 69,
+  "total_ms": 9577
+ },
+ "heap_used_mb": 125,
+ "not_measured_here": {
+  "completion_debounce_ipc_provider_paint": "provider-unverified",
+  "completion_cancel_rate": "provider-unverified",
+  "switcher_modifier_release_flow": "platform-unverified (needs real modifier hold)",
+  "buffer_1mib": "environment-blocked (browser-VFS seed)",
+  "candidates_10k": "environment-blocked",
+  "workspace_10k_files": "environment-blocked",
+  "splits_3plus": "environment-blocked (harness scope)",
+  "native_webkitgtk_latency": "platform-unverified (run per-platform runbooks)"
+ },
+ "targets_verdict": [
+  "key-to-paint OVER 50ms target",
+  "local action WITHIN 100ms target"
+ ]
+}

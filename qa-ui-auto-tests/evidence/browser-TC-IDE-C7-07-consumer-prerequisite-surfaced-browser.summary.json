@@ -1,0 +1,41 @@
+{
+  "started_at": "2026-09-04T10:06:38+08:00",
+  "finished_at": "2026-09-04T10:06:43+08:00",
+  "duration_sec": 4.852416753768921,
+  "mode": "browser",
+  "workers": 1,
+  "totals": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "cases": [
+    {
+      "id": "TC-IDE-C7-07-consumer-prerequisite-surfaced-browser",
+      "title": "Consumer prerequisite identified on badge in browser",
+      "tags": [
+        "code-workspace",
+        "ide-c7",
+        "project-structure",
+        "consumer-prerequisite",
+        "browser-gate",
+        "p1"
+      ],
+      "covers": [
+        "F25.5"
+      ],
+      "modes": [
+        "browser"
+      ],
+      "status": "passed",
+      "duration_sec": 4.852244138717651,
+      "step_count": 15,
+      "worker_id": 0,
+      "failure": null,
+      "fixtures_skipped": null,
+      "skipped_reason": null
+    }
+  ],
+  "schema": "qa-ui-auto.summary.v1"
+}

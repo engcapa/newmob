@@ -24,16 +24,26 @@ export interface CapabilityMatrixRecord {
   capabilityId: string;
   name: string;
   platform: "linux" | "macos" | "windows";
-  executionMode: "packaged" | "provider-fixture" | "blocked-external";
+  executionMode: "packaged" | "provider-fixture" | "blocked-external" | "browser-proxy";
   expectedBehavior: string;
   observedBehavior: string;
   effectReceipts: readonly string[];
   undoVerified: boolean;
   a11y: CapabilityA11yStatus;
   perf: CapabilityPerfMetrics;
-  ideaParityDelta: "exact-match" | "acceptable-delta" | "divergent";
+  ideaParityDelta: "exact-match" | "acceptable-delta" | "divergent" | "uncompared";
   status: "PASS" | "FAIL" | "BLOCKED";
   blockedReason?: string | null;
+  /**
+   * ED-QA-003 contract: real matrix input comes only from verified runner
+   * receipts/artifacts. Unit-test fixtures must label themselves
+   * synthetic-fixture; the builder marks generated rows runner-artifact.
+   * The auditor ignores origin (validator logic is origin-blind); the label
+   * exists so a synthetic PASS can never be mistaken for runner evidence.
+   */
+  origin?: "synthetic-fixture" | "runner-artifact";
+  /** ED-QA-003: where the perf numbers were actually measured. */
+  perfOrigin?: string | null;
 }
 
 export interface MatrixAuditSummary {

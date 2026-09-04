@@ -25,6 +25,7 @@ describe("ED-QA-003: capabilityMatrixAudit Linux packaged and cross-platform mat
     perf: computePerfMetrics([20, 22, 25, 24, 30]),
     ideaParityDelta: "exact-match",
     status: "PASS",
+    origin: "synthetic-fixture",
   };
 
   const blockedWindowsRecord: CapabilityMatrixRecord = {
@@ -47,6 +48,7 @@ describe("ED-QA-003: capabilityMatrixAudit Linux packaged and cross-platform mat
     ideaParityDelta: "acceptable-delta",
     status: "BLOCKED",
     blockedReason: "Windows host environment unavailable in CI matrix",
+    origin: "synthetic-fixture",
   };
 
   const blockedMacosRecord: CapabilityMatrixRecord = {
@@ -69,6 +71,7 @@ describe("ED-QA-003: capabilityMatrixAudit Linux packaged and cross-platform mat
     ideaParityDelta: "acceptable-delta",
     status: "BLOCKED",
     blockedReason: "macOS host environment unavailable in CI matrix",
+    origin: "synthetic-fixture",
   };
 
   it("audits compliant matrix where Linux passes and Windows/macOS are independently blocked", () => {
@@ -105,5 +108,37 @@ describe("ED-QA-003: capabilityMatrixAudit Linux packaged and cross-platform mat
     expect(summary.compliant).toBe(false);
     expect(summary.p95Violations).toHaveLength(1);
     expect(summary.p95Violations[0].p95Ms).toBeGreaterThan(100);
+  });
+});
+
+describe("ED-QA-003: runner-artifact provenance labeling", () => {
+  it("keeps uncompared IDEA deltas and browser-proxy modes neutral (no violation)", () => {
+    const row = {
+      capabilityId: "query-definition",
+      name: "Definition reveal",
+      platform: "linux",
+      executionMode: "browser-proxy",
+      expectedBehavior: "typed unavailable fallback",
+      observedBehavior: "References dock fallback observed in stub preview",
+      effectReceipts: ["browser-TC-IDE-C6-02.summary.json"],
+      undoVerified: false,
+      a11y: {
+        keyboardFocus: true,
+        nameRoleState: true,
+        zoom200Percent: false,
+        screenReaderAnnouncements: false,
+        imeComposition: false,
+      },
+      perf: computePerfMetrics([]),
+      ideaParityDelta: "uncompared",
+      status: "PASS",
+      origin: "runner-artifact",
+      perfOrigin: null,
+    } as const;
+
+    const summary = auditCapabilityMatrix([row]);
+    expect(summary.compliant).toBe(true);
+    expect(summary.linuxPassedCount).toBe(1);
+    expect(summary.extrapolationViolations).toEqual([]);
   });
 });

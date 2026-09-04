@@ -1,0 +1,757 @@
+{
+ "schema": "taomni.linux-matrix.v1",
+ "generated_at": "2026-09-04T02:23:50.642350+00:00",
+ "provider_traces_satisfied": true,
+ "gaps": [],
+ "records": [
+  {
+   "capabilityId": "query.definition",
+   "name": "Definition reveal + history",
+   "platform": "linux",
+   "executionMode": "packaged",
+   "expectedBehavior": "F12 cross-file reveal App.java + nav-back in packaged app",
+   "observedBehavior": "TC-IDE-C6-05-query-definition-reveal-history-native passed in 24.9s (21 steps, native)",
+   "effectReceipts": [
+    "run-20260904-100424.summary.json",
+    "browser-TC-IDE-C6-02.summary.json"
+   ],
+   "undoVerified": true,
+   "a11y": {
+    "keyboardFocus": true,
+    "nameRoleState": true,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "project.maven-ingest",
+   "name": "Maven tooling ingestion",
+   "platform": "linux",
+   "executionMode": "packaged",
+   "expectedBehavior": "badge Ready + Maven Discovered + tree root in packaged app",
+   "observedBehavior": "TC-IDE-C7-04-maven-tooling-ingestion-native passed in 6.0s (14 steps, native)",
+   "effectReceipts": [
+    "run-20260904-100327.summary.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "project.gradle-ingest",
+   "name": "Gradle tooling ingestion",
+   "platform": "linux",
+   "executionMode": "packaged",
+   "expectedBehavior": "badge Ready + Gradle Discovered + tree root in packaged app",
+   "observedBehavior": "TC-IDE-C7-05-gradle-tooling-ingestion-native passed in 5.8s (14 steps, native)",
+   "effectReceipts": [
+    "run-20260904-100354.summary.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "completion.choice-undo",
+   "name": "Completion choice + one undo",
+   "platform": "linux",
+   "executionMode": "packaged",
+   "expectedBehavior": "String accepted, one undo restored Stri on real JDT LS",
+   "observedBehavior": "TC-IDE-C2-03-completion-choice-undo-native passed in 30.5s (20 steps, native)",
+   "effectReceipts": [
+    "run-20260904-100514.summary.json"
+   ],
+   "undoVerified": true,
+   "a11y": {
+    "keyboardFocus": true,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "reformat.markers",
+   "name": "Reformat markers/exclusions",
+   "platform": "linux",
+   "executionMode": "browser-proxy",
+   "expectedBehavior": "typed unavailable with marker text byte-identical in stub preview",
+   "observedBehavior": "TC-IDE-C8-03-reformat-unavailable-zero-commit-browser passed in 6.2s (19 steps, browser)",
+   "effectReceipts": [
+    "browser-TC-IDE-C8-03-reformat-unavailable-zero-commit-browser.summary.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": true,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "exact-match",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "facts.lifecycle",
+   "name": "Facts cache + refresh",
+   "platform": "linux",
+   "executionMode": "browser-proxy",
+   "expectedBehavior": "Facts Failed badge + explicit refresh without crash in stub preview",
+   "observedBehavior": "TC-IDE-C7-06-project-facts-failed-refresh-browser passed in 4.9s (16 steps, browser)",
+   "effectReceipts": [
+    "browser-TC-IDE-C7-06-project-facts-failed-refresh-browser.summary.json",
+    "browser-TC-IDE-C7-07-consumer-prerequisite-surfaced-browser.summary.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "completion.scope-fallback",
+   "name": "Completion scope fallback",
+   "platform": "linux",
+   "executionMode": "browser-proxy",
+   "expectedBehavior": "prerequisite named in status on explicit invocation",
+   "observedBehavior": "TC-IDE-C2-02-completion-scope-fallback-browser passed in 6.1s (17 steps, browser)",
+   "effectReceipts": [
+    "browser-TC-IDE-C2-02-completion-scope-fallback-browser.summary.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": true,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "editor-input.key-to-paint",
+   "name": "Editor key-to-paint latency",
+   "platform": "linux",
+   "executionMode": "browser-proxy",
+   "expectedBehavior": "key-to-paint p95 <= 50ms",
+   "observedBehavior": "browser-renderer proxy (Chromium, excludes WebKitGTK): n=205 p50=22.5ms p95=171.5ms max=241.5ms -> OVER target",
+   "effectReceipts": [
+    "perf-baseline-browser-20260904-092100.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": true,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "FAIL",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": "browser-renderer-proxy (Chromium keydown->rAF; excludes OS/compositor/WebKitGTK)"
+  },
+  {
+   "capabilityId": "editor-input.local-action",
+   "name": "Local action latency",
+   "platform": "linux",
+   "executionMode": "browser-proxy",
+   "expectedBehavior": "local action p95 <= 100ms",
+   "observedBehavior": "n=40 p50=6.2ms p95=15.4ms -> WITHIN target",
+   "effectReceipts": [
+    "perf-baseline-browser-20260904-092100.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": true,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": "browser-renderer-proxy (Chromium keydown->rAF; excludes OS/compositor/WebKitGTK)"
+  },
+  {
+   "capabilityId": "a11y.shell-scan",
+   "name": "Shell ARIA contract scan",
+   "platform": "linux",
+   "executionMode": "browser-proxy",
+   "expectedBehavior": "no ARIA name/role/state violations on core surfaces",
+   "observedBehavior": "0 violations across surfaces [] (complements, never replaces, keyboard/screen-reader/IME manual smoke)",
+   "effectReceipts": [
+    "a11y-scan-browser-20260904-092119.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": true,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "idea.format-markers",
+   "name": "IDEA formatting comparison",
+   "platform": "linux",
+   "executionMode": "provider-fixture",
+   "expectedBehavior": "identical probe formatted like IntelliJ IDEA",
+   "observedBehavior": "IDEA 2026.1.2 (byte-identical vs JDT LS post-image; ceiling: single-fixture Java formatting only; navigation/completion IDEA comparison remains manual (no GUI automation on shared workstation))",
+   "effectReceipts": [
+    "idea-format-FormatProbe.json"
+   ],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "exact-match",
+   "status": "PASS",
+   "blockedReason": null,
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "query.definition",
+   "name": "Definition reveal + history",
+   "platform": "windows",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "query.definition",
+   "name": "Definition reveal + history",
+   "platform": "macos",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "project.maven-ingest",
+   "name": "Maven tooling ingestion",
+   "platform": "windows",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "project.maven-ingest",
+   "name": "Maven tooling ingestion",
+   "platform": "macos",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "project.gradle-ingest",
+   "name": "Gradle tooling ingestion",
+   "platform": "windows",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "project.gradle-ingest",
+   "name": "Gradle tooling ingestion",
+   "platform": "macos",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "completion.choice-undo",
+   "name": "Completion choice + one undo",
+   "platform": "windows",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "completion.choice-undo",
+   "name": "Completion choice + one undo",
+   "platform": "macos",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "reformat.markers",
+   "name": "Reformat markers/exclusions",
+   "platform": "windows",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "reformat.markers",
+   "name": "Reformat markers/exclusions",
+   "platform": "macos",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "facts.lifecycle",
+   "name": "Facts cache + refresh",
+   "platform": "windows",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "facts.lifecycle",
+   "name": "Facts cache + refresh",
+   "platform": "macos",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "completion.scope-fallback",
+   "name": "Completion scope fallback",
+   "platform": "windows",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no Windows runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  },
+  {
+   "capabilityId": "completion.scope-fallback",
+   "name": "Completion scope fallback",
+   "platform": "macos",
+   "executionMode": "blocked-external",
+   "expectedBehavior": "Independent per-platform verification",
+   "observedBehavior": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "effectReceipts": [],
+   "undoVerified": false,
+   "a11y": {
+    "keyboardFocus": false,
+    "nameRoleState": false,
+    "zoom200Percent": false,
+    "screenReaderAnnouncements": false,
+    "imeComposition": false
+   },
+   "perf": {
+    "rawSamplesMs": [],
+    "p50Ms": 0,
+    "p95Ms": 0,
+    "p99Ms": 0,
+    "maxMs": 0
+   },
+   "ideaParityDelta": "uncompared",
+   "status": "BLOCKED",
+   "blockedReason": "no macOS runner on this Linux-only box; needs per-platform runbook",
+   "origin": "runner-artifact",
+   "perfOrigin": null
+  }
+ ]
+}
