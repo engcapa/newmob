@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "format-maven-single",
+  "generatedAt": "2026-09-04T00:12:54.956Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21,
+        "version": "21.0.4"
+      }
+    },
+    "jdtls": {
+      "home": "~/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    },
+    "mavenCliDetected": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)"
+  },
+  "formattingCapability": {
+    "advertised": true,
+    "raw": true
+  },
+  "request": {
+    "attempts": [
+      {
+        "ms": 2137,
+        "editCount": 1
+      }
+    ],
+    "msTotal": 2137,
+    "editCount": 1,
+    "satisfied": true
+  },
+  "firstEditPreview": "{\"range\":{\"start\":{\"line\":5,\"character\":20},\"end\":{\"line\":6,\"character\":8}},\"newText\":\"\\n    \"}",
+  "postText": "package com.example.single;\n\npublic class FormatProbe {\n    // @formatter:off\n       int   badly_spaced  =  1;\n    // @formatter:on\n    int also_bad = 2;\n}\n",
+  "postSha256": "eeb42451f01d4baac2865d95ea6747cc85bfb530f59861b6fae32895e5310a88",
+  "markersPreserved": true,
+  "guardedLineUntouched": true,
+  "unguardedLineFixed": true,
+  "idempotentSecondPassEditCount": 1,
+  "idempotentNote": "server buffer was never updated via didChange, so the second pass re-derives edits from the original buffer; recorded for determinism, not as a fixpoint claim",
+  "cancelProbe": "rejected:-32800",
+  "importProgressTitles": [
+    "Building",
+    "Initialize Workspace",
+    "Synchronizing projects",
+    "Detect installed JVMs",
+    "LookupJDKToolchainsJob",
+    "Reporting encoding changes."
+  ],
+  "failures": []
+}
