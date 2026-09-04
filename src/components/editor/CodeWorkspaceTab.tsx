@@ -1102,6 +1102,24 @@ interface TabPolicyLifecycleReceiptView {
   readonly openResourceCount: number;
 }
 
+/** Resolve the execution line for one visible editor group. */
+export function debugCurrentLineForFile(
+  location: { path: string; line: number } | null,
+  frames: readonly Pick<DebugStackFrame, "id" | "path" | "line" | "sourceName">[],
+  selectedFrameId: number | null | undefined,
+  activeFilePath: string | null,
+  stopped: boolean,
+): number | null {
+  if (!activeFilePath) return null;
+  if (location && fsPathEquals(location.path, activeFilePath)) return location.line;
+  if (!stopped) return null;
+  const frame = frames.find((candidate) => candidate.id === selectedFrameId) ?? frames[0];
+  if (!frame || frame.line < 1) return null;
+  const sourceName = frame.sourceName ?? frame.path?.split(/[\\/]/).pop() ?? null;
+  const fileName = activeFilePath.split(/[\\/]/).pop() ?? null;
+  return sourceName && fileName && sourceName === fileName ? frame.line : null;
+}
+
 export function CodeWorkspaceTab({
   tabId,
   workspace,
@@ -16000,9 +16018,13 @@ export function CodeWorkspaceTab({
       });
     })();
     const groupDebugCurrentLine = (() => {
-      const loc = debug.currentLocation;
-      if (!loc || !groupFileAbsPath) return null;
-      return fsPathEquals(loc.path, groupFileAbsPath) ? loc.line : null;
+      return debugCurrentLineForFile(
+        debug.currentLocation,
+        debug.state?.frames ?? [],
+        debug.state?.selectedFrameId,
+        groupFileAbsPath,
+        debug.state?.status === "stopped",
+      );
     })();
     const groupDebugStoppedHere = debug.state?.status === "stopped" && groupDebugCurrentLine != null;
     const groupDebugInlineValues = groupDebugStoppedHere ? debug.frameVariables : undefined;

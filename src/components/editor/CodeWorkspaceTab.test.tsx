@@ -19,7 +19,7 @@ import type {
 import type { ProjectDescriptorDiscoveryState } from "../../hooks/useProjectDescriptorDiscovery";
 import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile, WorkspaceWriteAck } from "../../lib/editor/workspace";
 import type { LocalHistoryEntry } from "../../lib/localHistory";
-import { CodeWorkspaceTab, extractContextSnippet } from "./CodeWorkspaceTab";
+import { CodeWorkspaceTab, debugCurrentLineForFile, extractContextSnippet } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
 import { WORKSPACE_RECOVERY_STORAGE_PREFIX, hasBlockingDiskEffectResolution, listDiskEffectLedgerEntries, resolveDiskEffectLedgerEntry } from "./workspace/workspaceRecovery";
 import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
@@ -533,6 +533,35 @@ describe("extractContextSnippet", () => {
       lineText: "two",
       contextSnippet: "one\ntwo",
     });
+  });
+});
+
+describe("debugCurrentLineForFile", () => {
+  it("matches a stopped source frame by source name when path is omitted", () => {
+    expect(debugCurrentLineForFile(
+      null,
+      [{ id: 7, path: null, line: 17, sourceName: "PersisG2Application.java" }],
+      7,
+      "/repo/persis-g2-server/src/main/java/com/deepzero/ads/persis/PersisG2Application.java",
+      true,
+    )).toBe(17);
+  });
+
+  it("prefers an exact source path and rejects a different source name", () => {
+    expect(debugCurrentLineForFile(
+      { path: "/repo/src/App.java", line: 9 },
+      [{ id: 1, path: null, line: 17, sourceName: "Other.java" }],
+      1,
+      "/repo/src/App.java",
+      true,
+    )).toBe(9);
+    expect(debugCurrentLineForFile(
+      null,
+      [{ id: 1, path: null, line: 17, sourceName: "Other.java" }],
+      1,
+      "/repo/src/App.java",
+      true,
+    )).toBeNull();
   });
 });
 
