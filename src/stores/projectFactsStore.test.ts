@@ -245,4 +245,20 @@ describe("ED-PROJECT-004: projectFactsStore lifecycle & generation cache", () =>
     expect(result.generation).toBe(1);
     expect(store.getWorkspaceFacts("/transition").status).toBe("failed");
   });
+
+  it("names the missing prerequisite when tooling returns nothing (A4)", async () => {
+    vi.spyOn(workspaceTooling, "workspaceIngestMavenProject").mockResolvedValue(
+      undefined as unknown as Awaited<ReturnType<typeof workspaceTooling.workspaceIngestMavenProject>>,
+    );
+    vi.spyOn(workspaceTooling, "workspaceIngestGradleProject").mockResolvedValue(
+      undefined as unknown as Awaited<ReturnType<typeof workspaceTooling.workspaceIngestGradleProject>>,
+    );
+
+    const store = useProjectFactsStore.getState();
+    const result = await store.fetchProjectFacts("/stub-preview", { trusted: true });
+
+    expect(result.status).toBe("failed");
+    expect(result.reason).toContain("require a build backend");
+    expect(result.structure).toBeNull();
+  });
 });

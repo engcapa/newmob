@@ -1,9 +1,11 @@
 import type { WorkspaceProjectFactsEntry } from "../../../stores/projectFactsStore";
+import { useProjectFactsStore } from "../../../stores/projectFactsStore";
 import {
   findPathSourceSet,
   isPathExcluded,
   type ProjectSourceSetKind,
 } from "./projectStructureModel";
+import { relativePathWithinRoot } from "./codeWorkspaceModel";
 
 export type ConsumerState = "ready" | "loading" | "untrusted" | "degraded" | "stale" | "failed";
 
@@ -32,6 +34,8 @@ export function consumeCompletionScope(
   filePath: string,
   expectedGeneration?: number,
 ): ConsumerResult<CompletionScopeFacts> {
+  const crossRoot = crossWorkspaceRefusal<CompletionScopeFacts>(entry, filePath);
+  if (crossRoot) return crossRoot;
   const gate = evaluateConsumerGate(entry, expectedGeneration);
   if (gate.state !== "ready" || !entry.structure) {
     return {
@@ -94,6 +98,8 @@ export function consumeSemanticQueryScope(
   targetPath: string,
   expectedGeneration?: number,
 ): ConsumerResult<SemanticQueryScopeFacts> {
+  const crossRoot = crossWorkspaceRefusal<SemanticQueryScopeFacts>(entry, targetPath);
+  if (crossRoot) return crossRoot;
   const gate = evaluateConsumerGate(entry, expectedGeneration);
   if (gate.state !== "ready" || !entry.structure) {
     return {
@@ -226,6 +232,45 @@ export function consumeRefactorCoverage(
     },
     reason: null,
   };
+}
+
+/**
+ * ED-PROJECT-005 A3: a facts entry must never answer for a path outside its
+ * own workspace root. Boundary-aware comparison (not a string prefix) so
+ * `/workspace-evil/x` does not ride on `/workspace` facts.
+ */
+function crossWorkspaceRefusal<T>(
+  entry: WorkspaceProjectFactsEntry,
+  filePath: string,
+): ConsumerResult<T> | null {
+  if (!filePath || relativePathWithinRoot(entry.workspaceRoot, filePath) !== null) {
+    return null;
+  }
+  return {
+    state: "failed",
+    generation: entry.generation,
+    data: null,
+    reason: `Path ${filePath} is outside workspace root ${entry.workspaceRoot}; cross-workspace facts never leak`,
+  };
+}
+
+/**
+ * ED-PROJECT-005 A1/A2: the fact generation a semantic query request pins.
+ * Returns the live ready generation only when the entry is ready, carries a
+ * structure snapshot, and owns the file path; otherwise undefined so the
+ * query runs without scope facts instead of leaking a foreign generation.
+ * Callers pair this with a live-generation guard so facts invalidation
+ * stales the in-flight request with zero downstream effect.
+ */
+export function selectQueryProjectGeneration(
+  workspaceRoot: string,
+  fileAbsPath: string | null,
+): number | undefined {
+  if (!workspaceRoot || !fileAbsPath) return undefined;
+  const entry = useProjectFactsStore.getState().getWorkspaceFacts(workspaceRoot);
+  if (entry.status !== "ready" || entry.isStale || !entry.structure) return undefined;
+  if (relativePathWithinRoot(entry.workspaceRoot, fileAbsPath) === null) return undefined;
+  return entry.generation;
 }
 
 function evaluateConsumerGate(

@@ -1,13 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach } from "vitest";
 import type { WorkspaceProjectFactsEntry } from "../../../stores/projectFactsStore";
+import { useProjectFactsStore } from "../../../stores/projectFactsStore";
 import {
   consumeCompletionScope,
   consumeSemanticQueryScope,
   consumeRefactorCoverage,
+  selectQueryProjectGeneration,
 } from "./projectFactsConsumers";
 import { buildProjectStructureSnapshotV2 } from "./projectStructureModel";
 
 describe("ED-PROJECT-005: project facts three-consumer adapters", () => {
+  beforeEach(() => {
+    useProjectFactsStore.setState({ workspaces: {} });
+  });
+
   const mockStructure = buildProjectStructureSnapshotV2({
     generation: 3,
     modules: [
@@ -91,6 +97,23 @@ describe("ED-PROJECT-005: project facts three-consumer adapters", () => {
       expect(compGenMismatch.state).toBe("stale");
       expect(compGenMismatch.reason).toContain("Generation mismatch");
     });
+
+    it("fails closed for cross-workspace paths without leaking facts (A3)", () => {
+      const comp = consumeCompletionScope(readyEntry, "/other/project/src/Main.java");
+      expect(comp.state).toBe("failed");
+      expect(comp.data).toBeNull();
+      expect(comp.reason).toContain("/other/project/src/Main.java");
+      expect(comp.reason).toContain("/workspace");
+
+      const query = consumeSemanticQueryScope(readyEntry, "/other/project/src/Main.java");
+      expect(query.state).toBe("failed");
+      expect(query.data).toBeNull();
+
+      // A path that merely shares a string prefix is still outside the root.
+      const prefix = consumeCompletionScope(readyEntry, "/workspace-evil/Main.java");
+      expect(prefix.state).toBe("failed");
+      expect(prefix.data).toBeNull();
+    });
   });
 
   describe("1. Completion Scope Consumer", () => {
@@ -150,6 +173,35 @@ describe("ED-PROJECT-005: project facts three-consumer adapters", () => {
       expect(res.data?.affectedModuleIds).toEqual(["com.example:app", "com.example:core"]);
       expect(res.data?.affectedRoots).toContain("/workspace/core");
       expect(res.data?.affectedRoots).toContain("/workspace/app");
+    });
+  });
+
+  describe("4. Query generation pinning helper", () => {
+    it("returns the ready generation only for owned ready paths", () => {
+      useProjectFactsStore.setState({ workspaces: { "/workspace": readyEntry } });
+
+      expect(selectQueryProjectGeneration("/workspace", "/workspace/core/src/main/java/Main.java")).toBe(3);
+      // Unknown workspace, foreign path, and empty inputs pin nothing.
+      expect(selectQueryProjectGeneration("/other", "/other/src/Main.java")).toBeUndefined();
+      expect(selectQueryProjectGeneration("/workspace", "/other/src/Main.java")).toBeUndefined();
+      expect(selectQueryProjectGeneration("", "/workspace/core/src/main/java/Main.java")).toBeUndefined();
+      expect(selectQueryProjectGeneration("/workspace", null)).toBeUndefined();
+    });
+
+    it("pins nothing while facts are not ready", () => {
+      useProjectFactsStore.setState({
+        workspaces: {
+          "/workspace": { ...readyEntry, status: "loading", structure: null },
+        },
+      });
+      expect(selectQueryProjectGeneration("/workspace", "/workspace/core/src/main/java/Main.java")).toBeUndefined();
+
+      useProjectFactsStore.setState({
+        workspaces: {
+          "/workspace": { ...readyEntry, isStale: true },
+        },
+      });
+      expect(selectQueryProjectGeneration("/workspace", "/workspace/core/src/main/java/Main.java")).toBeUndefined();
     });
   });
 });

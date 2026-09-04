@@ -42,6 +42,46 @@ interface ProjectFactsState {
   resetWorkspace: (workspaceRoot: string) => void;
 }
 
+interface ToolingResultShape<Module, Provenance> {
+  status: string;
+  modules: Module[];
+  provenance: Provenance | null;
+  errorMessage: string | null;
+}
+
+/**
+ * ED-PROJECT-005 A4: a missing or malformed tooling response (for example the
+ * browser stub preview, which has no build backend) must surface as a typed
+ * prerequisite failure naming what is missing — never as a raw TypeError
+ * from dereferencing the response.
+ */
+const KNOWN_TOOLING_STATUSES = ["ready", "untrusted", "degraded", "failed"] as const;
+type KnownToolingStatus = (typeof KNOWN_TOOLING_STATUSES)[number];
+
+function normalizeToolingResult<Module, Provenance>(
+  res: ToolingResultShape<Module, Provenance> | null | undefined,
+  toolLabel: string,
+): { status: KnownToolingStatus; modules: Module[]; provenance: Provenance | null; errorMessage: string | null } {
+  if (
+    res &&
+    (KNOWN_TOOLING_STATUSES as readonly string[]).includes(res.status) &&
+    Array.isArray(res.modules)
+  ) {
+    return {
+      status: res.status as KnownToolingStatus,
+      modules: res.modules,
+      provenance: res.provenance,
+      errorMessage: res.errorMessage,
+    };
+  }
+  return {
+    status: "failed",
+    modules: [],
+    provenance: null,
+    errorMessage: `${toolLabel} tooling returned no usable result; ready project facts require a build backend`,
+  };
+}
+
 const defaultEntry = (workspaceRoot: string): WorkspaceProjectFactsEntry => ({
   workspaceRoot,
   generation: 0,
@@ -136,8 +176,7 @@ export const useProjectFactsStore = create<ProjectFactsState>((set, get) => ({
     try {
       let resultStatus: ProjectFactsStatus = "ready";
       let errorMessage: string | null = null;
-      let provenance: MavenToolingProvenance | GradleToolingProvenance | null = null;
-      let rawModules: Array<{
+      let provenance: MavenToolingProvenance | GradleToolingProvenance | null = null;      let rawModules: Array<{
         id: string;
         name: string;
         root: string;
@@ -152,13 +191,13 @@ export const useProjectFactsStore = create<ProjectFactsState>((set, get) => ({
       const tool = options.toolKind ?? "auto";
 
       if (tool === "gradle") {
-        const gradleRes = await workspaceIngestGradleProject({
+        const gradleRes = normalizeToolingResult(await workspaceIngestGradleProject({
           workspaceRoot,
           trusted: options.trusted,
           javaHome: options.javaHome,
           gradleExecutable: options.gradleExecutable,
           offline: options.offline,
-        });
+        }), "Gradle");
 
         if (abortController.signal.aborted) {
           return get().getWorkspaceFacts(workspaceRoot);
@@ -172,13 +211,13 @@ export const useProjectFactsStore = create<ProjectFactsState>((set, get) => ({
           provenance = gradleRes.provenance;
         }
       } else if (tool === "maven") {
-        const mavenRes = await workspaceIngestMavenProject({
+        const mavenRes = normalizeToolingResult(await workspaceIngestMavenProject({
           workspaceRoot,
           trusted: options.trusted,
           javaHome: options.javaHome,
           mavenExecutable: options.mavenExecutable,
           offline: options.offline,
-        });
+        }), "Maven");
 
         if (abortController.signal.aborted) {
           return get().getWorkspaceFacts(workspaceRoot);
@@ -193,13 +232,13 @@ export const useProjectFactsStore = create<ProjectFactsState>((set, get) => ({
         }
       } else {
         // Auto detection: try Maven first, if not found or failed, try Gradle
-        const mavenRes = await workspaceIngestMavenProject({
+        const mavenRes = normalizeToolingResult(await workspaceIngestMavenProject({
           workspaceRoot,
           trusted: options.trusted,
           javaHome: options.javaHome,
           mavenExecutable: options.mavenExecutable,
           offline: options.offline,
-        });
+        }), "Maven");
 
         if (abortController.signal.aborted) {
           return get().getWorkspaceFacts(workspaceRoot);
@@ -210,13 +249,13 @@ export const useProjectFactsStore = create<ProjectFactsState>((set, get) => ({
           provenance = mavenRes.provenance;
         } else {
           // Try Gradle
-          const gradleRes = await workspaceIngestGradleProject({
+          const gradleRes = normalizeToolingResult(await workspaceIngestGradleProject({
             workspaceRoot,
             trusted: options.trusted,
             javaHome: options.javaHome,
             gradleExecutable: options.gradleExecutable,
             offline: options.offline,
-          });
+          }), "Gradle");
 
           if (abortController.signal.aborted) {
             return get().getWorkspaceFacts(workspaceRoot);

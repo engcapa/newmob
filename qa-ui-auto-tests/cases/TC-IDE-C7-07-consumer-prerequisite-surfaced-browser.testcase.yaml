@@ -1,0 +1,39 @@
+id: TC-IDE-C7-07-consumer-prerequisite-surfaced-browser
+title: "Consumer prerequisite identified on badge in browser"
+description: |
+  Browser gate case (ED-PROJECT-005 A4). In the stub preview no ready
+  project snapshot can exist, so every semantic consumer must fail closed
+  AND the UI must name the missing prerequisite instead of going silent:
+  the status badge exposes a Project facts title naming the failed state,
+  and the labeled refresh control offers the explicit remediation. The
+  ready path (generation-pinned requests) is proven by unit tests and the
+  native provider gates.
+covers: [F25.5]
+tags: [code-workspace, ide-c7, project-structure, consumer-prerequisite, browser-gate, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - wait_for:
+      selector: '[data-testid="project-facts-status-badge"]'
+      timeout_sec: 60
+  - assert_attribute:
+      selector: '[data-testid="project-facts-status-badge"]'
+      name: title
+      equals: "Maven tooling returned no usable result; ready project facts require a build backend"
+  - assert_visible: '[data-testid="project-facts-refresh-btn"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-tree-file"]'
+      contains: "README"
+      timeout_sec: 10
+  - screenshot: tc-ide-c7-07-prerequisite.png

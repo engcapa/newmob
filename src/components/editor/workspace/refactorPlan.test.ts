@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LspLocation, LspWorkspaceEdit } from "../../../lib/editor/lsp";
 import { buildCapabilityEvidence } from "./capabilityEvidence";
+import type { ProjectStructureSnapshotV2 } from "./projectStructureModel";
 import {
   buildRefactorPlan,
   refactorApplyGate,
@@ -439,3 +440,133 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => 
   });
 });
 
+
+describe("ED-PROJECT-005: refactor plan facts generation pinning", () => {
+  const factsPinnedPlan = (projectFacts: RefactorPlanV4["projectFacts"]): RefactorPlanV4 => ({
+    actionId: "rename-facts",
+    kind: "rename",
+    evidence: dummyEvidence,
+    completeness: { value: "complete", source: "provider-asserted", proof: "p" },
+    conflicts: [],
+    operations: [],
+    documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+    requiredOperationIndexes: [],
+    affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
+    excludableGroups: [],
+    projectFacts,
+  });
+
+  it("records the explicit facts snapshot on the plan (A1)", () => {
+    const plan = buildRefactorPlan({
+      actionId: "rename-explicit",
+      kind: "rename",
+      evidence: dummyEvidence,
+      edit: {
+        documentEdits: [
+          {
+            uri: "file:///workspace/src/A.java",
+            path: "/workspace/src/A.java",
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } }, newText: "A2" }],
+          },
+        ],
+      },
+      roots: [{ path: "/workspace" }],
+      projectFacts: { workspaceRoot: "/workspace", generation: 7, fingerprint: "fp-7" },
+    });
+
+    expect(plan.projectFacts).toEqual({ workspaceRoot: "/workspace", generation: 7, fingerprint: "fp-7" });
+  });
+
+  it("resolves the live ready snapshot when the input omits it (A1)", async () => {
+    const { useProjectFactsStore } = await import("../../../stores/projectFactsStore");
+    useProjectFactsStore.setState({ workspaces: {} });
+    useProjectFactsStore.setState({
+      workspaces: {
+        "/workspace": {
+          workspaceRoot: "/workspace",
+          generation: 4,
+          status: "ready",
+          reason: null,
+          fingerprint: "fp-4",
+          structure: { modules: [] } as unknown as ProjectStructureSnapshotV2,
+          provenance: null,
+          isStale: false,
+          abortController: null,
+        },
+      },
+    });
+
+    const plan = buildRefactorPlan({
+      actionId: "rename-live",
+      kind: "rename",
+      evidence: dummyEvidence,
+      edit: {
+        documentEdits: [
+          {
+            uri: "file:///workspace/src/A.java",
+            path: "/workspace/src/A.java",
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } }, newText: "A2" }],
+          },
+        ],
+      },
+      roots: [{ path: "/workspace" }],
+    });
+
+    expect(plan.projectFacts).toEqual({ workspaceRoot: "/workspace", generation: 4, fingerprint: "fp-4" });
+    useProjectFactsStore.setState({ workspaces: {} });
+  });
+
+  it("blocks apply when the pinned generation went stale (A2)", async () => {
+    const { useProjectFactsStore } = await import("../../../stores/projectFactsStore");
+    useProjectFactsStore.setState({
+      workspaces: {
+        "/workspace": {
+          workspaceRoot: "/workspace",
+          generation: 5,
+          status: "ready",
+          reason: null,
+          fingerprint: "fp-5",
+          structure: { modules: [] } as unknown as ProjectStructureSnapshotV2,
+          provenance: null,
+          isStale: false,
+          abortController: null,
+        },
+      },
+    });
+
+    const gate = refactorApplyGate(
+      factsPinnedPlan({ workspaceRoot: "/workspace", generation: 4, fingerprint: "fp-4" }),
+    );
+    expect(gate.allowed).toBe(false);
+    expect(gate.reason).toContain("G4 -> G5");
+    useProjectFactsStore.setState({ workspaces: {} });
+  });
+
+  it("allows apply when the pinned generation is current and when unpinned (A2)", async () => {
+    const { useProjectFactsStore } = await import("../../../stores/projectFactsStore");
+    useProjectFactsStore.setState({
+      workspaces: {
+        "/workspace": {
+          workspaceRoot: "/workspace",
+          generation: 4,
+          status: "ready",
+          reason: null,
+          fingerprint: "fp-4",
+          structure: { modules: [] } as unknown as ProjectStructureSnapshotV2,
+          provenance: null,
+          isStale: false,
+          abortController: null,
+        },
+      },
+    });
+
+    const current = refactorApplyGate(
+      factsPinnedPlan({ workspaceRoot: "/workspace", generation: 4, fingerprint: "fp-4" }),
+    );
+    expect(current.allowed).toBe(true);
+
+    const unpinned = refactorApplyGate(factsPinnedPlan(null));
+    expect(unpinned.allowed).toBe(true);
+    useProjectFactsStore.setState({ workspaces: {} });
+  });
+});

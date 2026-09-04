@@ -530,6 +530,8 @@ import {
 import { useWorkspaceProjectAnalysis } from "./workspace/useWorkspaceProjectAnalysis";
 import { useProjectFacts } from "../../hooks/useProjectFacts";
 import { useProjectDescriptorDiscovery } from "../../hooks/useProjectDescriptorDiscovery";
+import { useProjectFactsStore } from "../../stores/projectFactsStore";
+import { selectQueryProjectGeneration } from "./workspace/projectFactsConsumers";
 import {
   DEFAULT_SCOPE_SELECTION,
   libraryUriClassifierForRoots,
@@ -2487,6 +2489,22 @@ export function CodeWorkspaceTab({
     semanticQueryLatestRequestRef.current[kind] = requestId;
     const cancelKey = `${workspaceInstanceId}|${file.key}`;
     const requestSeq = nextLspRequestSequence();
+    // ED-PROJECT-005: pin the ready project-facts generation into the query
+    // identity so facts invalidation stales the in-flight request with zero
+    // downstream effect. Files without ready same-workspace facts pin nothing
+    // and run scope-less instead of leaking a foreign generation.
+    // (Mirrors absolutePathForOpenFile: library buffers have no host path.)
+    let queryFileAbsPath: string | null = null;
+    const queryRef = file.ref;
+    if (!file.library) {
+      if (queryRef.kind === "loose") {
+        queryFileAbsPath = queryRef.path;
+      } else {
+        const queryRoot = rootsRef.current.find((root) => root.id === queryRef.rootId);
+        if (queryRoot) queryFileAbsPath = absoluteWorkspacePath(queryRoot, queryRef.path);
+      }
+    }
+    const capturedFactsGeneration = selectQueryProjectGeneration(projectFactsRoot, queryFileAbsPath);
     const identity: SemanticQueryIdentity = {
       workspaceId: workspaceInstanceId,
       fileKey: file.key,
@@ -2494,6 +2512,7 @@ export function CodeWorkspaceTab({
       position,
       documentRevision,
       lspSessionGeneration: capturedLspSessionGeneration,
+      ...(capturedFactsGeneration !== undefined ? { projectGeneration: capturedFactsGeneration } : {}),
       requestId,
     };
     const isCurrent = (candidate?: SemanticQueryIdentity): boolean => {
@@ -2511,6 +2530,7 @@ export function CodeWorkspaceTab({
     const guards: SemanticQueryLiveGuards = {
       getLiveDocumentRevision: () => openFilesRef.current[file.key]?.documentRevision ?? -1,
       getLiveLspGeneration: () => lspSessionGeneration(),
+      getLiveProjectGeneration: () => useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot).generation,
       guardDelivery: (candidate) => isCurrent(candidate),
     };
     return {
@@ -2521,7 +2541,7 @@ export function CodeWorkspaceTab({
       isCurrent,
       lspOptions: (signal: AbortSignal) => ({ signal, cancelKey, requestSeq }),
     };
-  }, [lspDescriptorForFile, lspSessionGeneration, workspaceInstanceId]);
+  }, [lspDescriptorForFile, lspSessionGeneration, projectFactsRoot, workspaceInstanceId]);
 
   useEffect(() => {
     const queryHost = semanticQueryHostRef.current;

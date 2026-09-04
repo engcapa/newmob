@@ -6,6 +6,7 @@ import type {
 import { normalizeFsPath, relativePathWithinRoot } from "./codeWorkspaceModel";
 import type { CapabilityEvidenceV3 } from "./capabilityEvidence";
 import { workspaceEditOperations } from "./workspaceEditPreview";
+import { useProjectFactsStore } from "../../../stores/projectFactsStore";
 
 /**
  * §8.20.6 W5 / §8.21.2 V1: Unified refactoring plan & verification gate.
@@ -113,6 +114,17 @@ export interface RefactorPlanV4 {
     revision: number | null;
     owner: RefactorUriOwner;
   }[];
+  /**
+   * ED-PROJECT-005: the ready project-facts snapshot this plan was built
+   * against. Null when no same-workspace ready snapshot existed: the plan
+   * carries no scope facts instead of a foreign generation. The apply gate
+   * blocks plans whose generation no longer matches live facts.
+   */
+  projectFacts?: {
+    workspaceRoot: string;
+    generation: number;
+    fingerprint: string | null;
+  } | null;
 }
 
 export type RefactorPlanV3 = RefactorPlanV4;
@@ -165,6 +177,25 @@ export function refactorApplyGate(plan: RefactorPlanV4): RefactorGateDecision {
       blockingConflicts: errorConflicts,
       warningConflicts: plan.conflicts.filter((c) => c.severity === "warning"),
     };
+  }
+
+  // Rule 2b (ED-PROJECT-005): a plan pinned to a facts snapshot must not
+  // apply after that snapshot went stale. Unpinned plans (no ready snapshot
+  // at preview time) are unaffected.
+  if (plan.projectFacts) {
+    const live = useProjectFactsStore.getState().getWorkspaceFacts(plan.projectFacts.workspaceRoot);
+    if (live.generation !== plan.projectFacts.generation) {
+      const reason = `Project facts changed since plan preview (G${plan.projectFacts.generation} -> G${live.generation}); re-preview the refactoring`;
+      const conflict: RefactorConflictV3 = { severity: "error", message: reason, location: null };
+      return {
+        allowed: false,
+        requiresConfirm: false,
+        requiresPreview: false,
+        reason,
+        blockingConflicts: [conflict, ...plan.conflicts.filter((c) => c.severity === "error")],
+        warningConflicts: plan.conflicts.filter((c) => c.severity === "warning"),
+      };
+    }
   }
 
   // Rule 3: Safe Delete without provider-asserted complete proof hard blocks (§8.21.2).
@@ -226,6 +257,16 @@ export interface BuildRefactorPlanInput {
   conflicts?: readonly (RefactorConflictV3 & { source?: RefactorFactV4<"reported" | "derived">["source"] })[];
   completeness?: RefactorCompleteness | RefactorFactV4<"complete" | "partial" | "unknown">;
   requiredOperationIndexes?: readonly number[];
+  /**
+   * ED-PROJECT-005: explicit facts snapshot for the plan. When omitted, the
+   * builder records the live ready snapshot for the first root (or null).
+   * Tests pass this explicitly to stay hermetic.
+   */
+  projectFacts?: {
+    workspaceRoot: string;
+    generation: number;
+    fingerprint: string | null;
+  } | null;
 }
 
 function classifyUriOwner(uri: string, path: string | null, roots: readonly { path: string }[]): RefactorUriOwner {
@@ -364,8 +405,7 @@ export function buildRefactorPlan(input: BuildRefactorPlanInput): RefactorPlanV4
   }));
 
   // Resolve completeness fact
-  let completeness: RefactorFactV4<"complete" | "partial" | "unknown">;
-  if (input.completeness && typeof input.completeness === "object" && "value" in input.completeness) {
+  let completeness: RefactorFactV4<"complete" | "partial" | "unknown">;  if (input.completeness && typeof input.completeness === "object" && "value" in input.completeness) {
     completeness = input.completeness;
   } else {
     const rawVal = input.completeness ?? (input.evidence.coverage.complete ? "provider-complete" : "provider-partial");
@@ -380,6 +420,27 @@ export function buildRefactorPlan(input: BuildRefactorPlanInput): RefactorPlanV4
     };
   }
 
+  // ED-PROJECT-005: record the ready facts snapshot this plan was built
+  // against. Explicit input wins (hermetic tests); otherwise resolve the
+  // live ready snapshot for the first root, or null when no same-workspace
+  // ready snapshot exists.
+  let planProjectFacts: RefactorPlanV4["projectFacts"];
+  if (input.projectFacts !== undefined) {
+    planProjectFacts = input.projectFacts;
+  } else {
+    const planRoot = roots[0]?.path ?? "";
+    const liveEntry = planRoot
+      ? useProjectFactsStore.getState().getWorkspaceFacts(planRoot)
+      : null;
+    planProjectFacts = liveEntry && liveEntry.status === "ready" && liveEntry.structure
+      ? {
+        workspaceRoot: liveEntry.workspaceRoot,
+        generation: liveEntry.generation,
+        fingerprint: liveEntry.fingerprint,
+      }
+      : null;
+  }
+
   return {
     actionId: input.actionId,
     kind: input.kind,
@@ -391,6 +452,7 @@ export function buildRefactorPlan(input: BuildRefactorPlanInput): RefactorPlanV4
     requiredOperationIndexes: Object.freeze(Array.from(requiredSet)),
     affectedUris: Object.freeze(affectedUris),
     excludableGroups: Object.freeze(excludableGroups),
+    projectFacts: planProjectFacts,
   };
 }
 
