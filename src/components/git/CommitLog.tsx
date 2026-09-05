@@ -111,11 +111,12 @@ export function CommitLog({ repoRoot, headOid, branches = [], busy, onContextMen
     () => entries.find((e) => e.oid === selectedOid) ?? null,
     [entries, selectedOid],
   );
+  const selectedCommitOid = selected?.oid ?? null;
 
   // Load the changed-files list for the selected commit.
   useEffect(() => {
     let cancelled = false;
-    if (!selected) {
+    if (!selectedCommitOid) {
       setFiles([]);
       setFilePath(null);
       setPair(null);
@@ -126,7 +127,7 @@ export function CommitLog({ repoRoot, headOid, branches = [], busy, onContextMen
     setFilePath(null);
     setPair(null);
     setPairLoading(false);
-    gitCommitFiles(repoRoot, selected.oid)
+    gitCommitFiles(repoRoot, selectedCommitOid)
       .then((list) => {
         if (cancelled) return;
         setFiles(list);
@@ -138,19 +139,19 @@ export function CommitLog({ repoRoot, headOid, branches = [], busy, onContextMen
     return () => {
       cancelled = true;
     };
-  }, [repoRoot, selected]);
+  }, [repoRoot, selectedCommitOid]);
 
   // Load the diff for the selected file within the selected commit (parent ↔ commit).
   useEffect(() => {
     let cancelled = false;
     const file = files.find((f) => f.path === filePath) ?? null;
-    if (!selected || !file) {
+    if (!selectedCommitOid || !file) {
       setPair(null);
       setPairLoading(false);
       return;
     }
     setPairLoading(true);
-    gitBlobPair(repoRoot, file.path, `${selected.oid}^`, selected.oid, file.oldPath)
+    gitBlobPair(repoRoot, file.path, `${selectedCommitOid}^`, selectedCommitOid, file.oldPath)
       .then((p) => {
         if (!cancelled) setPair(p);
       })
@@ -163,7 +164,7 @@ export function CommitLog({ repoRoot, headOid, branches = [], busy, onContextMen
     return () => {
       cancelled = true;
     };
-  }, [repoRoot, selected, filePath, files]);
+  }, [repoRoot, selectedCommitOid, filePath, files]);
 
   const graph = useMemo(() => buildGraph(entries), [entries]);
   const maxWidth = useMemo(() => graph.reduce((m, r) => Math.max(m, r.width), 1), [graph]);
@@ -238,6 +239,8 @@ export function CommitLog({ repoRoot, headOid, branches = [], busy, onContextMen
                 <div
                   role="button"
                   tabIndex={0}
+                  data-testid="git-log-commit"
+                  data-oid={entry.oid}
                   style={{ height: ROW_H }}
                   className="w-full flex items-start gap-2 overflow-hidden"
                   onClick={() => setSelectedOid(entry.oid)}
@@ -308,6 +311,9 @@ export function CommitLog({ repoRoot, headOid, branches = [], busy, onContextMen
                   <button
                     key={file.path}
                     type="button"
+                    data-testid="git-log-file"
+                    data-path={file.path}
+                    aria-pressed={filePath === file.path}
                     className={`w-full px-3 py-1 flex items-center gap-2 text-left border-b border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] ${
                       filePath === file.path ? "bg-[var(--taomni-hover)]" : ""
                     }`}

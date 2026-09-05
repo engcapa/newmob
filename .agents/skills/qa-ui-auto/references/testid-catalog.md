@@ -278,6 +278,7 @@
 
 - `[data-testid="sidebar-tool-code-workspace"]` — interactive — F25.1.sidebar-entry
 - `[data-testid="code-workspace-tab"]` — display — F25.1.workspace
+- `[data-testid="code-workspace-git-panel-toggle"]` — interactive [optional] — F25.1.git-panel-toggle
 - `[data-testid="code-workspace-tree"]` — display [optional] — F25.1.tree-container
 - `[data-testid="code-workspace-split-equalize"]` — interactive [optional] — F25.1.split-equalize
 - `[data-testid="code-workspace-split-unsplit-all"]` — interactive [optional] — F25.1.split-unsplit-all
@@ -579,6 +580,33 @@
 - `[data-testid="db-connection-error-banner"]` — display [optional] — F-DB-1.connection-error-banner
 - `[data-testid="db-chat-toggle"]` — interactive [optional] — F-DB-1.chat-toggle
 - `[data-testid="db-detach"]` — interactive [optional] — F-DB-1.detach
+
+## git/diff (F26.1)
+
+- `[data-testid="git-panel"]` — display — F26.1.git-panel
+- `[data-testid="git-log-tab"]` — interactive — F26.1.git-log-tab
+- `[data-testid="git-log-commit"]` — interactive — F26.1.git-log-commit
+- `[data-testid="git-log-file"]` — interactive — F26.1.git-log-file
+- `[data-testid="git-diff-viewer"]` — display — F26.1.diff-viewer
+  ↳ `.git-log-view [data-testid="git-diff-viewer"]` — alias
+- `[data-testid="git-diff-render-anyway"]` — interactive [optional] — F26.1.diff-render-anyway
+  ↳ `.git-log-view [data-testid="git-diff-render-anyway"]` — alias
+- `[data-testid="git-diff-mode-split"]` — interactive — F26.1.diff-mode-split
+  ↳ `.git-log-view [data-testid="git-diff-mode-split"]` — alias
+- `[data-testid="git-diff-mode-unified"]` — interactive — F26.1.diff-mode-unified
+  ↳ `.git-log-view [data-testid="git-diff-mode-unified"]` — alias
+- `[data-testid="git-diff-sync-scroll"]` — interactive — F26.1.diff-sync-scroll
+  ↳ `.git-log-view [data-testid="git-diff-sync-scroll"]` — alias
+- `[data-testid="git-diff-splitter"]` — interactive — F26.1.diff-splitter
+  ↳ `.git-log-view [data-testid="git-diff-splitter"]` — alias
+- `[data-testid="git-diff-left-scroll"]` — display — F26.1.diff-left-scroll
+  ↳ `.git-log-view [data-testid="git-diff-left-scroll"]` — alias
+- `[data-testid="git-diff-right-scroll"]` — display — F26.1.diff-right-scroll
+  ↳ `.git-log-view [data-testid="git-diff-right-scroll"]` — alias
+- `[data-testid="git-diff-prev"]` — interactive — F26.1.diff-previous
+  ↳ `.git-log-view [data-testid="git-diff-prev"]` — alias
+- `[data-testid="git-diff-next"]` — interactive — F26.1.diff-next
+  ↳ `.git-log-view [data-testid="git-diff-next"]` — alias
 
 ## mail/compose (F-MAIL-1)
 
