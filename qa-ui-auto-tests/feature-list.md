@@ -4891,6 +4891,10 @@ controls:
   - id: workspace
     selector: '[data-testid="code-workspace-tab"]'
     kind: display
+  - id: git-panel-toggle
+    selector: '[data-testid="code-workspace-git-panel-toggle"]'
+    kind: interactive
+    optional: true       # only enabled for a workspace with a detected Git root
   - id: tree-container
     selector: '[data-testid="code-workspace-tree"]'
     kind: display
@@ -6377,6 +6381,79 @@ controls:
 - 编辑器外观配置支持字体族、字号、行高、连字、高对比度主题、活动/全部编辑器缩放范围、软换行路径 glob、虚拟光标空间与面包屑多语言过滤。
 - 智能提示设置支持 Quick Documentation 悬停延迟与默认窗格/弹出框目标、Parameter Info 自动触发与完整重载签名开关。
 - 支持 IDEA 风格 Ctrl+Tab 标签切换器（MRU 顺序、鼠标悬停预览、释放即切换）与统一动作快照投影的快捷键速查表及右键上下文菜单。
+
+## 26. Git Diff Viewport
+
+<!-- feature
+id: F26.1
+status: done
+area: git/diff
+components: [GitPanel, CommitLog, WorkspaceCommitLog, CompareView, DiffPane, DiffViewer]
+files:
+  - src/components/git/GitPanel.tsx
+  - src/components/git/CommitLog.tsx
+  - src/components/git/WorkspaceCommitLog.tsx
+  - src/components/git/CompareView.tsx
+  - src/components/git/shared/DiffPane.tsx
+  - src/components/git/DiffViewer.tsx
+controls:
+  - id: git-panel
+    selector: '[data-testid="git-panel"]'
+    kind: display
+  - id: git-log-tab
+    selector: '[data-testid="git-log-tab"]'
+    kind: interactive
+  - id: git-log-commit
+    selector: '[data-testid="git-log-commit"]'
+    kind: interactive
+  - id: git-log-file
+    selector: '[data-testid="git-log-file"]'
+    kind: interactive
+  - id: diff-viewer
+    selector: '[data-testid="git-diff-viewer"]'
+    kind: display
+    aliases: ['.git-log-view [data-testid="git-diff-viewer"]']
+  - id: diff-render-anyway
+    selector: '[data-testid="git-diff-render-anyway"]'
+    kind: interactive
+    optional: true
+    aliases: ['.git-log-view [data-testid="git-diff-render-anyway"]']
+  - id: diff-mode-split
+    selector: '[data-testid="git-diff-mode-split"]'
+    kind: interactive
+    aliases: ['.git-log-view [data-testid="git-diff-mode-split"]']
+  - id: diff-mode-unified
+    selector: '[data-testid="git-diff-mode-unified"]'
+    kind: interactive
+    aliases: ['.git-log-view [data-testid="git-diff-mode-unified"]']
+  - id: diff-sync-scroll
+    selector: '[data-testid="git-diff-sync-scroll"]'
+    kind: interactive
+    aliases: ['.git-log-view [data-testid="git-diff-sync-scroll"]']
+  - id: diff-splitter
+    selector: '[data-testid="git-diff-splitter"]'
+    kind: interactive
+    aliases: ['.git-log-view [data-testid="git-diff-splitter"]']
+  - id: diff-left-scroll
+    selector: '[data-testid="git-diff-left-scroll"]'
+    kind: display
+    aliases: ['.git-log-view [data-testid="git-diff-left-scroll"]']
+  - id: diff-right-scroll
+    selector: '[data-testid="git-diff-right-scroll"]'
+    kind: display
+    aliases: ['.git-log-view [data-testid="git-diff-right-scroll"]']
+  - id: diff-previous
+    selector: '[data-testid="git-diff-prev"]'
+    kind: interactive
+    aliases: ['.git-log-view [data-testid="git-diff-prev"]']
+  - id: diff-next
+    selector: '[data-testid="git-diff-next"]'
+    kind: interactive
+    aliases: ['.git-log-view [data-testid="git-diff-next"]']
+-->
+
+- Git Log、聚合 Workspace Git Log 和 Compare 复用 `DiffViewer` 展示文本差异；Split 模式支持拖动/键盘调整左右正文宽度，并在新视图与差异导航时从行首开始显示。
+- 横向滚动由两侧 CodeMirror 编辑器独立保留，纵向同步继续按已有开关工作；非文本和大文件保护分支不创建可操作分割控件。
 
 ---
 

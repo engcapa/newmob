@@ -970,17 +970,15 @@ mod tests {
 
     #[test]
     fn clipboard_uri_text_parses_quoted_paths() {
-        let single_quoted = clipboard_paths_from_uri_text("'/home/zhyhang/图片/2026-08-27_23-08.png'");
+        let single_quoted =
+            clipboard_paths_from_uri_text("'/home/zhyhang/图片/2026-08-27_23-08.png'");
         assert_eq!(
             single_quoted,
             vec!["/home/zhyhang/图片/2026-08-27_23-08.png".to_string()]
         );
 
         let double_quoted = clipboard_paths_from_uri_text("\"/tmp/screenshot.png\"");
-        assert_eq!(
-            double_quoted,
-            vec!["/tmp/screenshot.png".to_string()]
-        );
+        assert_eq!(double_quoted, vec!["/tmp/screenshot.png".to_string()]);
     }
 }
 

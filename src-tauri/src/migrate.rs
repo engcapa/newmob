@@ -30,6 +30,9 @@ const NEW_DB_NAME: &str = "taomni.db";
 pub fn run(new_app_data: &Path) {
     migrate_app_data_dir(new_app_data);
     migrate_db_file(new_app_data);
+    if std::env::var_os("NEWMOB_DATA_DIR").is_some() {
+        return;
+    }
     migrate_named_dir(dirs::config_dir());
     migrate_named_dir(dirs::cache_dir());
 }

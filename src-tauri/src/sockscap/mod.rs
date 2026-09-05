@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
@@ -158,11 +158,7 @@ impl Default for SocksCapRuntime {
 }
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?
-        .join("sockscap");
+    let dir = crate::resolved_app_data_dir(app)?.join("sockscap");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create sockscap dir: {e}"))?;
     Ok(dir)
 }

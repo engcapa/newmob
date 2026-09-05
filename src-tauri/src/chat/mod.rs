@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
@@ -842,10 +842,7 @@ fn extension_for_mime(mime: &str, fallback: &str) -> &'static str {
 }
 
 fn generation_output_path(app: &AppHandle, kind: &str, ext: &str) -> Result<PathBuf, String> {
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Resolve app data dir: {e}"))?
+    let base = crate::resolved_app_data_dir(app)?
         .join("ai-generations")
         .join(chrono::Local::now().format("%Y-%m-%d").to_string());
     std::fs::create_dir_all(&base).map_err(|e| format!("Create generation output dir: {e}"))?;

@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::State;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -622,10 +622,7 @@ pub async fn vault_list(state: State<'_, AppState>) -> Result<Vec<db::EntrySumma
 
 /// Helper used by setup() to choose the on-disk vault path.
 pub fn default_vault_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
-    let mut p = app
-        .path()
-        .app_data_dir()
-        .expect("failed to resolve app data dir");
+    let mut p = crate::resolved_app_data_dir(app).expect("failed to resolve app data dir");
     p.push("vault.db");
     p
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import {
@@ -38,6 +38,8 @@ const SYNC_SCROLL_KEY = "taomni.git.diff.syncScroll";
 const MAX_AUTO_RENDER_CHARS = 300_000;
 const MAX_AUTO_RENDER_LINES = 12_000;
 const CONNECTOR_WIDTH = 36;
+const MIN_PANE_WIDTH = 160;
+const MIN_SPLIT_CONTENT_WIDTH = MIN_PANE_WIDTH * 2;
 
 function readPref<T extends string>(key: string, fallback: T): T {
   try {
@@ -144,7 +146,7 @@ if (typeof document !== "undefined" && !document.getElementById(STYLE_ID)) {
   display: flex;
   flex-direction: column;
   flex: 1 1 0;
-  width: 0; /* force equal flex share so panes fill available width */
+  width: auto;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -267,6 +269,7 @@ if (typeof document !== "undefined" && !document.getElementById(STYLE_ID)) {
 .taomni-diff-host .taomni-diff-connector {
   position: relative;
   align-self: stretch;
+  box-sizing: border-box;
   flex: 0 0 ${CONNECTOR_WIDTH}px;
   width: ${CONNECTOR_WIDTH}px;
   min-width: ${CONNECTOR_WIDTH}px;
@@ -278,7 +281,19 @@ if (typeof document !== "undefined" && !document.getElementById(STYLE_ID)) {
     var(--taomni-diff-gutter-bg);
   border-left: 1px solid var(--taomni-diff-border);
   border-right: 1px solid var(--taomni-diff-border);
-  pointer-events: none;
+  cursor: col-resize;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+}
+
+.taomni-diff-host .taomni-diff-connector:focus-visible {
+  outline: 1px solid var(--taomni-accent);
+  outline-offset: -1px;
+}
+
+.taomni-diff-host .taomni-diff-connector.is-dragging {
+  background-color: color-mix(in srgb, var(--taomni-accent) 16%, var(--taomni-diff-gutter-bg));
 }
 
 .taomni-diff-host .taomni-diff-connector svg {
@@ -396,6 +411,53 @@ function setImportantStyle(element: HTMLElement, property: string, value: string
   element.style.setProperty(property, value, "important");
 }
 
+function setImportantStyleIfChanged(element: HTMLElement, property: string, value: string): boolean {
+  if (element.style.getPropertyValue(property) === value && element.style.getPropertyPriority(property) === "important") {
+    return false;
+  }
+  setImportantStyle(element, property, value);
+  return true;
+}
+
+function elementWidth(element: HTMLElement): number {
+  if (element.clientWidth > 0) return element.clientWidth;
+  const width = element.getBoundingClientRect().width;
+  return Number.isFinite(width) && width > 0 ? width : 0;
+}
+
+interface SplitLayoutMetrics {
+  width: number;
+  availableWidth: number;
+  leftWidth: number;
+  rightWidth: number;
+  effectiveRatio: number;
+  disabled: boolean;
+}
+
+function splitLayoutMetrics(editorDom: HTMLElement, preferredRatio: number): SplitLayoutMetrics {
+  const width = elementWidth(editorDom);
+  const availableWidth = Math.max(0, width - CONNECTOR_WIDTH);
+  const disabled = availableWidth < MIN_SPLIT_CONTENT_WIDTH;
+  if (availableWidth === 0) {
+    return { width, availableWidth, leftWidth: 0, rightWidth: 0, effectiveRatio: 0.5, disabled: true };
+  }
+  if (disabled) {
+    const half = availableWidth / 2;
+    return { width, availableWidth, leftWidth: half, rightWidth: half, effectiveRatio: 0.5, disabled: true };
+  }
+  const minRatio = MIN_PANE_WIDTH / availableWidth;
+  const effectiveRatio = clampNumber(preferredRatio, minRatio, 1 - minRatio);
+  const leftWidth = availableWidth * effectiveRatio;
+  return {
+    width,
+    availableWidth,
+    leftWidth,
+    rightWidth: availableWidth - leftWidth,
+    effectiveRatio,
+    disabled: false,
+  };
+}
+
 function applyEditorViewportLayout(view: EditorView) {
   const editor = view.dom;
   const scroller = view.scrollDOM;
@@ -420,7 +482,12 @@ function applyEditorViewportLayout(view: EditorView) {
 
 function applySplitDiffLayout(
   mv: MergeView,
-): { editorDom: HTMLElement; leftWrap: HTMLElement; rightWrap: HTMLElement } | null {
+  preferredRatio: number,
+): ({
+  editorDom: HTMLElement;
+  leftWrap: HTMLElement;
+  rightWrap: HTMLElement;
+} & SplitLayoutMetrics) | null {
   const editorDom = mv.dom.querySelector<HTMLElement>(".cm-mergeViewEditors");
   const leftWrap = mv.a.dom.parentElement;
   const rightWrap = mv.b.dom.parentElement;
@@ -459,30 +526,71 @@ function applySplitDiffLayout(
     setImportantStyle(wrap, "display", "flex");
     setImportantStyle(wrap, "flex-direction", "column");
     setImportantStyle(wrap, "align-items", "stretch");
-    wrap.style.setProperty("flex", "1 1 0");
-    setImportantStyle(wrap, "width", "0");
     setImportantStyle(wrap, "min-height", "0");
     setImportantStyle(wrap, "min-width", "0");
     setImportantStyle(wrap, "overflow", "hidden");
   }
 
+  const metrics = splitLayoutMetrics(editorDom, preferredRatio);
+  const shouldApplyMeasuredWidths = metrics.width > CONNECTOR_WIDTH;
+  const leftFlex = shouldApplyMeasuredWidths ? `0 0 ${metrics.leftWidth}px` : "1 1 0";
+  const rightFlex = shouldApplyMeasuredWidths ? `0 0 ${metrics.rightWidth}px` : "1 1 0";
+  const leftWidth = shouldApplyMeasuredWidths ? `${metrics.leftWidth}px` : "auto";
+  const rightWidth = shouldApplyMeasuredWidths ? `${metrics.rightWidth}px` : "auto";
+  const leftFlexChanged = setImportantStyleIfChanged(leftWrap, "flex", leftFlex);
+  const leftWidthChanged = setImportantStyleIfChanged(leftWrap, "width", leftWidth);
+  const rightFlexChanged = setImportantStyleIfChanged(rightWrap, "flex", rightFlex);
+  const rightWidthChanged = setImportantStyleIfChanged(rightWrap, "width", rightWidth);
+  const leftChanged = leftFlexChanged || leftWidthChanged;
+  const rightChanged = rightFlexChanged || rightWidthChanged;
+
   applyEditorViewportLayout(mv.a);
   applyEditorViewportLayout(mv.b);
-  mv.a.requestMeasure();
-  mv.b.requestMeasure();
+  if (leftChanged || rightChanged) {
+    mv.a.requestMeasure();
+    mv.b.requestMeasure();
+  }
 
-  return { editorDom, leftWrap, rightWrap };
+  return { editorDom, leftWrap, rightWrap, ...metrics };
 }
 
-function setupSplitDiffInteractions(mv: MergeView, isSyncEnabled: () => boolean): () => void {
-  const layout = applySplitDiffLayout(mv);
-  if (!layout) return () => {};
-  const { editorDom, rightWrap } = layout;
+interface SplitInteractionOptions {
+  isSyncEnabled: () => boolean;
+  readPreferredRatio: () => number;
+  commitPreferredRatio: (ratio: number) => void;
+  leftPaneId: string;
+  rightPaneId: string;
+  cancelPendingScrollCorrection: () => void;
+  onLayoutReady: () => void;
+}
+
+interface DragState {
+  pointerId: number;
+  startClientX: number;
+  startLeftWidth: number;
+  startAvailableWidth: number;
+  startPreferredRatio: number;
+}
+
+function setupSplitDiffInteractions(mv: MergeView, options: SplitInteractionOptions): () => void {
+  const initialLayout = applySplitDiffLayout(mv, options.readPreferredRatio());
+  if (!initialLayout) return () => {};
+  let layout = initialLayout;
+  const { editorDom, leftWrap, rightWrap } = layout;
+
+  leftWrap.id = options.leftPaneId;
+  rightWrap.id = options.rightPaneId;
 
   editorDom.querySelector(".taomni-diff-connector")?.remove();
 
   const connector = document.createElement("div");
   connector.className = "taomni-diff-connector";
+  connector.dataset.testid = "git-diff-splitter";
+  connector.setAttribute("role", "separator");
+  connector.setAttribute("aria-orientation", "vertical");
+  connector.setAttribute("aria-label", "Resize diff panes");
+  connector.tabIndex = 0;
+  connector.setAttribute("aria-controls", `${options.leftPaneId} ${options.rightPaneId}`);
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("aria-hidden", "true");
   const pathLayer = document.createElementNS("http://www.w3.org/2000/svg", "g");
@@ -492,9 +600,18 @@ function setupSplitDiffInteractions(mv: MergeView, isSyncEnabled: () => boolean)
 
   const aScroll = mv.a.scrollDOM;
   const bScroll = mv.b.scrollDOM;
+  aScroll.dataset.testid = "git-diff-left-scroll";
+  bScroll.dataset.testid = "git-diff-right-scroll";
   let ignoreNextScroll: HTMLElement | null = null;
   let renderFrame = 0;
   let deferredRender = 0;
+  let lastWidth = layout.width;
+  let drag: DragState | null = null;
+  let pendingClientX: number | null = null;
+  let dragFrame = 0;
+  let previewRatio: number | null = null;
+  let previousBodyCursor = "";
+  let previousBodyUserSelect = "";
 
   const renderConnectors = () => {
     renderFrame = 0;
@@ -530,13 +647,247 @@ function setupSplitDiffInteractions(mv: MergeView, isSyncEnabled: () => boolean)
     }
   };
 
+  const updateSeparatorA11y = () => {
+    const min = layout.disabled ? 50 : Math.round((MIN_PANE_WIDTH / layout.availableWidth) * 100);
+    const max = layout.disabled ? 50 : 100 - min;
+    connector.setAttribute("aria-disabled", String(layout.disabled));
+    connector.setAttribute("aria-valuemin", String(min));
+    connector.setAttribute("aria-valuemax", String(max));
+    connector.setAttribute("aria-valuenow", String(Math.round(layout.effectiveRatio * 100)));
+    connector.dataset.availableWidth = String(Math.round(layout.availableWidth));
+  };
+
+  const applyLayout = (preferredRatio: number) => {
+    const next = applySplitDiffLayout(mv, preferredRatio);
+    if (next) {
+      layout = next;
+      updateSeparatorA11y();
+    }
+    return next;
+  };
+
+  updateSeparatorA11y();
+
+  const restoreDocumentStyles = () => {
+    if (typeof document === "undefined" || !document.body) return;
+    document.body.style.cursor = previousBodyCursor;
+    document.body.style.userSelect = previousBodyUserSelect;
+  };
+
+  const removeDragWindowListeners = () => {
+    window.removeEventListener("pointermove", onWindowPointerMove);
+    window.removeEventListener("pointerup", onWindowPointerUp);
+    window.removeEventListener("pointercancel", onWindowPointerCancel);
+  };
+
+  const endDrag = (commit: boolean) => {
+    const state = drag;
+    if (!state) return;
+    drag = null;
+    pendingClientX = null;
+    if (dragFrame !== 0) {
+      window.cancelAnimationFrame(dragFrame);
+      dragFrame = 0;
+    }
+
+    const ratio = commit ? previewRatio : null;
+    const restored = applyLayout(ratio ?? state.startPreferredRatio);
+    if (commit && restored && !restored.disabled) {
+      options.commitPreferredRatio(restored.effectiveRatio);
+    }
+    previewRatio = null;
+    removeDragWindowListeners();
+    connector.classList.remove("is-dragging");
+    restoreDocumentStyles();
+    if (connector.hasPointerCapture?.(state.pointerId)) {
+      try {
+        connector.releasePointerCapture(state.pointerId);
+      } catch {
+        /* Pointer capture may already have been lost. */
+      }
+    }
+  };
+
+  const pointerRatio = (clientX: number, state: DragState): number | null => {
+    const current = splitLayoutMetrics(editorDom, options.readPreferredRatio());
+    if (
+      current.availableWidth < MIN_SPLIT_CONTENT_WIDTH
+      || Math.abs(current.availableWidth - state.startAvailableWidth) > 0.5
+    ) {
+      return null;
+    }
+    const leftWidth = state.startLeftWidth + clientX - state.startClientX;
+    const minRatio = MIN_PANE_WIDTH / current.availableWidth;
+    return clampNumber(leftWidth / current.availableWidth, minRatio, 1 - minRatio);
+  };
+
+  const applyDragAt = (clientX: number): boolean => {
+    const state = drag;
+    if (!state) return false;
+    const ratio = pointerRatio(clientX, state);
+    if (ratio == null) return false;
+    const next = applyLayout(ratio);
+    if (!next || next.disabled) return false;
+    previewRatio = next.effectiveRatio;
+    return true;
+  };
+
+  const applyPendingDrag = () => {
+    dragFrame = 0;
+    if (!drag || pendingClientX == null) return;
+    const clientX = pendingClientX;
+    pendingClientX = null;
+    if (!applyDragAt(clientX)) endDrag(false);
+  };
+
+  const queueDragAt = (clientX: number) => {
+    pendingClientX = clientX;
+    if (dragFrame === 0) dragFrame = window.requestAnimationFrame(applyPendingDrag);
+  };
+
+  function onWindowPointerMove(event: PointerEvent) {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    queueDragAt(event.clientX);
+  }
+
+  function onWindowPointerUp(event: PointerEvent) {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    if (dragFrame !== 0) {
+      window.cancelAnimationFrame(dragFrame);
+      dragFrame = 0;
+    }
+    const applied = applyDragAt(event.clientX);
+    endDrag(applied);
+  }
+
+  function onWindowPointerCancel(event: PointerEvent) {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    endDrag(false);
+  }
+
+  function onWindowBlur() {
+    if (drag) endDrag(false);
+  }
+
+  const onPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0 || ("isPrimary" in event && !event.isPrimary)) return;
+    options.cancelPendingScrollCorrection();
+    const current = applyLayout(options.readPreferredRatio());
+    if (!current || current.disabled || current.availableWidth <= 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    connector.focus();
+    drag = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startLeftWidth: current.leftWidth,
+      startAvailableWidth: current.availableWidth,
+      startPreferredRatio: options.readPreferredRatio(),
+    };
+    previewRatio = current.effectiveRatio;
+    previousBodyCursor = document.body?.style.cursor ?? "";
+    previousBodyUserSelect = document.body?.style.userSelect ?? "";
+    if (document.body) {
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    }
+    connector.classList.add("is-dragging");
+    window.addEventListener("pointermove", onWindowPointerMove);
+    window.addEventListener("pointerup", onWindowPointerUp);
+    window.addEventListener("pointercancel", onWindowPointerCancel);
+    window.addEventListener("blur", onWindowBlur);
+    if (connector.setPointerCapture) {
+      try {
+        connector.setPointerCapture(event.pointerId);
+      } catch {
+        /* The window listeners remain the fallback when capture is unavailable. */
+      }
+    }
+  };
+
+  const onPointerMove = (event: PointerEvent) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    queueDragAt(event.clientX);
+  };
+
+  const onPointerUp = (event: PointerEvent) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onWindowPointerUp(event);
+  };
+
+  const onPointerCancel = (event: PointerEvent) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onWindowPointerCancel(event);
+  };
+
+  const onLostPointerCapture = () => {
+    if (drag) endDrag(false);
+  };
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      if (drag) {
+        event.preventDefault();
+        endDrag(false);
+      }
+      return;
+    }
+    if (!["ArrowLeft", "ArrowRight", "Home", "End", "Enter"].includes(event.key)) return;
+    const current = applyLayout(options.readPreferredRatio());
+    if (!current) return;
+    let nextRatio: number;
+    if (event.key === "Enter") {
+      nextRatio = 0.5;
+    } else if (current.disabled) {
+      return;
+    } else if (event.key === "Home") {
+      nextRatio = MIN_PANE_WIDTH / current.availableWidth;
+    } else if (event.key === "End") {
+      nextRatio = 1 - MIN_PANE_WIDTH / current.availableWidth;
+    } else {
+      const delta = event.shiftKey ? 0.1 : 0.02;
+      nextRatio = current.effectiveRatio + (event.key === "ArrowRight" ? delta : -delta);
+    }
+    event.preventDefault();
+    const next = applyLayout(nextRatio);
+    if (next && !next.disabled) options.commitPreferredRatio(next.effectiveRatio);
+  };
+
+  const onDoubleClick = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    options.cancelPendingScrollCorrection();
+    if (drag) endDrag(false);
+    const next = applyLayout(0.5);
+    if (next && !next.disabled) options.commitPreferredRatio(next.effectiveRatio);
+  };
+
+  const cancelPendingCorrection = () => options.cancelPendingScrollCorrection();
+  const interactionTargets = [aScroll, bScroll, mv.a.dom, mv.b.dom];
+  for (const target of interactionTargets) {
+    target.addEventListener("wheel", cancelPendingCorrection, { passive: true });
+    target.addEventListener("pointerdown", cancelPendingCorrection, { passive: true });
+    target.addEventListener("touchstart", cancelPendingCorrection, { passive: true });
+    target.addEventListener("beforeinput", cancelPendingCorrection);
+    target.addEventListener("input", cancelPendingCorrection);
+  }
+
   const handleScroll = (source: HTMLElement, target: HTMLElement) => {
     if (ignoreNextScroll === source) {
       ignoreNextScroll = null;
       queueRender();
       return;
     }
-    if (isSyncEnabled()) {
+    if (options.isSyncEnabled()) {
       ignoreNextScroll = target;
       target.scrollTop = mappedScrollTop(source, target);
     }
@@ -548,22 +899,60 @@ function setupSplitDiffInteractions(mv: MergeView, isSyncEnabled: () => boolean)
   aScroll.addEventListener("scroll", onAScroll, { passive: true });
   bScroll.addEventListener("scroll", onBScroll, { passive: true });
 
-  const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(queueRender) : null;
+  const handleResize = () => {
+    const width = elementWidth(editorDom);
+    if (width !== lastWidth) {
+      const becameUsable = lastWidth <= CONNECTOR_WIDTH && width > CONNECTOR_WIDTH;
+      if (drag) endDrag(false);
+      lastWidth = width;
+      applyLayout(options.readPreferredRatio());
+      if (becameUsable) options.onLayoutReady();
+    }
+    queueRender();
+  };
+  const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(handleResize) : null;
   resizeObserver?.observe(mv.dom);
   resizeObserver?.observe(editorDom);
   resizeObserver?.observe(connector);
   resizeObserver?.observe(aScroll);
   resizeObserver?.observe(bScroll);
-  window.addEventListener("resize", queueRender);
+  window.addEventListener("resize", handleResize);
+
+  connector.addEventListener("pointerdown", onPointerDown);
+  connector.addEventListener("pointermove", onPointerMove);
+  connector.addEventListener("pointerup", onPointerUp);
+  connector.addEventListener("pointercancel", onPointerCancel);
+  connector.addEventListener("lostpointercapture", onLostPointerCapture);
+  connector.addEventListener("keydown", onKeyDown);
+  connector.addEventListener("dblclick", onDoubleClick);
 
   queueRender();
   deferredRender = window.setTimeout(queueRender, 80);
+  if (layout.width > CONNECTOR_WIDTH) options.onLayoutReady();
 
   return () => {
+    options.cancelPendingScrollCorrection();
+    endDrag(false);
+    connector.removeEventListener("pointerdown", onPointerDown);
+    connector.removeEventListener("pointermove", onPointerMove);
+    connector.removeEventListener("pointerup", onPointerUp);
+    connector.removeEventListener("pointercancel", onPointerCancel);
+    connector.removeEventListener("lostpointercapture", onLostPointerCapture);
+    connector.removeEventListener("keydown", onKeyDown);
+    connector.removeEventListener("dblclick", onDoubleClick);
+    for (const target of interactionTargets) {
+      target.removeEventListener("wheel", cancelPendingCorrection);
+      target.removeEventListener("pointerdown", cancelPendingCorrection);
+      target.removeEventListener("touchstart", cancelPendingCorrection);
+      target.removeEventListener("beforeinput", cancelPendingCorrection);
+      target.removeEventListener("input", cancelPendingCorrection);
+    }
     aScroll.removeEventListener("scroll", onAScroll);
     bScroll.removeEventListener("scroll", onBScroll);
-    window.removeEventListener("resize", queueRender);
+    window.removeEventListener("resize", handleResize);
+    window.removeEventListener("blur", onWindowBlur);
     resizeObserver?.disconnect();
+    if (dragFrame !== 0) window.cancelAnimationFrame(dragFrame);
     if (renderFrame !== 0) window.cancelAnimationFrame(renderFrame);
     if (deferredRender !== 0) window.clearTimeout(deferredRender);
     connector.remove();
@@ -573,13 +962,27 @@ function setupSplitDiffInteractions(mv: MergeView, isSyncEnabled: () => boolean)
 function scrollChunkIntoView(view: EditorView, chunk: Chunk, side: "a" | "b") {
   const docLength = view.state.doc.length;
   const from = side === "a" ? chunk.fromA : chunk.fromB;
-  const end = side === "a" ? chunk.endA : chunk.endB;
   const anchor = clampNumber(from, 0, docLength);
-  const scrollPos = clampNumber(Math.max(anchor, end - 1), 0, docLength);
+  const lineStart = docLength === 0 ? 0 : view.state.doc.lineAt(anchor).from;
+  const scrollerRect = view.scrollDOM.getBoundingClientRect();
+  const contentRect = view.contentDOM.getBoundingClientRect();
+  const contentOrigin = contentRect.width > 0 && scrollerRect.width > 0
+    ? contentRect.left - scrollerRect.left + view.scrollDOM.scrollLeft
+    : 0;
   view.dispatch({
-    selection: { anchor },
-    effects: EditorView.scrollIntoView(scrollPos, { y: "center", x: "nearest" }),
+    selection: { anchor: lineStart },
+    effects: EditorView.scrollIntoView(lineStart, {
+      y: "center",
+      x: "start",
+      // Align the text origin rather than the gutter edge. Without this,
+      // CodeMirror treats the line-number gutter as a horizontal offset.
+      xMargin: Math.max(0, contentOrigin),
+    }),
   });
+  // CodeMirror applies the scroll effect during its next measure. Set the
+  // horizontal origin immediately as well so navigation never exposes a
+  // transient horizontal offset to the next interaction or assertion.
+  view.scrollDOM.scrollLeft = 0;
 }
 
 function formatBytes(n: number): string {
@@ -597,6 +1000,9 @@ export function DiffViewer({
   worktreeEditable = false,
   onSaveWorktree,
 }: DiffViewerProps) {
+  const instanceId = useId().replace(/:/g, "");
+  const leftPaneId = `git-diff-left-pane-${instanceId}`;
+  const rightPaneId = `git-diff-right-pane-${instanceId}`;
   const [view, setView] = useState<ViewMode>(() => readPref<ViewMode>(VIEW_KEY, "split"));
   const [whitespace, setWhitespace] = useState<WhitespaceMode>(() => readPref<WhitespaceMode>(WS_KEY, "none"));
   const [syncScrolling, setSyncScrolling] = useState(
@@ -612,6 +1018,9 @@ export function DiffViewer({
   const mergeRef = useRef<MergeView | null>(null);
   const unifiedRef = useRef<EditorView | null>(null);
   const scrollCleanupRef = useRef<(() => void) | null>(null);
+  const scrollZeroRef = useRef<((views: EditorView[]) => void) | null>(null);
+  const cancelScrollZeroRef = useRef<(() => void) | null>(null);
+  const preferredRatioRef = useRef(0.5);
   const syncScrollingRef = useRef(syncScrolling);
   const activeChunkIndexRef = useRef(-1);
   const baselineNewTextRef = useRef("");
@@ -623,9 +1032,12 @@ export function DiffViewer({
     && !pair.oversize
     && pair.newExists
     && pair.newText != null;
-  const pairKey = pair
-    ? `${pair.path}\0${pair.oldPath ?? ""}\0${pair.oldSize}\0${pair.newSize}\0${pair.oldText?.length ?? -1}\0${pair.newText?.length ?? -1}`
-    : "";
+  const pairKey = useMemo(
+    () => pair
+      ? `${pair.path}\0${pair.oldPath ?? ""}\0${pair.oldSize}\0${pair.newSize}\0${pair.oldText ?? ""}\0${pair.newText ?? ""}`
+      : "",
+    [pair],
+  );
   const complexity = useMemo(() => (pair ? diffComplexity(pair) : null), [pairKey, pair]);
   const largeTextDiff = !!complexity?.tooLarge && forceRenderLargeDiffKey !== pairKey;
 
@@ -650,7 +1062,7 @@ export function DiffViewer({
   useEffect(() => {
     setDirty(false);
     baselineNewTextRef.current = pair?.newText ?? "";
-  }, [pairKey]);
+  }, [pair]);
 
   const readWorktreeText = useCallback((): string | null => {
     if (mergeRef.current) return mergeRef.current.b.state.doc.toString();
@@ -675,7 +1087,47 @@ export function DiffViewer({
   // BUILD_EFFECT
   useEffect(() => {
     let cancelled = false;
+    let correctionFrame = 0;
+    let correctionGeneration = 0;
+    let viewportCleanup: (() => void) | null = null;
+
+    const cancelPendingScrollCorrection = () => {
+      correctionGeneration += 1;
+      if (correctionFrame !== 0) {
+        window.cancelAnimationFrame(correctionFrame);
+        correctionFrame = 0;
+      }
+    };
+
+    const scheduleScrollZero = (views: EditorView[]) => {
+      cancelPendingScrollCorrection();
+      const generation = correctionGeneration;
+      correctionFrame = window.requestAnimationFrame(() => {
+        correctionFrame = 0;
+        if (cancelled || generation !== correctionGeneration) return;
+        for (const editorView of views) {
+          editorView.requestMeasure({
+            read: () => true,
+            write: () => {
+              if (
+                cancelled
+                || generation !== correctionGeneration
+                || !editorView.dom.isConnected
+                || elementWidth(editorView.dom) <= 0
+              ) return;
+              editorView.scrollDOM.scrollLeft = 0;
+            },
+          });
+        }
+      });
+    };
+
+    scrollZeroRef.current = scheduleScrollZero;
+    cancelScrollZeroRef.current = cancelPendingScrollCorrection;
     const teardown = () => {
+      cancelPendingScrollCorrection();
+      viewportCleanup?.();
+      viewportCleanup = null;
       scrollCleanupRef.current?.();
       scrollCleanupRef.current = null;
       mergeRef.current?.destroy();
@@ -687,10 +1139,12 @@ export function DiffViewer({
     setDiffCount(0);
     activeChunkIndexRef.current = -1;
     const host = hostRef.current;
-    if (!host || !renderable || !pair) {
+    if (loading || !host || !renderable || !pair) {
       return () => {
         cancelled = true;
         teardown();
+        if (scrollZeroRef.current === scheduleScrollZero) scrollZeroRef.current = null;
+        if (cancelScrollZeroRef.current === cancelPendingScrollCorrection) cancelScrollZeroRef.current = null;
       };
     }
     host.innerHTML = "";
@@ -703,6 +1157,7 @@ export function DiffViewer({
     const updateListener = editable
       ? EditorView.updateListener.of((update) => {
         if (!update.docChanged) return;
+        cancelPendingScrollCorrection();
         const text = update.state.doc.toString();
         setDirty(text !== baselineNewTextRef.current);
       })
@@ -726,7 +1181,17 @@ export function DiffViewer({
             diffConfig,
           });
           mergeRef.current = mv;
-          scrollCleanupRef.current = setupSplitDiffInteractions(mv, () => syncScrollingRef.current);
+          scrollCleanupRef.current = setupSplitDiffInteractions(mv, {
+            isSyncEnabled: () => syncScrollingRef.current,
+            readPreferredRatio: () => preferredRatioRef.current,
+            commitPreferredRatio: (ratio) => {
+              preferredRatioRef.current = clampNumber(ratio, 0, 1);
+            },
+            leftPaneId,
+            rightPaneId,
+            cancelPendingScrollCorrection,
+            onLayoutReady: () => scheduleScrollZero([mv.a, mv.b]),
+          });
           setDiffCount(mv.chunks.length);
         } else {
           const uv = new EditorView({
@@ -745,8 +1210,37 @@ export function DiffViewer({
             ],
           });
           unifiedRef.current = uv;
+          uv.scrollDOM.dataset.testid = "git-diff-right-scroll";
           applyEditorViewportLayout(uv);
+          const cancelUnifiedCorrection = () => cancelPendingScrollCorrection();
+          for (const target of [uv.scrollDOM, uv.dom]) {
+            target.addEventListener("wheel", cancelUnifiedCorrection, { passive: true });
+            target.addEventListener("pointerdown", cancelUnifiedCorrection, { passive: true });
+            target.addEventListener("touchstart", cancelUnifiedCorrection, { passive: true });
+            target.addEventListener("beforeinput", cancelUnifiedCorrection);
+            target.addEventListener("input", cancelUnifiedCorrection);
+          }
+          let wasUsable = elementWidth(uv.dom) > 0;
+          const unifiedResizeObserver = typeof ResizeObserver !== "undefined"
+            ? new ResizeObserver(() => {
+              const usable = elementWidth(uv.dom) > 0;
+              if (usable && !wasUsable) scheduleScrollZero([uv]);
+              wasUsable = usable;
+            })
+            : null;
+          unifiedResizeObserver?.observe(uv.dom);
+          viewportCleanup = () => {
+            unifiedResizeObserver?.disconnect();
+            for (const target of [uv.scrollDOM, uv.dom]) {
+              target.removeEventListener("wheel", cancelUnifiedCorrection);
+              target.removeEventListener("pointerdown", cancelUnifiedCorrection);
+              target.removeEventListener("touchstart", cancelUnifiedCorrection);
+              target.removeEventListener("beforeinput", cancelUnifiedCorrection);
+              target.removeEventListener("input", cancelUnifiedCorrection);
+            }
+          };
           uv.requestMeasure();
+          scheduleScrollZero([uv]);
           setDiffCount(getChunks(uv.state)?.chunks.length ?? 0);
         }
       })
@@ -757,8 +1251,10 @@ export function DiffViewer({
     return () => {
       cancelled = true;
       teardown();
+      if (scrollZeroRef.current === scheduleScrollZero) scrollZeroRef.current = null;
+      if (cancelScrollZeroRef.current === cancelPendingScrollCorrection) cancelScrollZeroRef.current = null;
     };
-  }, [canEditWorktree, pair, renderable, view, whitespace, highlightWords]);
+  }, [canEditWorktree, highlightWords, leftPaneId, loading, pair, renderable, rightPaneId, view, whitespace]);
 
   const goToChunk = useCallback((direction: 1 | -1) => {
     const mv = mergeRef.current;
@@ -780,12 +1276,14 @@ export function DiffViewer({
       scrollChunkIntoView(mv.a, chunk, "a");
       scrollChunkIntoView(mv.b, chunk, "b");
       mv.b.focus();
+      scrollZeroRef.current?.([mv.a, mv.b]);
       return;
     }
 
     if (uv) {
       scrollChunkIntoView(uv, chunk, "b");
       uv.focus();
+      scrollZeroRef.current?.([uv]);
     }
   }, []);
   const goNext = useCallback(() => goToChunk(1), [goToChunk]);
@@ -822,9 +1320,15 @@ export function DiffViewer({
   if (largeTextDiff && complexity) {
     return (
       <DiffNotice
+        path={pair.path}
         text={`Large text diff skipped (${formatBytes(pair.oldSize)} to ${formatBytes(pair.newSize)}, ${formatLines(complexity.maxLines)}).`}
       >
-        <button className="taomni-btn h-7 px-2 mt-3" type="button" onClick={() => setForceRenderLargeDiffKey(pairKey)}>
+        <button
+          className="taomni-btn h-7 px-2 mt-3"
+          type="button"
+          data-testid="git-diff-render-anyway"
+          onClick={() => setForceRenderLargeDiffKey(pairKey)}
+        >
           Render anyway
         </button>
       </DiffNotice>
@@ -837,7 +1341,11 @@ export function DiffViewer({
     : null;
 
   return (
-    <div className="h-full min-h-0 min-w-0 w-full flex flex-col bg-[var(--taomni-panel-bg)]">
+    <div
+      data-testid="git-diff-viewer"
+      data-path={pair.path}
+      className="h-full min-h-0 min-w-0 w-full flex flex-col bg-[var(--taomni-panel-bg)]"
+    >
       {eolOnly && eolLabel ? (
         <div
           data-testid="git-diff-eol-only-banner"
@@ -861,6 +1369,7 @@ export function DiffViewer({
         <div className="inline-flex rounded-md p-0.5 bg-[var(--taomni-hover)] border border-[var(--taomni-divider)]">
           <button
             type="button"
+            data-testid="git-diff-mode-split"
             title="Side-by-side (Split)"
             className={`h-6 px-2.5 rounded text-[11px] font-medium inline-flex items-center gap-1.5 transition-all duration-150 ${view === "split" ? "bg-[var(--taomni-card-bg)] text-[var(--taomni-text)] shadow-sm" : "text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)]"}`}
             onClick={() => setView("split")}
@@ -869,6 +1378,7 @@ export function DiffViewer({
           </button>
           <button
             type="button"
+            data-testid="git-diff-mode-unified"
             title="Unified"
             className={`h-6 px-2.5 rounded text-[11px] font-medium inline-flex items-center gap-1.5 transition-all duration-150 ${view === "unified" ? "bg-[var(--taomni-card-bg)] text-[var(--taomni-text)] shadow-sm" : "text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)]"}`}
             onClick={() => setView("unified")}
@@ -882,6 +1392,7 @@ export function DiffViewer({
         {view === "split" && (
           <button
             type="button"
+            data-testid="git-diff-sync-scroll"
             title={syncScrolling ? "Synchronize scrolling: on" : "Synchronize scrolling: off"}
             aria-pressed={syncScrolling}
             className={`h-7 w-7 rounded-md inline-flex items-center justify-center border transition-all duration-150 cursor-pointer ${
@@ -940,6 +1451,7 @@ export function DiffViewer({
           <button
             className="h-7 w-7 rounded-md inline-flex items-center justify-center border border-[var(--taomni-divider)] bg-[var(--taomni-card-bg)] text-[var(--taomni-text)] hover:bg-[var(--taomni-hover)] disabled:opacity-40 disabled:hover:bg-[var(--taomni-card-bg)] transition-all duration-150 cursor-pointer"
             type="button"
+            data-testid="git-diff-prev"
             title="Previous change"
             disabled={!diffCount}
             onClick={goPrev}
@@ -949,6 +1461,7 @@ export function DiffViewer({
           <button
             className="h-7 w-7 rounded-md inline-flex items-center justify-center border border-[var(--taomni-divider)] bg-[var(--taomni-card-bg)] text-[var(--taomni-text)] hover:bg-[var(--taomni-hover)] disabled:opacity-40 disabled:hover:bg-[var(--taomni-card-bg)] transition-all duration-150 cursor-pointer"
             type="button"
+            data-testid="git-diff-next"
             title="Next change"
             disabled={!diffCount}
             onClick={goNext}
@@ -957,14 +1470,18 @@ export function DiffViewer({
           </button>
         </div>
       </div>
-      <div ref={hostRef} data-testid="git-diff-viewer" className="taomni-diff-host flex-1 min-h-0 min-w-0 w-full overflow-hidden" />
+      <div ref={hostRef} className="taomni-diff-host flex-1 min-h-0 min-w-0 w-full overflow-hidden" />
     </div>
   );
 }
 
-function DiffNotice({ text, children }: { text: string; children?: ReactNode }) {
+function DiffNotice({ text, children, path }: { text: string; children?: ReactNode; path?: string }) {
   return (
-    <div className="h-full min-h-24 flex flex-col items-center justify-center px-4 text-center text-[12px] text-[var(--taomni-text-muted)]">
+    <div
+      data-testid={path ? "git-diff-viewer" : undefined}
+      data-path={path}
+      className="h-full min-h-24 flex flex-col items-center justify-center px-4 text-center text-[12px] text-[var(--taomni-text-muted)]"
+    >
       <div>{text}</div>
       {children}
     </div>

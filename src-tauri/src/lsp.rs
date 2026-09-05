@@ -1881,7 +1881,10 @@ impl LspManager {
             commands
         };
 
-        if registered.iter().any(|command| command == "java.project.list") {
+        if registered
+            .iter()
+            .any(|command| command == "java.project.list")
+        {
             match session
                 .request_with_timeout(
                     "workspace/executeCommand",
@@ -1892,8 +1895,7 @@ impl LspManager {
             {
                 Ok(value) => result.java_projects = parse_java_project_list(&value),
                 Err(error) => {
-                    result.probe_reason =
-                        Some(format!("java.project.list-failed:{error}"));
+                    result.probe_reason = Some(format!("java.project.list-failed:{error}"));
                 }
             }
         }
@@ -1929,8 +1931,7 @@ impl LspManager {
                 }
             }
         } else if result.probe_reason.is_none() {
-            result.probe_reason =
-                Some("command-not-registered:java.project.getClasspaths".into());
+            result.probe_reason = Some("command-not-registered:java.project.getClasspaths".into());
         }
         result.registered_commands = registered;
         result
@@ -8437,7 +8438,11 @@ fn scan_build_file_hashes(root: &Path) -> Vec<LspBuildFileHash> {
             if !BUILD_DESCRIPTOR_NAMES.contains(&name) {
                 continue;
             }
-            if entry.metadata().map(|m| m.len() > BUILD_FILE_MAX_BYTES).unwrap_or(true) {
+            if entry
+                .metadata()
+                .map(|m| m.len() > BUILD_FILE_MAX_BYTES)
+                .unwrap_or(true)
+            {
                 continue;
             }
             if let Some(hash) = sha256_hex_file(&path) {
@@ -8632,7 +8637,11 @@ pub async fn lsp_java_project_model(
     custom_server_command: Option<LspCustomServerCommand>,
 ) -> Result<LspJavaProjectModelResult, String> {
     let mut document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
-    if let Some(uri) = document_uri.as_deref().map(str::trim).filter(|uri| !uri.is_empty()) {
+    if let Some(uri) = document_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|uri| !uri.is_empty())
+    {
         document.uri = uri.to_string();
     }
     Ok(state
