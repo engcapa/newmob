@@ -15,13 +15,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use ironrdp::server::TlsIdentityCtx;
-use tauri::{AppHandle, Manager as _};
+use tauri::AppHandle;
 
 /// Locate (creating if needed) the directory holding the RDP server's TLS files.
 fn tls_dir(app: &AppHandle) -> Result<PathBuf> {
-    let dir = app
-        .path()
-        .app_data_dir()
+    let dir = crate::resolved_app_data_dir(app)
+        .map_err(anyhow::Error::msg)
         .context("resolving app data dir")?
         .join("rdp-server");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;

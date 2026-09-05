@@ -59,6 +59,25 @@ use tauri::{AppHandle, Manager, State, WebviewWindowBuilder};
 const AI_PROCESS_REAPER_INTERVAL_SECS: u64 = 30;
 const AI_PROCESS_IDLE_REAP_SECS: u64 = 300;
 
+/// Resolve the app data root, honoring the debug-only QA override used by
+/// native tests. Windows' `dirs::data_dir()` uses the Known Folder API and
+/// ignores `APPDATA`, so the explicit override is required for isolation.
+pub fn resolved_app_data_dir<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<std::path::PathBuf, String> {
+    if cfg!(debug_assertions) {
+        if let Ok(raw) = std::env::var("NEWMOB_DATA_DIR") {
+            let path = std::path::PathBuf::from(raw.trim());
+            if path.is_absolute() {
+                return Ok(path);
+            }
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data dir: {error}"))
+}
+
 fn should_reap_ai_process(
     chat_turn_active: bool,
     process_turn_active: bool,
@@ -86,9 +105,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let app_data = app
-                .path()
-                .app_data_dir()
+            let app_data = resolved_app_data_dir(app.handle())
                 .expect("failed to resolve app data dir");
 
             // One-time migration from the legacy Taomni identity (see migrate.rs).
@@ -289,6 +306,16 @@ pub fn run() {
                     // Required on Linux/Windows for navigator.clipboard.readText().
                     // Terminal right-click paste and Shift+Insert use that API.
                     .enable_clipboard_access();
+                if cfg!(debug_assertions) {
+                    if let Ok(raw) = std::env::var("NEWMOB_DATA_DIR") {
+                        let data_dir = std::path::PathBuf::from(raw.trim());
+                        if data_dir.is_absolute() {
+                            let webview_dir = data_dir.join("webview");
+                            std::fs::create_dir_all(&webview_dir).ok();
+                            builder = builder.data_directory(webview_dir);
+                        }
+                    }
+                }
                 // On macOS use the native traffic-light controls with an overlay
                 // title bar so the window feels native (the frontend reserves a
                 // left inset and hides its custom min/max/close there). Windows

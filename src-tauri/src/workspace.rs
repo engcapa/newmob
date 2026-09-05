@@ -3288,7 +3288,9 @@ fn write_workspace_bytes(
                 .with_effect(WorkspaceWriteEffect::None, None));
         }
     };
-    let expected = expected_hash.map(str::trim).filter(|value| !value.is_empty());
+    let expected = expected_hash
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     // A requested precondition against a missing target is a stale snapshot:
     // creating the file would silently violate the caller's expectation.
     if expected.is_some() && old_hash.is_none() {
@@ -3723,7 +3725,10 @@ mod tests {
         let result = write_workspace_bytes(&target, b"new".to_vec(), Some("deadbeef"));
         let err = result.unwrap_err();
         assert_eq!(err.effect, Some(WorkspaceWriteEffect::None));
-        assert_eq!(err.intent_hash.as_deref(), Some(sha256_hex(b"new").as_str()));
+        assert_eq!(
+            err.intent_hash.as_deref(),
+            Some(sha256_hex(b"new").as_str())
+        );
         assert_eq!(err.old_hash.as_deref(), Some(sha256_hex(b"old").as_str()));
     }
 

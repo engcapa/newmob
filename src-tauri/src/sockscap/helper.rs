@@ -9,8 +9,6 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-#[cfg(windows)]
-use tauri::Manager;
 use tauri::{AppHandle, State};
 
 use crate::sockscap::paths::{resolve_helper_exe, resolve_windivert_dir, windivert_missing_hint};
@@ -219,11 +217,7 @@ pub async fn sockscap_helper_start(
         };
         let token = random_token();
         let port = pick_free_port()?;
-        let ready_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| e.to_string())?
-            .join("sockscap");
+        let ready_dir = crate::resolved_app_data_dir(&app)?.join("sockscap");
         std::fs::create_dir_all(&ready_dir).map_err(|e| e.to_string())?;
         let ready_file = ready_dir.join(format!("helper-ready-{port}.json"));
         let ready_file = std::fs::canonicalize(&ready_dir)
