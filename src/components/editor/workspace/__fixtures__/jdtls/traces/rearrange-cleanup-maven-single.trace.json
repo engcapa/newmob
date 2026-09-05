@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "rearrange-cleanup-maven-single",
+  "generatedAt": "2026-09-05T05:15:13.330Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21,
+        "version": "21.0.4"
+      }
+    },
+    "jdtls": {
+      "home": "/home/zhyhang/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    }
+  },
+  "capabilities": {
+    "rawCodeActionKinds": [
+      "refactor",
+      "refactor.extract",
+      "refactor.inline",
+      "refactor.rewrite",
+      "source",
+      "source.organizeImports"
+    ],
+    "formattingSupported": true,
+    "organizeImportsSupported": true,
+    "rearrangeAdvertised": false,
+    "cleanupAdvertised": false
+  },
+  "failClosedExplanations": {
+    "rearrange": "Eclipse JDT Language Server does not support member-rearrangement for java. Rearrange Code requires a dedicated arrangement provider.",
+    "cleanup": "Eclipse JDT Language Server does not support code cleanup for java. Code Cleanup requires a dedicated batch cleanup provider."
+  },
+  "nonRelabelContract": {
+    "formatNeverRelabeledAsRearrange": true,
+    "organizeImportsNeverRelabeledAsCleanup": true
+  },
+  "capableWorkflowExecution": {
+    "workflow": "rearrange",
+    "provider": {
+      "id": "eclipse-jdtls-arrangement-ext",
+      "version": "1.61.0"
+    },
+    "scope": "file",
+    "targetPath": "src/main/java/com/example/Service.java",
+    "preTextSha256": "ff6145a9eacf3e881277e999110af08e0e0ed421f430abdb89cf8b687d90c9e1",
+    "expectedPostHash": "d2ae3a9f7d70bf0d63d33af6e635618bca3a3d826cd36944e46a3ac2f715a986",
+    "previewGenerated": true,
+    "affectedFilesCount": 1,
+    "conflictDetectedOnDirty": true,
+    "singleUndoRestoredPreHash": true
+  },
+  "failures": []
+}

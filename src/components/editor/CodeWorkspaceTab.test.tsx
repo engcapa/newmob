@@ -6090,6 +6090,19 @@ describe("CodeWorkspaceTab", () => {
 
     // 8. Ctrl+Shift+F9 Recompile Active File
     expect(registrationRef.current?.items.find((item) => item.id === "workspace.recompileActiveFile")?.enabled).toBe(true);
+
+    // 9. ED-STYLE-002: Rearrange Code & Code Cleanup fail-closed with honest unavailable reasons
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.rearrangeCode")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.rearrangeCode");
+    });
+    expect(useAppStore.getState().statusMessage).toContain("does not support member-rearrangement for csharp");
+
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.codeCleanup")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.codeCleanup");
+    });
+    expect(useAppStore.getState().statusMessage).toContain("does not support code cleanup for csharp");
   });
 
   it("routes every common semantic navigation command through the provider host", async () => {

@@ -1101,6 +1101,8 @@ import {
 import {
   planCleanup,
   planRearrange,
+  resolveCleanupCapabilities,
+  resolveRearrangeCapabilities,
 } from "./workspace/rearrangeCleanupWorkflow";
 
 interface ResourceCleanupRecoveryView {
@@ -11649,20 +11651,26 @@ export function CodeWorkspaceTab({
       when: () => !!activeFile,
       run: () => {
         if (!activeFile) return;
+        const capabilities = resolveRearrangeCapabilities(
+          activeCapabilities,
+          activeLspState?.status,
+        );
         const decision = planRearrange({
           scope: "file",
           targetPath: activeFile.path ?? activeFile.key,
-          // Language and write-lock come from the live LSP session and the buffer's
-          // library origin, the same resolution the Reformat entry uses. The buffer
-          // view model carries neither as its own property.
           languageId: activeLanguageId,
           readOnly: !!activeFile.library || workspaceResourceOperationLocked,
           hasSelection: false,
-          capabilities: { rearrangeSupported: false },
+          capabilities,
         });
         if (decision.kind === "unavailable") {
           setStatusMessage(decision.reason);
+          return false;
         }
+        setStatusMessage(
+          `Executing rearrange for ${activeFile.title ?? activeFile.path ?? "active file"} (${decision.provider?.id ?? "provider"})`,
+        );
+        return true;
       },
     },
     {
@@ -11673,16 +11681,25 @@ export function CodeWorkspaceTab({
       when: () => !!activeFile,
       run: () => {
         if (!activeFile) return;
+        const capabilities = resolveCleanupCapabilities(
+          activeCapabilities,
+          activeLspState?.status,
+        );
         const decision = planCleanup({
           scope: "file",
           targetPath: activeFile.path ?? activeFile.key,
           languageId: activeLanguageId,
           readOnly: !!activeFile.library || workspaceResourceOperationLocked,
-          capabilities: { cleanupSupported: false },
+          capabilities,
         });
         if (decision.kind === "unavailable") {
           setStatusMessage(decision.reason);
+          return false;
         }
+        setStatusMessage(
+          `Executing code cleanup for ${activeFile.title ?? activeFile.path ?? "active file"} (${decision.profileId}, ${decision.provider?.id ?? "provider"})`,
+        );
+        return true;
       },
     },
     {
@@ -11760,8 +11777,14 @@ export function CodeWorkspaceTab({
         const capabilities = {
           formatting: !!activeCapabilities?.formatting,
           rangeFormatting: !!activeCapabilities?.rangeFormatting,
-          rearrangeSupported: false,
-          cleanupSupported: false,
+          rearrangeSupported: resolveRearrangeCapabilities(
+            activeCapabilities,
+            activeLspState?.status,
+          ).rearrangeSupported,
+          cleanupSupported: resolveCleanupCapabilities(
+            activeCapabilities,
+            activeLspState?.status,
+          ).cleanupSupported,
         };
         const plan = buildFormatPlan({
           scope: hasSelection ? "selection" : "file",

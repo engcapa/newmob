@@ -1,0 +1,48 @@
+id: TC-IDE-C8-04-rearrange-cleanup-unavailable-browser
+title: "Rearrange and Cleanup unavailable provider reports honest message in browser"
+description: |
+  Browser gate case (ED-STYLE-002). Opens an active file in the code workspace,
+  invokes Rearrange Code from Search Everywhere Actions, and proves the fail-closed
+  unavailable path: the status bar reports that no dedicated arrangement provider is
+  available and editor text remains untouched (zero commit).
+covers: [F25.5]
+tags: [code-workspace, ide-c8, rearrange, cleanup, browser-gate, p2]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: "public class Sample {\n    public void beta() {}\n    public void alpha() {}\n}"
+  - click: '[data-testid="code-workspace-tab"]'
+  - wait: 0.3
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Rearrange Code
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Rearrange Code'
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "Rearrange Code requires a dedicated arrangement provider"
+      timeout_sec: 20
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "public void beta()"
+      timeout_sec: 10
+  - screenshot: tc-ide-c8-04-rearrange-unavailable.png
