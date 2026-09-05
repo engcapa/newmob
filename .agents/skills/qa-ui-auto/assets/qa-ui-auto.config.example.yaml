@@ -5,8 +5,9 @@
 
 app:
   base_url: http://localhost:5000   # Vite dev server in browser mode
-  mode: browser                     # browser | native
-  # native_binary: ./src-tauri/target/debug/taomni.exe   # used when mode=native on Windows
+  mode: native                      # native preferred; browser for explicit fallback
+  # Build first: python .agents/skills/qa-ui-auto/scripts/native_build.py
+  # native_binary: ./src-tauri/target/qa-ui-auto/debug/taomni.exe  # Windows; omit .exe on Linux
 
 worker:
   parallel: 4                       # max browser worker processes (browser mode only)
@@ -14,6 +15,7 @@ worker:
 webdriver:
   host: 127.0.0.1
   port: 4444
+  native_port: 4445                # both ports must be free; external drivers are not reused
   tauri_driver: tauri-driver        # cargo install tauri-driver --locked
   # native_driver: C:/path/to/msedgedriver.exe  # optional; otherwise PATH
   startup_timeout: 20

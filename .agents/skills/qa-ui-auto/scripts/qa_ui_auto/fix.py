@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """qa-ui-auto fix — task-oriented dispatcher for the underlying gen-* tools.
 
-`fix` is the agent-facing way to close a gap surfaced by `audit`. Each
+`fix` is an optional context helper for a gap surfaced by `audit`. Each
 target maps to one of the underlying playbooks; fix pre-fetches the data
 the playbook needs and prints a step-by-step plan with concrete commands.
 
@@ -125,30 +125,27 @@ def _fix_tests_feature(feature_id: str) -> int:
     out.append("")
     out.append("## Playbook")
     out.append(
-        f"  1. Read: python -m qa_ui_auto.feature_catalog --feature {feature_id} --json"
+        f"  1. Read source files: {', '.join(row.files)}"
     )
-    out.append(
-        f"  2. Read source files (Read tool): {', '.join(row.files)}"
-    )
-    out.append("  3. Draft new YAML at qa-ui-auto-tests/cases/auto/")
+    out.append("  2. Draft YAML at qa-ui-auto-tests/cases/auto/ using references/authoring.md.")
     out.append(
         f"     filename: TC-auto-{feature_id.replace('.', '-')}-<slug>.testcase.yaml"
     )
     out.append(f"     covers: [{feature_id}]")
-    out.append("     tags: [auto-generated, smoke, needs-review]")
+    out.append("     tags: [auto-generated, needs-review]  # smoke only if fast and self-contained")
+    out.append("     modes: [native]  # verify verbs/fixtures; explain any browser fallback")
     out.append("     fixtures: [reset_db]  # add ssh_required / sftp_required if needed")
     out.append(
         "     steps: touch every missing required control with the right verb class above."
     )
     out.append("     Use the EXACT selector strings — orphan reports flag rogue selectors.")
-    out.append("  4. Validate: python -m qa_ui_auto.lint")
-    out.append("  5. Dry-run:  python -m qa_ui_auto.runner --filter <id> --dry-run")
-    out.append("  6. Real run: python -m qa_ui_auto.runner --filter <id> --workers 1")
+    out.append("     Assert observable outcomes, preserve performance budgets, consider all three OSes.")
+    out.append("  3. Run: python -m qa_ui_auto run --filter <id> (see references/native-testing.md for QA isolation)")
     out.append(
-        f"  7. Verify gap closed: python -m qa_ui_auto.audit --feature {feature_id}"
+        f"  4. After the related edits, verify once: python -m qa_ui_auto audit --feature {feature_id} --gate"
     )
     out.append(
-        f"  8. Ratchet baseline:  python -m qa_ui_auto.control_coverage "
+        f"     Ratchet only verified improvements: python -m qa_ui_auto.control_coverage "
         f"--update-baseline {DEFAULT_BASELINE}"
     )
     print("\n".join(out))
@@ -194,9 +191,8 @@ def _fix_tests_diff(base: str | None) -> int:
     out.append(f"changed files: {len(changed)}")
     out.append("")
     if not feat_hits:
-        out.append("No features touched. Cases should still pass; "
-                   "run a smoke sweep to confirm.")
-        out.append("  python -m qa_ui_auto.runner --tag smoke --workers 4")
+        out.append("No catalog-owned features touched. Inspect unowned changed files; "
+                   "run smoke only when the change scope warrants it.")
         print("\n".join(out))
         return 0
 
@@ -231,9 +227,10 @@ def _fix_tests_diff(base: str | None) -> int:
     out.append("  For each case in 'Cases needing patch':")
     out.append("    1. Read the case YAML and the changed component source.")
     out.append("    2. For each stale selector, find what replaced it (consult ADDED list).")
-    out.append("    3. Show user the unified-diff before applying.")
-    out.append("    4. Apply, then: python -m qa_ui_auto.runner --filter <id>")
-    out.append(f"    5. Re-run: python -m qa_ui_auto.audit --diff {base}")
+    out.append("    3. Apply the requested correction; preserve assertions and performance budgets.")
+    out.append("    4. Run affected IDs together: python -m qa_ui_auto run --filter <ids>")
+    out.append("       Use the isolated QA native build; explain any explicit --mode browser fallback.")
+    out.append(f"    5. After the batch, verify once: python -m qa_ui_auto audit --diff {base} --gate")
     out.append("       The BROKEN list should clear.")
     if any(f.delta and f.delta.added for f in feat_hits):
         out.append("")
@@ -242,7 +239,7 @@ def _fix_tests_diff(base: str | None) -> int:
             if f.delta and f.delta.added:
                 out.append(f"    python -m qa_ui_auto.fix controls {f.id}")
     out.append("")
-    out.append("  After patching, regenerate the catalog:")
+    out.append("  Only if feature controls changed, regenerate the catalog before the final audit:")
     out.append("    python -m qa_ui_auto.gen_testid_catalog")
     print("\n".join(out))
     return 0
@@ -311,13 +308,12 @@ def _fix_controls_feature(feature_id: str) -> int:
     out.append("  1. Review the extractor draft above:")
     out.append("     - drop decorative entries (e.g. aria-label on status icons)")
     out.append("     - confirm `kind` (interactive vs display)")
-    out.append("     - mark conditional renders as `optional: true`")
+    out.append("     - mark only genuinely optional controls as `optional: true`")
     out.append("     - add a testid in source for any control extractor missed")
     out.append("  2. Edit the feature's frontmatter `controls:` block in feature-list.md.")
-    out.append("  3. Lint:           python -m qa_ui_auto.lint")
-    out.append("  4. Catalog:        python -m qa_ui_auto.gen_testid_catalog")
-    out.append(f"  5. Verify:         python -m qa_ui_auto.audit --feature {feature_id}")
-    out.append("  6. (Cases that follow) — run `fix tests {fid}` next.".format(fid=feature_id))
+    out.append("  3. Add/repair related cases as needed; authoring.md has the rules.")
+    out.append("  4. After the batch: python -m qa_ui_auto.gen_testid_catalog")
+    out.append(f"  5. Verify once: python -m qa_ui_auto audit --feature {feature_id} --gate")
     print("\n".join(out))
     return 0
 
@@ -344,10 +340,10 @@ def _fix_features_range(since: str | None) -> int:
     out.append("  - Deleted          → remove from owning feature's `files`; mark feature manually if it was the last one")
     out.append("")
     out.append("After editing feature-list.md:")
-    out.append("  1. python -m qa_ui_auto.lint")
-    out.append("  2. For each new feature: python -m qa_ui_auto.fix controls <F.x>")
-    out.append("  3. For each new feature: python -m qa_ui_auto.fix tests <F.x>")
-    out.append("  4. python -m qa_ui_auto.gen_testid_catalog")
+    out.append("  Add controls and cases for related features together (see references/authoring.md).")
+    out.append("  Run affected cases with the isolated QA native build; explain browser fallback.")
+    out.append("  Regenerate once: python -m qa_ui_auto.gen_testid_catalog")
+    out.append("  Verify once: python -m qa_ui_auto audit --gate")
     print("\n".join(out))
     return 0
 

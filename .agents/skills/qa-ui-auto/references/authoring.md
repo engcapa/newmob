@@ -1,92 +1,89 @@
-# Authoring testcases
+# Authoring And Maintaining Coverage
 
-Rules for the parent agent (Claude Code) when writing or fixing a `qa-ui-auto-tests/cases/*.testcase.yaml` file. The runner skill itself does not author cases unprompted; this is the rulebook the `fix tests` and `fix tests --diff` playbooks expect the agent to follow.
+Reuse audit results and source context. Inspect the owning feature in
+`qa-ui-auto-tests/feature-list.md` and its source files; run a helper only when
+information is missing. Apply requested changes directly and summarize the diff.
 
-## Discovery helpers (read these first)
+## Cases
 
-Before drafting or fixing a case, run the deterministic helpers to know what's missing or impacted:
+- One unique ID per `cases/<id>-<slug>.testcase.yaml`; drafts may use `cases/auto/`.
+  Set `covers: [F.x]` and `fixtures` explicitly. Use `reset_db` for persistent
+  mutations, plus required network/workspace/provider fixtures.
+- Assert the user's result after acting, including relevant failure/recovery
+  paths. Control touches alone do not prove workflows work. Prefer real native
+  boundaries over repeating store/unit assertions through JavaScript.
+- Set `modes` explicitly. Prefer `[native]` for supported real-app workflows;
+  use `[browser, native]` when both implementations/fixtures support the assertions.
+  Browser-specific stubs/verbs stay `[browser]`. Missing modes still default to
+  browser for compatibility. Never mass-add native without checking verbs/fixtures.
+- Native is a mode, not an OS guarantee. Some verbs are Linux/X11-only; check
+  [verb-catalog.md](verb-catalog.md) and `scripts/qa_ui_auto/native_steps.py`.
+  Use platform runbooks for OS differences and disclose unsupported paths.
+  Do not invent YAML platform fields or substitute mocks for OS evidence.
+- Each step is a single-key map using a schema-supported verb. `eval_readonly`
+  is the only raw-JS escape hatch; never mutate state or bypass the real action.
+- Prefer exact `[data-testid="..."]` selectors from feature controls or
+  [testid-catalog.md](testid-catalog.md). Add stable testids where needed; avoid
+  styling classes and fragile text. Do not add expensive production polling,
+  DOM mirroring or instrumentation solely to make automation easier.
+- Use condition-based waits and existing performance budgets. Measure affected
+  native interactions as described in [native-testing.md](native-testing.md).
+  Never weaken assertions, increase latency budgets or skip regressions to pass.
 
-```bash
-# What features have no testcase, or are only covered by needs-review cases?
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.coverage_report
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.coverage_report --feature F4.10
+Tags: `smoke` for fast (normally <=30s), self-contained cases; `p0` for release
+critical cases; `p1` for broader coverage; area tags for selection. Mark drafts
+`auto-generated, needs-review`, adding `smoke` only when appropriate. Retain
+`needs-review` and `legacy-imported` until assertions have been reviewed.
 
-# Which features and cases does the current change touch?
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.diff_impact
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.diff_impact --files src/components/foo.tsx
+## Repair And Verify
 
-# Which features did a commit range add / change / break? (feeds `fix features --range`)
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.range_changes --since HEAD~5
+Read failure artifacts, YAML and current source to distinguish stale tests from
+product regressions. Fix within the user's requested scope; diagnosis alone does
+not authorize unrelated product changes. Run affected IDs after a concrete
+correction, retaining first-failure evidence and disclosing skips.
 
-# Inspect the feature catalog directly (parses qa-ui-auto-tests/feature-list.md):
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.feature_catalog
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.feature_catalog --feature F4.10 --json
-```
+The runner validates YAML, so normal edits need a targeted run rather than
+separate lint/dry-run/run stages. For feature/control edits, regenerate the
+catalog once after the batch and run `python -m qa_ui_auto audit --gate` to check
+lint, freshness and the existing coverage ratchet. Ratchet verified improvements
+only; do not overwrite unrelated baseline losses.
 
-All four tools support `--json` for parsing. None of them write any files.
+## Catalogs And Optional Helpers
 
-## File and ID conventions
+Add feature `id/title/status/area/components/files` and controls to
+`qa-ui-auto-tests/feature-list.md`, then reference its ID from cases. New/unowned
+changed files may extend a feature or justify a new one; private helpers do not
+automatically need features. Refresh touched features for observable changes.
+Remove deleted files from `files`; assess empty features before removing them.
 
-- One file per case: `qa-ui-auto-tests/cases/<id>-<slug>.testcase.yaml`. Slug is the title lowercased, non-alphanumerics → `-`, truncated to ~40 chars.
-- `id` matches the filename prefix and is unique repo-wide.
-- Always set `covers: [F.x, F.y, ...]` with at least one feature ID from `qa-ui-auto-tests/feature-list.md`. `lint` does not enforce this yet, but coverage analysis will.
-- Always declare `fixtures` explicitly. Use `reset_db` for any case that mutates persistent state. Add `ssh_required` / `sftp_required` if the case talks to the network.
+Controls declare `id`, `selector`, `kind: interactive|display`, optional aliases
+and `optional`. Conditional controls are not automatically optional: required
+workflows must reach them. Review extractor drafts against source. Regenerate
+`references/testid-catalog.md` after controls change.
 
-## Verb rules
+Coverage matches exact selectors/aliases (normalizing quotes) or derivations at
+CSS boundaries (`[`, space, `:`, `>`, `,`). The longest control match wins.
+Interactive controls require interaction verbs; display-only touches are shallow.
+Fix orphan attribution without weakening the asserted behavior.
 
-- Use only verbs listed in `verb-catalog.md`. The schema rejects anything else.
-- Each step is a single-key map. `{click: "...", screenshot: "y.png"}` is invalid.
-- Selectors prefer `[data-testid="..."]`. Fall back to `text=`, `role=`, CSS, or XPath only when no testid exists — and add a testid in the next change.
-- The only escape hatch for raw JS is `eval_readonly`. The schema rejects assignments, `await`, `function`, `new`, `.click(`, `.dispatchEvent(`, `.innerHTML=`, etc. Use it sparingly (e.g., reading `localStorage`).
+Use `python -m qa_ui_auto.<module> --help` for flags. Existing modules remain
+available for scripts and CI; this table is not a required command sequence.
 
-## Modes
+| Need | Module / Arguments |
+|---|---|
+| Combined health, gaps, diff and gate | `audit [--feature F.x] [--diff REF] [--gate] [--json]` |
+| Case/control context or extraction playbook | `fix tests F.x`, `fix tests --diff REF`, `fix controls F.x` |
+| Commit-range inventory | `range_changes --since REF` or `fix features --range REF` |
+| Render/check catalog | `gen_testid_catalog [--check]` or `fix catalog` |
+| Ratchet verified coverage | `control_coverage --update-baseline qa-ui-auto-tests/coverage-baseline.json` |
+| Detailed coverage / orphans | `coverage_report --controls`, `control_coverage --orphans` |
+| Strict schema / orphan diagnostics | `lint --strict-orphans` |
+| One feature's metadata | `feature_catalog --feature F.x --json` |
+| Extract controls / initial bulk fill | `control_extractor FILE.tsx`, `batch_extract` |
+| Explicit changed-file impact | `diff_impact --files A.tsx B.tsx` |
 
-- `modes: [browser]` is the default. Add `native` only when the case truly needs the Tauri Rust backend: local PTY behavior, native dialogs, system clipboard read paths, window controls.
-- Browser+native is rarely correct. The duplicate-run policy is gone.
-
-## When you fix a failing case
-
-Order of operations:
-
-1. Read the failure: `qa-ui-auto-report/<run>/<TC-id>/_failure-stepN.{png,html,console.json}`.
-2. Read the case YAML.
-3. Read the relevant component source (find via `qa-ui-auto-tests/feature-list.md` → `files`).
-4. Decide whether the case is wrong (selector renamed, assertion stale) or the code is wrong (real regression).
-5. If the case is wrong, propose a YAML patch — show a unified diff in chat — and only apply after user approval.
-6. After applying, re-run with `--filter <id> --workers 1`.
-
-Never silently rewrite a case without showing the diff. Never disable a case to make CI green; if you must, mark `skip: "<reason>"` and surface the skip prominently.
-
-## Tagging
-
-- `smoke` — fast (≤30 s), no network preconditions, runs on every PR.
-- `p0` — must pass before a release tag.
-- `p1` — full sweep on `main`.
-- `needs-review` — auto-migrated or auto-drafted; flag for human read.
-- `legacy-imported` — added by the migration step; cleared once the case is hand-reviewed.
-- `terminal`, `sftp`, `ssh`, `tunnel`, `vnc`, `welcome`, `main`, `settings` — area tags.
-
-## Adding a new verb to the step library
-
-Three places must move together:
-
-1. `scripts/qa_ui_auto/steps/<module>.py` — implement the function and `@verb("name")` it.
-2. `schema/testcase.schema.json` — add the property under `step.properties` and a `$defs` entry for its arg shape.
-3. `references/verb-catalog.md` — document it.
-
-Run `python -m qa_ui_auto.lint` after.
-
-## Adding a new feature to the catalog
-
-When Taomni ships a new feature in `feature-list.md`, add a matching entry to `qa-ui-auto-tests/feature-list.md`:
-
-```yaml
-- id: F<chapter>.<seq>
-  title: <human title>
-  status: done
-  area: <slash/separated/area>
-  components: [ComponentA, ComponentB]
-  files: [src/components/.../File.tsx]
-```
-
-Then add at least one testcase referencing it via `covers: [F<id>]`.
+When adding a verb, update implementation, testcase schema and verb catalog
+together; check/implement native support where appropriate. Validate the argument
+contract and execute a representative case. Evidence rollup, release-plan and
+artifact scripts remain available when their existing contracts are needed;
+routine case maintenance does not require them.
