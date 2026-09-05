@@ -207,6 +207,7 @@ xcap = { version = "0.9.6", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-dialog = "2.7.1"
 sqlparser = "0.62.0"
+scopeguard = "1.2"
 
 [patch.crates-io]
 # libspa 0.9.2 assumes the latest spa_video_info_raw layout even though its
@@ -248,7 +249,6 @@ winreg = "0.55"
 # native frame pool and session. The capture module supplies a bounded native
 # GDI fallback when Graphics Capture is unavailable.
 xcap = { version = "0.9.6", features = ["wgc"] }
-scopeguard = "1.2"
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
