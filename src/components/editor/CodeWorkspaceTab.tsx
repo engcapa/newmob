@@ -400,6 +400,9 @@ import {
   buildRefactorPlan,
   refactorApplyGate,
   evaluateDestructiveRefactorAvailability,
+  verifyRefactorPostHashes,
+  buildRefactorRecoveryJournalEntry,
+  recordRefactorRecoveryJournal,
   type RefactorPlanV3,
 } from "./workspace/refactorPlan";
 import { KeymapCheatSheetDialog } from "./workspace/KeymapCheatSheetDialog";
@@ -8852,6 +8855,29 @@ export function CodeWorkspaceTab({
         || snapshot.bom !== beforeSnapshots[index]?.bom
       ));
       if (afterSnapshots && changed) {
+        if (options.plan) {
+          const actualPostTexts: Record<string, string> = {};
+          for (const s of afterSnapshots) {
+            if (s.text !== null) actualPostTexts[s.path] = s.text;
+          }
+          const postHashCheck = verifyRefactorPostHashes(options.plan, actualPostTexts);
+          if (!postHashCheck.allMatched) {
+            console.warn("[refactor] Post-refactor hash mismatch detected:", postHashCheck.mismatches);
+          }
+          const preTexts: Record<string, string> = {};
+          for (const s of beforeSnapshots) {
+            if (s.text !== null) preTexts[s.path] = s.text;
+          }
+          const recoveryEntry = buildRefactorRecoveryJournalEntry(
+            options.plan,
+            preTexts,
+            rootsRef.current[0]?.path ?? "",
+          );
+          if (recoveryEntry) {
+            recoveryEntry.status = "committed";
+            recordRefactorRecoveryJournal(recoveryEntry);
+          }
+        }
         const affectedBookmarkIds = Array.from(new Set([
           ...(beforeBookmarks ?? []).map((bookmark) => bookmark.id),
           ...(afterBookmarks ?? []).map((bookmark) => bookmark.id),
