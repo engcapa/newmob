@@ -1,0 +1,72 @@
+id: TC-IDE-C6-05-query-definition-reveal-history-native
+title: "Definition reveal and history back over real JDT LS in packaged app"
+description: |
+  §8.19.10 native gate case (ED-QUERY-004 A1). Enters the in-repo
+  single-module Maven sample through persisted recents (no native picker),
+  waits for the real JDT LS provider to report active, places the caret on
+  the `App` symbol in AppTest.java with physical keys, fires F12 (Go to Definition)
+  through the production keymap, and proves cross-file open/reveal (App.java
+  tab + body) plus navigation-history back to AppTest.java. All keystrokes
+  use native_keys so the exact test window self-activates before XTest
+  injection. Highest claim on green: L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-c6, query, declaration, native-gate, p1]
+modes: [native]
+fixtures: [reset_db, java_sample_projects]
+timeout_sec: 600
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  # Enter the real sample project through persisted recents (no native picker).
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-q4","name":"maven-single","roots":[{"id":"maven-single","name":"maven-single","path":"${fixture.maven_single_root}","kind":"folder"}],"looseFiles":[],"lastActiveFile":{"kind":"root","rootId":"maven-single","path":"src/test/java/com/example/single/AppTest.java"},"lastOpenedAt":1756100000000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.maven_single_root}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - wait_for:
+      selector: '[data-testid="code-workspace-editor-pane"]'
+      timeout_sec: 60
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "appHasMain"
+      timeout_sec: 60
+  # Real provider readiness: the per-file LSP pill reports the active Java
+  # server (cached JDT LS index makes this fast after the first import).
+  - assert_text:
+      selector: '[data-testid="code-workspace-lsp-status-pill"]'
+      contains: "Java"
+      timeout_sec: 60
+  # Deterministic caret onto `App` (line 10, column 26): doc start, down 9,
+  # right 26. Proven by probe to spell zzqApp at this position.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      keys: ["Control+Home", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]
+  - press: "F12"
+  # Cross-file open/reveal: App.java tab, body, and breadcrumbs.
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor-tab-strip"]'
+      contains: "App.java"
+      timeout_sec: 60
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "public static void main"
+      timeout_sec: 60
+  - assert_text:
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+      contains: "App.java"
+      timeout_sec: 30
+  # History was written: Back returns to the AppTest query source.
+  - click: '[data-testid="code-workspace-nav-back"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor-tab-strip"]'
+      contains: "AppTest.java"
+      timeout_sec: 30
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "appHasMain"
+      timeout_sec: 30
+  - screenshot: tc-ide-c6-05-definition-reveal.png

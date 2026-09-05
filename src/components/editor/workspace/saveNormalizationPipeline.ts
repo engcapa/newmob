@@ -20,12 +20,21 @@ import {
 } from "./workspaceCodeStyleScheme";
 import { sha256Hex } from "./projectAnalysisModel";
 
-export type SaveStageKind = "format" | "organize-imports" | "normalization";
+export type SaveStageKind =
+  | "format"
+  | "organize-imports"
+  | "trim"
+  | "final-newline"
+  | "eol"
+  | "charset-bom";
+
 export type SaveStageStatus =
+  | "applied"
   | "executed"
   | "disabled"
   | "unavailable"
   | "failed"
+  | "stale"
   | "skipped-prior-failure";
 
 export interface SaveStageReport {
@@ -33,8 +42,65 @@ export interface SaveStageReport {
   status: SaveStageStatus;
   error?: string;
   reason?: string;
-  beforeHash?: string;
-  afterHash?: string;
+  beforeHash: string;
+  afterHash: string;
+}
+
+export interface SavePlanDocumentIdentity {
+  uri: string;
+  path?: string;
+  revision: number;
+  languageId?: string;
+}
+
+export interface SavePlanDiskIdentity {
+  mtimeMs?: number | null;
+  sizeBytes?: number | null;
+  exists?: boolean;
+  sha256?: string | null;
+}
+
+export interface SavePlanProviderIdentity {
+  id?: string | null;
+  generation?: number | null;
+}
+
+export interface SavePlanProjectIdentity {
+  fingerprint?: string | null;
+  rootUri?: string | null;
+}
+
+export interface SavePlanEncodingIdentity {
+  charset?: string | null;
+  bom?: boolean | null;
+}
+
+export interface SavePlanIdentity {
+  text: string;
+  document?: Readonly<SavePlanDocumentIdentity>;
+  disk?: Readonly<SavePlanDiskIdentity>;
+  policy?: Readonly<EffectiveSavePolicyV4>;
+  style: Readonly<ResolvedCodeStyle | EffectiveCodeStyle>;
+  provider?: Readonly<SavePlanProviderIdentity>;
+  project?: Readonly<SavePlanProjectIdentity>;
+  encoding?: Readonly<SavePlanEncodingIdentity>;
+}
+
+export interface ImmutableSavePlan {
+  planId: string;
+  identity: Readonly<SavePlanIdentity>;
+  initialHash: string;
+  finalHash: string;
+  finalText: string;
+  stages: readonly SaveStageReport[];
+  disposition: "ready" | "stale" | "failed" | "cancelled";
+  cancelledDueToEdit: boolean;
+  encodingError?: boolean;
+  diagnostics: readonly string[];
+  resolvedEol?: "lf" | "crlf" | "cr";
+  resolvedCharset?: string;
+  resolvedBom?: boolean;
+  createdAt: number;
 }
 
 export interface SaveNormalizationOptions {
@@ -49,6 +115,10 @@ export interface SaveNormalizationOptions {
   getLatestBufferText?: () => string;
   expectedVersion?: number;
   getLatestBufferVersion?: () => number;
+  documentIdentity?: SavePlanDocumentIdentity;
+  diskIdentity?: SavePlanDiskIdentity;
+  providerIdentity?: SavePlanProviderIdentity;
+  projectIdentity?: SavePlanProjectIdentity;
 }
 
 export interface SaveNormalizationResult {
@@ -65,6 +135,7 @@ export interface SaveNormalizationResult {
   resolvedEol?: "lf" | "crlf" | "cr";
   resolvedCharset?: string;
   resolvedBom?: boolean;
+  plan: ImmutableSavePlan;
 }
 
 /**
@@ -126,8 +197,79 @@ export function normalizeLineEndings(
   return text;
 }
 
+function buildImmutableSavePlan(
+  options: SaveNormalizationOptions,
+  result: Omit<SaveNormalizationResult, "plan">,
+  disposition: "ready" | "stale" | "failed" | "cancelled",
+): ImmutableSavePlan {
+  const planId = `save-plan-${sha256Hex(`${options.filePath || ""}:${options.text}:${Date.now()}`).slice(0, 16)}`;
+  const identity = cloneAndFreeze<SavePlanIdentity>({
+    text: options.text,
+    document: options.documentIdentity ?? {
+      uri: options.filePath ? (options.filePath.startsWith("file://") ? options.filePath : `file://${options.filePath}`) : "untitled:file",
+      path: options.filePath,
+      revision: options.expectedVersion ?? 0,
+    },
+    disk: options.diskIdentity,
+    policy: options.savePolicy,
+    style: options.codeStyle,
+    provider: options.providerIdentity,
+    project: options.projectIdentity,
+    encoding: {
+      charset: result.resolvedCharset ?? options.codeStyle.charset,
+      bom: result.resolvedBom,
+    },
+  });
+
+  return Object.freeze({
+    planId,
+    identity,
+    initialHash: sha256Hex(options.text),
+    finalHash: sha256Hex(result.text),
+    finalText: result.text,
+    stages: cloneAndFreeze(result.stages),
+    disposition,
+    cancelledDueToEdit: result.cancelledDueToEdit,
+    encodingError: result.encodingError,
+    diagnostics: cloneAndFreeze(result.diagnostics),
+    resolvedEol: result.resolvedEol,
+    resolvedCharset: result.resolvedCharset,
+    resolvedBom: result.resolvedBom,
+    createdAt: Date.now(),
+  });
+}
+
+/** Clone plan inputs before freezing so a save cannot freeze caller-owned state. */
+function cloneAndFreeze<T>(value: T, seen = new WeakMap<object, unknown>()): T {
+  if (value === null || typeof value !== "object") return value;
+
+  const source = value as object;
+  const existing = seen.get(source);
+  if (existing !== undefined) return existing as T;
+
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    seen.set(source, clone);
+    for (const item of value) clone.push(cloneAndFreeze(item, seen));
+    return Object.freeze(clone) as unknown as T;
+  }
+
+  const clone: Record<string, unknown> = {};
+  seen.set(source, clone);
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    clone[key] = cloneAndFreeze(child, seen);
+  }
+  return Object.freeze(clone) as T;
+}
+
 /**
- * Run the save normalization pipeline in strict sequence.
+ * Run the save normalization pipeline across 6 fixed stages in strict sequence (§ED-SAVE-001):
+ * 1. format
+ * 2. organize-imports
+ * 3. trim
+ * 4. final-newline
+ * 5. eol
+ * 6. charset-bom
  */
 export async function runSaveNormalizationPipeline(
   options: SaveNormalizationOptions,
@@ -152,19 +294,42 @@ export async function runSaveNormalizationPipeline(
   const stages: SaveStageReport[] = [];
   let stopEffectful = false;
 
-  const explicitEol = codeStyle.endOfLine;
-  const eolChar = explicitEol === "crlf" ? "\r\n" : explicitEol === "cr" ? "\r" : explicitEol === "lf" ? "\n" : undefined;
-
-  // Detect if initial text had mismatched EOL
-  if (codeStyle.endOfLine) {
-    if (codeStyle.endOfLine === "lf" && currentText.includes("\r")) {
-      eolNormalized = true;
-    } else if (codeStyle.endOfLine === "crlf" && (/[^\r]\n/.test(currentText) || currentText.startsWith("\n"))) {
-      eolNormalized = true;
-    } else if (codeStyle.endOfLine === "cr" && currentText.includes("\n")) {
-      eolNormalized = true;
-    }
-  }
+  const assemble = (
+    data: {
+      text: string;
+      formatted?: boolean;
+      importsOrganized?: boolean;
+      whitespaceTrimmed?: boolean;
+      newlineAdjusted?: boolean;
+      eolNormalized?: boolean;
+      cancelledDueToEdit: boolean;
+      encodingError?: boolean;
+      diagnostics: string[];
+      stages: SaveStageReport[];
+      resolvedEol?: "lf" | "crlf" | "cr";
+      resolvedCharset?: string;
+      resolvedBom?: boolean;
+      disposition: "ready" | "stale" | "failed" | "cancelled";
+    },
+  ): SaveNormalizationResult => {
+    const rawResult: Omit<SaveNormalizationResult, "plan"> = {
+      text: data.text,
+      formatted: data.formatted ?? false,
+      importsOrganized: data.importsOrganized ?? false,
+      whitespaceTrimmed: data.whitespaceTrimmed ?? false,
+      newlineAdjusted: data.newlineAdjusted ?? false,
+      eolNormalized: data.eolNormalized ?? false,
+      cancelledDueToEdit: data.cancelledDueToEdit,
+      encodingError: data.encodingError,
+      diagnostics: data.diagnostics,
+      stages: data.stages,
+      resolvedEol: data.resolvedEol,
+      resolvedCharset: data.resolvedCharset,
+      resolvedBom: data.resolvedBom,
+    };
+    const plan = buildImmutableSavePlan(options, rawResult, data.disposition);
+    return { ...rawResult, plan };
+  };
 
   const formatEnabled = options.savePolicy
     ? options.savePolicy.format.enabled
@@ -193,24 +358,27 @@ export async function runSaveNormalizationPipeline(
         if (getLatestBufferVersion && expectedVersion !== undefined) {
           const latestVer = getLatestBufferVersion();
           if (latestVer !== expectedVersion) {
-            return {
+            stages.push({ stage: "format", status: "stale", reason: "concurrent edit", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
+            return assemble({
               text: initialText,
-              formatted: false,
-              importsOrganized: false,
-              whitespaceTrimmed: false,
-              newlineAdjusted: false,
-              eolNormalized: false,
               cancelledDueToEdit: true,
               diagnostics: ["Formatter cancelled because buffer was modified concurrently."],
-              stages: [{ stage: "format", status: "failed", error: "concurrent edit", beforeHash: formatBeforeHash, afterHash: formatBeforeHash }],
-            };
+              stages,
+              disposition: "stale",
+            });
           }
         }
+        const formatAfterHash = sha256Hex(formattedResult);
+        formatted = formatAfterHash !== formatBeforeHash;
         currentText = formattedResult;
-        formatted = true;
-        stages.push({ stage: "format", status: "executed", beforeHash: formatBeforeHash, afterHash: sha256Hex(currentText) });
+        stages.push({
+          stage: "format",
+          status: formatted ? "applied" : "executed",
+          beforeHash: formatBeforeHash,
+          afterHash: formatAfterHash,
+        });
       } else {
-        stages.push({ stage: "format", status: "unavailable", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
+        stages.push({ stage: "format", status: "unavailable", reason: "no-change-or-empty", beforeHash: formatBeforeHash, afterHash: formatBeforeHash });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -230,12 +398,12 @@ export async function runSaveNormalizationPipeline(
     stages.push({
       stage: "organize-imports",
       status: "skipped-prior-failure",
-      error: "Skipped due to prior format failure",
+      reason: "Skipped due to prior format failure",
       beforeHash: organizeBeforeHash,
       afterHash: organizeBeforeHash,
     });
   } else if (!organizeImportsEnabled) {
-    stages.push({ stage: "organize-imports", status: "disabled", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
+    stages.push({ stage: "organize-imports", status: "disabled", reason: "organize-imports-disabled", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
   } else if (!options.organizeImportsFn) {
     stages.push({ stage: "organize-imports", status: "unavailable", reason: "no-provider", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
   } else {
@@ -245,24 +413,28 @@ export async function runSaveNormalizationPipeline(
         if (getLatestBufferVersion && expectedVersion !== undefined) {
           const latestVer = getLatestBufferVersion();
           if (latestVer !== expectedVersion) {
-            return {
+            stages.push({ stage: "organize-imports", status: "stale", reason: "concurrent edit", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
+            return assemble({
               text: initialText,
               formatted,
-              importsOrganized: false,
-              whitespaceTrimmed: false,
-              newlineAdjusted: false,
-              eolNormalized: false,
               cancelledDueToEdit: true,
               diagnostics: ["Organize imports cancelled because buffer was modified concurrently."],
-              stages: [...stages, { stage: "organize-imports", status: "failed", error: "concurrent edit", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash }],
-            };
+              stages,
+              disposition: "stale",
+            });
           }
         }
+        const organizeAfterHash = sha256Hex(organizedResult);
+        importsOrganized = organizeAfterHash !== organizeBeforeHash;
         currentText = organizedResult;
-        importsOrganized = true;
-        stages.push({ stage: "organize-imports", status: "executed", beforeHash: organizeBeforeHash, afterHash: sha256Hex(currentText) });
+        stages.push({
+          stage: "organize-imports",
+          status: importsOrganized ? "applied" : "executed",
+          beforeHash: organizeBeforeHash,
+          afterHash: organizeAfterHash,
+        });
       } else {
-        stages.push({ stage: "organize-imports", status: "unavailable", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
+        stages.push({ stage: "organize-imports", status: "unavailable", reason: "no-change-or-empty", beforeHash: organizeBeforeHash, afterHash: organizeBeforeHash });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -271,112 +443,184 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
-  // Stage 3: normalization
-  const normBeforeHash = sha256Hex(currentText);
-
-  // Trim trailing whitespace
+  // Stage 3: trim
+  const trimBeforeHash = sha256Hex(currentText);
   if (codeStyle.trimTrailingWhitespace) {
-    const trimmed = trimTrailingWhitespace(currentText, eolChar);
-    if (trimmed !== currentText) {
-      currentText = trimmed;
-      whitespaceTrimmed = true;
-    }
+    const trimmed = trimTrailingWhitespace(currentText);
+    const trimAfterHash = sha256Hex(trimmed);
+    whitespaceTrimmed = trimAfterHash !== trimBeforeHash;
+    currentText = trimmed;
+    stages.push({
+      stage: "trim",
+      status: whitespaceTrimmed ? "applied" : "executed",
+      beforeHash: trimBeforeHash,
+      afterHash: trimAfterHash,
+    });
+  } else {
+    stages.push({ stage: "trim", status: "disabled", beforeHash: trimBeforeHash, afterHash: trimBeforeHash });
   }
 
-  // Insert final newline
+  // Stage 4: final-newline
+  const newlineBeforeHash = sha256Hex(currentText);
   if (codeStyle.insertFinalNewline !== undefined) {
-    const adjusted = adjustFinalNewline(currentText, codeStyle.insertFinalNewline, eolChar);
-    if (adjusted !== currentText) {
-      currentText = adjusted;
-      newlineAdjusted = true;
-    }
+    const adjusted = adjustFinalNewline(currentText, codeStyle.insertFinalNewline);
+    const newlineAfterHash = sha256Hex(adjusted);
+    newlineAdjusted = newlineAfterHash !== newlineBeforeHash;
+    currentText = adjusted;
+    stages.push({
+      stage: "final-newline",
+      status: newlineAdjusted ? "applied" : "executed",
+      beforeHash: newlineBeforeHash,
+      afterHash: newlineAfterHash,
+    });
+  } else {
+    stages.push({ stage: "final-newline", status: "disabled", beforeHash: newlineBeforeHash, afterHash: newlineBeforeHash });
   }
 
-  // Normalise line endings (CRLF vs LF vs CR)
+  // Stage 5: eol
+  const eolBeforeHash = sha256Hex(currentText);
   if (codeStyle.endOfLine) {
     const eolFixed = normalizeLineEndings(currentText, codeStyle.endOfLine);
-    if (eolFixed !== currentText) {
-      currentText = eolFixed;
-      eolNormalized = true;
-    }
+    const eolAfterHash = sha256Hex(eolFixed);
+    eolNormalized = eolAfterHash !== eolBeforeHash;
+    currentText = eolFixed;
+    stages.push({
+      stage: "eol",
+      status: eolNormalized ? "applied" : "executed",
+      beforeHash: eolBeforeHash,
+      afterHash: eolAfterHash,
+    });
+  } else {
+    stages.push({ stage: "eol", status: "disabled", beforeHash: eolBeforeHash, afterHash: eolBeforeHash });
   }
 
+  // Stage 6: charset-bom
   let resolvedCharset = codeStyle.charset;
   let resolvedBom: boolean | undefined = undefined;
+  const charsetBeforeHash = sha256Hex(currentText);
 
-  // Stage 5: Charset / BOM verification & normalization
   if (codeStyle.charset) {
     const charset = codeStyle.charset.toLowerCase();
     if (charset === "utf-8") {
       resolvedCharset = "UTF-8";
       resolvedBom = false;
-      // Ensure no BOM prefix for standard utf-8
       if (currentText.startsWith("\uFEFF")) {
         currentText = currentText.slice(1);
       }
+      const charsetAfterHash = sha256Hex(currentText);
+      stages.push({
+        stage: "charset-bom",
+        status: charsetAfterHash !== charsetBeforeHash ? "applied" : "executed",
+        beforeHash: charsetBeforeHash,
+        afterHash: charsetAfterHash,
+      });
     } else if (charset === "utf-8-bom") {
       resolvedCharset = "UTF-8";
       resolvedBom = true;
-      // Ensure BOM prefix for utf-8-bom if non-empty
       if (currentText.length > 0 && !currentText.startsWith("\uFEFF")) {
         currentText = `\uFEFF${currentText}`;
       }
+      const charsetAfterHash = sha256Hex(currentText);
+      stages.push({
+        stage: "charset-bom",
+        status: charsetAfterHash !== charsetBeforeHash ? "applied" : "executed",
+        beforeHash: charsetBeforeHash,
+        afterHash: charsetAfterHash,
+      });
     } else if (charset === "latin1" || charset === "iso-8859-1") {
       resolvedCharset = "ISO-8859-1";
+      let errorIndex = -1;
       for (let i = 0; i < currentText.length; i++) {
-        const code = currentText.charCodeAt(i);
-        if (code > 255) {
-          return {
-            text: initialText,
-            formatted: false,
-            importsOrganized: false,
-            whitespaceTrimmed: false,
-            newlineAdjusted: false,
-            eolNormalized: false,
-            cancelledDueToEdit: false,
-            encodingError: true,
-            diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds Latin-1 range (cannot be represented in Latin-1).`],
-            stages: [...stages, { stage: "normalization", status: "failed", error: "Latin-1 encoding error", beforeHash: normBeforeHash, afterHash: normBeforeHash }],
-          };
+        if (currentText.charCodeAt(i) > 255) {
+          errorIndex = i;
+          break;
         }
+      }
+      if (errorIndex >= 0) {
+        stages.push({
+          stage: "charset-bom",
+          status: "failed",
+          error: "Latin-1 encoding error",
+          beforeHash: charsetBeforeHash,
+          afterHash: charsetBeforeHash,
+        });
+        return assemble({
+          text: initialText, // live buffer effect 0!
+          formatted: false,
+          importsOrganized: false,
+          whitespaceTrimmed: false,
+          newlineAdjusted: false,
+          eolNormalized: false,
+          cancelledDueToEdit: false,
+          encodingError: true,
+          diagnostics: [`Save blocked: Character '${currentText[errorIndex]}' at position ${errorIndex} exceeds Latin-1 range (cannot be represented in Latin-1).`],
+          stages,
+          disposition: "failed",
+        });
+      } else {
+        stages.push({
+          stage: "charset-bom",
+          status: "executed",
+          beforeHash: charsetBeforeHash,
+          afterHash: charsetBeforeHash,
+        });
       }
     } else if (charset === "us-ascii" || charset === "ascii") {
       resolvedCharset = "US-ASCII";
+      let errorIndex = -1;
       for (let i = 0; i < currentText.length; i++) {
-        const code = currentText.charCodeAt(i);
-        if (code > 127) {
-          return {
-            text: initialText,
-            formatted: false,
-            importsOrganized: false,
-            whitespaceTrimmed: false,
-            newlineAdjusted: false,
-            eolNormalized: false,
-            cancelledDueToEdit: false,
-            encodingError: true,
-            diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds ASCII range (cannot be represented in US-ASCII).`],
-            stages: [...stages, { stage: "normalization", status: "failed", error: "US-ASCII encoding error", beforeHash: normBeforeHash, afterHash: normBeforeHash }],
-          };
+        if (currentText.charCodeAt(i) > 127) {
+          errorIndex = i;
+          break;
         }
+      }
+      if (errorIndex >= 0) {
+        stages.push({
+          stage: "charset-bom",
+          status: "failed",
+          error: "US-ASCII encoding error",
+          beforeHash: charsetBeforeHash,
+          afterHash: charsetBeforeHash,
+        });
+        return assemble({
+          text: initialText, // live buffer effect 0!
+          formatted: false,
+          importsOrganized: false,
+          whitespaceTrimmed: false,
+          newlineAdjusted: false,
+          eolNormalized: false,
+          cancelledDueToEdit: false,
+          encodingError: true,
+          diagnostics: [`Save blocked: Character '${currentText[errorIndex]}' at position ${errorIndex} exceeds ASCII range (cannot be represented in US-ASCII).`],
+          stages,
+          disposition: "failed",
+        });
+      } else {
+        stages.push({
+          stage: "charset-bom",
+          status: "executed",
+          beforeHash: charsetBeforeHash,
+          afterHash: charsetBeforeHash,
+        });
       }
     } else if (charset === "utf-16le" || charset === "utf-16be" || charset === "utf-16") {
       resolvedCharset = charset.toUpperCase();
+      stages.push({
+        stage: "charset-bom",
+        status: "executed",
+        beforeHash: charsetBeforeHash,
+        afterHash: charsetBeforeHash,
+      });
     }
+  } else {
+    stages.push({ stage: "charset-bom", status: "disabled", beforeHash: charsetBeforeHash, afterHash: charsetBeforeHash });
   }
-
-  stages.push({
-    stage: "normalization",
-    status: "executed",
-    beforeHash: normBeforeHash,
-    afterHash: sha256Hex(currentText),
-  });
 
   // Final race condition check
   if (getLatestBufferText) {
     const latestText = getLatestBufferText();
-    // If buffer was changed while pipeline was running (and not equal to our input text)
     if (latestText !== initialText && latestText !== currentText) {
-      return {
+      return assemble({
         text: latestText,
         formatted,
         importsOrganized,
@@ -386,11 +630,12 @@ export async function runSaveNormalizationPipeline(
         cancelledDueToEdit: true,
         diagnostics: ["Normalization aborted due to newer buffer edits."],
         stages,
-      };
+        disposition: "stale",
+      });
     }
   }
 
-  return {
+  return assemble({
     text: currentText,
     formatted,
     importsOrganized,
@@ -403,7 +648,8 @@ export async function runSaveNormalizationPipeline(
     resolvedEol: codeStyle.endOfLine,
     resolvedCharset,
     resolvedBom,
-  };
+    disposition: "ready",
+  });
 }
 
 /**

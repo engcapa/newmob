@@ -550,10 +550,309 @@ function relativeWorkspacePath(repoRoot: string, path: string): string {
   return normalized === root ? "" : normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized;
 }
 
+function parentWorkspacePath(path: string): string | null {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const separator = normalized.lastIndexOf("/");
+  return separator > 0 ? normalized.slice(0, separator) : separator === 0 ? "/" : null;
+}
+
 function assertWorkspaceWritablePath(path: string): void {
   if (path.split(/[\\/]+/).includes(".git")) {
     throw new Error("Writing inside .git is not allowed");
   }
+}
+
+/** Pending stub-search cancellations by search id (browser preview only). */
+const stubSearchCancelIds = new Set<string>();
+
+function stubSearchCancelled(searchId: string): () => boolean {
+  return () => stubSearchCancelIds.has(searchId);
+}
+
+function stubSearchGlobMatch(text: string, pattern: string): boolean {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`, "i").test(text);
+}
+
+function stubSearchPathAllowed(
+  relativePath: string,
+  includeGlobs: string[],
+  excludeGlobs: string[],
+): boolean {
+  const fileName = relativePath.split("/").pop() ?? relativePath;
+  for (const raw of excludeGlobs) {
+    const pattern = raw.trim();
+    if (pattern && (stubSearchGlobMatch(fileName, pattern) || stubSearchGlobMatch(relativePath, pattern))) {
+      return false;
+    }
+  }
+  const positives = includeGlobs.map((raw) => raw.trim()).filter(Boolean);
+  if (positives.length === 0) return true;
+  return positives.some(
+    (pattern) => stubSearchGlobMatch(fileName, pattern) || stubSearchGlobMatch(relativePath, pattern),
+  );
+}
+
+/**
+ * Browser-preview workspace search: line grep over VFS text files. Emits
+ * `batch`/`done` events shaped like the native backend. Roots outside the
+ * VFS jail are skipped with the reason recorded on the done event.
+ */
+async function stubWorkspaceSearch(
+  searchId: string,
+  roots: Array<{ id?: unknown; name?: unknown; path?: unknown }>,
+  query: string,
+  options: Record<string, unknown>,
+  cancelled: () => boolean,
+  emitSearch: (payload: Record<string, unknown>) => void,
+): Promise<void> {
+  const includeGlobs = Array.isArray(options.includeGlobs)
+    ? (options.includeGlobs as unknown[]).map(String)
+    : [];
+  const excludeGlobs = Array.isArray(options.excludeGlobs)
+    ? (options.excludeGlobs as unknown[]).map(String)
+    : [];
+  const caseSensitive = options.caseSensitive === true;
+  const wholeWord = options.wholeWord === true;
+  const useRegexp = options.regexp === true;
+  const maxTotal = typeof options.maxTotalMatches === "number" ? options.maxTotalMatches : 2000;
+  let pattern: RegExp;
+  try {
+    const source = useRegexp ? query : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    pattern = new RegExp(wholeWord ? `\\b(?:${source})\\b` : source, caseSensitive ? "g" : "gi");
+  } catch {
+    emitSearch({
+      searchId, kind: "error", matches: [], truncated: false, cancelled: false,
+      filesScanned: 0, totalMatches: 0, error: `Invalid search pattern: ${query}`,
+    });
+    return;
+  }
+  interface StubMatch {
+    rootId: string;
+    rootName: string;
+    rootPath: string;
+    path: string;
+    lineNumber: number;
+    column: number;
+    matchStart: number;
+    matchEnd: number;
+    lineText: string;
+  }
+  let filesScanned = 0;
+  let totalMatches = 0;
+  let truncated = false;
+  const skippedRoots: string[] = [];
+  const harvestFile = async (
+    rootId: string,
+    rootName: string,
+    rootPath: string,
+    relative: string,
+    absolute: string,
+    out: StubMatch[],
+  ): Promise<boolean> => {
+    let text: string;
+    try {
+      text = await vfsReadText(absolute);
+    } catch {
+      return true;
+    }
+    filesScanned += 1;
+    const lines = text.split("\n");
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      const lineText = lines[lineIndex];
+      pattern.lastIndex = 0;
+      let hit: RegExpExecArray | null;
+      while ((hit = pattern.exec(lineText)) !== null) {
+        const start = Array.from(lineText.slice(0, hit.index)).length;
+        const end = start + Array.from(hit[0]).length;
+        out.push({
+          rootId, rootName, rootPath, path: relative,
+          lineNumber: lineIndex + 1, column: start + 1,
+          matchStart: start, matchEnd: end, lineText,
+        });
+        totalMatches += 1;
+        if (totalMatches >= maxTotal) {
+          truncated = true;
+          return false;
+        }
+        if (hit[0].length === 0) pattern.lastIndex += 1;
+      }
+    }
+    // Yield so a racing cancel lands before the done event.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return true;
+  };
+  const walk = async (
+    rootId: string,
+    rootName: string,
+    rootPath: string,
+    absolute: string,
+    relative: string,
+    depth: number,
+    out: StubMatch[],
+  ): Promise<boolean> => {
+    if (cancelled() || totalMatches >= maxTotal || depth > 16) return false;
+    let entries;
+    try {
+      entries = await vfsList(absolute);
+    } catch {
+      return true;
+    }
+    for (const entry of entries) {
+      if (cancelled() || totalMatches >= maxTotal) return false;
+      const childRel = relative ? `${relative}/${entry.name}` : entry.name;
+      const childAbs = `${absolute.replace(/\/+$/, "")}/${entry.name}`;
+      if (entry.fileType === "dir") {
+        if (entry.name === ".git") continue;
+        if (!(await walk(rootId, rootName, rootPath, childAbs, childRel, depth + 1, out))) return false;
+        continue;
+      }
+      if (entry.fileType !== "file" || entry.size > 262144) continue;
+      if (!stubSearchPathAllowed(childRel, includeGlobs, excludeGlobs)) continue;
+      if (!(await harvestFile(rootId, rootName, rootPath, childRel, childAbs, out))) return false;
+    }
+    return true;
+  };
+  const all: StubMatch[] = [];
+  for (const root of roots) {
+    if (cancelled()) break;
+    const rootPath = String(root.path ?? "");
+    const normalized = rootPath.replace(/\\/g, "/");
+    if (normalized !== VFS_ROOT && !normalized.startsWith(`${VFS_ROOT}/`)) {
+      skippedRoots.push(rootPath);
+      continue;
+    }
+    const out: StubMatch[] = [];
+    const keepGoing = await walk(
+      String(root.id ?? ""), String(root.name ?? ""), rootPath, normalized, "", 0, out,
+    );
+    if (out.length > 0) {
+      emitSearch({
+        searchId, kind: "batch", matches: out, truncated: false, cancelled: false,
+        filesScanned, totalMatches, error: null,
+      });
+    }
+    all.push(...out);
+    if (!keepGoing) break;
+  }
+  if (cancelled()) {
+    emitSearch({
+      searchId, kind: "done", matches: [], truncated, cancelled: true,
+      filesScanned, totalMatches: 0, error: null,
+    });
+    return;
+  }
+  const skippedNote = skippedRoots.length > 0
+    ? ` Skipped ${skippedRoots.length} non-VFS root(s): browser preview cannot read host disk.`
+    : null;
+  if (skippedNote) {
+    console.warn(`[tauri-stub] workspace search:${skippedNote}`);
+  }
+  emitSearch({
+    searchId, kind: "done", matches: [], truncated, cancelled: false,
+    filesScanned, totalMatches, error: null,
+  });
+}
+
+type StubWorkspaceResourceOperation =
+  | {
+    kind: "create";
+    path: string;
+    overwrite: boolean;
+    ignoreIfExists: boolean;
+  }
+  | {
+    kind: "rename";
+    fromPath: string;
+    toPath: string;
+    toRepoRoot?: string;
+    overwrite: boolean;
+    ignoreIfExists: boolean;
+  }
+  | {
+    kind: "delete";
+    path: string;
+    recursive: boolean;
+    ignoreIfNotExists: boolean;
+  };
+
+async function workspaceResourceVfsEntry(path: string): Promise<Awaited<ReturnType<typeof vfsStat>> | null> {
+  try {
+    return await vfsStat(path);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Not found:")) return null;
+    throw error;
+  }
+}
+
+async function applyStubWorkspaceResourceOperation(
+  repoRoot: string,
+  operation: StubWorkspaceResourceOperation,
+): Promise<{ ignored: boolean }> {
+  const root = (repoRoot || VFS_ROOT).replace(/\/+$/, "") || VFS_ROOT;
+  if (operation.kind === "create") {
+    assertWorkspaceWritablePath(operation.path);
+    const target = joinWorkspacePath(root, operation.path);
+    const existing = await workspaceResourceVfsEntry(target);
+    if (existing) {
+      if (operation.overwrite) {
+        if (existing.fileType === "dir") {
+          throw new Error(`CreateFile cannot overwrite directory: ${target}`);
+        }
+        await vfsRemove(target, false);
+        await vfsWriteText(target, "");
+      } else if (operation.ignoreIfExists) {
+        return { ignored: true };
+      } else {
+        throw new Error(`Path already exists: ${target}`);
+      }
+    } else {
+      await vfsWriteText(target, "");
+    }
+    return { ignored: false };
+  }
+
+  if (operation.kind === "delete") {
+    assertWorkspaceWritablePath(operation.path);
+    const target = joinWorkspacePath(root, operation.path);
+    if (relativeWorkspacePath(root, target) === "") {
+      throw new Error("Cannot delete the workspace root");
+    }
+    if (!(await workspaceResourceVfsEntry(target))) {
+      if (operation.ignoreIfNotExists) return { ignored: true };
+      throw new Error(`Path does not exist: ${target}`);
+    }
+    await vfsRemove(target, operation.recursive);
+    return { ignored: false };
+  }
+
+  assertWorkspaceWritablePath(operation.fromPath);
+  assertWorkspaceWritablePath(operation.toPath);
+  const from = joinWorkspacePath(root, operation.fromPath);
+  const destinationRoot = (operation.toRepoRoot || root).replace(/\/+$/, "") || VFS_ROOT;
+  const to = joinWorkspacePath(destinationRoot, operation.toPath);
+  const sourceEntry = await workspaceResourceVfsEntry(from);
+  if (!sourceEntry) throw new Error(`Path does not exist: ${from}`);
+  if (from === to) return { ignored: true };
+  if (sourceEntry.fileType === "dir" && to.startsWith(`${from}/`)) {
+    throw new Error(`Cannot move directory ${from} inside itself`);
+  }
+  const destinationEntry = await workspaceResourceVfsEntry(to);
+  if (destinationEntry) {
+    if (operation.overwrite) {
+      await vfsRemove(to, true);
+    } else if (operation.ignoreIfExists) {
+      return { ignored: true };
+    } else {
+      throw new Error(`Path already exists: ${to}`);
+    }
+  }
+  const destinationParent = parentWorkspacePath(to);
+  if (destinationParent && !(await workspaceResourceVfsEntry(destinationParent))) {
+    throw new Error(`Parent does not exist: ${destinationParent}`);
+  }
+  await vfsRename(from, to);
+  return { ignored: false };
 }
 
 async function workspaceEntryFromVfs(repoRoot: string, path: string) {
@@ -1642,6 +1941,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       } as T;
     }
     case "lsp_definition":
+    case "lsp_declaration":
     case "lsp_type_definition":
     case "lsp_implementation":
     case "lsp_references": {
@@ -1986,6 +2286,32 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         hash: await sha256Hex(contents),
       } as T;
     }
+    case "workspace_search_start": {
+      // Browser-preview workspace search (ED-FIND-003): synchronous VFS grep
+      // over roots inside the VFS jail. Proves panel routing, scope/mask
+      // planning, preview, and cancel in browser mode; the native ripgrep
+      // backend remains the production search path. Roots outside the VFS
+      // are skipped (the browser cannot read host disk).
+      const searchId = (args?.searchId as string) || "";
+      const roots = (Array.isArray(args?.roots) ? args?.roots : []) as Array<{
+        id?: unknown;
+        name?: unknown;
+        path?: unknown;
+      }>;
+      const query = (args?.query as string) ?? "";
+      const options = (args?.options as Record<string, unknown> | null) ?? {};
+      const cancelled = stubSearchCancelled(searchId);
+      const emitSearch = (payload: Record<string, unknown>) => {
+        if (cancelled()) return;
+        void emit(`workspace-search-${searchId}`, payload);
+      };
+      void stubWorkspaceSearch(searchId, roots, query, options, cancelled, emitSearch);
+      return searchId as T;
+    }
+    case "workspace_search_cancel": {
+      stubSearchCancelIds.add((args?.searchId as string) || "");
+      return true as T;
+    }
     case "workspace_write_file_encoded":
     case "workspace_write_loose_file_encoded": {
       const isRoot = cmd === "workspace_write_file_encoded";
@@ -1995,27 +2321,35 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       assertWorkspaceWritablePath(path);
       const expectedHash = (args?.expectedHash as string | null | undefined)?.trim();
       const currentBytes = new Uint8Array(await vfsReadBytes(target));
+      const oldHash = await sha256Bytes(currentBytes);
       if (expectedHash) {
-        const currentHash = await sha256Bytes(currentBytes);
-        if (currentHash !== expectedHash) {
-          throw new Error(`hash-mismatch: File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
+        if (oldHash !== expectedHash) {
+          throw new Error(`hash-mismatch: File changed on disk; expected hash ${expectedHash}, found ${oldHash}`);
         }
       }
       const encoding = (args?.encoding as string) || "UTF-8";
       const bytes = encodeStubText((args?.contents as string) ?? "", encoding, !!args?.bom);
+      const writtenHash = await sha256Bytes(bytes);
       const storedBytes = new Uint8Array(bytes.byteLength);
       storedBytes.set(bytes);
       await vfsWriteBytes(target, storedBytes.buffer);
       const entry = await vfsStat(target);
       const decoded = decodeStubBytes(bytes, encoding);
       return {
-        path: repoRoot ? relativeWorkspacePath(repoRoot, entry.path) : entry.path,
-        text: decoded.text,
-        encoding: decoded.encoding,
-        bom: decoded.bom,
-        size: entry.size,
-        mtime: entry.mtime,
-        hash: await sha256Bytes(bytes),
+        file: {
+          path: repoRoot ? relativeWorkspacePath(repoRoot, entry.path) : entry.path,
+          text: decoded.text,
+          encoding: decoded.encoding,
+          bom: decoded.bom,
+          size: entry.size,
+          mtime: entry.mtime,
+          hash: writtenHash,
+        },
+        writtenHash,
+        writtenByteLength: bytes.byteLength,
+        intentHash: writtenHash,
+        oldHash,
+        atomicReplaceUsed: false,
       } as T;
     }
     case "workspace_create_file": {
@@ -2086,6 +2420,12 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         });
       await vfsRename(from, to);
       return await workspaceEntryFromVfs(repoRoot, to) as T;
+    }
+    case "workspace_apply_resource_operation": {
+      return await applyStubWorkspaceResourceOperation(
+        (args?.repoRoot as string) || VFS_ROOT,
+        args?.operation as StubWorkspaceResourceOperation,
+      ) as T;
     }
     case "create_local_terminal": {
       throw new Error(

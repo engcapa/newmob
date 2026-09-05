@@ -254,18 +254,30 @@ const FORMATTER_ON_MARKERS = ["@formatter:on", "fmt: on", "# fmt: on"];
  */
 export function findFormatterMarkerRanges(lines: readonly string[]): Array<{ from: number; to: number | null }> {
   const ranges: Array<{ from: number; to: number | null }> = [];
-  let open: number | null = null;
+  let openIndex: number | null = null;
+  let depth = 0;
+
   lines.forEach((line, index) => {
-    if (open !== null && FORMATTER_ON_MARKERS.some((marker) => line.includes(marker))) {
-      ranges.push({ from: open, to: index });
-      open = null;
-      return;
-    }
-    if (open === null && FORMATTER_OFF_MARKERS.some((marker) => line.includes(marker))) {
-      open = index;
+    const hasOff = FORMATTER_OFF_MARKERS.some((marker) => line.includes(marker));
+    const hasOn = FORMATTER_ON_MARKERS.some((marker) => line.includes(marker));
+
+    if (hasOff) {
+      if (depth === 0) {
+        openIndex = index;
+      }
+      depth += 1;
+    } else if (hasOn && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && openIndex !== null) {
+        ranges.push({ from: openIndex, to: index });
+        openIndex = null;
+      }
     }
   });
-  if (open !== null) ranges.push({ from: open, to: null });
+
+  if (openIndex !== null) {
+    ranges.push({ from: openIndex, to: null });
+  }
   return ranges;
 }
 
@@ -288,26 +300,86 @@ export interface FormatPlan {
   capabilities: { formatting: boolean; rangeFormatting: boolean; rearrangeSupported: boolean; cleanupSupported: boolean };
 }
 
-export function isFormatScopeSupported(scope: FormatPlan["scope"]): boolean {
-  return scope === "selection" || scope === "file";
+export function filterFormattingRanges(
+  text: string,
+  selectionRange?: { startLine: number; endLine: number } | null,
+  honorMarkers = true,
+): Array<{ startLine: number; endLine: number }> {
+  if (!text) return [];
+  const lines = text.split("\n");
+  const totalLines = lines.length;
+
+  const markerRanges = honorMarkers ? findFormatterMarkerRanges(lines) : [];
+  if (markerRanges.length === 0) {
+    if (selectionRange) {
+      const start = Math.max(0, Math.min(selectionRange.startLine, totalLines - 1));
+      const end = Math.max(start, Math.min(selectionRange.endLine, totalLines - 1));
+      return [{ startLine: start, endLine: end }];
+    }
+    return [{ startLine: 0, endLine: totalLines - 1 }];
+  }
+
+  // Build active formatting ranges by excluding marker regions
+  const unformattedLines = new Set<number>();
+  for (const range of markerRanges) {
+    const end = range.to === null ? totalLines - 1 : range.to;
+    for (let i = range.from; i <= end; i += 1) {
+      unformattedLines.add(i);
+    }
+  }
+
+  const result: Array<{ startLine: number; endLine: number }> = [];
+  let currentStart: number | null = null;
+
+  const minLine = selectionRange ? Math.max(0, selectionRange.startLine) : 0;
+  const maxLine = selectionRange ? Math.min(totalLines - 1, selectionRange.endLine) : totalLines - 1;
+
+  for (let line = minLine; line <= maxLine; line += 1) {
+    if (!unformattedLines.has(line)) {
+      if (currentStart === null) currentStart = line;
+    } else {
+      if (currentStart !== null) {
+        result.push({ startLine: currentStart, endLine: line - 1 });
+        currentStart = null;
+      }
+    }
+  }
+
+  if (currentStart !== null) {
+    result.push({ startLine: currentStart, endLine: maxLine });
+  }
+
+  return result;
+}
+
+export function isFormatScopeSupported(
+  scope: FormatPlan["scope"],
+  moduleFactsReady?: boolean,
+): boolean {
+  if (scope === "selection" || scope === "file" || scope === "directory") return true;
+  if (scope === "module") return Boolean(moduleFactsReady);
+  return false;
+}
+
+export interface BuildFormatPlanInput {
+  scope: FormatPlan["scope"];
+  targets: readonly string[];
+  excludedByPattern: readonly string[];
+  readOnlyPaths: ReadonlySet<string>;
+  capabilities: FormatPlan["capabilities"];
+  moduleFactsReady?: boolean;
 }
 
 /**
  * Build a plan for the requested scope. Stages without provider/syntax
  * evidence are simply absent — the caller reports them as unavailable
  * rather than faking rearrange/cleanup from formatted text heuristics.
- * Selection and file scopes are G1 supported; directory and module scopes
- * remain plan-level unavailable until a directory-wide provider owner is registered.
+ * Selection, file, and directory scopes are supported; module scope
+ * requires ready module facts.
  * Excluded list strictly records genuine pattern/read-only/marker exclusions.
  */
-export function buildFormatPlan(input: {
-  scope: FormatPlan["scope"];
-  targets: readonly string[];
-  excludedByPattern: readonly string[];
-  readOnlyPaths: ReadonlySet<string>;
-  capabilities: FormatPlan["capabilities"];
-}): FormatPlan {
-  const isSupported = isFormatScopeSupported(input.scope);
+export function buildFormatPlan(input: BuildFormatPlanInput): FormatPlan {
+  const isSupported = isFormatScopeSupported(input.scope, input.moduleFactsReady);
   const excluded: Array<{ uri: string; reason: FormatExclusionReason }> = [];
   const eligible: string[] = [];
   for (const target of input.targets) {
@@ -324,17 +396,17 @@ export function buildFormatPlan(input: {
   const documentFormat = input.scope === "selection"
     ? input.capabilities.rangeFormatting
     : input.capabilities.formatting;
-  if (isSupported && documentFormat) {
+  if (isSupported && documentFormat && eligible.length > 0) {
     stages.push({ kind: "format", source: "lsp", editsCount: 0 });
   }
-  if (input.capabilities.rearrangeSupported) {
+  if (isSupported && input.capabilities.rearrangeSupported && eligible.length > 0) {
     stages.push({ kind: "rearrange", source: "jdtls", editsCount: 0 });
   }
-  if (input.capabilities.cleanupSupported) {
+  if (isSupported && input.capabilities.cleanupSupported && eligible.length > 0) {
     stages.push({ kind: "cleanup", source: "lsp", editsCount: 0 });
   }
   return {
-    state: isSupported ? "ready" : "unavailable",
+    state: isSupported && (stages.length > 0 || (eligible.length === 0 && excluded.length > 0)) ? "ready" : "unavailable",
     scope: input.scope,
     stages,
     excluded,

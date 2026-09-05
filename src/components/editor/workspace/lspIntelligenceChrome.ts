@@ -1,4 +1,9 @@
-import type { Extension, Text } from "@codemirror/state";
+import {
+  StateEffect,
+  StateField,
+  type Extension,
+  type Text,
+} from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemirror/view";
 import type {
   LspDocumentHighlight,
@@ -52,9 +57,9 @@ function semanticTokenClass(token: LspSemanticToken): string {
 
 export function buildLspIntelligenceDecorations(
   doc: Text,
-  highlights: LspDocumentHighlight[],
-  hints: LspInlayHint[],
-  semanticTokens: LspSemanticToken[] = [],
+  highlights: readonly LspDocumentHighlight[],
+  hints: readonly LspInlayHint[],
+  semanticTokens: readonly LspSemanticToken[] = [],
 ): DecorationSet {
   const ranges = semanticTokens.flatMap((token) => {
     const { from, to } = rangeOffsets(doc, token.range);
@@ -84,7 +89,7 @@ export function buildLspIntelligenceDecorations(
  */
 export function buildLspSemanticTokenDecorations(
   doc: Text,
-  semanticTokens: LspSemanticToken[] = [],
+  semanticTokens: readonly LspSemanticToken[] = [],
 ): DecorationSet {
   const ranges = semanticTokens.flatMap((token) => {
     const { from, to } = rangeOffsets(doc, token.range);
@@ -97,8 +102,8 @@ export function buildLspSemanticTokenDecorations(
 /** Cursor- and viewport-scoped intelligence chrome. */
 export function buildLspOverlayDecorations(
   doc: Text,
-  highlights: LspDocumentHighlight[],
-  hints: LspInlayHint[],
+  highlights: readonly LspDocumentHighlight[],
+  hints: readonly LspInlayHint[],
 ): DecorationSet {
   const ranges = [];
   for (const highlight of highlights) {
@@ -117,19 +122,73 @@ export function buildLspOverlayDecorations(
   return Decoration.set(ranges, true);
 }
 
+interface LspOverlayChromeConfig {
+  highlights: readonly LspDocumentHighlight[];
+  hints: readonly LspInlayHint[];
+}
+
+const setLspOverlayChrome = StateEffect.define<LspOverlayChromeConfig>();
+const lspOverlayDecorations = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update: (current, transaction) => {
+    for (const effect of transaction.effects) {
+      if (effect.is(setLspOverlayChrome)) {
+        return buildLspOverlayDecorations(
+          transaction.newDoc,
+          effect.value.highlights,
+          effect.value.hints,
+        );
+      }
+    }
+    return transaction.docChanged ? current.map(transaction.changes) : current;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+const setLspSemanticTokenChrome = StateEffect.define<readonly LspSemanticToken[]>();
+const lspSemanticTokenDecorations = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update: (current, transaction) => {
+    for (const effect of transaction.effects) {
+      if (effect.is(setLspSemanticTokenChrome)) {
+        return buildLspSemanticTokenDecorations(transaction.newDoc, effect.value);
+      }
+    }
+    return transaction.docChanged ? current.map(transaction.changes) : current;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
 export function createLspSemanticTokenChrome(
   doc: Text,
-  semanticTokens: LspSemanticToken[] = [],
+  semanticTokens: readonly LspSemanticToken[] = [],
 ): Extension[] {
-  return [EditorView.decorations.of(buildLspSemanticTokenDecorations(doc, semanticTokens))];
+  return [
+    lspSemanticTokenDecorations.init(() => buildLspSemanticTokenDecorations(doc, semanticTokens)),
+  ];
 }
 
 export function createLspOverlayChrome(
   doc: Text,
-  highlights: LspDocumentHighlight[],
-  hints: LspInlayHint[],
+  highlights: readonly LspDocumentHighlight[],
+  hints: readonly LspInlayHint[],
 ): Extension[] {
-  return [EditorView.decorations.of(buildLspOverlayDecorations(doc, highlights, hints))];
+  return [
+    lspOverlayDecorations.init(() => buildLspOverlayDecorations(doc, highlights, hints)),
+  ];
+}
+
+export function updateLspSemanticTokenChrome(
+  semanticTokens: readonly LspSemanticToken[],
+): StateEffect<readonly LspSemanticToken[]> {
+  return setLspSemanticTokenChrome.of(semanticTokens);
+}
+
+export function updateLspOverlayChrome(
+  highlights: readonly LspDocumentHighlight[],
+  hints: readonly LspInlayHint[],
+): StateEffect<LspOverlayChromeConfig> {
+  return setLspOverlayChrome.of({ highlights, hints });
 }
 
 export const LSP_INTELLIGENCE_THEME = EditorView.theme({
@@ -164,9 +223,9 @@ export const LSP_INTELLIGENCE_THEME = EditorView.theme({
 
 export function createLspIntelligenceChrome(
   doc: Text,
-  highlights: LspDocumentHighlight[],
-  hints: LspInlayHint[],
-  semanticTokens: LspSemanticToken[] = [],
+  highlights: readonly LspDocumentHighlight[],
+  hints: readonly LspInlayHint[],
+  semanticTokens: readonly LspSemanticToken[] = [],
 ): Extension[] {
   return [
     ...createLspSemanticTokenChrome(doc, semanticTokens),
@@ -175,7 +234,7 @@ export function createLspIntelligenceChrome(
   ];
 }
 
-function wordAt(text: string, offset: number): { from: number; to: number; word: string } | null {
+export function wordAt(text: string, offset: number): { from: number; to: number; word: string } | null {
   const isWord = (char: string) => /[\p{L}\p{N}_$]/u.test(char);
   if (!text || offset < 0 || offset > text.length) return null;
   let from = Math.min(offset, text.length - 1);

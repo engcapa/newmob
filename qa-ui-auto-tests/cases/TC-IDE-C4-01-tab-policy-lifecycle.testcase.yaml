@@ -1,0 +1,199 @@
+id: TC-IDE-C4-01
+title: "Editor tab policy eviction, dirty confirmation, and lifecycle receipt"
+description: |
+  ED-TABS-004 browser lifecycle case. Builds a deterministic pinned + clean +
+  dirty three-tab fixture in the browser VFS, previews exact victims, verifies
+  dirty cancellation has zero effect, then confirms the same plan and matches
+  active-tab/layout/resource observations to the production receipt. It also
+  observes that a fully committed cleanup leaves no recovery banner or replay
+  affordance behind. Browser mode has no honest didClose transport-failure
+  fixture -- all four cleanup stages resolve in the browser Tauri stub -- so the
+  A4 failure/replay branch is certified by the mounted production test and is
+  not claimed here. Highest green claim: A1-A3 browser-wired lifecycle plus the
+  negative recovery-surface observation.
+covers: [F25.5]
+tags: [code-workspace, ide-c4, tab-policy, lifecycle, accessibility, p0]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+
+  # Add the browser-VFS preview root and open its seeded README permanently.
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"][data-path="README.txt"]'
+  - click: '[data-testid="code-workspace-tree-file"][data-path="README.txt"]'
+  - wait_for: '[data-testid="code-workspace-editor"] .cm-content'
+
+  # Create two more real VFS files. New File opens each as a permanent tab.
+  - click: '[data-testid="code-workspace-tree-new-file"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill:
+      selector: '[data-testid="text-input-dialog-input"]'
+      value: alpha.txt
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"][data-path="alpha.txt"]'
+  - click: '[data-testid="code-workspace-tree-new-file"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill:
+      selector: '[data-testid="text-input-dialog-input"]'
+      value: beta.txt
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"][data-path="beta.txt"]'
+  - assert_count:
+      selector: '[data-testid="code-workspace-editor-tab-strip"] [data-editor-tab-key]'
+      equal: 3
+
+  # Pin README, then dirty the active beta buffer. Alpha is the only clean,
+  # unpinned victim and beta is the confirmation-gated second victim.
+  - right_click: '[data-testid="code-workspace-editor-tab-strip"] button[title*="README.txt"]'
+  - click_menu: Pin Tab
+  - assert_count:
+      selector: '[data-testid="code-workspace-editor-tab-strip"] [data-editor-tab-key][data-pinned="true"]'
+      equal: 1
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - type: dirty beta buffer
+  - assert_text:
+      selector: '[data-testid="code-workspace-tree-file"][data-path="beta.txt"]'
+      contains: "*"
+
+  # A1 + accessibility: change the numeric limit and observe the exact plan.
+  - click: '[data-testid="code-workspace-tab-policy-settings"]'
+  - wait_for: '[data-testid="workspace-tab-policy-settings-dialog"]'
+  - assert_attribute:
+      selector: '[data-testid="workspace-tab-policy-settings-dialog"]'
+      name: role
+      equals: dialog
+  - assert_attribute:
+      selector: '[data-testid="workspace-tab-policy-settings-dialog"]'
+      name: aria-modal
+      equals: "true"
+  - assert_attribute:
+      selector: '[data-testid="workspace-tab-policy-settings-dialog"]'
+      name: aria-label
+      equals: Editor tab policy settings
+  - eval_readonly:
+      expression: 'document.activeElement?.getAttribute("data-testid") === "workspace-tab-policy-limit"'
+      expect_truthy: true
+  - fill:
+      selector: '[data-testid="workspace-tab-policy-limit"]'
+      value: "1"
+  - wait_for: '[data-testid="workspace-tab-policy-eviction-preview"]'
+  - assert_text:
+      selector: '[data-testid="workspace-tab-policy-eviction-preview"]'
+      contains: alpha.txt
+  - assert_text:
+      selector: '[data-testid="workspace-tab-policy-eviction-preview"]'
+      contains: beta.txt
+  - assert_text:
+      selector: '[data-testid="workspace-tab-policy-eviction-preview"]'
+      contains: "1 tab(s) with unsaved changes require confirmation"
+
+  # A2 cancel: the app-owned confirmation rejects the transaction. The draft
+  # dialog remains mounted, focus returns to Apply, and no effect is reported.
+  - click: '[data-testid="workspace-tab-policy-apply"]'
+  - wait_for: '[data-testid="confirm-dialog"]'
+  - assert_attribute:
+      selector: '[data-testid="confirm-dialog"]'
+      name: role
+      equals: dialog
+  - assert_attribute:
+      selector: '[data-testid="confirm-dialog"]'
+      name: aria-label
+      equals: Apply editor tab policy
+  - assert_text:
+      selector: '[data-testid="confirm-dialog-message"]'
+      contains: beta.txt
+  - click: '[data-testid="confirm-dialog-cancel"]'
+  - wait_for: '[data-testid="code-workspace-tab"][data-tab-policy-receipt-status="aborted"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-tab-policy-limit
+      equals: "12"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-tab-policy-receipt-evicted-count
+      equals: "0"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-tab-policy-receipt-cleanup-count
+      equals: "0"
+  - assert_count:
+      selector: '[data-testid="code-workspace-editor-tab-strip"] [data-editor-tab-key]'
+      equal: 3
+  - eval_readonly:
+      expression: 'document.activeElement?.getAttribute("data-testid") === "workspace-tab-policy-apply"'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelector("[data-layout-revision]")?.getAttribute("data-layout-revision") === document.querySelector("[data-tab-policy-receipt-layout-revision]")?.getAttribute("data-tab-policy-receipt-layout-revision")'
+      expect_truthy: true
+
+  # A2 confirm + A3 receipt: keyboard activation commits exactly two victims,
+  # keeps pinned README active, and closes both buffer resources/history rows.
+  - click: '[data-testid="workspace-tab-policy-apply"]'
+  - wait_for: '[data-testid="confirm-dialog"]'
+  - press:
+      key: Enter
+      selector: '[data-testid="confirm-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tab"][data-tab-policy-receipt-status="applied"][data-tab-policy-limit="1"]'
+  - assert_count:
+      selector: '[data-testid="workspace-tab-policy-settings-dialog"]'
+      equal: 0
+  - assert_count:
+      selector: '[data-testid="code-workspace-editor-tab-strip"] [data-editor-tab-key]'
+      equal: 1
+  - assert_count:
+      selector: '[data-testid="code-workspace-editor-tab-strip"] [data-editor-tab-key][data-active="true"] button[title*="README.txt"]'
+      equal: 1
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-tab-policy-receipt-evicted-count
+      equals: "2"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-tab-policy-receipt-cleanup-count
+      equals: "2"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-tab-policy-receipt-cleanup-committed-count
+      equals: "2"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-tab-policy-receipt-cleanup-recovery-count
+      equals: "0"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-resource-recovery-count
+      equals: "0"
+  # A fully committed cleanup must leave no recovery surface behind. This is the
+  # honest browser-side observation of the recovery contract: the banner and its
+  # replay affordance are absent precisely because every stage succeeded. The
+  # failure branch itself has no browser-reachable transport (see the header
+  # note) and is certified by the mounted production test instead.
+  - assert_not_visible: '[data-testid="workspace-resource-cleanup-recovery"]'
+  - assert_count:
+      selector: '[data-testid="workspace-resource-cleanup-recovery-item"]'
+      equal: 0
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-tab"]'
+      name: data-reopen-stack-count
+      equals: "2"
+  - eval_readonly:
+      expression: 'document.querySelector("[data-layout-revision]")?.getAttribute("data-layout-revision") === document.querySelector("[data-tab-policy-receipt-layout-revision]")?.getAttribute("data-tab-policy-receipt-layout-revision")'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelector("[data-active-editor-key]")?.getAttribute("data-active-editor-key") === document.querySelector("[data-tab-policy-receipt-active-key]")?.getAttribute("data-tab-policy-receipt-active-key")'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelector("[data-open-resource-count]")?.getAttribute("data-open-resource-count") === document.querySelector("[data-tab-policy-receipt-open-resource-count]")?.getAttribute("data-tab-policy-receipt-open-resource-count")'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.activeElement?.getAttribute("data-testid") === "code-workspace-tab-policy-settings"'
+      expect_truthy: true

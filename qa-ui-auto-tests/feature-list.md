@@ -355,6 +355,14 @@ controls:
     selector: '[data-testid="status-bar-message"]'
     kind: display
     optional: true       # transient status text (operation feedback)
+  - id: workspace-encoding
+    selector: '[data-testid="status-bar-workspace-encoding"]'
+    kind: interactive
+    optional: true       # active Code Workspace file only
+  - id: workspace-eol
+    selector: '[data-testid="status-bar-workspace-eol"]'
+    kind: interactive
+    optional: true       # active Code Workspace file only
 -->
 
 - 显示活跃连接数
@@ -2426,9 +2434,10 @@ controls:
 id: F11.2
 status: done
 area: settings/code-workspace
-components: [SdkSettings, WorkspaceSdkStatus]
+components: [SdkSettings, LanguageServersSettings, WorkspaceSdkStatus]
 files:
   - src/components/settings/SdkSettings.tsx
+  - src/components/settings/LanguageServersSettings.tsx
   - src/components/editor/workspace/WorkspaceSdkStatus.tsx
   - src/lib/editor/sdk.ts
   - src-tauri/src/sdk/
@@ -2583,6 +2592,17 @@ controls:
     selector: '[data-testid^="workspace-sdk-binding-"]'
     kind: interactive
     optional: true
+  # Language server setup is the single settings owner for editor banners.
+  - id: language-servers-settings
+    selector: '[data-testid="language-servers-settings"]'
+    kind: display
+    optional: true
+  - id: language-server-row
+    selector: '[data-testid^="language-server-row-"]'
+    kind: display
+    optional: true
+    aliases:
+      - '[data-testid="language-server-row-csharp"]'
 -->
 
 - 全局 SDK 管理支持登记、探测、自动发现、刷新和移除多个 Java/JDK、Kotlin、Scala 与 Python 安装，并为每类工具链设置兼容默认项。
@@ -5050,6 +5070,14 @@ controls:
   - id: debug-panel
     selector: '[data-testid="debug-panel"]'
     kind: display
+  - id: debug-stop
+    selector: '[data-testid="debug-stop"]'
+    kind: interactive
+    optional: true       # enabled while a debug adapter session is active
+  - id: debug-current-line
+    selector: '.taomni-debug-current-line'
+    kind: display
+    optional: true       # CodeMirror decoration for the stopped stack frame
   - id: debug-active-configuration
     selector: '[data-testid="debug-active-configuration"]'
     kind: interactive
@@ -5534,25 +5562,56 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, EditorGroup, FileTreePane, TabSwitcher, KeymapSettingsDialog]
+components: [CodeWorkspaceTab, WorkspaceTabPolicySettingsDialog, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog, FileEncodingDialog]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/FileEncodingDialog.tsx
+  - src/components/editor/workspace/WorkspaceTabPolicySettingsDialog.tsx
+  - src/components/editor/workspace/Breadcrumbs.tsx
+  - src/components/editor/workspace/ProjectFactsStatusBadge.tsx
   - src/components/editor/workspace/EditorGroup.tsx
+  - src/components/editor/workspace/HighlightingWidget.tsx
   - src/components/editor/workspace/FileTreePane.tsx
   - src/components/editor/workspace/TabSwitcher.tsx
   - src/components/editor/workspace/KeymapSettingsDialog.tsx
+  - src/components/editor/workspace/ClipboardHistoryPopup.tsx
+  - src/components/editor/workspace/panels/TodosBookmarksPanel.tsx
+  - src/components/editor/workspace/todoBookmarks.ts
+  - src/components/editor/workspace/EditorCompareDialog.tsx
+  - src/components/editor/workspace/LocalHistoryDialog.tsx
+  - src/components/editor/workspace/editorCompareModel.ts
 controls:
   - id: tree-add-folder
     selector: '[data-testid="code-workspace-tree-add-folder"]'
     kind: interactive
     optional: true       # opens the folder prompt (browser VFS / native dialog)
+  - id: tree-pane
+    selector: '[data-testid="code-workspace-tree-pane"]'
+    kind: display
+    optional: true       # focusable project tree container
+  - id: tree-root-row                 # expands a workspace root before listing children
+    selector: '[data-testid="code-workspace-tree-root"]'
+    kind: interactive
+    optional: true
   - id: tree-file-row                  # rows render via a shared component; exact id varies per file
     selector: '[data-testid="code-workspace-tree-file"]'
+    kind: interactive
+    optional: true
+  - id: tree-filter
+    selector: '[data-testid="code-workspace-tree-filter"]'
+    kind: interactive
+    optional: true
+  - id: tree-flat-file-row
+    selector: '[data-testid="code-workspace-flat-file"]'
     kind: interactive
     optional: true
   - id: editor-pane
     selector: '[data-testid="code-workspace-editor-pane"]'
     kind: display
+  - id: editor-host
+    selector: '[data-testid="code-workspace-editor"]'
+    kind: display
+    optional: true       # CodeMirror host container inside pane
   - id: editor-tab-strip
     selector: '[data-testid="code-workspace-editor-tab-strip"]'
     kind: display
@@ -5561,16 +5620,252 @@ controls:
     selector: '[data-testid="code-workspace-editor"] .cm-content'
     kind: interactive
     optional: true
+  - id: editor-completion-popup
+    selector: '.cm-tooltip-autocomplete'
+    kind: display
+    optional: true       # CodeMirror-owned completion list while suggestions are active
   - id: file-status
     selector: '[data-testid="code-workspace-file-status"]'
     kind: display
     optional: true       # dirty/saved indicator on the active tab strip
+  - id: save-observation
+    selector: '[data-testid="code-workspace-save-observation"]'
+    kind: display
+    optional: true       # metadata-only live region for the active file
+  - id: clipboard-observation
+    selector: '[data-testid="code-workspace-clipboard-observation"]'
+    kind: display
+    optional: true       # ED-CLIP-004 metadata-only clipboard outcome/effect seam
+  - id: file-encoding-dialog
+    selector: '[data-testid="file-encoding-dialog"]'
+    kind: display
+    optional: true       # opened from the status-bar encoding action
+  - id: file-encoding-select
+    selector: '[data-testid="file-encoding-select"]'
+    kind: interactive
+    optional: true
+  - id: file-encoding-bom
+    selector: '[data-testid="file-encoding-bom"]'
+    kind: interactive
+    optional: true
+  - id: file-encoding-reload
+    selector: '[data-testid="file-encoding-reload"]'
+    kind: interactive
+    optional: true
+  - id: file-encoding-convert
+    selector: '[data-testid="file-encoding-convert"]'
+    kind: interactive
+    optional: true
+  # Per-file IDEA-style diagnostics chrome. Provider-backed counts are covered
+  # by unit/native/provider evidence; browser covers the typed no-provider UI.
+  - id: highlighting-widget
+    selector: '[data-testid="code-workspace-highlighting-widget"]'
+    kind: display
+  - id: highlighting-widget-prev-error
+    selector: '[data-testid="highlighting-widget-prev-error"]'
+    kind: interactive
+    optional: true       # disabled when the browser preview has no diagnostics
+  - id: highlighting-widget-next-error
+    selector: '[data-testid="highlighting-widget-next-error"]'
+    kind: interactive
+    optional: true       # disabled when the browser preview has no diagnostics
+  - id: highlighting-widget-level-button
+    selector: '[data-testid="highlighting-widget-level-button"]'
+    kind: interactive
+  - id: highlighting-widget-menu
+    selector: '[data-testid="highlighting-widget-menu"]'
+    kind: display
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-level-option-none
+    selector: '[data-testid="highlighting-level-option-none"]'
+    kind: interactive
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-level-option-syntax
+    selector: '[data-testid="highlighting-level-option-syntax"]'
+    kind: interactive
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-level-option-all
+    selector: '[data-testid="highlighting-level-option-all"]'
+    kind: interactive
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-widget-provider
+    selector: '[data-testid="highlighting-widget-provider"]'
+    kind: display
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-widget-diagnostic-status
+    selector: '[data-testid="highlighting-widget-diagnostic-status"]'
+    kind: display
+    optional: true       # mounted while the level menu is open
+  - id: highlighting-widget-open-settings
+    selector: '[data-testid="highlighting-widget-open-settings"]'
+    kind: interactive
+    optional: true       # settings action is available only in the menu
+  - id: project-facts-status-badge
+    selector: '[data-testid="project-facts-status-badge"]'
+    kind: display
+    optional: true       # mounted when a workspace root has facts or descriptor state
+  - id: project-facts-discovery-status
+    selector: '[data-testid="project-facts-discovery-status"]'
+    kind: display
+    optional: true       # Maven/Gradle discovery state inside the facts badge
+  - id: project-facts-refresh
+    selector: '[data-testid="project-facts-refresh-btn"]'
+    kind: interactive
+    optional: true       # mounted after facts or descriptor discovery starts
+  - id: project-facts-loading-icon
+    selector: '[data-testid="project-facts-loading-icon"]'
+    kind: display
+    optional: true
+  - id: project-facts-ready-icon
+    selector: '[data-testid="project-facts-ready-icon"]'
+    kind: display
+    optional: true
+  - id: lsp-status-pill
+    selector: '[data-testid="code-workspace-lsp-status-pill"]'
+    kind: display
+    optional: true       # per-file language-server state (LSP idle / Java / starting); ED-QUERY-004 native readiness signal
+  - id: project-facts-untrusted-icon
+    selector: '[data-testid="project-facts-untrusted-icon"]'
+    kind: display
+    optional: true
+  - id: project-facts-stale-icon
+    selector: '[data-testid="project-facts-stale-icon"]'
+    kind: display
+    optional: true
+  - id: project-facts-failed-icon
+    selector: '[data-testid="project-facts-failed-icon"]'
+    kind: display
+    optional: true
+  - id: tree-new-file
+    selector: '[data-testid="code-workspace-tree-new-file"]'
+    kind: interactive
+    optional: true       # enabled when a workspace root is available
   - id: search-everywhere
     selector: '[data-testid="code-workspace-search-everywhere"]'
     kind: display
     optional: true       # Ctrl+Shift+N palette popup
+  - id: find-panel
+    selector: '[data-testid="code-workspace-find-in-files-panel"]'
+    kind: display
+    optional: true       # bottom-dock Search tab content (ED-FIND-003)
+  - id: find-query-input
+    selector: '[aria-label="Search query"]'
+    kind: interactive
+    optional: true       # ED-FIND-003 query field
+  - id: find-include-globs
+    selector: '[aria-label="Include globs"]'
+    kind: interactive
+    optional: true       # ED-FIND-003 include mask field
+  - id: find-replace-input
+    selector: '[aria-label="Replace text"]'
+    kind: interactive
+    optional: true       # ED-FIND-004 replacement field
+  - id: find-replace-all
+    selector: '[data-testid="code-workspace-find-replace-all"]'
+    kind: interactive
+    optional: true       # opens the replace preview; ED-FIND-004
+  - id: find-run-search
+    selector: '[data-testid="code-workspace-find-run-search"]'
+    kind: interactive
+    optional: true       # ED-FIND-003 run button
+  - id: find-scope-select
+    selector: '[data-testid="code-workspace-find-scope-select"]'
+    kind: interactive
+    optional: true       # Project / Module / Directory scope (ED-FIND-003)
+  - id: find-module-select
+    selector: '[data-testid="code-workspace-find-module-select"]'
+    kind: interactive
+    optional: true       # module picker from ready facts; ED-FIND-003
+  - id: find-directory-input
+    selector: '[data-testid="code-workspace-find-directory-input"]'
+    kind: interactive
+    optional: true       # ED-FIND-003 directory scope target
+  - id: find-scope-notice
+    selector: '[data-testid="code-workspace-find-scope-notice"]'
+    kind: display
+    optional: true       # unresolved scope reason; ED-FIND-003 fail-closed
+  - id: find-error
+    selector: '[data-testid="code-workspace-find-error"]'
+    kind: display
+    optional: true       # backend/stale search errors; ED-FIND-003
+  - id: find-file-group
+    selector: '[data-testid="code-workspace-find-file-group"]'
+    kind: display
+    optional: true       # one section per matched file
+  - id: find-match-hit
+    selector: '[data-testid="code-workspace-find-match-hit"]'
+    kind: display
+    optional: true       # highlighted hit inside a match row
+  - id: replace-preview
+    selector: '[data-testid="code-workspace-replace-preview"]'
+    kind: display
+    optional: true       # structured replace preview dialog; ED-FIND-004
+  - id: replace-counts
+    selector: '[data-testid="code-workspace-replace-counts"]'
+    kind: display
+    optional: true       # included/total occurrences; ED-FIND-004
+  - id: replace-usage
+    selector: '[data-testid="code-workspace-replace-usage"]'
+    kind: interactive
+    optional: true       # per-occurrence exclusion checkbox; ED-FIND-004
+  - id: replace-file-toggle
+    selector: '[data-testid="code-workspace-replace-file-toggle"]'
+    kind: interactive
+    optional: true       # per-file exclusion checkbox; ED-FIND-004
+  - id: replace-commit
+    selector: '[data-testid="code-workspace-replace-commit"]'
+    kind: interactive
+    optional: true       # ED-FIND-004 commit
+  - id: replace-cancel
+    selector: '[data-testid="code-workspace-replace-cancel"]'
+    kind: interactive
+    optional: true       # ED-FIND-004 cancel (zero commit)
+  - id: replace-commit-error
+    selector: '[data-testid="code-workspace-replace-commit-error"]'
+    kind: display
+    optional: true       # precondition conflicts; ED-FIND-004 fail-closed
   - id: bottom-dock-terminal-tab       # dock tab ids are shared with F25.1/F25.2 panels; this owns the terminal tab id
     selector: '[data-testid="code-workspace-bottom-tab-terminal"]'
+    kind: interactive
+    optional: true
+  - id: bottom-dock-search-tab
+    selector: '[data-testid="code-workspace-bottom-tab-search"]'
+    kind: interactive
+    optional: true       # opens the Find in Files panel; ED-FIND-003/004
+  - id: tab-policy-settings
+    selector: '[data-testid="code-workspace-tab-policy-settings"]'
+    kind: interactive
+    optional: true
+  - id: tab-policy-dialog
+    selector: '[data-testid="workspace-tab-policy-settings-dialog"]'
+    kind: display
+    optional: true
+  - id: tab-policy-limit
+    selector: '[data-testid="workspace-tab-policy-limit"]'
+    kind: interactive
+    optional: true
+  - id: tab-policy-eviction-preview
+    selector: '[data-testid="workspace-tab-policy-eviction-preview"]'
+    kind: display
+    optional: true
+  - id: tab-policy-apply
+    selector: '[data-testid="workspace-tab-policy-apply"]'
+    kind: interactive
+    optional: true
+  - id: tab-policy-close
+    selector: '[data-testid="workspace-tab-policy-close"]'
+    kind: interactive
+    optional: true
+  - id: resource-cleanup-recovery
+    selector: '[data-testid="workspace-resource-cleanup-recovery"]'
+    kind: display
+    optional: true
+  - id: resource-cleanup-recovery-item
+    selector: '[data-testid="workspace-resource-cleanup-recovery-item"]'
+    kind: display
+    optional: true       # one row per pending recovery; absent after a clean cleanup
+  - id: resource-cleanup-retry
+    selector: '[data-testid="workspace-resource-cleanup-retry"]'
     kind: interactive
     optional: true
   - id: split-down
@@ -5611,6 +5906,23 @@ controls:
     selector: '[data-testid="code-workspace-quick-doc"]'
     kind: display
     optional: true       # explicit Quick Documentation popup
+  # §8.20.2 W1 actionable editor conditions and retryable actions.
+  - id: editor-banners
+    selector: '[data-testid="code-workspace-editor-banners"]'
+    kind: display
+    optional: true       # rendered only when a file/workspace condition is active
+  - id: editor-banner-open-settings
+    selector: '[data-testid="banner-action-open-settings"]'
+    kind: interactive
+    optional: true       # rendered for provider/setup conditions
+  - id: editor-banner-action-error
+    selector: '[data-testid="banner-action-error-open-settings"]'
+    kind: display
+    optional: true       # rendered after a banner action fails
+  - id: editor-banner-dismiss
+    selector: '[data-testid^="banner-dismiss-"]'
+    kind: interactive
+    optional: true       # dismissible conditions only
   # §8.20.4 W3 Problems-surface controls (diagnostics presentation owner).
   - id: problems-dock-tab
     selector: '[data-testid="code-workspace-bottom-tab-problems"]'
@@ -5632,6 +5944,149 @@ controls:
     selector: '[data-testid="keymap-settings-close"]'
     kind: interactive
     optional: true       # inside the keymap settings dialog
+  - id: clipboard-history-popup
+    selector: '[data-testid="clipboard-history-popup"]'
+    kind: display
+    optional: true       # §8.19.5 Clipboard history ring popup
+  - id: clipboard-history-search
+    selector: '[data-testid="clipboard-history-search"]'
+    kind: interactive
+    optional: true
+  - id: clipboard-history-entry-0
+    selector: '[data-testid="clipboard-history-entry-0"]'
+    kind: interactive
+    optional: true
+  - id: clipboard-history-close
+    selector: '[data-testid="clipboard-history-close"]'
+    kind: interactive
+    optional: true
+  # §8.19.8 IDEA-style navigation bar keyboard traversal and popup state.
+  - id: navigation-bar
+    selector: '[data-testid="code-workspace-breadcrumbs"]'
+    kind: interactive
+    optional: true
+  - id: navigation-back
+    selector: '[data-testid="code-workspace-nav-back"]'
+    kind: interactive
+    optional: true
+  - id: navigation-bar-popup
+    selector: '[data-testid="code-workspace-breadcrumb-popup"]'
+    kind: display
+    optional: true
+  - id: navigation-bar-popup-filter
+    selector: '[data-testid="code-workspace-breadcrumb-popup-filter"]'
+    kind: interactive
+    optional: true
+  - id: navigation-bar-popup-directory-entry
+    selector: '[data-testid="code-workspace-breadcrumb-entry-directory"]'
+    kind: interactive
+    optional: true
+  - id: navigation-bar-popup-file-entry
+    selector: '[data-testid="code-workspace-breadcrumb-entry-file"]'
+    kind: interactive
+    optional: true
+  # §ED-BOOKMARK-001: mounted TODO/bookmark owner and group lifecycle controls.
+  - id: todos-bookmarks-panel
+    selector: '[data-testid="code-workspace-todos-panel"]'
+    kind: display
+    optional: true       # mounted after Toggle Bookmark / Show Bookmarks
+  - id: bookmark-group
+    selector: '[data-testid="code-workspace-bookmark-group"]'
+    kind: display
+    optional: true
+  - id: bookmark-group-rename
+    selector: '[data-testid="code-workspace-bookmark-group-rename"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-group-input
+    selector: '[data-testid="code-workspace-bookmark-group-input"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-group-save
+    selector: '[data-testid="code-workspace-bookmark-group-save"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-group-cancel
+    selector: '[data-testid="code-workspace-bookmark-group-cancel"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-item
+    selector: '[data-testid="code-workspace-bookmark-item"]'
+    kind: display
+    optional: true
+  - id: bookmark-open
+    selector: '[data-testid="code-workspace-bookmark-open"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-mnemonic
+    selector: '[data-testid="code-workspace-bookmark-mnemonic"]'
+    kind: display
+    optional: true
+  - id: bookmark-remove
+    selector: '[data-testid="code-workspace-bookmark-remove"]'
+    kind: interactive
+    optional: true
+  - id: bookmark-missing
+    selector: '[data-testid="code-workspace-bookmark-missing"]'
+    kind: display
+    optional: true
+  # §ED-COMPARE-001: shared compare surface and local-history entry point.
+  - id: compare-dialog
+    selector: '[data-testid="code-workspace-compare-dialog"]'
+    kind: display
+    optional: true
+  - id: compare-session-metadata
+    selector: '[data-testid="compare-session-metadata"]'
+    kind: display
+    optional: true
+  - id: compare-left-line
+    selector: '[data-testid^="compare-left-line-"]'
+    kind: display
+    optional: true
+  - id: compare-right-line
+    selector: '[data-testid^="compare-right-line-"]'
+    kind: display
+    optional: true
+  - id: compare-copy-left
+    selector: '[data-testid="compare-copy-left"]'
+    kind: interactive
+    optional: true
+  - id: compare-copy-right
+    selector: '[data-testid="compare-copy-right"]'
+    kind: interactive
+    optional: true
+  - id: compare-apply
+    selector: '[data-testid="compare-apply-left-to-right"]'
+    kind: interactive
+    optional: true
+  - id: compare-dialog-close
+    selector: '[data-testid="compare-dialog-close"]'
+    kind: interactive
+    optional: true
+  - id: compare-apply-error
+    selector: '[data-testid="compare-apply-error"]'
+    kind: display
+    optional: true
+  - id: compare-left-unavailable
+    selector: '[data-testid="compare-left-unavailable"]'
+    kind: display
+    optional: true
+  - id: compare-right-unavailable
+    selector: '[data-testid="compare-right-unavailable"]'
+    kind: display
+    optional: true
+  - id: local-history-dialog
+    selector: '[data-testid="code-workspace-local-history-dialog"]'
+    kind: display
+    optional: true
+  - id: local-history-compare
+    selector: '[data-testid="code-workspace-local-history-compare"]'
+    kind: interactive
+    optional: true
+  - id: local-history-restore
+    selector: '[data-testid="code-workspace-local-history-restore"]'
+    kind: interactive
+    optional: true
 -->
 
 - 编辑器工作台的壳层控件：文件树（add-folder/open-file 行）、编辑器 pane/tab-strip/.cm-content、底部 dock 的 terminal tab、split down/close、Ctrl+Tab Switcher 弹层与 Keymap 设置面。
@@ -5793,6 +6248,10 @@ controls:
     selector: '[data-testid="workspace-editor-appearance-zoom-scope"]'
     kind: interactive
     optional: true
+  - id: editor-zoom-reset
+    selector: '[data-testid="code-workspace-zoom-reset"]'
+    kind: interactive
+    optional: true
   - id: appearance-soft-wrap-patterns
     selector: '[data-testid="workspace-editor-appearance-soft-wrap-patterns"]'
     kind: interactive
@@ -5903,6 +6362,10 @@ controls:
     optional: true
   - id: context-goto-definition
     selector: '[data-testid="editor-context-goto-definition"]'
+    kind: interactive
+    optional: true
+  - id: context-goto-declaration
+    selector: '[data-testid="editor-context-goto-declaration"]'
     kind: interactive
     optional: true
   - id: context-format

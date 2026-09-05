@@ -1,5 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 
+let lspRequestSequence = 0;
+
+/**
+ * Allocate a renderer-wide sequence for requests that share native
+ * cancellation identity. A component-local counter can repeat after a tab
+ * remount while the native registry is still finishing the previous request.
+ */
+export function nextLspRequestSequence(): number {
+  lspRequestSequence += 1;
+  return lspRequestSequence;
+}
+
 export interface LspServerCommandPreset {
   id: string;
   label: string;
@@ -50,6 +62,7 @@ export interface LspCapabilitySummary {
   signatureHelp: boolean;
   hover: boolean;
   definition: boolean;
+  declaration?: boolean;
   typeDefinition: boolean;
   implementation: boolean;
   references: boolean;
@@ -272,10 +285,54 @@ export function lspListPresets(): Promise<LspServerPreset[]> {
   return invoke<LspServerPreset[]>("lsp_list_presets");
 }
 
+let lspDetectCache: { key: string; time: number; data: LspServerStatus[] } | null = null;
+let lspDetectInFlight: { key: string; promise: Promise<LspServerStatus[]> } | null = null;
+const lspDetectLatestRequests = new Map<string, number>();
+let lspDetectCacheEpoch = 0;
+const LSP_DETECT_CACHE_TTL_MS = 60_000;
+
+export function clearLspDetectCache(): void {
+  lspDetectCache = null;
+  lspDetectInFlight = null;
+  lspDetectLatestRequests.clear();
+  lspDetectCacheEpoch += 1;
+}
+
 /** Detect installed language servers. Pass `javaHome` to probe jdtls with a configured JDK. */
-export function lspDetectServers(options?: { javaHome?: string | null }): Promise<LspServerStatus[]> {
+export function lspDetectServers(options?: { javaHome?: string | null; forceRefresh?: boolean }): Promise<LspServerStatus[]> {
   const javaHome = options?.javaHome?.trim() || null;
-  return invoke<LspServerStatus[]>("lsp_detect_servers", { javaHome });
+  const key = javaHome ?? "";
+
+  if (!options?.forceRefresh) {
+    if (lspDetectCache && lspDetectCache.key === key && Date.now() - lspDetectCache.time < LSP_DETECT_CACHE_TTL_MS) {
+      return Promise.resolve(lspDetectCache.data);
+    }
+  }
+  if (lspDetectInFlight && lspDetectInFlight.key === key) {
+    return lspDetectInFlight.promise;
+  }
+
+  const requestId = (lspDetectLatestRequests.get(key) ?? 0) + 1;
+  lspDetectLatestRequests.set(key, requestId);
+  const cacheEpoch = lspDetectCacheEpoch;
+  const promise = invoke<LspServerStatus[]>("lsp_detect_servers", { javaHome })
+    .then((statuses) => {
+      if (
+        lspDetectCacheEpoch === cacheEpoch
+        && lspDetectLatestRequests.get(key) === requestId
+      ) {
+        lspDetectCache = { key, time: Date.now(), data: statuses };
+      }
+      return statuses;
+    })
+    .finally(() => {
+      if (lspDetectInFlight?.promise === promise) {
+        lspDetectInFlight = null;
+      }
+    });
+
+  lspDetectInFlight = { key, promise };
+  return promise;
 }
 
 /** Apply the configured JDK for jdtls globally in the backend process. */
@@ -561,6 +618,8 @@ export function lspCompletionResolve(
 }
 
 export interface LspReferenceRequestOptions {
+  /** Abort signal owned by the semantic query host. */
+  signal?: AbortSignal;
   /** Per-file cancellation key shared with the native cancel registry. */
   cancelKey?: string;
   /**
@@ -568,6 +627,57 @@ export interface LspReferenceRequestOptions {
    * this request via `$/cancelRequest` (§8.18.6/§8.20.2).
    */
   requestSeq?: number;
+}
+
+function createLspAbortError(): Error {
+  const error = new Error("LSP request cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
+/**
+ * Invoke a provider request with the renderer-owned signal bridged to the
+ * native cancellation registry. The native command still receives the
+ * identity even when no renderer signal is supplied, so a newer request can
+ * supersede an older one at the provider boundary.
+ */
+function invokeCancellable<T>(
+  command: string,
+  args: Record<string, unknown>,
+  options?: LspReferenceRequestOptions,
+): Promise<T> {
+  const signal = options?.signal;
+  const cancelKey = options?.cancelKey?.trim() || null;
+  const requestSeq = cancelKey
+    ? options?.requestSeq ?? nextLspRequestSequence()
+    : null;
+  if (signal?.aborted) return Promise.reject(createLspAbortError());
+
+  let removeAbortListener: (() => void) | undefined;
+  const onAbort = () => {
+    if (cancelKey) {
+      void lspCancelReferenceRequest(cancelKey, requestSeq ?? undefined).catch(() => undefined);
+    }
+  };
+  if (signal) {
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  }
+
+  let request: Promise<T>;
+  try {
+    request = invoke<T>(command, {
+      ...args,
+      cancelKey,
+      requestSeq,
+    });
+  } catch (error) {
+    removeAbortListener?.();
+    return Promise.reject(error);
+  }
+  // Cover an abort racing the signal-listener registration and invoke call.
+  if (signal?.aborted) onAbort();
+  return request.finally(() => removeAbortListener?.());
 }
 
 // §8.20.3 W2: provider-owned Project Analysis facts.
@@ -614,13 +724,17 @@ export function lspSignatureHelp(
   triggerCharacter?: string | null,
   options?: LspReferenceRequestOptions,
 ): Promise<LspSignatureHelpResult> {
+  const cancelKey = options?.cancelKey?.trim() || null;
+  const requestSeq = cancelKey
+    ? options?.requestSeq ?? nextLspRequestSequence()
+    : null;
   return invoke<LspSignatureHelpResult>("lsp_signature_help", {
     ...documentArgs(descriptor),
     line: position.line,
     character: position.character,
     triggerCharacter: triggerCharacter ?? null,
-    cancelKey: options?.cancelKey ?? null,
-    requestSeq: options?.requestSeq ?? null,
+    cancelKey,
+    requestSeq,
   });
 }
 
@@ -1060,63 +1174,81 @@ export function lspWorkspaceSymbolResolve(
 export function lspPrepareCallHierarchy(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspHierarchyPrepareResult> {
-  return invoke<LspHierarchyPrepareResult>("lsp_prepare_call_hierarchy", {
-    ...documentArgs(descriptor),
-    line: position.line,
-    character: position.character,
-  });
+  return invokeCancellable<LspHierarchyPrepareResult>(
+    "lsp_prepare_call_hierarchy",
+    {
+      ...documentArgs(descriptor),
+      line: position.line,
+      character: position.character,
+    },
+    options,
+  );
 }
 
 export function lspCallHierarchyIncoming(
   descriptor: LspDocumentDescriptor,
   item: unknown,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspCallHierarchyResult> {
-  return invoke<LspCallHierarchyResult>("lsp_call_hierarchy_incoming", {
-    ...documentArgs(descriptor),
-    item,
-  });
+  return invokeCancellable<LspCallHierarchyResult>(
+    "lsp_call_hierarchy_incoming",
+    { ...documentArgs(descriptor), item },
+    options,
+  );
 }
 
 export function lspCallHierarchyOutgoing(
   descriptor: LspDocumentDescriptor,
   item: unknown,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspCallHierarchyResult> {
-  return invoke<LspCallHierarchyResult>("lsp_call_hierarchy_outgoing", {
-    ...documentArgs(descriptor),
-    item,
-  });
+  return invokeCancellable<LspCallHierarchyResult>(
+    "lsp_call_hierarchy_outgoing",
+    { ...documentArgs(descriptor), item },
+    options,
+  );
 }
 
 export function lspPrepareTypeHierarchy(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspHierarchyPrepareResult> {
-  return invoke<LspHierarchyPrepareResult>("lsp_prepare_type_hierarchy", {
-    ...documentArgs(descriptor),
-    line: position.line,
-    character: position.character,
-  });
+  return invokeCancellable<LspHierarchyPrepareResult>(
+    "lsp_prepare_type_hierarchy",
+    {
+      ...documentArgs(descriptor),
+      line: position.line,
+      character: position.character,
+    },
+    options,
+  );
 }
 
 export function lspTypeHierarchySupertypes(
   descriptor: LspDocumentDescriptor,
   item: unknown,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspTypeHierarchyResult> {
-  return invoke<LspTypeHierarchyResult>("lsp_type_hierarchy_supertypes", {
-    ...documentArgs(descriptor),
-    item,
-  });
+  return invokeCancellable<LspTypeHierarchyResult>(
+    "lsp_type_hierarchy_supertypes",
+    { ...documentArgs(descriptor), item },
+    options,
+  );
 }
 
 export function lspTypeHierarchySubtypes(
   descriptor: LspDocumentDescriptor,
   item: unknown,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspTypeHierarchyResult> {
-  return invoke<LspTypeHierarchyResult>("lsp_type_hierarchy_subtypes", {
-    ...documentArgs(descriptor),
-    item,
-  });
+  return invokeCancellable<LspTypeHierarchyResult>(
+    "lsp_type_hierarchy_subtypes",
+    { ...documentArgs(descriptor), item },
+    options,
+  );
 }
 
 export function lspDocumentHighlights(
@@ -1215,12 +1347,16 @@ export function lspHover(
     requestSeq?: number;
   },
 ): Promise<LspHoverResult> {
+  const cancelKey = options?.cancelKey?.trim() || null;
+  const requestSeq = cancelKey
+    ? options?.requestSeq ?? nextLspRequestSequence()
+    : null;
   return invoke<LspHoverResult>("lsp_hover", {
     ...documentArgs(descriptor),
     line: position.line,
     character: position.character,
-    cancelKey: options?.cancelKey ?? null,
-    requestSeq: options?.requestSeq ?? null,
+    cancelKey,
+    requestSeq,
   });
 }
 
@@ -1228,41 +1364,75 @@ export function lspHover(
  * Cancel an in-flight reference request without issuing a new one (popup
  * close / unmount path, §8.18.6).
  */
-export function lspCancelReferenceRequest(cancelKey: string): Promise<void> {
-  return invoke<void>("lsp_cancel_reference_request", { cancelKey });
+export function lspCancelReferenceRequest(cancelKey: string, requestSeq?: number): Promise<boolean> {
+  return invoke<boolean>("lsp_cancel_reference_request", {
+    cancelKey,
+    requestSeq: requestSeq ?? null,
+  });
 }
 
 export function lspDefinition(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspLocationsResult> {
-  return invoke<LspLocationsResult>("lsp_definition", {
-    ...documentArgs(descriptor),
-    line: position.line,
-    character: position.character,
-  });
+  return invokeCancellable<LspLocationsResult>(
+    "lsp_definition",
+    {
+      ...documentArgs(descriptor),
+      line: position.line,
+      character: position.character,
+    },
+    options,
+  );
+}
+
+export function lspDeclaration(
+  descriptor: LspDocumentDescriptor,
+  position: LspPosition,
+  options?: LspReferenceRequestOptions,
+): Promise<LspLocationsResult> {
+  return invokeCancellable<LspLocationsResult>(
+    "lsp_declaration",
+    {
+      ...documentArgs(descriptor),
+      line: position.line,
+      character: position.character,
+    },
+    options,
+  );
 }
 
 export function lspTypeDefinition(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspLocationsResult> {
-  return invoke<LspLocationsResult>("lsp_type_definition", {
-    ...documentArgs(descriptor),
-    line: position.line,
-    character: position.character,
-  });
+  return invokeCancellable<LspLocationsResult>(
+    "lsp_type_definition",
+    {
+      ...documentArgs(descriptor),
+      line: position.line,
+      character: position.character,
+    },
+    options,
+  );
 }
 
 export function lspImplementation(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspLocationsResult> {
-  return invoke<LspLocationsResult>("lsp_implementation", {
-    ...documentArgs(descriptor),
-    line: position.line,
-    character: position.character,
-  });
+  return invokeCancellable<LspLocationsResult>(
+    "lsp_implementation",
+    {
+      ...documentArgs(descriptor),
+      line: position.line,
+      character: position.character,
+    },
+    options,
+  );
 }
 
 /**
@@ -1324,11 +1494,16 @@ export function lspReferences(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
   includeDeclaration = true,
+  options?: LspReferenceRequestOptions,
 ): Promise<LspLocationsResult> {
-  return invoke<LspLocationsResult>("lsp_references", {
-    ...documentArgs(descriptor),
-    line: position.line,
-    character: position.character,
-    includeDeclaration,
-  });
+  return invokeCancellable<LspLocationsResult>(
+    "lsp_references",
+    {
+      ...documentArgs(descriptor),
+      line: position.line,
+      character: position.character,
+      includeDeclaration,
+    },
+    options,
+  );
 }

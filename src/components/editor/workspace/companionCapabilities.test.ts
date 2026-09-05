@@ -72,9 +72,9 @@ describe("§8.18.9.4 formatter exclusion + markers", () => {
       readOnlyPaths: new Set(),
       capabilities: { formatting: true, rangeFormatting: true, rearrangeSupported: false, cleanupSupported: false },
     });
-    // Directory scope has no provider document-format stage; rearrange/cleanup
-    // are absent because the provider does not support them.
-    expect(plan.stages).toEqual([]);
+    // Directory format is a multi-file plan stage; rearrange/cleanup remain
+    // absent because the provider does not support those distinct workflows.
+    expect(plan.stages).toEqual([{ kind: "format", source: "lsp", editsCount: 0 }]);
     expect(plan.excluded).toEqual([{ uri: "gen/b.java", reason: "pattern" }]);
 
     const filePlan = buildFormatPlan({

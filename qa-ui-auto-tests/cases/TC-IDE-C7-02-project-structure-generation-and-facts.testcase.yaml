@@ -1,0 +1,25 @@
+id: TC-IDE-C7-02
+title: "Project structure generation lifecycle and facts cache"
+description: |
+  §8.19.10 gate case C7 part 2 (ED-PROJECT-004 & ED-PROJECT-005).
+  Asserts workspace-root-keyed project facts cache, generation lifecycle,
+  status badge rendering (ready, loading, untrusted, stale, degraded),
+  and fail-closed completion/query/refactor consumer behavior.
+  Highest claim on green: L1 browser contract / L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-c7, project-structure, facts-cache, generation, p1]
+modes: [browser, native]
+fixtures: [reset_db]
+timeout_sec: 120
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - screenshot: tc-ide-c7-project-structure.png

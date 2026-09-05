@@ -21,7 +21,10 @@ describe("useDeferredGitLineChanges", () => {
     const buildChanges = vi.fn(() => changed);
     const initial = [{
       key: "main.rs",
+      filePath: "/repo/main.rs",
       sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
       headText: "before",
       bufferText: "first",
     }];
@@ -47,7 +50,10 @@ describe("useDeferredGitLineChanges", () => {
     const buildChanges = vi.fn(() => changed);
     const source = {
       key: "main.rs",
+      filePath: "/repo/main.rs",
       sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
       headText: "before",
       bufferText: "after",
     };
@@ -60,5 +66,87 @@ describe("useDeferredGitLineChanges", () => {
     rerender({ sources: [{ ...source }] });
     act(() => vi.runAllTimers());
     expect(buildChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restart debounce timer on equivalent source rerenders to prevent starvation", () => {
+    vi.useFakeTimers();
+    const buildChanges = vi.fn(() => changed);
+    const source = {
+      key: "main.rs",
+      filePath: "/repo/main.rs",
+      sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
+      headText: "before",
+      bufferText: "first",
+    };
+    const { rerender } = renderHook(
+      ({ sources }) => useDeferredGitLineChanges(sources, { delayMs: 100, buildChanges }),
+      { initialProps: { sources: [source] } },
+    );
+
+    // Unrelated re-renders pass new array references with identical content at 50ms and 80ms
+    act(() => vi.advanceTimersByTime(50));
+    rerender({ sources: [{ ...source }] });
+    act(() => vi.advanceTimersByTime(30));
+    rerender({ sources: [{ ...source }] });
+
+    // At 100ms from initial render, the debounce timer should fire (not delayed by rerenders)
+    act(() => vi.advanceTimersByTime(20));
+    act(() => vi.runOnlyPendingTimers());
+    expect(buildChanges).toHaveBeenCalledTimes(1);
+    expect(buildChanges).toHaveBeenCalledWith("before", "first");
+  });
+
+  it("invalidates the cache when the document revision changes even if text is equal", () => {
+    vi.useFakeTimers();
+    const buildChanges = vi.fn(() => changed);
+    const source = {
+      key: "main.rs",
+      filePath: "/repo/main.rs",
+      sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
+      headText: "before",
+      bufferText: "after",
+    };
+    const { rerender } = renderHook(
+      ({ sources }) => useDeferredGitLineChanges(sources, { delayMs: 10, buildChanges }),
+      { initialProps: { sources: [source] } },
+    );
+
+    act(() => vi.runAllTimers());
+    rerender({ sources: [{ ...source, textVersion: 2 }] });
+    act(() => vi.runAllTimers());
+
+    expect(buildChanges).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips line diff work while a visible file is in large-file mode", () => {
+    vi.useFakeTimers();
+    const buildChanges = vi.fn(() => changed);
+    const source = {
+      key: "main.rs",
+      filePath: "/repo/main.rs",
+      sourceKey: "head-1",
+      headOid: "head-1",
+      textVersion: 1,
+      headText: "before",
+      bufferText: "after",
+      largeFile: false,
+    };
+    const { result, rerender } = renderHook(
+      ({ sources }) => useDeferredGitLineChanges(sources, { delayMs: 10, buildChanges }),
+      { initialProps: { sources: [source] } },
+    );
+
+    act(() => vi.runAllTimers());
+    expect(result.current["main.rs"]).toEqual(changed);
+
+    rerender({ sources: [{ ...source, largeFile: true, textVersion: 2 }] });
+    act(() => vi.runAllTimers());
+
+    expect(buildChanges).toHaveBeenCalledTimes(1);
+    expect(result.current).toEqual({});
   });
 });

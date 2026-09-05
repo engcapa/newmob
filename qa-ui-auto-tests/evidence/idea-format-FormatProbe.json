@@ -1,0 +1,19 @@
+{
+ "kind": "idea-comparison",
+ "capability": "reformat.scope-marker-exclusion",
+ "idea": {
+  "product": "IntelliJ IDEA",
+  "version": "2026.1.2",
+  "build": "IU-261.24374.151",
+  "os": "Linux"
+ },
+ "command": "/data/dev/idea-IU-253.30387.90/bin/idea.sh format -allowDefaults <project>/src/com/example/single/FormatProbe.java",
+ "fixture": "FormatProbe.java with @formatter:off guarded badly_spaced line + unguarded also_bad indent",
+ "input_sha256": "d7a488474851396d680f16cd3e229c911265dfeb995ac0473dad43801c572f60",
+ "idea_post_sha256": "eeb42451f01d4baac2865d95ea6747cc85bfb530f59861b6fae32895e5310a88",
+ "jdtls_post_sha256": "eeb42451f01d4baac2865d95ea6747cc85bfb530f59861b6fae32895e5310a88",
+ "byte_identical_to_jdtls": true,
+ "verdict": "exact-match",
+ "claim_ceiling": "single-fixture Java formatting only; navigation/completion IDEA comparison remains manual (no GUI automation on shared workstation)",
+ "collected_at": "2026-09-04T10:00:00+08:00"
+}

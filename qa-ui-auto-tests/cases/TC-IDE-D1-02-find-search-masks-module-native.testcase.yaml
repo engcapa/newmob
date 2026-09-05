@@ -1,0 +1,72 @@
+id: TC-IDE-D1-02-find-search-masks-module-native
+title: "Find in files search, masks, and module scope in packaged app"
+description: |
+  §8.19.10 native gate case (ED-FIND-003 A1/A2). Enters the in-repo
+  single-module Maven sample through persisted recents, opens Find in Files
+  with physical keys, and proves real ripgrep-backed search: an unmasked
+  query groups AppTest.java, a pom.xml-masked junit query groups only
+  pom.xml, and module scope (resolved from ready facts) still returns the
+  module match. All text entry uses self-activating physical keys;
+  Cancel/supersede/stale paths are unit-proven against the mocked backend.
+  Highest claim on green: L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-find, find-scope, native-gate, p1]
+modes: [native]
+fixtures: [reset_db, java_sample_projects]
+timeout_sec: 600
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  # Enter the real sample project through persisted recents (no native picker).
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-d1","name":"maven-single","roots":[{"id":"maven-single","name":"maven-single","path":"${fixture.maven_single_root}","kind":"folder"}],"looseFiles":[],"lastActiveFile":{"kind":"root","rootId":"maven-single","path":"src/test/java/com/example/single/AppTest.java"},"lastOpenedAt":1756100000000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.maven_single_root}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - wait_for:
+      selector: '[data-testid="code-workspace-editor-pane"]'
+      timeout_sec: 60
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      keys: ["Control+Shift+F"]
+  - wait_for: '[data-testid="code-workspace-find-in-files-panel"]'
+  - click: '[aria-label="Search query"]'
+  - native_keys:
+      selector: '[aria-label="Search query"]'
+      keys: ["Control+a", "a", "s", "s", "e", "r", "t", "Shift+t", "r", "u", "e", "Enter"]
+  - assert_text:
+      selector: '[data-testid="code-workspace-find-in-files-panel"]'
+      contains: "AppTest"
+      timeout_sec: 60
+  - select_option:
+      selector: '[data-testid="code-workspace-find-scope-select"]'
+      label: "Module"
+  - assert_visible: '[data-testid="code-workspace-find-module-select"]'
+  - native_keys:
+      selector: '[aria-label="Search query"]'
+      keys: ["Enter"]
+  - assert_text:
+      selector: '[data-testid="code-workspace-find-in-files-panel"]'
+      contains: "AppTest"
+      timeout_sec: 60
+  - click: '[aria-label="Include globs"]'
+  - native_keys:
+      selector: '[aria-label="Include globs"]'
+      keys: ["Control+a", "p", "o", "m", ".", "x", "m", "l"]
+  - click: '[aria-label="Search query"]'
+  - native_keys:
+      selector: '[aria-label="Search query"]'
+      keys: ["Control+a", "j", "u", "n", "i", "t", "Enter"]
+  - assert_text:
+      selector: '[data-testid="code-workspace-find-in-files-panel"]'
+      contains: "pom.xml"
+      timeout_sec: 60
+  - assert_text:
+      selector: '[data-testid="code-workspace-find-in-files-panel"]'
+      contains: "junit"
+      timeout_sec: 10
+  - screenshot: tc-ide-d1-02-find-native.png

@@ -124,8 +124,7 @@ function utf8Bytes(input: string): Uint8Array {
   return new TextEncoder().encode(input);
 }
 
-export function sha256Hex(input: string): string {
-  const message = utf8Bytes(input);
+export function sha256HexBytes(message: Uint8Array): string {
   const bitLength = message.length * 8;
   // Padded length: message + 0x80 + zeros + 8-byte big-endian bit length,
   // rounded up to a multiple of 64 bytes.
@@ -194,9 +193,13 @@ export function sha256Hex(input: string): string {
     h6 = (h6 + g) >>> 0;
     h7 = (h7 + h) >>> 0;
   }
-  return [h0, h1, h2, h3, h4, h5, h6, h7]
-    .map((word) => word.toString(16).padStart(8, "0"))
-    .join("");
+
+  const toHex = (n: number) => (n >>> 0).toString(16).padStart(8, "0");
+  return `${toHex(h0)}${toHex(h1)}${toHex(h2)}${toHex(h3)}${toHex(h4)}${toHex(h5)}${toHex(h6)}${toHex(h7)}`;
+}
+
+export function sha256Hex(input: string): string {
+  return sha256HexBytes(utf8Bytes(input));
 }
 
 // ---------------------------------------------------------------------------

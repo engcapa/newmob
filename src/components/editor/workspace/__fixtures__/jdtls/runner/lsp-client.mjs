@@ -17,7 +17,7 @@ export class LspClient {
   /**
    * @param {string} command absolute path to java
    * @param {string[]} args full JVM arg list (mirrors production launch)
-   * @param {{cwd?: string, onDiagnostics?: (params: unknown) => void}} [options]
+   * @param {{cwd?: string, workspaceFolders?: unknown[], onDiagnostics?: (params: unknown) => void}} [options]
    */
   constructor(command, args, options = {}) {
     this.command = command;
@@ -74,7 +74,7 @@ export class LspClient {
   }
 
   #dispatch(message) {
-    if (typeof message.id === "undefined" && message.method) {
+    if (message.method) {
       if (message.method === "textDocument/publishDiagnostics") {
         this.options.onDiagnostics?.(message.params);
         // §8.20.4 W3: keep the RAW payload so quick-fix scenarios can echo
@@ -85,21 +85,51 @@ export class LspClient {
       }
       if (message.method === "$/progress") {
         this.options.onWorkDoneProgress?.(message.params);
-        // Fall through: $/progress is a notification, nothing to answer.
+        return;
       }
       if (message.method === "client/registerCapability") {
         this.options.onRegisterCapability?.(message.params);
       }
-      // Server→client requests we honour: configuration defaults and the
-      // register/unregister round-trips jdtls issues during import.
-      if (message.method === "workspace/configuration" || message.method === "client/registerCapability"
-        || message.method === "client/unregisterCapability" || message.method === "workspace/workspaceFolders"
-        || message.method === "window/workDoneProgress/create") {
-        const result = message.method === "workspace/configuration"
-          ? (message.params.items ?? []).map(() => null)
-          : null;
-        this.#write({ jsonrpc: "2.0", id: message.id, result });
+
+      // Server→client requests carry an id even though they are not responses
+      // to one of our requests. The old notification-only guard silently
+      // dropped these messages, leaving jdtls blocked on its configuration or
+      // capability-registration round trip before codeAction could answer.
+      if (typeof message.id === "undefined") return;
+
+      if (message.method === "workspace/configuration") {
+        const items = Array.isArray(message.params?.items) ? message.params.items : [];
+        this.#write({ jsonrpc: "2.0", id: message.id, result: items.map(() => null) });
+        return;
       }
+      if (message.method === "workspace/workspaceFolders") {
+        this.#write({ jsonrpc: "2.0", id: message.id, result: this.options.workspaceFolders ?? null });
+        return;
+      }
+      if (message.method === "workspace/applyEdit") {
+        // A provider request must not mutate the fixture. Returning the real
+        // protocol refusal keeps the request observable without fabricating a
+        // successful external effect.
+        this.#write({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { applied: false, failureReason: "fixture runner does not apply server workspace edits" },
+        });
+        return;
+      }
+      if (message.method === "client/registerCapability"
+        || message.method === "client/unregisterCapability"
+        || message.method === "window/workDoneProgress/create"
+        || message.method === "window/showMessageRequest") {
+        this.#write({ jsonrpc: "2.0", id: message.id, result: null });
+        return;
+      }
+      this.options.onServerRequest?.(message);
+      this.#write({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: -32601, message: `Unsupported fixture server request: ${message.method}` },
+      });
       return;
     }
     if (typeof message.id !== "undefined" && (message.result !== undefined || message.error !== undefined)) {

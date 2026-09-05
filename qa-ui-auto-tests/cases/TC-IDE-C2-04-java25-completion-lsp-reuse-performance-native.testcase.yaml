@@ -1,0 +1,92 @@
+id: TC-IDE-C2-04-java25-completion-lsp-reuse-performance-native
+title: "Java 25 live-template keyboard completion, LSP reuse, and input latency"
+description: |
+  Creates and compiles isolated Maven and Gradle projects with Java 25 before
+  launching the packaged app. In the Maven source, physical Alt+/ opens the
+  multi-choice live-template popup, ArrowDown changes its selected option, and
+  Tab accepts that option. Opening a Java file in another package must retain a
+  single new jdtls process. Physical typing in that second source records the
+  keydown-to-render p95 and enforces a 50 ms interaction budget. The Gradle
+  build is independently proven by the fixture build receipt.
+  Highest claim on green: L2 provider-backed native behavior and performance.
+covers: [F25.5]
+tags: [code-workspace, java25, completion, lsp, performance, native-gate, p0]
+modes: [native]
+fixtures: [reset_db, java25_projects]
+timeout_sec: 600
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-java25-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-java25-completion","name":"maven-java25","roots":[{"id":"maven-java25","name":"maven-java25","path":"${fixture.java25_maven_root}","kind":"folder"}],"looseFiles":[],"lastActiveFile":{"kind":"root","rootId":"maven-java25","path":"src/main/java/com/example/app/App.java"},"lastOpenedAt":1788537600000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.java25_maven_root}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "completionTargets"
+      timeout_sec: 60
+  - assert_text:
+      selector: '[data-testid="code-workspace-lsp-status-pill"]'
+      contains: "Java"
+      timeout_sec: 60
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Control+Home", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "End"]
+  - type: "sout"
+  - press: "Alt+/"
+  - wait_for:
+      selector: '.cm-tooltip-autocomplete'
+      timeout_sec: 10
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["ArrowDown"]
+  - eval_readonly:
+      expression: 'document.querySelector(".cm-tooltip-autocomplete [aria-selected]")?.textContent'
+      contains: "soutm"
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Tab"]
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: 'System.out.println("MethodName");'
+      timeout_sec: 30
+  - fill:
+      selector: '[data-testid="code-workspace-tree-filter"]'
+      value: "Helper"
+  - wait_for: '[data-testid="code-workspace-flat-file"][data-path="src/main/java/com/example/other/Helper.java"]'
+  - click: '[data-testid="code-workspace-flat-file"][data-path="src/main/java/com/example/other/Helper.java"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "// PERF:"
+      timeout_sec: 30
+  - assert_text:
+      selector: '[data-testid="code-workspace-lsp-status-pill"]'
+      contains: "Java"
+      timeout_sec: 60
+  - assert_native_process_delta:
+      pattern: org.eclipse.jdt.ls.core.id1
+      baseline: "${fixture.jdtls_process_count_before}"
+      max_delta: 1
+      timeout_sec: 10
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Control+End", "End"]
+  - native_editor_performance:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      keys: ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t"]
+      max_p95_ms: 50
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "abcdefghijklmnopqrst"
+      timeout_sec: 15
+  - screenshot: tc-ide-c2-04-java25-completion-performance.png

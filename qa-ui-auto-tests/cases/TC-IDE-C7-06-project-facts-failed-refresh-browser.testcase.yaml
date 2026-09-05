@@ -1,0 +1,42 @@
+id: TC-IDE-C7-06-project-facts-failed-refresh-browser
+title: "Project facts failed badge and explicit refresh in browser"
+description: |
+  Browser gate case (ED-PROJECT-004 A3). The stub preview has no build
+  tooling backend, so production autoFetch must fail closed: the status
+  badge renders Facts Failed with an explicit refresh control, and clicking
+  refresh re-runs the fetch without crashing or fabricating ready facts.
+  The ready path in the packaged runtime is covered by the native
+  TC-IDE-C7-04/05 gates; this case pins the browser failure/refresh half.
+covers: [F25.5]
+tags: [code-workspace, ide-c7, project-structure, facts-cache, browser-gate, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - wait_for:
+      selector: '[data-testid="project-facts-status-badge"]'
+      timeout_sec: 60
+  - assert_text:
+      selector: '[data-testid="project-facts-status-badge"]'
+      contains: "Facts Failed"
+      timeout_sec: 30
+  - click: '[data-testid="project-facts-refresh-btn"]'
+  - assert_text:
+      selector: '[data-testid="project-facts-status-badge"]'
+      contains: "Facts Failed"
+      timeout_sec: 30
+  - assert_text:
+      selector: '[data-testid="code-workspace-tree-file"]'
+      contains: "README"
+      timeout_sec: 10
+  - screenshot: tc-ide-c7-06-facts-failed-refresh.png

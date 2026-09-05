@@ -1,0 +1,40 @@
+{
+  "started_at": "2026-09-04T10:06:15+08:00",
+  "finished_at": "2026-09-04T10:06:21+08:00",
+  "duration_sec": 6.247394323348999,
+  "mode": "browser",
+  "workers": 1,
+  "totals": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "cases": [
+    {
+      "id": "TC-IDE-C8-03-reformat-unavailable-zero-commit-browser",
+      "title": "Reformat unavailable provider keeps marker text untouched in browser",
+      "tags": [
+        "code-workspace",
+        "ide-c8",
+        "reformat",
+        "browser-gate",
+        "p1"
+      ],
+      "covers": [
+        "F25.5"
+      ],
+      "modes": [
+        "browser"
+      ],
+      "status": "passed",
+      "duration_sec": 6.247172832489014,
+      "step_count": 19,
+      "worker_id": 0,
+      "failure": null,
+      "fixtures_skipped": null,
+      "skipped_reason": null
+    }
+  ],
+  "schema": "qa-ui-auto.summary.v1"
+}

@@ -1,0 +1,29 @@
+{
+ "kind": "a11y-scan",
+ "mode": "browser (Chromium); complements manual per-platform smoke",
+ "collected_at": "2026-09-04T09:21:19+0800",
+ "base_url": "http://localhost:5001",
+ "surfaces": [
+  {
+   "surface": "welcome",
+   "violations": [],
+   "roles_seen": {}
+  },
+  {
+   "surface": "app-main-menu open",
+   "violations": [],
+   "roles_seen": {}
+  },
+  {
+   "surface": "text-input-dialog (add workspace root)",
+   "violations": [],
+   "roles_seen": {}
+  },
+  {
+   "surface": "code-workspace shell",
+   "violations": [],
+   "roles_seen": {}
+  }
+ ],
+ "total_violations": 0
+}

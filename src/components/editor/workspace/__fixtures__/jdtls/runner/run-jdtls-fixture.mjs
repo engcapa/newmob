@@ -350,6 +350,7 @@ const FIXTURES = {
       id: "import-quick-fix",
       file: "src/main/java/com/example/single/QuickFixTarget.java",
       symbol: "StringUtils",
+      expectedDetailContains: "org.apache.commons.lang3",
     },
   },
 
@@ -564,6 +565,7 @@ async function startSession(jdtls, fixtureId, options = {}) {
   const progressEvents = [];
   const rawDiagnosticsByUri = new Map();
   const client = new LspClient(options.javaPath, launchArgs(jdtls, dataDir), {
+    workspaceFolders: [{ uri: `file://${projectDir}`, name: fixtureId }],
     onDiagnostics: (params) => {
       for (const diagnostic of params?.diagnostics ?? []) {
         diagnosticsLog.push({
@@ -851,14 +853,16 @@ async function runQuickFixScenario(session, spec) {
     }
   }
   record.offeredTitles = list.map((action) => action.title).slice(0, 8);
-  const picked = list.find((action) => (
+  const importActions = list.filter((action) => (
     /^import /i.test(action.title ?? "") && (action.title ?? "").includes(spec.symbol)
+  ));
+  const picked = importActions.find((action) => (
+    !spec.expectedDetailContains
+    || `${action.title ?? ""} ${action.detail ?? ""}`.includes(spec.expectedDetailContains)
   )) ?? null;
   if (!picked) {
-    // jdt.ls 1.61 observation: textDocument/codeAction never responds (hang,
-    // not empty) for BOTH healthy and broken documents, regardless of
-    // extendedClientCapabilities. Record that as first-class provider truth;
-    // the runner treats it as a documented difference, not an infra failure.
+    // Keep a provider timeout distinct from an answered response that simply
+    // lacks the requested import. Neither outcome is an apply success.
     if (list.length === 0 && codeActionTimeouts > 0) {
       record.providerHang = { attempts: codeActionTimeouts };
       record.reason = `provider-hang: textDocument/codeAction gave no response across ${codeActionTimeouts} attempt(s) (healthy + broken files alike)`;
@@ -875,9 +879,10 @@ async function runQuickFixScenario(session, spec) {
   let merged = picked;
   if (picked.data !== undefined) {
     try {
-      const resolvedAction = await session.client.request("textDocument/codeAction/resolve", picked);
+      const resolvedAction = await session.client.request("codeAction/resolve", picked);
       record.resolved = true;
       merged = { ...picked, ...(resolvedAction ?? {}) };
+      record.resolvedShape = summarizeCodeActionShape(merged);
     } catch (error) {
       record.resolveFailure = error.message.split("\n")[0];
       // Keep the raw action; some servers answer edits inline despite data.
@@ -889,14 +894,30 @@ async function runQuickFixScenario(session, spec) {
     ?? (merged.edit?.documentChanges ?? [])
       .filter((change) => change.textDocument?.uri === uri || change.textDocument?.uri === encodeURI(uri))
       .flatMap((change) => change.edits ?? []);
+  if (record.resolvedShape) {
+    record.resolvedShape.requestedUri = uri;
+    record.resolvedShape.exactUriMatch = Array.isArray(merged.edit?.changes?.[uri]);
+    record.resolvedShape.encodedUriMatch = Array.isArray(merged.edit?.changes?.[encodeURI(uri)]);
+    record.resolvedShape.targetEditShapes = targetEdits.map((edit) => ({
+      keys: edit && typeof edit === "object" ? Object.keys(edit).sort() : [],
+      rangeKeys: edit?.range && typeof edit.range === "object" ? Object.keys(edit.range).sort() : [],
+      newTextType: typeof edit?.newText,
+      newTextLength: typeof edit?.newText === "string" ? edit.newText.length : null,
+      containsImport: typeof edit?.newText === "string" && /(?:^|\n)\s*import\s+/.test(edit.newText),
+    }));
+  }
   const normalized = targetEdits.map(normalizeEdit).filter(Boolean);
-  const importEdit = normalized.find((edit) => /^import /.test(edit.newText.trim()));
+  const importEdit = normalized.find((edit) => /(?:^|\n)\s*import\s+/.test(edit.newText));
   if (!normalized.length || !importEdit) {
     record.reason = "quick fix produced no import edit for this document";
     record.msTotal = Date.now() - startedAt;
     return record;
   }
-  record.importInsertText = importEdit.newText.trim();
+  record.importInsertText = importEdit.newText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^import\s+/.test(line))
+    .join("\n");
   record.originalSha256 = sha256(text);
   const simulation = simulateAcceptance(text, normalized[0], normalized.slice(1));
   record.appliedSha256 = sha256(simulation.applied);
@@ -985,6 +1006,27 @@ async function waitForCase(client, uri, position, trigger, expectFn, budgetMs) {
 /** jdtls decorates labels ("String - java.lang", "asList(int…)"); strip it. */
 function baseLabel(item) {
   return String(item.label ?? "").split(" - ")[0].split("(")[0].trim();
+}
+
+function summarizeCodeActionShape(action) {
+  const edit = action?.edit && typeof action.edit === "object" ? action.edit : null;
+  const changes = edit?.changes && typeof edit.changes === "object" ? edit.changes : null;
+  const documentChanges = Array.isArray(edit?.documentChanges) ? edit.documentChanges : [];
+  return {
+    actionKeys: action && typeof action === "object" ? Object.keys(action).sort() : [],
+    command: typeof action?.command === "string" ? action.command : null,
+    commandArgumentCount: Array.isArray(action?.arguments) ? action.arguments.length : null,
+    editKeys: edit ? Object.keys(edit).sort() : [],
+    changeUris: changes ? Object.keys(changes).sort() : [],
+    changeEditCounts: changes
+      ? Object.values(changes).map((edits) => (Array.isArray(edits) ? edits.length : null))
+      : [],
+    documentChanges: documentChanges.map((change) => ({
+      keys: change && typeof change === "object" ? Object.keys(change).sort() : [],
+      uri: change?.textDocument?.uri ?? null,
+      editCount: Array.isArray(change?.edits) ? change.edits.length : null,
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,46 @@
+id: TC-IDE-C7-05-gradle-tooling-ingestion-native
+title: "Gradle tooling ingestion over real project in packaged app"
+description: |
+  §8.19.10 native gate case (ED-PROJECT-003). Enters the in-repo
+  single-project Gradle sample through persisted recents (no native picker),
+  then proves the production useProjectFacts -> fetchProjectFacts ->
+  workspace_ingest_gradle_project chain resolves real projects from the
+  on-disk settings.gradle/build.gradle: the status badge reaches Ready, the
+  discovery label reports Gradle Discovered, and the workspace tree lists the
+  sample root. Ingestion is read-only descriptor parsing (no wrapper
+  execution), so pointing at the checked-in sample is side-effect free.
+  Highest claim on green: L2 provider-backed (Linux).
+covers: [F25.5]
+tags: [code-workspace, ide-c7, gradle, native-gate, p1]
+modes: [native]
+fixtures: [reset_db, java_sample_projects]
+timeout_sec: 300
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  # Enter the real sample project through persisted recents (no native picker).
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-g2","name":"gradle-single","roots":[{"id":"gradle-single","name":"gradle-single","path":"${fixture.gradle_single_root}","kind":"folder"}],"looseFiles":[],"lastOpenedAt":1756100000000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.gradle_single_root}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - wait_for:
+      selector: '[data-testid="project-facts-status-badge"]'
+      timeout_sec: 90
+  - assert_text:
+      selector: '[data-testid="project-facts-status-badge"]'
+      contains: "Ready"
+      timeout_sec: 30
+  - assert_visible: '[data-testid="project-facts-ready-icon"]'
+  - assert_text:
+      selector: '[data-testid="project-facts-discovery-status"]'
+      contains: "Gradle Discovered"
+      timeout_sec: 30
+  - assert_text:
+      selector: '[data-testid="code-workspace-tree-root"]'
+      contains: "gradle-single"
+      timeout_sec: 30
+  - screenshot: tc-ide-c7-05-gradle-ingestion.png

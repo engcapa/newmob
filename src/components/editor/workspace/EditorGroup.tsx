@@ -41,7 +41,11 @@ import {
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./CodeMirrorHost";
+import type { ClipboardObservationRecord } from "./clipboardObservationContract";
+import type { WorkspaceDocumentTransactionOwner } from "./workspaceDocumentTransactionOwner";
 import type { EditorAppearanceExtensionProfile } from "./editorAppearanceExtension";
+import { EditorBanner } from "./EditorBanner";
+import type { EditorBannerItem } from "./editorBannerModel";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type { FileCoverage } from "./coverageModel";
 import {
@@ -51,6 +55,7 @@ import {
   type CompletionRequestIdentity,
   type CompletionRequestToken,
 } from "./lspCompletion";
+import type { CompletionScopeFactsState } from "./completionScopeAdapter";
 import type { QuickDocContent } from "./referenceDocumentation";
 import type { OpenFileViewModel } from "./editorGroupTypes";
 import { useContextMenu } from "../../ContextMenu";
@@ -91,6 +96,8 @@ export interface EditorRevealTarget {
 interface EditorGroupProps {
   /** Clipboard degradation notices forwarded to the workspace status bar. */
   onClipboardUnavailable?: (message: string) => void;
+  /** ED-CLIP-004: typed guarded-clipboard observations for the workspace seam. */
+  onClipboardObservation?: (record: ClipboardObservationRecord) => void;
 
   groupId: EditorGroupId;
   workspaceInstanceId: string;
@@ -135,8 +142,11 @@ interface EditorGroupProps {
   activeCapabilities: LspCapabilitySummary | null;
   activeLspSyncing: boolean;
   lspStatusPill: ReactNode;
+  highlightingWidget?: ReactNode;
   breadcrumbs: ReactNode;
   breadcrumbsPlacement?: "top" | "bottom";
+  editorBanners?: EditorBannerItem[];
+  onDismissBanner?: (id: string) => void;
   activeSymbols?: LspDocumentSymbol[];
   stickyLinesEnabled?: boolean;
   onRevealTargetLine?: (line: number) => void;
@@ -145,6 +155,12 @@ interface EditorGroupProps {
   editorPaneStyle: CSSProperties;
   softWrap?: boolean;
   appearance?: EditorAppearanceExtensionProfile;
+  /** Whether doc comments are replaced with safe rendered blocks for this file. */
+  renderedDocEnabled?: boolean;
+  /** Language identity used by the rendered documentation extractor. */
+  renderedDocLanguageId?: string | null;
+  /** Return a rendered documentation block to source mode. */
+  onToggleRenderedDocRaw?: () => void;
   columnSelectionMode?: boolean;
   showHoverDocumentation?: boolean;
   hoverDocumentationDelayMs?: number;
@@ -178,6 +194,10 @@ interface EditorGroupProps {
   onSave: (key: string) => void;
   /** §8.18.2: workspace action host owning the editor.* business actions. */
   workspaceActionHost?: WorkspaceActionHost | null;
+  /** §8.26 / ED-MULTIVIEW-002: shared document transaction owner across splits. */
+  transactionOwner?: WorkspaceDocumentTransactionOwner | null;
+  /** Current buffer revision used to seed the shared document owner. */
+  documentRevision?: number;
   onHover: (
     file: OpenFileViewModel,
     position: LspPosition,
@@ -202,7 +222,8 @@ interface EditorGroupProps {
     kind: CompletionAcceptanceDiagnostic,
     detail?: string,
   ) => void;
-  completionController?: LspCompletionController;
+  /** ED-COMP-004: explicit completion that falls back for missing scope facts. */
+  onScopeFallback?: (state: CompletionScopeFactsState) => void;  completionController?: LspCompletionController;
   /** §8.20.2 W1 single channel: file-scoped trigger event into the session. */
   onParameterTrigger?: (
     file: OpenFileViewModel,
@@ -242,6 +263,7 @@ export function EditorGroup({
   workspaceInstanceId,
   visible,
   onClipboardUnavailable,
+  onClipboardObservation,
   readOnly = false,
   tabPolicy,
   lastUsedByKey,
@@ -273,8 +295,11 @@ export function EditorGroup({
   activeCapabilities,
   activeLspSyncing,
   lspStatusPill,
+  highlightingWidget,
   breadcrumbs,
   breadcrumbsPlacement = "top",
+  editorBanners = [],
+  onDismissBanner,
   activeSymbols,
   stickyLinesEnabled = true,
   onRevealTargetLine,
@@ -283,6 +308,9 @@ export function EditorGroup({
   editorPaneStyle,
   softWrap = false,
   appearance,
+  renderedDocEnabled = false,
+  renderedDocLanguageId,
+  onToggleRenderedDocRaw,
   columnSelectionMode = false,
   showHoverDocumentation = true,
   hoverDocumentationDelayMs = 300,
@@ -320,10 +348,13 @@ export function EditorGroup({
   onCompleteResolve,
   onCompletionIdentity,
   onCompletionDiagnostic,
+  onScopeFallback,
   completionController,
   onParameterTrigger,
   onParameterInvalidate,
   onParameterEscape,
+  transactionOwner = null,
+  documentRevision = 0,
   parameterPopup = null,
   onSelectionChange,
   onViewportChange,
@@ -679,6 +710,7 @@ export function EditorGroup({
           {activeFile ? (
             <div className="absolute inset-0 flex flex-col">
               {breadcrumbsPlacement === "top" ? breadcrumbs : null}
+              <EditorBanner banners={editorBanners} onDismiss={onDismissBanner ?? (() => {})} />
               <div
                 data-testid="code-workspace-file-status"
                 className="min-h-7 shrink-0 flex items-center gap-2 px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] text-[length:var(--taomni-code-editor-ui-small-font-size)] text-[var(--taomni-code-text)]"
@@ -701,6 +733,7 @@ export function EditorGroup({
                   {activeFile.loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--taomni-code-muted)]" />}
                   {activeLspSyncing && <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--taomni-code-muted)]" />}
                   {lspStatusPill}
+                  {highlightingWidget}
                 </div>
                 {isMarkdownPath(activeFile.languagePath) && (
                   <div className="flex items-center gap-0.5">
@@ -787,8 +820,12 @@ export function EditorGroup({
                       <CodeMirrorHost
                         key={`${activeFile.key}:edit`}
                         fileKey={activeFile.key}
+                        viewId={groupId}
+                        transactionOwner={transactionOwner}
+                        documentRevision={activeFile.documentRevision ?? documentRevision}
                         clipboardWorkspaceId={workspaceInstanceId}
                         onClipboardUnavailable={onClipboardUnavailable}
+                        onClipboardObservation={onClipboardObservation}
                         workspaceActionHost={workspaceActionHost}
                         path={activeFile.languagePath}
                         doc={activeFile.text}
@@ -817,6 +854,7 @@ export function EditorGroup({
                         onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
                         getCompletionIdentity={() => onCompletionIdentity(activeFile)}
                         onCompletionDiagnostic={onCompletionDiagnostic}
+                        onScopeFallback={onScopeFallback}
                         onParameterTrigger={(event) => onParameterTrigger?.(activeFile, event)}
                         onParameterInvalidate={onParameterInvalidate}
                         onParameterEscape={onParameterEscape}
@@ -833,6 +871,9 @@ export function EditorGroup({
                         signatureTriggers={signatureTriggers}
                         softWrap={softWrap}
                         appearance={appearance}
+                        renderedDocEnabled={renderedDocEnabled}
+                        renderedDocLanguageId={renderedDocLanguageId}
+                        onToggleRenderedDocRaw={onToggleRenderedDocRaw}
                         columnSelectionMode={columnSelectionMode}
                         showHoverDocumentation={showHoverDocumentation}
                         hoverDocumentationDelayMs={hoverDocumentationDelayMs}
@@ -853,8 +894,12 @@ export function EditorGroup({
                     <CodeMirrorHost
                       key={activeFile.key}
                       fileKey={activeFile.key}
-                        clipboardWorkspaceId={workspaceInstanceId}
-                        onClipboardUnavailable={onClipboardUnavailable}
+                      viewId={groupId}
+                      transactionOwner={transactionOwner}
+                      documentRevision={activeFile.documentRevision ?? documentRevision}
+                      clipboardWorkspaceId={workspaceInstanceId}
+                      onClipboardUnavailable={onClipboardUnavailable}
+                      onClipboardObservation={onClipboardObservation}
                       workspaceActionHost={workspaceActionHost}
                       path={activeFile.languagePath}
                       doc={activeFile.text}
@@ -891,6 +936,7 @@ export function EditorGroup({
                       onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
                       getCompletionIdentity={() => onCompletionIdentity(activeFile)}
                       onCompletionDiagnostic={onCompletionDiagnostic}
+                      onScopeFallback={onScopeFallback}
                       onParameterTrigger={(event) => onParameterTrigger?.(activeFile, event)}
                       onParameterInvalidate={onParameterInvalidate}
                       onParameterEscape={onParameterEscape}
@@ -907,6 +953,9 @@ export function EditorGroup({
                       signatureTriggers={signatureTriggers}
                       softWrap={softWrap}
                       appearance={appearance}
+                      renderedDocEnabled={renderedDocEnabled}
+                      renderedDocLanguageId={renderedDocLanguageId}
+                      onToggleRenderedDocRaw={onToggleRenderedDocRaw}
                       columnSelectionMode={columnSelectionMode}
                       showHoverDocumentation={showHoverDocumentation}
                       hoverDocumentationDelayMs={hoverDocumentationDelayMs}

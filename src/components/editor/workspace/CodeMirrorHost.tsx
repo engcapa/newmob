@@ -7,7 +7,22 @@ import {
   useState,
   type MutableRefObject,
 } from "react";
-import { Compartment, EditorState, Prec, type Extension, type Text } from "@codemirror/state";
+import {
+  ChangeSet,
+  Compartment,
+  EditorState,
+  Prec,
+  Transaction,
+  type Extension,
+  type Text,
+  type TransactionSpec,
+} from "@codemirror/state";
+import {
+  remoteTransactionAnnotation,
+  type DocumentChangeDelta,
+  type DocumentTransaction,
+  type WorkspaceDocumentTransactionOwner,
+} from "./workspaceDocumentTransactionOwner";
 import {
   EditorView,
   closeHoverTooltip,
@@ -21,6 +36,7 @@ import {
   rectangularSelection,
   showTooltip,
   tooltips,
+  type Rect,
   type Tooltip,
 } from "@codemirror/view";
 import {
@@ -61,8 +77,9 @@ import {
 } from "@codemirror/language";
 import { openSearchPanel, search } from "@codemirror/search";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
-import { readTextResult, writeText } from "../../../lib/clipboard";
+import { readNativeTextResult, readTextResult, writeText } from "../../../lib/clipboard";
 import { codeViewExtensions } from "../../../lib/codeViewTheme";
+import { getAppPlatform, isTauriRuntime } from "../../../lib/runtime";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type {
   LspCompletionItem,
@@ -77,7 +94,18 @@ import type {
 } from "../../../lib/editor/lsp";
 import type { ParameterPopupView } from "./referenceInfoSession";
 import { languageForPath } from "../../git/diffLanguage";
-import { useWorkspaceClipboardSession, type WorkspaceClipboardHandle } from "./workspaceClipboardSession";
+import {
+  useWorkspaceClipboardSession,
+  type GuardedSystemReadResult,
+  type GuardedSystemWriteResult,
+  type WorkspaceClipboardHandle,
+} from "./workspaceClipboardSession";
+import {
+  createClipboardReadObservation,
+  createClipboardWriteObservation,
+  type ClipboardObservationOperation,
+  type ClipboardObservationRecord,
+} from "./clipboardObservationContract";
 import { createWorkspaceSearchPanel, WORKSPACE_SEARCH_STYLE } from "./editorSearchPanel";
 import {
   activeLspSnippetChoices,
@@ -94,14 +122,21 @@ import {
   type CompletionRequestToken,
   type CompletionResolveGateRequest,
 } from "./lspCompletion";
+import type { CompletionScopeFactsState } from "./completionScopeAdapter";
 import { createDiagnosticChrome } from "./lspDiagnosticChrome";
 import {
   createLspOverlayChrome,
   createLspSemanticTokenChrome,
   LSP_INTELLIGENCE_THEME,
+  updateLspOverlayChrome,
+  updateLspSemanticTokenChrome,
 } from "./lspIntelligenceChrome";
 import { createLspHyperlinkExtension } from "./lspHyperlink";
-import { createGitEditorChrome, type GitLineChange } from "./gitEditorChrome";
+import {
+  createGitEditorChrome,
+  updateGitEditorChrome,
+  type GitLineChange,
+} from "./gitEditorChrome";
 import { createDebugEditorChrome, type DebugBreakpointMarker } from "./debugEditorChrome";
 import { createCoverageEditorChrome } from "./coverageEditorChrome";
 import {
@@ -141,6 +176,11 @@ import {
 } from "./workspaceCodeMirrorKeymap";
 import { EditorActionBridge } from "./workspaceActionHost";
 import {
+  RENDERED_DOC_THEME,
+  renderedDocDecorationConfig,
+  renderedDocDecorationField,
+} from "./renderedDocCommentsExtension";
+import {
   completeStatementStrategy,
   surroundWithPlan,
   type SemanticEditSource,
@@ -149,8 +189,8 @@ import {
 import { observeSyntaxFacts, treeRevisionField } from "./workspaceSyntaxFacts";
 import {
   desiredVisualColumnField,
+  isEditorGeometryReady,
   virtualSpaceClickHandler,
-  virtualSpaceKeymap,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
 } from "./workspaceVirtualSpace";
@@ -174,6 +214,12 @@ interface CodeMirrorHostProps {
   path: string;
   /** Stable buffer identity used by the workspace editor command owner. */
   fileKey?: string;
+  /** Editor view or group identifier (§8.26 / ED-MULTIVIEW-002). */
+  viewId?: string;
+  /** Shared document transaction owner (§8.26 / ED-MULTIVIEW-002). */
+  transactionOwner?: WorkspaceDocumentTransactionOwner | null;
+  /** Store revision used when the first view creates the canonical document. */
+  documentRevision?: number;
   doc: string;
   visible: boolean;
   /**
@@ -185,6 +231,13 @@ interface CodeMirrorHostProps {
   clipboardHandle?: WorkspaceClipboardHandle | null;
   /** Surfaced when a clipboard operation degraded (system clipboard failed). */
   onClipboardUnavailable?: (message: string) => void;
+  /**
+   * ED-CLIP-004: typed, metadata-only observation of every settled guarded
+   * clipboard result. Carries outcome/effect/permission-epoch facts, never the
+   * clipboard payload, so packaged-runtime evidence can assert which enum
+   * member production actually chose.
+   */
+  onClipboardObservation?: (record: ClipboardObservationRecord) => void;
   diagnostics: LspDiagnostic[];
   highlights?: LspDocumentHighlight[];
   inlayHints?: LspInlayHint[];
@@ -230,6 +283,8 @@ interface CodeMirrorHostProps {
   /** Live completion request identity (§8.16.2); null = typed unavailable. */
   getCompletionIdentity: () => CompletionRequestIdentity | null;
   onCompletionDiagnostic: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
+  /** ED-COMP-004: explicit completion that falls back for missing scope facts. */
+  onScopeFallback?: (state: CompletionScopeFactsState) => void;
   /**
    * §8.20.2 W1 single channel: the host only EMITS parameter trigger events
    * (typed signature-trigger char or an explicit nonce); the workspace-side
@@ -277,6 +332,12 @@ interface CodeMirrorHostProps {
   parameterInfoShowFullSignatures?: boolean;
   /** Effective code style driving indentUnit, tabSize, and insertSpaces. */
   codeStyle?: EffectiveCodeStyle;
+  /** In-place rendered documentation comments for the active source buffer. */
+  renderedDocEnabled?: boolean;
+  /** Provider/path language identity used by the documentation renderer. */
+  renderedDocLanguageId?: string | null;
+  /** Returns from a rendered block to the source view without changing text. */
+  onToggleRenderedDocRaw?: () => void;
   /** When enabled, a normal mouse drag creates a rectangular selection. */
   columnSelectionMode?: boolean;
   /**
@@ -313,6 +374,8 @@ export interface EditorCommandTarget {
 
 const editorClipboardPayloadByView = new WeakMap<EditorView, EditorClipboardPayload>();
 
+let nextEditorHostViewId = 0;
+
 // Clipboard helpers close over host props through this per-view registry
 // (bound at mount) so the module-level helpers stay pure and testable.
 const clipboardContextByView = new WeakMap<
@@ -320,10 +383,65 @@ const clipboardContextByView = new WeakMap<
   {
     workspaceId: string | null;
     onUnavailable: (message: string) => void;
+    /** ED-CLIP-004: typed metadata-only observation of the guarded result. */
+    onObservation?: (record: ClipboardObservationRecord) => void;
     /** Refcounted session handle (§8.18.4); null for legacy non-workspace views. */
     handle: WorkspaceClipboardHandle | null;
   }
 >();
+
+/**
+ * ED-CLIP-004: project one settled guarded clipboard result into the typed
+ * observation seam. Copy/cut report the local payload shape; paste reports the
+ * shape of whatever was actually inserted (OS text or workspace fallback).
+ */
+function reportClipboardWriteObservation(
+  view: EditorView,
+  operation: ClipboardObservationOperation,
+  result: GuardedSystemWriteResult,
+  payload: EditorClipboardPayload,
+  caretCount: number,
+): void {
+  const context = clipboardContextByView.get(view);
+  if (!context?.onObservation) return;
+  const handle = context.handle;
+  const snapshot = handle?.getSnapshot();
+  context.onObservation(createClipboardWriteObservation({
+    operation,
+    result,
+    payload: {
+      plainText: payload.plainText,
+      segments: payload.segments,
+      rectangular: payload.rectangular,
+    },
+    permission: snapshot?.permission ?? "unknown",
+    permissionGeneration: snapshot?.permissionGeneration ?? 0,
+    historyExclusion: snapshot?.exclusion ?? "recorded",
+    payloadRevision: snapshot?.payloadRevision ?? 0,
+    caretCount,
+  }));
+}
+
+function reportClipboardReadObservation(
+  view: EditorView,
+  operation: ClipboardObservationOperation,
+  result: GuardedSystemReadResult,
+  caretCount: number,
+): void {
+  const context = clipboardContextByView.get(view);
+  if (!context?.onObservation) return;
+  const handle = context.handle;
+  const snapshot = handle?.getSnapshot();
+  context.onObservation(createClipboardReadObservation({
+    operation,
+    result,
+    permission: snapshot?.permission ?? "unknown",
+    permissionGeneration: snapshot?.permissionGeneration ?? 0,
+    historyExclusion: snapshot?.exclusion ?? "recorded",
+    payloadRevision: snapshot?.payloadRevision ?? 0,
+    caretCount,
+  }));
+}
 
 type ClipboardStoreLike = Pick<WorkspaceClipboardHandle, "write" | "read" | "pasteFromHistory">
   & Partial<Pick<WorkspaceClipboardHandle, "historyExclusion">>;
@@ -393,6 +511,48 @@ function writeEditorSelectionToClipboard(view: EditorView): boolean {
   const payload = editorClipboardPayload(view.state);
   if (!payload) return false;
   const context = clipboardContextByView.get(view);
+  const handle = context?.handle;
+  const caretCountAtCopy = view.state.selection.ranges.length;
+  if (handle) {
+    void handle.writeSystemClipboard(payload.plainText).then((res) => {
+      if (!view.dom.isConnected) return;
+      if (res.outcome === "success") {
+        rememberEditorClipboardPayload(view, payload);
+      } else if (res.outcome === "denied") {
+        rememberEditorClipboardPayload(
+          view,
+          payload,
+          res.systemEffect === "performed" ? {} : { systemClipboardUnavailable: true },
+        );
+        context?.onUnavailable(
+          res.systemEffect === "performed"
+            ? "System clipboard permission was denied after the copy completed"
+            : "System clipboard access denied — copy kept for in-workspace paste only",
+        );
+      } else if (res.outcome === "stale-generation") {
+        rememberEditorClipboardPayload(
+          view,
+          payload,
+          res.systemEffect === "performed" ? {} : { systemClipboardUnavailable: true },
+        );
+        context?.onUnavailable(
+          res.systemEffect === "performed"
+            ? "Clipboard permission changed after the system clipboard copy completed"
+            : "Clipboard permission changed during copy — system clipboard effect is unknown; copy kept for in-workspace paste",
+        );
+      } else {
+        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        context?.onUnavailable(
+          "System clipboard write effect is unknown — copy kept for in-workspace paste",
+        );
+      }
+      // Reported after the payload landed in the slot so the observation's
+      // revision/exclusion fields describe the committed state, not the
+      // pre-write one.
+      reportClipboardWriteObservation(view, "copy", res, payload, caretCountAtCopy);
+    });
+    return true;
+  }
   void writeText(payload.plainText)
     .then(() => {
       if (view.dom.isConnected) rememberEditorClipboardPayload(view, payload);
@@ -410,12 +570,74 @@ function writeEditorSelectionToClipboard(view: EditorView): boolean {
   return true;
 }
 
+function readCodeWorkspaceClipboardText() {
+  // Linux/WebKitGTK can return an old in-process clipboard value after the
+  // current X11 owner rejects conversion. Cross the Rust boundary there so a
+  // real denial stays observable. Keep the established macOS/Windows strategy
+  // in readTextResult(): those platforms are outside this card's native matrix.
+  return isTauriRuntime() && getAppPlatform() === "linux"
+    ? readNativeTextResult()
+    : readTextResult();
+}
+
 function pasteSystemClipboard(view: EditorView): boolean {
   if (view.composing || view.state.readOnly) return false;
   const docAtRequest = view.state.doc;
   const selectionAtRequest = view.state.selection;
   const context = clipboardContextByView.get(view);
-  void readTextResult()
+  const handle = context?.handle;
+
+  const caretCountAtPaste = view.state.selection.ranges.length;
+
+  if (handle) {
+    void handle.readSystemClipboard({ readTextResult: readCodeWorkspaceClipboardText }).then((result) => {
+      if (
+        !view.dom.isConnected
+        || view.composing
+        || view.state.doc !== docAtRequest
+        || !view.state.selection.eq(selectionAtRequest, true)
+      ) {
+        // Stale/cancelled paste: no effect and, per the shared contract, no
+        // observation entry either.
+        return;
+      }
+      reportClipboardReadObservation(view, "paste", result, caretCountAtPaste);
+      if (result.outcome === "success") {
+        pasteEditorClipboardPayload(
+          view,
+          payloadForSystemClipboardText(view, result.text),
+        );
+        view.focus();
+      } else {
+        const session = result.fallbackSession;
+        if (session) {
+          pasteEditorClipboardPayload(view, {
+            plainText: session.plainText,
+            segments: session.segments ?? undefined,
+            sourceEol: session.sourceEol,
+            rectangular: session.rectangular,
+          });
+          const reasonMsg = result.outcome === "denied"
+            ? "System clipboard access denied — pasted from in-workspace session slot instead"
+            : result.outcome === "stale-generation"
+            ? "Clipboard permission changed during read — pasted from in-workspace session slot instead"
+            : "System clipboard access denied — pasted from in-workspace session slot instead";
+          context?.onUnavailable(reasonMsg);
+          view.focus();
+        } else {
+          const reasonMsg = result.outcome === "denied"
+            ? "System clipboard access denied and no in-workspace clipboard session available"
+            : result.outcome === "stale-generation"
+            ? "Clipboard permission changed during read and no in-workspace clipboard session available"
+            : "System clipboard access denied and no in-workspace clipboard session available";
+          context?.onUnavailable(reasonMsg);
+        }
+      }
+    }).catch(() => {});
+    return true;
+  }
+
+  void readCodeWorkspaceClipboardText()
     .then((result) => {
       if (
         !result.ok
@@ -467,7 +689,42 @@ function pasteAsPlainText(view: EditorView): boolean {
   if (view.composing || view.state.readOnly) return false;
   const docAtRequest = view.state.doc;
   const context = clipboardContextByView.get(view);
-  void readTextResult()
+  const handle = context?.handle;
+
+  const caretCountAtPlainPaste = view.state.selection.ranges.length;
+
+  if (handle) {
+    void handle.readSystemClipboard({ readTextResult: readCodeWorkspaceClipboardText }).then((result) => {
+      if (!view.dom.isConnected || view.composing || view.state.doc !== docAtRequest) return;
+      reportClipboardReadObservation(view, "paste-plain", result, caretCountAtPlainPaste);
+      const text = result.outcome === "success" ? result.text : result.fallbackSession?.plainText ?? "";
+      if (!text) {
+        context?.onUnavailable(
+          result.outcome === "success"
+            ? "Nothing to paste"
+            : result.outcome === "denied"
+            ? "System clipboard access denied and no in-workspace clipboard session available"
+            : "System clipboard access denied and no in-workspace clipboard session available",
+        );
+        return;
+      }
+      const ranges = [...view.state.selection.ranges].sort((a, b) => a.from - b.from);
+      view.dispatch({
+        changes: ranges.map((range) => ({ from: range.from, to: range.to, insert: text })),
+        userEvent: "input.paste.plain",
+        scrollIntoView: true,
+      });
+      if (result.outcome !== "success" && result.fallbackSession) {
+        context?.onUnavailable(
+          "System clipboard access denied — pasted from in-workspace session slot as plain text",
+        );
+      }
+      view.focus();
+    }).catch(() => {});
+    return true;
+  }
+
+  void readCodeWorkspaceClipboardText()
     .then((result) => {
       if (!view.dom.isConnected || view.composing || view.state.doc !== docAtRequest) return;
       const session = workspaceStoreFor(context)?.read() ?? null;
@@ -504,6 +761,48 @@ function cutSystemClipboard(view: EditorView): boolean {
   const docAtRequest = view.state.doc;
   const selectionAtRequest = view.state.selection;
   const context = clipboardContextByView.get(view);
+  const handle = context?.handle;
+
+  const caretCountAtCut = view.state.selection.ranges.length;
+
+  if (handle) {
+    void handle.writeSystemClipboard(payload.plainText).then((res) => {
+      if (
+        !view.dom.isConnected
+        || view.composing
+        || view.state.doc !== docAtRequest
+        || !view.state.selection.eq(selectionAtRequest, true)
+      ) {
+        return;
+      }
+      if (res.outcome === "success") {
+        rememberEditorClipboardPayload(view, payload);
+        cutEditorSelections(view);
+        view.focus();
+      } else {
+        rememberEditorClipboardPayload(
+          view,
+          payload,
+          res.systemEffect === "performed" ? {} : { systemClipboardUnavailable: true },
+        );
+        cutEditorSelections(view);
+        const reasonMsg = res.outcome === "denied"
+          ? res.systemEffect === "performed"
+            ? "System clipboard permission was denied after the cut copy completed"
+            : "System clipboard access denied — cut kept for in-workspace paste only"
+          : res.outcome === "stale-generation"
+          ? res.systemEffect === "performed"
+            ? "Clipboard permission changed after the system clipboard cut copy completed"
+            : "Clipboard permission changed during cut — system clipboard effect is unknown; cut kept for in-workspace paste"
+          : "System clipboard write effect is unknown — cut kept for in-workspace paste";
+        context?.onUnavailable(reasonMsg);
+        view.focus();
+      }
+      reportClipboardWriteObservation(view, "cut", res, payload, caretCountAtCut);
+    });
+    return true;
+  }
+
   void writeText(payload.plainText)
     .then(() => {
       if (
@@ -570,6 +869,7 @@ export interface EditorCommandState {
   hasSelection: boolean;
   caretCount: number;
   occurrenceSessionActive: boolean;
+  completionActive: boolean;
 }
 
 export interface EditorCommandPort {
@@ -726,6 +1026,7 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
       hasSelection: view.state.selection.ranges.some((range) => !range.empty),
       caretCount: view.state.selection.ranges.length,
       occurrenceSessionActive: view.state.field(occurrenceSessionField, false) ?? false,
+      completionActive: completionStatus(view.state) !== null,
     }),
   };
 }
@@ -754,6 +1055,18 @@ const WORKSPACE_EDITOR_STYLE = EditorView.theme({
 });
 
 const LSP_EDITOR_STYLE = EditorView.theme({
+  ".cm-tooltip-autocomplete > ul > li": {
+    cursor: "pointer",
+  },
+  ".cm-tooltip-autocomplete > ul > li[aria-selected][role=option]": {
+    backgroundColor: "#1d4ed8",
+    color: "#ffffff",
+    boxShadow: "inset 3px 0 #93c5fd",
+  },
+  ".cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionIcon, .cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionMatchedText": {
+    color: "inherit",
+    opacity: "1",
+  },
   ".cm-lsp-diagnostic-error": {
     textDecoration: "underline wavy #ef4444 1px",
     textUnderlineOffset: "2px",
@@ -797,10 +1110,47 @@ const LSP_EDITOR_STYLE = EditorView.theme({
   // --taomni-code-* even when the tooltip is portaled outside the editor host.
 });
 
+function positionCompletionInfo(view: EditorView, list: Rect, option: Rect, info: Rect, space: Rect) {
+  const gap = 4;
+  const width = Math.min(400, info.right - info.left, space.right - space.left);
+  const height = info.bottom - info.top;
+  const right = space.right - list.right - gap;
+  const left = list.left - space.left - gap;
+  let x: number;
+  let y: number;
+  let maxHeight: number;
+  if (right >= width || left >= width) {
+    x = right >= width ? list.right + gap : list.left - width - gap;
+    y = Math.max(space.top, Math.min(option.top, space.bottom - height));
+    maxHeight = space.bottom - y;
+  } else {
+    // CodeMirror's narrow fallback overlaps the selected row's neighbours.
+    // Stack outside the entire list so every candidate remains clickable.
+    const below = space.bottom - list.bottom - gap;
+    const above = list.top - space.top - gap;
+    x = Math.max(space.left, Math.min(list.left, space.right - width));
+    if (below >= Math.min(height, above)) {
+      y = list.bottom + gap;
+      maxHeight = below;
+    } else {
+      maxHeight = above;
+      y = list.top - Math.min(height, above) - gap;
+    }
+  }
+  return {
+    style: `left: ${(x - list.left) / view.scaleX}px; top: ${(y - list.top) / view.scaleY}px; `
+      + `width: ${width / view.scaleX}px; max-width: ${width / view.scaleX}px; `
+      + `max-height: ${Math.max(0, maxHeight) / view.scaleY}px; box-sizing: border-box; overflow-y: auto`,
+  };
+}
+
+const EMPTY_DIAGNOSTICS: LspDiagnostic[] = [];
 const EMPTY_HIGHLIGHTS: LspDocumentHighlight[] = [];
 const EMPTY_INLAY_HINTS: LspInlayHint[] = [];
 const EMPTY_SEMANTIC_TOKENS: LspSemanticToken[] = [];
 const EMPTY_GIT_CHANGES: GitLineChange[] = [];
+const EMPTY_DEBUG_BREAKPOINTS: DebugBreakpointMarker[] = [];
+const EMPTY_DEBUG_INLINE_VALUES: Record<string, string> = {};
 
 /**
  * New empty-array props are common while LSP requests are debounced, and a
@@ -1236,9 +1586,14 @@ function sameEditorAppearance(
 function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirrorHostProps): boolean {
   if (prev.path !== next.path) return false;
   if (prev.fileKey !== next.fileKey) return false;
+  if (prev.viewId !== next.viewId) return false;
+  if (prev.transactionOwner !== next.transactionOwner) return false;
+  if (prev.documentRevision !== next.documentRevision) return false;
   if (prev.doc !== next.doc) return false;
   if (prev.visible !== next.visible) return false;
   if (prev.readOnly !== next.readOnly) return false;
+  if (prev.renderedDocEnabled !== next.renderedDocEnabled) return false;
+  if (prev.renderedDocLanguageId !== next.renderedDocLanguageId) return false;
   if (prev.softWrap !== next.softWrap) return false;
   if (!sameEditorAppearance(prev.appearance, next.appearance)) return false;
   if (prev.columnSelectionMode !== next.columnSelectionMode) return false;
@@ -1270,12 +1625,83 @@ function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirror
   return true;
 }
 
+function documentReplacementChange(currentText: string, nextText: string): DocumentChangeDelta | null {
+  if (currentText === nextText) return null;
+
+  let prefix = 0;
+  const maxPrefix = Math.min(currentText.length, nextText.length);
+  while (prefix < maxPrefix && currentText[prefix] === nextText[prefix]) prefix += 1;
+
+  let suffix = 0;
+  const maxSuffix = Math.min(currentText.length - prefix, nextText.length - prefix);
+  while (
+    suffix < maxSuffix
+    && currentText[currentText.length - suffix - 1] === nextText[nextText.length - suffix - 1]
+  ) {
+    suffix += 1;
+  }
+
+  const deleted = currentText.slice(prefix, currentText.length - suffix);
+  return {
+    from: prefix,
+    to: currentText.length - suffix,
+    insert: nextText.slice(prefix, nextText.length - suffix),
+    ...(deleted ? { deleted } : {}),
+  };
+}
+
+function applySharedTransactionToView(view: EditorView, transaction: DocumentTransaction): boolean {
+  if (transaction.changes.length === 0) return false;
+  const changes = transaction.changes.map(({ from, to, insert }) => ({ from, to, insert }));
+  let changeSet: ChangeSet;
+  try {
+    changeSet = ChangeSet.of(changes, view.state.doc.length);
+  } catch {
+    return false;
+  }
+  view.dispatch({
+    changes,
+    selection: view.state.selection.map(changeSet),
+    scrollIntoView: false,
+    annotations: [
+      remoteTransactionAnnotation.of(true),
+      Transaction.addToHistory.of(false),
+    ],
+  });
+  return true;
+}
+
+function applyDocumentSnapshotToView(view: EditorView, nextText: string): boolean {
+  const change = documentReplacementChange(view.state.doc.toString(), nextText);
+  if (!change) return false;
+  const changes = [{ from: change.from, to: change.to, insert: change.insert }];
+  let changeSet: ChangeSet;
+  try {
+    changeSet = ChangeSet.of(changes, view.state.doc.length);
+  } catch {
+    return false;
+  }
+  view.dispatch({
+    changes,
+    selection: view.state.selection.map(changeSet),
+    scrollIntoView: false,
+    annotations: [
+      remoteTransactionAnnotation.of(true),
+      Transaction.addToHistory.of(false),
+    ],
+  } satisfies TransactionSpec);
+  return true;
+}
+
 export const CodeMirrorHost = memo(function CodeMirrorHost({
   path,
   fileKey = path,
+  viewId,
+  transactionOwner = null,
+  documentRevision = 0,
   doc,
   visible,
-  diagnostics,
+  diagnostics = EMPTY_DIAGNOSTICS,
   highlights = EMPTY_HIGHLIGHTS,
   inlayHints = EMPTY_INLAY_HINTS,
   semanticTokens = EMPTY_SEMANTIC_TOKENS,
@@ -1292,10 +1718,12 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   clipboardWorkspaceId,
   clipboardHandle,
   onClipboardUnavailable,
+  onClipboardObservation,
   onComplete,
   onCompleteResolve,
   getCompletionIdentity,
   onCompletionDiagnostic,
+  onScopeFallback,
   onParameterTrigger,
   onParameterInvalidate,
   onParameterEscape,
@@ -1320,9 +1748,9 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   softWrap = false,
   appearance,
   columnSelectionMode = false,
-  debugBreakpoints,
+  debugBreakpoints = EMPTY_DEBUG_BREAKPOINTS,
   debugCurrentLine,
-  debugInlineValues,
+  debugInlineValues = EMPTY_DEBUG_INLINE_VALUES,
   debugStep,
   debugRunToCursor,
   debugStop,
@@ -1330,12 +1758,29 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   fileCoverage,
   coverageEnabled = true,
   codeStyle,
+  renderedDocEnabled = false,
+  renderedDocLanguageId,
+  onToggleRenderedDocRaw,
   workspaceActionHost = null,
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const completionControllerRef = useRef(completionController);
   completionControllerRef.current = completionController;
+  const fallbackViewIdRef = useRef<string | null>(null);
+  if (fallbackViewIdRef.current === null) {
+    nextEditorHostViewId += 1;
+    fallbackViewIdRef.current = `cm-view-${nextEditorHostViewId}`;
+  }
+  const editorViewId = viewId ?? fallbackViewIdRef.current;
+  const viewIdRef = useRef(editorViewId);
+  viewIdRef.current = editorViewId;
+  const fileKeyRef = useRef(fileKey);
+  fileKeyRef.current = fileKey;
+  const transactionOwnerRef = useRef(transactionOwner);
+  transactionOwnerRef.current = transactionOwner;
+  const documentRevisionRef = useRef(documentRevision);
+  documentRevisionRef.current = documentRevision;
   // §8.18.2: the mount-once editor effect reads the live host through a ref so
   // editor.* actions register against the workspace controller's instance.
   const workspaceActionHostRef = useRef<WorkspaceActionHost | null>(workspaceActionHost);
@@ -1345,6 +1790,12 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   });
   onClipboardUnavailableRef.current = (message: string) => {
     onClipboardUnavailable?.(message);
+  };
+  const onClipboardObservationRef = useRef((record: ClipboardObservationRecord) => {
+    onClipboardObservation?.(record);
+  });
+  onClipboardObservationRef.current = (record: ClipboardObservationRecord) => {
+    onClipboardObservation?.(record);
   };
   const languageCompartment = useRef(new Compartment());
   const codeStyleCompartment = useRef(new Compartment());
@@ -1360,6 +1811,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const wrappingCompartment = useRef(new Compartment());
   const appearanceCompartment = useRef(new Compartment());
   const completionCompartment = useRef(new Compartment());
+  const renderedDocCompartment = useRef(new Compartment());
   const presentResolveGateRef = useRef<((request: CompletionResolveGateRequest) => void) | null>(null);
 
   const buildAutocompletionExtension = useCallback(() => {
@@ -1376,6 +1828,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       icons: true,
       maxRenderedOptions: maxVisibleItems,
       interactionDelay: docDelayMs,
+      positionInfo: positionCompletionInfo,
       optionClass: (completion) => (
         completion.type ? `cm-completion-type-${completion.type}` : ""
       ),
@@ -1390,6 +1843,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           triggerCharacters: () => completionTriggersRef.current,
           getDocumentRevision: () => getCompletionIdentityRef.current()?.documentRevision ?? -1,
           reportDiagnostic: (kind, detail) => onCompletionDiagnosticRef.current(kind, detail),
+          onScopeFallback: (state) => onScopeFallbackRef.current?.(state),
           onResolveGate: (request) => presentResolveGateRef.current?.(request),
           controller: completionControllerRef.current,
           getView: () => viewRef.current,
@@ -1404,6 +1858,30 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const applyingExternalDocRef = useRef(false);
   /** Mirrors the last full text sent through onChange or applied from props. */
   const lastDocumentTextRef = useRef(doc);
+  /** Last controlled prop snapshot; distinguishes stale lag from a real reload. */
+  const lastPropDocumentTextRef = useRef(doc);
+  /** Local snapshots awaiting a controlled-prop echo, oldest first. */
+  const pendingLocalDocumentEchoesRef = useRef<Array<{
+    text: string;
+    expectedDocumentRevision: number;
+  }>>([]);
+  const lastLocalDocumentRevisionRef = useRef(documentRevision);
+  const rememberLocalDocumentEcho = (text: string): void => {
+    const expectedDocumentRevision = Math.max(
+      documentRevisionRef.current,
+      lastLocalDocumentRevisionRef.current,
+    ) + 1;
+    lastLocalDocumentRevisionRef.current = expectedDocumentRevision;
+    const pendingEchoes = pendingLocalDocumentEchoesRef.current;
+    const lastPendingEcho = pendingEchoes[pendingEchoes.length - 1];
+    if (
+      lastPendingEcho?.text !== text
+      || lastPendingEcho.expectedDocumentRevision !== expectedDocumentRevision
+    ) {
+      pendingEchoes.push({ text, expectedDocumentRevision });
+      if (pendingEchoes.length > 64) pendingEchoes.splice(0, pendingEchoes.length - 64);
+    }
+  };
   const lastSelectionRef = useRef<{ from: number; to: number } | null>(null);
   const selectionEmitTimerRef = useRef<number | null>(null);
   const renderedDiagnosticsRef = useRef(diagnostics);
@@ -1423,12 +1901,23 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const renderedOverlayRef = useRef({ highlights, inlayHints });
   const renderedSemanticTokensRef = useRef(semanticTokens);
   const renderedGitRef = useRef({ changes: gitChanges, blame: gitBlame });
+  const pendingGitUpdateFrameRef = useRef<number | null>(null);
   const renderedDebugRef = useRef({
     breakpoints: debugBreakpoints,
     currentLine: debugCurrentLine,
     inlineValues: debugInlineValues,
     evaluating: !!debugEvaluate,
   });
+  const renderedDocConfigRef = useRef({
+    enabled: !!renderedDocEnabled,
+    languageId: renderedDocLanguageId ?? liveTemplateLanguageForPath(path),
+  });
+  const renderedCompletionPolicyRef = useRef<{
+    autoPopup: boolean;
+    delayMs: number;
+    maxVisibleItems: number;
+    docDelayMs: number;
+  } | null>(null);
   const onToggleBreakpointRef = useRef(onToggleBreakpoint);
   const onEditBreakpointRef = useRef(onEditBreakpoint);
   const onPinHoverDocRef = useRef(onPinHoverDoc);
@@ -1448,6 +1937,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const onCompleteResolveRef = useRef(onCompleteResolve);
   const getCompletionIdentityRef = useRef(getCompletionIdentity);
   const onCompletionDiagnosticRef = useRef(onCompletionDiagnostic);
+  const onScopeFallbackRef = useRef(onScopeFallback);
   const onParameterTriggerRef = useRef(onParameterTrigger);
   const onParameterInvalidateRef = useRef(onParameterInvalidate);
   const onParameterEscapeRef = useRef(onParameterEscape);
@@ -1458,6 +1948,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const onLightbulbRef = useRef(onLightbulb);
   const onGitChangeClickRef = useRef(onGitChangeClick);
   const onContextMenuRef = useRef(onContextMenu);
+  const onToggleRenderedDocRawRef = useRef(onToggleRenderedDocRaw);
   const completionTriggersRef = useRef(completionTriggers ?? []);
   const signatureTriggersRef = useRef(signatureTriggers ?? []);
   const columnSelectionModeRef = useRef(columnSelectionMode);
@@ -1488,6 +1979,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onCompleteResolveRef.current = onCompleteResolve;
   getCompletionIdentityRef.current = getCompletionIdentity;
   onCompletionDiagnosticRef.current = onCompletionDiagnostic;
+  onScopeFallbackRef.current = onScopeFallback;
   onParameterTriggerRef.current = onParameterTrigger;
   onParameterInvalidateRef.current = onParameterInvalidate;
   onParameterEscapeRef.current = onParameterEscape;
@@ -1504,6 +1996,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   debugStopRef.current = debugStop;
   debugEvaluateRef.current = debugEvaluate;
   onContextMenuRef.current = onContextMenu;
+  onToggleRenderedDocRawRef.current = onToggleRenderedDocRaw;
 
   /**
    * Build the debug compartment's extensions. Actions read through refs so the
@@ -1598,7 +2091,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
 
   useEffect(() => {
     if (!hostRef.current) return;
-    const initialDoc = EditorState.create({ doc }).doc;
+    const owner = transactionOwnerRef.current;
+    const sharedFileKey = fileKeyRef.current;
+    const sharedViewId = viewIdRef.current;
+    const initialDocumentText = owner && sharedFileKey
+      ? owner.acquireView(sharedFileKey, sharedViewId, doc, documentRevision)
+      : doc;
+    lastDocumentTextRef.current = initialDocumentText;
+    const initialDoc = EditorState.create({ doc: initialDocumentText }).doc;
     // §8.19.4 resolve gate banner: anchored to the caret at presentation time.
     // The gate request's own closures re-verify identity/doc before acting, so
     // a stale banner is inert — this only decides where it shows.
@@ -1719,7 +2219,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
             ),
         }),
         crosshairCursor(),
-        history(),
+        ...(owner && sharedFileKey ? [] : [history()]),
         // §8.19.8 treeRevision source for semantic-edit evidence envelopes.
         treeRevisionField,
         // §8.19.5 / §8.21.3 Virtual Space: overflow tracking, typing materialization,
@@ -1728,7 +2228,6 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         desiredVisualColumnField,
         virtualSpaceTypingHandler,
         virtualSpaceClickHandler,
-        keymap.of(virtualSpaceKeymap),
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),
@@ -1817,11 +2316,21 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         appearanceCompartment.current.of(
           appearance ? editorAppearanceExtension(appearance) : [],
         ),
+        renderedDocDecorationField,
+        renderedDocCompartment.current.of(renderedDocDecorationConfig.of({
+          languageId: renderedDocLanguageId ?? liveTemplateLanguageForPath(pathRef.current),
+          enabled: renderedDocEnabled,
+          onToggleRaw: () => {
+            onToggleRenderedDocRawRef.current?.();
+            viewRef.current?.focus();
+          },
+        })),
         ...lspNavigationExtensions(onDefinitionRef, onReferencesRef),
         ...codeViewExtensions(),
         WORKSPACE_EDITOR_STYLE,
         LSP_EDITOR_STYLE,
         WORKSPACE_SEARCH_STYLE,
+        RENDERED_DOC_THEME,
         // IDEA-style Tab:
         // 1) Accept the active completion (often a live template).
         // 2) Else expand an exact live/postfix template under the caret
@@ -1874,6 +2383,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
               ]),
         ]),
         EditorView.domEventHandlers({
+          // WebKitGTK's WebDriver pointer path can deliver the editor mouse
+          // event without transferring DOM focus from the body. Keep the
+          // production pointer entry equivalent to a user click before
+          // CodeMirror resolves its selection position.
+          mousedown(_event, view) {
+            if (!view.hasFocus) view.focus();
+            return false;
+          },
           copy(event, view) {
             const payload = editorClipboardPayload(view.state);
             if (!payload) return false;
@@ -1955,12 +2472,59 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            if (!applyingExternalDocRef.current) {
+            const isRemote = update.transactions.some((tr) => tr.annotation(remoteTransactionAnnotation));
+            if (!applyingExternalDocRef.current && !isRemote) {
               // onChange currently carries a full string, so one conversion is
               // unavoidable. Remember it to avoid a second full conversion in
               // the controlled-doc effect after React reflects the change.
               const nextDoc = update.state.doc.toString();
               lastDocumentTextRef.current = nextDoc;
+              if (transactionOwnerRef.current && fileKeyRef.current && viewIdRef.current) {
+                const deltas: DocumentChangeDelta[] = [];
+                update.changes.iterChanges((fromA, toA, _fromB, _toB, insertedText) => {
+                  const deleted = update.startState.doc.sliceString(fromA, toA);
+                  deltas.push({
+                    from: fromA,
+                    to: toA,
+                    insert: insertedText.toString(),
+                    ...(deleted ? { deleted } : {}),
+                  });
+                });
+                if (deltas.length > 0) {
+                  const sharedTransaction = transactionOwnerRef.current.dispatchTransaction(
+                    fileKeyRef.current,
+                    viewIdRef.current,
+                    deltas,
+                    "user-input",
+                  );
+                  if (!sharedTransaction) {
+                    const rejectedView = update.view;
+                    const rejectedText = nextDoc;
+                    queueMicrotask(() => {
+                      const currentView = viewRef.current;
+                      const currentOwner = transactionOwnerRef.current;
+                      const currentFileKey = fileKeyRef.current;
+                      if (
+                        currentView !== rejectedView
+                        || !currentOwner
+                        || !currentFileKey
+                        || currentView.state.doc.toString() !== rejectedText
+                      ) return;
+                      const canonical = currentOwner.getDocument(currentFileKey);
+                      if (canonical === null || canonical === rejectedText) return;
+                      applyingExternalDocRef.current = true;
+                      try {
+                        applyDocumentSnapshotToView(currentView, canonical);
+                        lastDocumentTextRef.current = currentView.state.doc.toString();
+                      } finally {
+                        applyingExternalDocRef.current = false;
+                      }
+                    });
+                    return;
+                  }
+                }
+              }
+              rememberLocalDocumentEcho(nextDoc);
               onChangeRef.current(
                 nextDoc,
                 lspPositionFromOffset(update.state.doc, update.state.selection.main.head),
@@ -1974,6 +2538,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
             const lastChar = inserted.slice(-1);
             if (
               !applyingExternalDocRef.current
+              && !isRemote
               && lastChar
               && signatureTriggersRef.current.includes(lastChar)
             ) {
@@ -2012,6 +2577,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     const actionHost = workspaceActionHostRef.current;
     let unregisterEditorActions: (() => void) | null = null;
     let bridgeRegistration: { dispose(): void } | null = null;
+    let legacyBridgeRegistration: { dispose(): void } | null = null;
     if (actionHost && !actionHost.isDisposed()) {
       // Handlers close over this mount's view instance; the registration is
       // removed in cleanup so a remount re-binds against the fresh view.
@@ -2042,14 +2608,52 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           cancelLspSnippetSession(view)
           || escapeEditorSelections(view)
           || (onParameterEscapeRef.current?.() ?? false),
+        isEditorGeometryReady: () => isEditorGeometryReady(view),
         runEditorCommand: (command) => command(view),
-      }));
+        undo: () => {
+          const currentOwner = transactionOwnerRef.current;
+          if (!currentOwner) return undefined;
+          if (view.state.readOnly || view.composing) return false;
+          if (currentOwner.getDocument(fileKeyRef.current) !== view.state.doc.toString()) return false;
+          const transaction = currentOwner.undo(fileKeyRef.current, viewIdRef.current);
+          if (!transaction || !applySharedTransactionToView(view, transaction)) return false;
+          rememberLocalDocumentEcho(view.state.doc.toString());
+          onChangeRef.current(
+            view.state.doc.toString(),
+            lspPositionFromOffset(view.state.doc, view.state.selection.main.head),
+            view.state.selection.main.head,
+          );
+          return true;
+        },
+        redo: () => {
+          const currentOwner = transactionOwnerRef.current;
+          if (!currentOwner) return undefined;
+          if (view.state.readOnly || view.composing) return false;
+          if (currentOwner.getDocument(fileKeyRef.current) !== view.state.doc.toString()) return false;
+          const transaction = currentOwner.redo(fileKeyRef.current, viewIdRef.current);
+          if (!transaction || !applySharedTransactionToView(view, transaction)) return false;
+          rememberLocalDocumentEcho(view.state.doc.toString());
+          onChangeRef.current(
+            view.state.doc.toString(),
+            lspPositionFromOffset(view.state.doc, view.state.selection.main.head),
+            view.state.selection.main.head,
+          );
+          return true;
+        },
+      }), { ownerViewId: viewId ?? fileKey });
       // §8.19.2 EditorActionBridge: register this mounted view so keyboard
       // dispatch knows the live view set; unmount releases it.
-      bridgeRegistration = new EditorActionBridge(actionHost).registerView(fileKey);
+      bridgeRegistration = new EditorActionBridge(actionHost).registerView(sharedViewId);
+      // Standalone consumers historically passed fileKey as their dispatch
+      // target without a viewId. Keep that alias outside the shared-owner
+      // identity path while production split views use the unique id above.
+      if (!viewId && fileKey !== sharedViewId) {
+        legacyBridgeRegistration = new EditorActionBridge(actionHost).registerView(fileKey);
+      }
     }
 
     return () => {
+      legacyBridgeRegistration?.dispose();
       bridgeRegistration?.dispose();
       unregisterEditorActions?.();
       clearPendingSelectionEmit();
@@ -2058,6 +2662,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       clipboardContextByView.delete(view);
       view.destroy();
       viewRef.current = null;
+      if (owner && sharedFileKey) owner.releaseView(sharedFileKey, sharedViewId);
     };
   }, []);
 
@@ -2071,14 +2676,15 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     const view = viewRef.current;
     if (!view) return;
     const consumerId = `cm-${fileKey || Math.random().toString(36).slice(2, 9)}`;
-    const detach = effectiveClipboardHandle?.attachConsumer(consumerId);
+    const lease = effectiveClipboardHandle?.attachConsumer(consumerId, "codemirror-host");
     clipboardContextByView.set(view, {
       workspaceId: effectiveClipboardHandle?.workspaceId ?? clipboardWorkspaceId ?? null,
       onUnavailable: (message) => onClipboardUnavailableRef.current(message),
+      onObservation: (record) => onClipboardObservationRef.current(record),
       handle: effectiveClipboardHandle ?? null,
     });
     return () => {
-      detach?.();
+      lease?.detach();
       clipboardContextByView.set(view, {
         workspaceId: null,
         onUnavailable: () => {},
@@ -2210,6 +2816,28 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     });
   }, [softWrap]);
 
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const languageId = renderedDocLanguageId ?? liveTemplateLanguageForPath(path);
+    const enabled = !!renderedDocEnabled;
+    const previous = renderedDocConfigRef.current;
+    if (previous.enabled === enabled && previous.languageId === languageId) return;
+    renderedDocConfigRef.current = { enabled, languageId };
+    view.dispatch({
+      effects: renderedDocCompartment.current.reconfigure(
+        renderedDocDecorationConfig.of({
+          languageId,
+          enabled,
+          onToggleRaw: () => {
+            onToggleRenderedDocRawRef.current?.();
+            viewRef.current?.focus();
+          },
+        }),
+      ),
+    });
+  }, [path, renderedDocEnabled, renderedDocLanguageId]);
+
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
@@ -2235,9 +2863,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     }
     renderedOverlayRef.current = { highlights, inlayHints };
     view.dispatch({
-      effects: overlayCompartment.current.reconfigure(
-        createLspOverlayChrome(view.state.doc, highlights, inlayHints),
-      ),
+      effects: updateLspOverlayChrome(highlights, inlayHints),
     });
   }, [highlights, inlayHints]);
 
@@ -2266,25 +2892,33 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     if (sameArrayOrBothEmpty(renderedSemanticTokensRef.current, semanticTokens)) return;
     renderedSemanticTokensRef.current = semanticTokens;
     view.dispatch({
-      effects: semanticTokensCompartment.current.reconfigure(
-        createLspSemanticTokenChrome(view.state.doc, semanticTokens),
-      ),
+      effects: updateLspSemanticTokenChrome(semanticTokens),
     });
   }, [semanticTokens]);
 
   useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
     const previous = renderedGitRef.current;
     if (sameArrayOrBothEmpty(previous.changes, gitChanges) && previous.blame === gitBlame) return;
-    renderedGitRef.current = { changes: gitChanges, blame: gitBlame };
-    view.dispatch({
-      effects: gitCompartment.current.reconfigure(createGitEditorChrome(
-        gitChanges,
-        gitBlame,
-        (change) => onGitChangeClickRef.current?.(change),
-      )),
+    const frame = window.requestAnimationFrame(() => {
+      if (pendingGitUpdateFrameRef.current !== frame) return;
+      pendingGitUpdateFrameRef.current = null;
+      const view = viewRef.current;
+      if (!view || !view.dom.isConnected) return;
+      renderedGitRef.current = { changes: gitChanges, blame: gitBlame };
+      view.dispatch({
+        effects: updateGitEditorChrome(
+          gitChanges,
+          gitBlame,
+          (change) => onGitChangeClickRef.current?.(change),
+        ),
+      });
     });
+    pendingGitUpdateFrameRef.current = frame;
+    return () => {
+      if (pendingGitUpdateFrameRef.current !== frame) return;
+      window.cancelAnimationFrame(frame);
+      pendingGitUpdateFrameRef.current = null;
+    };
   }, [gitBlame, gitChanges]);
 
   useEffect(() => {
@@ -2331,44 +2965,146 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     });
   }, [buildDebugChrome, debugBreakpoints, debugCurrentLine, debugEvaluate, debugInlineValues]);
 
-  useEffect(() => {
+  const reconfigureAutocompletion = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
+    const policy = completionControllerRef.current?.getPolicy();
+    const autoPopup = policy?.autoPopup ?? true;
+    const delayMs = policy?.delayMs ?? 100;
+    const maxVisibleItems = policy?.maxVisibleItems ?? 100;
+    const docDelayMs = policy?.documentation?.delayMs ?? hoverDocumentationDelayMs ?? 75;
+
+    const prev = renderedCompletionPolicyRef.current;
+    if (
+      prev &&
+      prev.autoPopup === autoPopup &&
+      prev.delayMs === delayMs &&
+      prev.maxVisibleItems === maxVisibleItems &&
+      prev.docDelayMs === docDelayMs
+    ) {
+      return;
+    }
+    renderedCompletionPolicyRef.current = { autoPopup, delayMs, maxVisibleItems, docDelayMs };
     view.dispatch({
       effects: completionCompartment.current.reconfigure(buildAutocompletionExtension()),
     });
-  }, [buildAutocompletionExtension]);
+  }, [buildAutocompletionExtension, hoverDocumentationDelayMs]);
+
+  useEffect(() => {
+    reconfigureAutocompletion();
+  }, [reconfigureAutocompletion]);
 
   useEffect(() => {
     if (!completionController) return;
     return completionController.subscribe(() => {
-      const view = viewRef.current;
-      if (!view) return;
-      view.dispatch({
-        effects: completionCompartment.current.reconfigure(buildAutocompletionExtension()),
-      });
+      reconfigureAutocompletion();
     });
-  }, [completionController, buildAutocompletionExtension]);
+  }, [completionController, reconfigureAutocompletion]);
+
+  useEffect(() => {
+    const owner = transactionOwner;
+    if (!owner || !fileKey) return;
+
+    return owner.subscribe(fileKey, (transaction) => {
+      if (transaction.sourceViewId === editorViewId) return;
+      const currentView = viewRef.current;
+      if (!currentView || !currentView.dom.isConnected) return;
+      if (applySharedTransactionToView(currentView, transaction)) {
+        lastDocumentTextRef.current = currentView.state.doc.toString();
+      }
+    });
+  }, [transactionOwner, fileKey, editorViewId]);
 
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const previousPropDocument = lastPropDocumentTextRef.current;
+    lastPropDocumentTextRef.current = doc;
+    const pendingEchoes = pendingLocalDocumentEchoesRef.current;
+    lastLocalDocumentRevisionRef.current = Math.max(
+      lastLocalDocumentRevisionRef.current,
+      documentRevision,
+    );
+    let localEchoIndex = -1;
+    for (let index = pendingEchoes.length - 1; index >= 0; index -= 1) {
+      const entry = pendingEchoes[index]!;
+      if (
+        entry.text === doc
+        && entry.expectedDocumentRevision === documentRevision
+      ) {
+        localEchoIndex = index;
+        break;
+      }
+    }
+    if (localEchoIndex >= 0) {
+      pendingEchoes.splice(0, localEchoIndex + 1);
+      // A recognized echo acknowledges an earlier local transaction. During
+      // native character-level input, both the view and shared owner may have
+      // advanced again before React delivers this prop. Replacing the live
+      // document here can corrupt an in-flight CodeMirror change set; a later
+      // non-echo snapshot remains responsible for canonical reconciliation.
+      lastDocumentTextRef.current = view.state.doc.toString();
+      return;
+    }
+    while (
+      pendingEchoes.length > 0
+      && pendingEchoes[0]!.expectedDocumentRevision <= documentRevision
+    ) {
+      pendingEchoes.shift();
+    }
+
+    const owner = transactionOwnerRef.current;
+    if (owner && fileKeyRef.current) {
+      const canonical = owner.getDocument(fileKeyRef.current);
+      if (canonical !== null) {
+        const currentText = view.state.doc.toString();
+        if (doc === canonical) {
+          // The controlled snapshot caught up with the shared owner. If a
+          // remote transaction raced this effect, repair only the changed
+          // range and preserve the view's selection.
+          if (currentText !== canonical) {
+            applyingExternalDocRef.current = true;
+            try {
+              applyDocumentSnapshotToView(view, canonical);
+            } finally {
+              applyingExternalDocRef.current = false;
+            }
+          }
+          lastDocumentTextRef.current = view.state.doc.toString();
+          return;
+        }
+        if (previousPropDocument !== doc) {
+          // A changed prop is an external/store snapshot. Make it one shared
+          // transaction so every split sees the same replacement and history
+          // remains owned by the canonical document.
+          const transaction = owner.replaceDocument(
+            fileKeyRef.current,
+            viewIdRef.current,
+            doc,
+            "external-disk",
+          );
+          if (transaction) applySharedTransactionToView(view, transaction);
+          lastDocumentTextRef.current = view.state.doc.toString();
+          return;
+        }
+        if (currentText === canonical || lastDocumentTextRef.current === canonical) {
+          // React may still expose the previous store value while a live
+          // editor edit is buffered. The shared owner is authoritative.
+          lastDocumentTextRef.current = currentText;
+          return;
+        }
+      }
+    }
+
     if (lastDocumentTextRef.current === doc) return;
     applyingExternalDocRef.current = true;
     try {
-      lastDocumentTextRef.current = doc;
-      const currentSelection = view.state.selection;
-      const clampedAnchor = Math.min(currentSelection.main.anchor, doc.length);
-      const clampedHead = Math.min(currentSelection.main.head, doc.length);
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: doc },
-        selection: { anchor: clampedAnchor, head: clampedHead },
-        scrollIntoView: false,
-      });
+      applyDocumentSnapshotToView(view, doc);
+      lastDocumentTextRef.current = view.state.doc.toString();
     } finally {
       applyingExternalDocRef.current = false;
     }
-  }, [doc]);
+  }, [doc, documentRevision]);
 
   useEffect(() => {
     if (!visible) return;

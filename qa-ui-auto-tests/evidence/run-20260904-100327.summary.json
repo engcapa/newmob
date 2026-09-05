@@ -1,0 +1,39 @@
+{
+  "started_at": "2026-09-04T10:03:27+08:00",
+  "finished_at": "2026-09-04T10:03:34+08:00",
+  "duration_sec": 6.214746952056885,
+  "mode": "native",
+  "workers": 1,
+  "totals": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "cases": [
+    {
+      "id": "TC-IDE-C7-04-maven-tooling-ingestion-native",
+      "title": "Maven tooling ingestion over real project in packaged app",
+      "status": "passed",
+      "tags": [
+        "code-workspace",
+        "ide-c7",
+        "maven",
+        "native-gate",
+        "p1"
+      ],
+      "covers": [
+        "F25.5"
+      ],
+      "modes": [
+        "native"
+      ],
+      "duration_sec": 5.958319902420044,
+      "step_count": 14,
+      "worker_id": 0,
+      "failure": null,
+      "fixtures_skipped": null
+    }
+  ],
+  "schema": "qa-ui-auto.summary.v1"
+}

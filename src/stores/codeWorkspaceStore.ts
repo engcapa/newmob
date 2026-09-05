@@ -118,6 +118,8 @@ export interface CodeWorkspaceInstanceUi {
   expandedDirKeys: string[];
   treeSelection: TreeSelection | null;
   /** Open editor buffers keyed by fileKey(ref). */
+  /** Monotonic layout revision (§8.26.3 AA2 / ED-TABS-001) incremented on every layout mutation. */
+  layoutRevision: number;
   openFiles: Record<string, OpenFileState>;
   /** Per-open-file LSP sync/diagnostics map. */
   lspFiles: Record<string, LspFileState>;
@@ -158,6 +160,7 @@ export function createDefaultCodeWorkspaceUi(): CodeWorkspaceInstanceUi {
     splitOrientation: null,
     layoutTreeV2: createSingleLeafLayout("primary", [], null),
     markdownModes: {},
+    layoutRevision: 0,
     treeFilter: "",
     treeViewMode: readCodeWorkspaceTreeViewMode(),
     expandedRootIds: [],
@@ -175,6 +178,46 @@ type Updater<T> = T | ((prev: T) => T);
 
 function resolveUpdater<T>(prev: T, updater: Updater<T>): T {
   return typeof updater === "function" ? (updater as (prev: T) => T)(prev) : updater;
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameLayoutTree(left: LayoutNode, right: LayoutNode): boolean {
+  if (left === right) return true;
+  if (left.type !== right.type || left.id !== right.id) return false;
+  if (left.type === "leaf" && right.type === "leaf") {
+    return left.activeKey === right.activeKey && sameStringArray(left.openFileKeys, right.openFileKeys);
+  }
+  if (left.type === "split" && right.type === "split") {
+    return left.orientation === right.orientation
+      && left.ratios.length === right.ratios.length
+      && left.ratios.every((ratio, index) => ratio === right.ratios[index])
+      && left.children.length === right.children.length
+      && left.children.every((child, index) => sameLayoutTree(child, right.children[index]));
+  }
+  return false;
+}
+
+function sameEditorGroups(
+  left: Readonly<Record<EditorGroupId, CodeWorkspaceEditorGroupState>>,
+  right: Readonly<Record<EditorGroupId, CodeWorkspaceEditorGroupState>>,
+): boolean {
+  if (left === right) return true;
+  const leftIds = Object.keys(left);
+  const rightIds = Object.keys(right);
+  if (leftIds.length !== rightIds.length) return false;
+  return leftIds.every((id) => {
+    const leftGroup = left[id];
+    const rightGroup = right[id];
+    return rightGroup !== undefined
+      && leftGroup.id === rightGroup.id
+      && leftGroup.activeKey === rightGroup.activeKey
+      && leftGroup.previewKey === rightGroup.previewKey
+      && sameStringArray(leftGroup.openOrder, rightGroup.openOrder)
+      && sameStringArray(leftGroup.pinnedKeys, rightGroup.pinnedKeys);
+  });
 }
 
 function remappedFileKey(
@@ -291,6 +334,8 @@ interface CodeWorkspaceStoreState {
   ) => void;
   setMarkdownMode: (instanceId: string, fileKey: string, mode: "edit" | "preview" | "split") => void;
   replaceFileState: (instanceId: string, replacement: CodeWorkspaceFileStateReplacement) => void;
+  /** Explicitly increment monotonic layout revision (§8.26.3 AA2 / ED-TABS-001). */
+  bumpLayoutRevision: (instanceId: string) => number;
   updateOpenFiles: (instanceId: string, updater: Updater<Record<string, OpenFileState>>) => void;
   updateLspFiles: (instanceId: string, updater: Updater<Record<string, LspFileState>>) => void;
   updateExpandedRootIds: (instanceId: string, updater: Updater<string[]>) => void;
@@ -329,10 +374,48 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      let isLayoutChanged = false;
+      if (patch.activeKey !== undefined && patch.activeKey !== current.activeKey) {
+        isLayoutChanged = true;
+      }
+      if (patch.activeEditorGroupId !== undefined && patch.activeEditorGroupId !== current.activeEditorGroupId) {
+        isLayoutChanged = true;
+      }
+      if (patch.splitOrientation !== undefined && patch.splitOrientation !== current.splitOrientation) {
+        isLayoutChanged = true;
+      }
+      if (patch.layoutTreeV2 !== undefined && !sameLayoutTree(patch.layoutTreeV2, current.layoutTreeV2)) {
+        isLayoutChanged = true;
+      }
+      if (patch.editorGroups !== undefined && !sameEditorGroups(patch.editorGroups, current.editorGroups)) {
+        isLayoutChanged = true;
+      }
+      if (patch.openOrder !== undefined && !sameStringArray(patch.openOrder, current.openOrder)) {
+        isLayoutChanged = true;
+      }
+
+      let anyFieldChanged = false;
+      for (const [key, val] of Object.entries(patch)) {
+        if ((current as unknown as Record<string, unknown>)[key] !== val) {
+          anyFieldChanged = true;
+          break;
+        }
+      }
+      if (!anyFieldChanged && patch.layoutRevision === undefined) {
+        return state;
+      }
+
+      const nextRevision =
+        patch.layoutRevision !== undefined
+          ? patch.layoutRevision
+          : isLayoutChanged
+            ? current.layoutRevision + 1
+            : current.layoutRevision;
+
       return {
         byInstanceId: {
           ...state.byInstanceId,
-          [instanceId]: { ...current, ...patch },
+          [instanceId]: { ...current, ...patch, layoutRevision: nextRevision },
         },
       };
     });
@@ -344,15 +427,17 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       const groupId = current.activeEditorGroupId;
       const group = current.editorGroups[groupId];
+      if (current.activeKey === key && group?.activeKey === key) return state;
       return {
         byInstanceId: {
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             activeKey: key,
             editorGroups: {
               ...current.editorGroups,
-              [groupId]: { ...group, activeKey: key },
+              [groupId]: group ? { ...group, activeKey: key } : createEditorGroup(groupId),
             },
           },
         },
@@ -366,15 +451,23 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       const groupId = current.activeEditorGroupId;
       const group = current.editorGroups[groupId];
+      const unchanged =
+        current.openOrder.length === order.length &&
+        current.openOrder.every((k, i) => k === order[i]) &&
+        group &&
+        group.openOrder.length === order.length &&
+        group.openOrder.every((k, i) => k === order[i]);
+      if (unchanged) return state;
       return {
         byInstanceId: {
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             openOrder: order,
             editorGroups: {
               ...current.editorGroups,
-              [groupId]: { ...group, openOrder: order },
+              [groupId]: group ? { ...group, openOrder: order } : { ...createEditorGroup(groupId), openOrder: order },
             },
           },
         },
@@ -386,7 +479,20 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      const nextGroup = resolveUpdater(current.editorGroups[groupId], updater);
+      const prevGroup = current.editorGroups[groupId];
+      const nextGroup = resolveUpdater(prevGroup, updater);
+      if (nextGroup === prevGroup) return state;
+      if (
+        prevGroup &&
+        prevGroup.activeKey === nextGroup.activeKey &&
+        prevGroup.previewKey === nextGroup.previewKey &&
+        prevGroup.openOrder.length === nextGroup.openOrder.length &&
+        prevGroup.openOrder.every((k, i) => k === nextGroup.openOrder[i]) &&
+        prevGroup.pinnedKeys.length === nextGroup.pinnedKeys.length &&
+        prevGroup.pinnedKeys.every((k, i) => k === nextGroup.pinnedKeys[i])
+      ) {
+        return state;
+      }
       const active = current.activeEditorGroupId === groupId;
       // §8.16.4 N6.6: mirror group writes into the recursive tree so the
       // leaf stays the structural truth (same reference when unchanged).
@@ -396,6 +502,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             openOrder: active ? nextGroup.openOrder : current.openOrder,
             activeKey: active ? nextGroup.activeKey : current.activeKey,
             editorGroups: { ...current.editorGroups, [groupId]: nextGroup },
@@ -410,15 +517,17 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      if (current.activeEditorGroupId === groupId) return state;
       const group = current.editorGroups[groupId];
       return {
         byInstanceId: {
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             activeEditorGroupId: groupId,
-            openOrder: group.openOrder,
-            activeKey: group.activeKey,
+            openOrder: group?.openOrder ?? current.openOrder,
+            activeKey: group?.activeKey ?? current.activeKey,
           },
         },
       };
@@ -426,7 +535,21 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
   },
 
   setSplitOrientation: (instanceId, orientation) => {
-    get().patchInstance(instanceId, { splitOrientation: orientation });
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      if (current.splitOrientation === orientation) return state;
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutRevision: current.layoutRevision + 1,
+            splitOrientation: orientation,
+          },
+        },
+      };
+    });
   },
 
   setLayoutTreeV2: (instanceId, layoutTree) => {
@@ -434,17 +557,19 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     if (!validateLayoutTree(layoutTree).valid) return;
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      if (current.layoutTreeV2 === layoutTree) return state;
+      if (sameLayoutTree(current.layoutTreeV2, layoutTree)) return state;
       return {
         byInstanceId: {
           ...state.byInstanceId,
-          [instanceId]: { ...current, layoutTreeV2: layoutTree },
+          [instanceId]: {
+            ...current,
+            layoutRevision: current.layoutRevision + 1,
+            layoutTreeV2: layoutTree,
+          },
         },
       };
     });
   },
-
-
 
   splitLayoutLeaf: (instanceId, leafId, orientation, newFileKey) => {
     get().ensureInstance(instanceId);
@@ -468,6 +593,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: result.tree,
             editorGroups: result.groups,
             activeEditorGroupId: result.activeGroupId,
@@ -498,6 +624,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: result.tree,
             editorGroups: result.groups,
             activeEditorGroupId: result.activeGroupId,
@@ -532,6 +659,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: result.tree,
             editorGroups: result.groups,
             activeEditorGroupId: result.activeGroupId,
@@ -565,6 +693,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: result.tree,
             editorGroups: result.groups,
             activeEditorGroupId: result.activeGroupId,
@@ -600,6 +729,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: result.tree,
             editorGroups: result.groups,
             openOrder: activeGroup?.openOrder ?? current.openOrder,
@@ -633,6 +763,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: validation.tree,
           },
         },
@@ -658,6 +789,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: validation.tree,
           },
         },
@@ -683,6 +815,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: validation.tree,
           },
         },
@@ -706,9 +839,10 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         }
       }
       const previewCandidate = current.editorGroups[survivorId]?.previewKey ?? null;
-      const previewKey = previewCandidate != null && openOrder.includes(previewCandidate)
-        ? previewCandidate
-        : null;
+      const previewKey =
+        previewCandidate != null && openOrder.includes(previewCandidate)
+          ? previewCandidate
+          : null;
 
       const nextGroups: Record<string, CodeWorkspaceEditorGroupState> = {};
       // Dormant empty legacy slots carry no layout truth — keep them as-is.
@@ -737,6 +871,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             layoutTreeV2: result.tree,
             editorGroups: result.groups,
             activeEditorGroupId: result.activeGroupId,
@@ -793,6 +928,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
+            layoutRevision: current.layoutRevision + 1,
             openFiles: replacement.openFiles,
             lspFiles: replacement.lspFiles,
             editorGroups,
@@ -807,6 +943,25 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         },
       };
     });
+  },
+
+  bumpLayoutRevision: (instanceId: string) => {
+    get().ensureInstance(instanceId);
+    let nextRev = 1;
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      nextRev = current.layoutRevision + 1;
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutRevision: nextRev,
+          },
+        },
+      };
+    });
+    return nextRev;
   },
 
   updateOpenFiles: (instanceId, updater) => {

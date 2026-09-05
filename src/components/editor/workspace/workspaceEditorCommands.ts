@@ -235,81 +235,47 @@ export function cloneCaretVertically(direction: -1 | 1): Command {
     const virtualSpace = state.facet(editorVirtualSpacePolicy);
     const normalized = normalizeEditorSelections(state.selection.ranges, state.selection.mainIndex);
     const additions: Array<{
-      source: SelectionRange;
-      targetLineNumber: number;
-      targetColumn: number;
-      padding: number;
+      targetHead: number;
+      overflow: number;
     }> = [];
     for (const range of normalized.ranges) {
       const line = state.doc.lineAt(range.head);
-      const desiredColumn = range.head - line.from;
+      const desiredColumn = range.head - line.from
+        + (state.field(virtualSpaceOverflowField, false)?.get(range.head) ?? 0);
       const targetLineNumber = line.number + direction;
       if (targetLineNumber < 1) continue;
       if (targetLineNumber > state.doc.lines) {
-        if (!virtualSpace.atFileBottom || direction < 0) continue;
-        additions.push({
-          source: range,
-          targetLineNumber,
-          targetColumn: virtualSpace.afterLineEnd ? desiredColumn : 0,
-          padding: virtualSpace.afterLineEnd ? desiredColumn : 0,
-        });
+        // CodeMirror merges empty selections at the same final document
+        // offset. Never manufacture a line or padding just to clone a caret.
         continue;
       }
       const target = state.doc.line(targetLineNumber);
+      const targetColumn = Math.min(desiredColumn, target.length);
       additions.push({
-        source: range,
-        targetLineNumber,
-        targetColumn: virtualSpace.afterLineEnd
-          ? desiredColumn
-          : Math.min(desiredColumn, target.length),
-        padding: virtualSpace.afterLineEnd
+        targetHead: target.from + targetColumn,
+        overflow: virtualSpace.afterLineEnd
           ? Math.max(0, desiredColumn - target.length)
           : 0,
       });
     }
     if (additions.length === 0) return false;
 
-    const paddingByLine = new Map<number, number>();
+    const nextOverflow = new Map(
+      state.field(virtualSpaceOverflowField, false) ?? new Map<number, number>(),
+    );
     for (const addition of additions) {
-      if (addition.targetLineNumber > state.doc.lines) {
-        paddingByLine.set(
-          addition.targetLineNumber,
-          Math.max(paddingByLine.get(addition.targetLineNumber) ?? 0, addition.padding),
-        );
-        continue;
-      }
-      if (addition.padding <= 0) continue;
-      paddingByLine.set(
-        addition.targetLineNumber,
-        Math.max(paddingByLine.get(addition.targetLineNumber) ?? 0, addition.padding),
-      );
-    }
-    const changes: ChangeSpec[] = [];
-    for (const [lineNumber, padding] of paddingByLine) {
-      if (lineNumber > state.doc.lines) {
-        changes.push({ from: state.doc.length, insert: `${state.lineBreak}${" ".repeat(padding)}` });
-      } else {
-        changes.push({ from: state.doc.line(lineNumber).to, insert: " ".repeat(padding) });
+      if (addition.overflow > 0) {
+        nextOverflow.set(addition.targetHead, addition.overflow);
       }
     }
-    const changeSet = state.changes(changes);
-    const originalRanges = normalized.ranges.map((range) => range.map(changeSet));
-    const clonedRanges = additions.map((addition) => {
-      if (addition.targetLineNumber > state.doc.lines) {
-        const start = changeSet.mapPos(state.doc.length, 1) - addition.padding;
-        return EditorSelection.cursor(start + addition.targetColumn);
-      }
-      const target = state.doc.line(addition.targetLineNumber);
-      const mappedStart = changeSet.mapPos(target.from, 1);
-      return EditorSelection.cursor(mappedStart + addition.targetColumn);
-    });
+    const clonedRanges = additions.map((addition) => EditorSelection.cursor(addition.targetHead));
     const merged = normalizeEditorSelections(
-      [...originalRanges, ...clonedRanges],
+      [...normalized.ranges, ...clonedRanges],
       normalized.mainIndex,
     );
     view.dispatch({
-      changes,
       selection: EditorSelection.create(merged.ranges, merged.mainIndex),
+      effects: setVirtualOverflow.of(nextOverflow),
       scrollIntoView: true,
       userEvent: "select.cloneCaret",
     });

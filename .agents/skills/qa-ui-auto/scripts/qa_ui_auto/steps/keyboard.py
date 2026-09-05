@@ -1,4 +1,4 @@
-"""Keyboard input: fill, type, send_keys, press, select_option, upload_file."""
+"""Keyboard input: fill, type, composition, press, select_option, upload_file."""
 
 from __future__ import annotations
 
@@ -33,6 +33,38 @@ def step_send_keys(ctx: StepContext, args: Any) -> None:
     if ctx.dry_run:
         return
     ctx.page.keyboard.type(text)  # type: ignore[attr-defined]
+
+
+@verb("compose_text")
+def step_compose_text(ctx: StepContext, args: Any) -> None:
+    """Drive one browser composition lifecycle through the focused control.
+
+    This is browser interaction evidence only. It deliberately does not claim
+    an OS input method or satisfy native IME evidence.
+    """
+    if not isinstance(args, dict):
+        raise StepError("compose_text: expected {selector, text, during_key?}")
+    selector = args["selector"]
+    text = args["text"]
+    during_key = args.get("during_key")
+    if not isinstance(text, str) or not text:
+        raise StepError("compose_text: text must be a non-empty string")
+    loc = ctx.page.locator(selector).first  # type: ignore[attr-defined]
+    if ctx.dry_run:
+        return
+    loc.focus()
+    session = ctx.page.context.new_cdp_session(ctx.page)  # type: ignore[attr-defined]
+    try:
+        session.send("Input.imeSetComposition", {
+            "text": text,
+            "selectionStart": len(text),
+            "selectionEnd": len(text),
+        })
+        if during_key:
+            ctx.page.keyboard.press(during_key)  # type: ignore[attr-defined]
+        session.send("Input.insertText", {"text": text})
+    finally:
+        session.detach()
 
 
 @verb("press")

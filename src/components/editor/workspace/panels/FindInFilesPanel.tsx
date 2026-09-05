@@ -7,6 +7,7 @@ import {
   workspaceSearchCancel,
   workspaceSearchStart,
   type WorkspaceSearchMatch,
+  type WorkspaceSearchRoot,
 } from "../../../../lib/editor/workspaceSearch";
 import {
   highlightSearchLine,
@@ -17,12 +18,36 @@ import {
   pushWorkspaceSearchHistory,
   readWorkspaceSearchHistory,
 } from "../workspaceLayoutPersistence";
+import {
+  isFileInScopePlan,
+  planFindInFilesScope,
+  type FindInFilesScopeKind,
+  type FindInFilesScopePlan,
+} from "../findInFilesScopeModel";
+import type { LspWorkspaceEdit } from "../../../../lib/editor/lsp";
+import { workspaceSearchMatchKey } from "../buildReplaceEdits";
+import {
+  buildReplaceInFilesWorkspaceEdit,
+  createReplaceInFilesPlan,
+  replaceMatchAbsolutePath,
+  searchMatchesToReplaceInputs,
+  type ReplaceInFilesPlan,
+} from "../replaceInFilesModel";
+import { ReplacePreviewDialog } from "./ReplacePreviewDialog";
+import {
+  useProjectFactsStore,
+  type WorkspaceProjectFactsEntry,
+} from "../../../../stores/projectFactsStore";
 
 interface FindInFilesPanelProps {
   roots: CodeWorkspaceRootInfo[];
   onOpenMatch: (match: WorkspaceSearchMatch, options: { preview: boolean }) => void;
-  /** Apply replacements for the current result set via the shared WorkspaceEdit path. */
-  onReplaceMatches?: (matches: WorkspaceSearchMatch[], replacement: string) => void | Promise<void>;
+  /** Commit a filtered replace transaction; returns the commit report. */
+  onReplaceMatches?: (
+    matches: WorkspaceSearchMatch[],
+    replacement: string,
+    edit: LspWorkspaceEdit,
+  ) => Promise<{ ok: boolean; appliedCount?: number; fileCount?: number; message?: string }>;
   /** Bump to move focus into the query input (Ctrl+Shift+F). */
   focusNonce?: number;
   /** Bump the nonce to overwrite the include globs ("Find in Directory..."). */
@@ -148,6 +173,12 @@ function groupKey(match: WorkspaceSearchMatch): string {
   return `${match.rootId}:${match.path}`;
 }
 
+/** Join key shared by preview usages and search matches for exclusion. */
+function usageJoinKeyForMatch(match: WorkspaceSearchMatch): string {
+  const line = Math.max(0, match.lineNumber - 1);
+  return `${replaceMatchAbsolutePath(match)}:${line}:${match.matchStart}:${line}:${match.matchEnd}`;
+}
+
 function groupTitle(match: WorkspaceSearchMatch): string {
   return `${match.rootName}/${match.path}`;
 }
@@ -172,7 +203,53 @@ export function FindInFilesPanel({
   const [groups, setGroups] = useState<MatchGroup[]>([]);
   const [summary, setSummary] = useState<SearchSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [replacing, setReplacing] = useState(false);
+  /** ED-FIND-004: frozen replace preview (plan + source edit + matches). */
+  const [replacePreview, setReplacePreview] = useState<{
+    edit: LspWorkspaceEdit;
+    plan: ReplaceInFilesPlan;
+    matches: WorkspaceSearchMatch[];
+    usageToMatchKey: ReadonlyMap<string, string>;
+    stableToUsageId: ReadonlyMap<string, string>;
+  } | null>(null);
+  const [replaceCommitting, setReplaceCommitting] = useState(false);
+  const [replaceCommitError, setReplaceCommitError] = useState<string | null>(null);
+  /** ED-FIND-003: selected search scope. Module scope requires ready facts. */
+  const [scopeKind, setScopeKind] = useState<FindInFilesScopeKind>("project");
+  const [scopeModuleId, setScopeModuleId] = useState("");
+  const [scopeDirectory, setScopeDirectory] = useState("");
+  const workspaceRoot = roots[0]?.path ?? "";
+  const factsEntry: WorkspaceProjectFactsEntry | null = useProjectFactsStore(
+    (state) => (workspaceRoot ? (state.workspaces[workspaceRoot] ?? null) : null),
+  );
+  const factsModules = factsEntry?.structure?.modules ?? [];
+
+  // ED-FIND-003 A1: the selected scope plan, rebuilt live so the panel can
+  // fail closed before touching the backend. startSearch consumes the same
+  // plan object the notice below renders.
+  const scopePlan: FindInFilesScopePlan = useMemo(() => {
+    const maskValue = splitGlobs(includeGlobs).join(",") || undefined;
+    const directoryInput = scopeDirectory.trim();
+    const targetDirectory = scopeKind !== "directory"
+      ? undefined
+      : !directoryInput
+        ? workspaceRoot || undefined
+        : /^(?:[a-zA-Z]:[\\/]|[/\\])/.test(directoryInput)
+          ? directoryInput
+          : workspaceRoot
+            ? `${workspaceRoot.replace(/\/+$/, "")}/${directoryInput.replace(/^\/+/, "")}`
+            : directoryInput;
+    return planFindInFilesScope(
+      {
+        kind: scopeKind,
+        workspaceRoot,
+        targetDirectory,
+        moduleId: scopeModuleId || factsModules[0]?.id,
+        fileMask: maskValue,
+        expectedGeneration: factsEntry?.generation,
+      },
+      factsEntry,
+    );
+  }, [factsEntry, factsModules, includeGlobs, scopeDirectory, scopeKind, scopeModuleId, workspaceRoot]);
   /** Per-file expand state: collapsed (default), numeric limit, or "all". */
   const [fileExpand, setFileExpand] = useState<Record<string, number | "all">>({});
   const [collapsedFiles, setCollapsedFiles] = useState<Record<string, boolean>>({});
@@ -218,6 +295,10 @@ export function FindInFilesPanel({
     unlistenRef.current = null;
     const active = searchIdRef.current;
     searchIdRef.current = null;
+    // ED-FIND-004: a superseded search invalidates any open replace preview
+    // so a stale plan can never commit.
+    setReplacePreview(null);
+    setReplaceCommitError(null);
     if (active) void workspaceSearchCancel(active).catch(() => {});
   }, []);
 
@@ -244,13 +325,56 @@ export function FindInFilesPanel({
     setLanguagesByPath({});
     setStatus("searching");
 
+    // ED-FIND-003 A1: the scope plan is built live (scopePlan memo) so the
+    // notice below and the search consume one plan. Unresolved plans
+    // (module scope without ready facts) fail closed here with a visible
+    // reason and never reach the backend (A3).
+    const plan = scopePlan;
+    if (plan.status !== "ready") {
+      setStatus("error");
+      setError(plan.reason);
+      return;
+    }
+    // Project scope spans every workspace root; module/directory scopes use
+    // the exact plan roots. Client-side filtering below applies to
+    // facts-derived scopes only, so other roots' matches are never dropped.
+    const filterPlan = plan.kind === "project" ? null : plan;
+    const planStructure = factsEntry?.structure ?? null;
+    const searchRoots: WorkspaceSearchRoot[] = filterPlan === null
+      ? roots.map((root) => ({ id: root.id, name: root.name, path: root.path }))
+      : plan.roots.map((rootPath, index) => ({
+        id: `scope-${index}`,
+        name: rootPath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? rootPath,
+        path: rootPath,
+      }));
+
     const searchId = newWorkspaceSearchId();
     searchIdRef.current = searchId;
     try {
       const unlisten = await subscribeWorkspaceSearch(searchId, (event) => {
         if (searchIdRef.current !== searchId) return;
+        // ED-FIND-003 A4: facts-derived scopes stop publishing once the
+        // snapshot moves under a running search. Filesystem scopes are
+        // facts-independent and keep streaming.
+        if (filterPlan !== null && filterPlan.generation !== undefined) {
+          const liveGeneration = useProjectFactsStore
+            .getState()
+            .getWorkspaceFacts(workspaceRoot).generation;
+          if (liveGeneration !== filterPlan.generation) {
+            teardownSearch();
+            setStatus("error");
+            setError(
+              `Project facts changed during search (G${filterPlan.generation} -> G${liveGeneration}); run the search again`,
+            );
+            return;
+          }
+        }
         if (event.kind === "batch") {
           for (const match of event.matches) {
+            if (filterPlan !== null) {
+              const absolute = `${(match.rootPath ?? "").replace(/\/+$/, "")}/${(match.path ?? "").replace(/^\/+/, "")}`;
+              if (!isFileInScopePlan(absolute, filterPlan, planStructure)) continue;
+            }
             const key = groupKey(match);
             const group = groupsRef.current.get(key);
             if (group) group.matches.push(match);
@@ -282,7 +406,7 @@ export function FindInFilesPanel({
       unlistenRef.current = unlisten;
       await workspaceSearchStart(
         searchId,
-        roots.map((root) => ({ id: root.id, name: root.name, path: root.path })),
+        searchRoots,
         trimmed,
         {
           caseSensitive,
@@ -302,7 +426,7 @@ export function FindInFilesPanel({
         setError(err instanceof Error ? err.message : String(err));
       }
     }
-  }, [caseSensitive, excludeGlobs, includeGlobs, query, regexp, roots, teardownSearch, wholeWord, workspaceInstanceId]);
+  }, [caseSensitive, excludeGlobs, factsEntry, factsModules, includeGlobs, query, regexp, roots, scopeDirectory, scopeKind, scopeModuleId, teardownSearch, wholeWord, workspaceInstanceId, workspaceRoot]);
 
   const cancelSearch = useCallback(() => {
     const active = searchIdRef.current;
@@ -424,20 +548,71 @@ export function FindInFilesPanel({
     );
   }, [languagesByPath]);
 
-  const replaceAll = useCallback(async () => {
-    if (!onReplaceMatches || allMatches.length === 0 || replacing) return;
-    const files = new Set(allMatches.map((match) => `${match.rootId}:${match.path}`)).size;
-    const ok = window.confirm(
-      `Replace ${allMatches.length} occurrence${allMatches.length === 1 ? "" : "s"} in ${files} file${files === 1 ? "" : "s"}?`,
-    );
-    if (!ok) return;
-    setReplacing(true);
-    try {
-      await onReplaceMatches(allMatches, replacement);
-    } finally {
-      setReplacing(false);
+  const replaceAll = useCallback(() => {
+    if (!onReplaceMatches || allMatches.length === 0 || replacePreview) return;
+    // ED-FIND-004 A1: freeze the preimage — model matches, edit, and plan —
+    // at dialog open. Commit reconfirms against live disk state (A2/A3).
+    const modelMatches = searchMatchesToReplaceInputs(allMatches);
+    const edit = buildReplaceInFilesWorkspaceEdit({ matches: modelMatches, replacementText: replacement });
+    const plan = createReplaceInFilesPlan(edit);
+    // Join preview usage ids back to search-match keys for exclusion.
+    const remaining = new Map<string, WorkspaceSearchMatch[]>();
+    for (const match of allMatches) {
+      const key = usageJoinKeyForMatch(match);
+      const list = remaining.get(key);
+      if (list) list.push(match);
+      else remaining.set(key, [match]);
     }
-  }, [allMatches, onReplaceMatches, replacement, replacing]);
+    const usageToMatchKey = new Map<string, string>();
+    const stableToUsageId = new Map<string, string>();
+    for (const usage of plan.preview.usages) {
+      const key = `${usage.path}:${usage.range.start.line}:${usage.range.start.character}:${usage.range.end.line}:${usage.range.end.character}`;
+      const list = remaining.get(key);
+      const target = list?.shift();
+      if (target) {
+        usageToMatchKey.set(usage.id, workspaceSearchMatchKey(target));
+        if (!stableToUsageId.has(key)) stableToUsageId.set(key, usage.id);
+      }
+      if (list && list.length === 0) remaining.delete(key);
+    }
+    setReplaceCommitError(null);
+    setReplacePreview({ edit, plan, matches: allMatches, usageToMatchKey, stableToUsageId });
+  }, [allMatches, onReplaceMatches, replacement, replacePreview]);
+
+  const commitReplacePreview = useCallback(async (excludedStableKeys: ReadonlySet<string>) => {
+    if (!replacePreview || !onReplaceMatches) return;
+    // Stable content keys back to the ORIGINAL plan usage ids (positional
+    // ids shift across recomputes, so the dialog never sees them).
+    const excludedUsageIds = new Set<string>();
+    for (const stableKey of excludedStableKeys) {
+      const usageId = replacePreview.stableToUsageId.get(stableKey);
+      if (usageId) excludedUsageIds.add(usageId);
+    }
+    const excludedMatchKeys = new Set<string>();
+    for (const usageId of excludedUsageIds) {
+      const key = replacePreview.usageToMatchKey.get(usageId);
+      if (key) excludedMatchKeys.add(key);
+    }
+    const filteredMatches = replacePreview.matches.filter(
+      (match) => !excludedMatchKeys.has(workspaceSearchMatchKey(match)),
+    );
+    const filteredEdit = createReplaceInFilesPlan(
+      replacePreview.edit,
+      excludedUsageIds,
+    ).filteredEdit;
+    setReplaceCommitting(true);
+    setReplaceCommitError(null);
+    try {
+      const result = await onReplaceMatches(filteredMatches, replacement, filteredEdit);
+      if (result.ok) {
+        setReplacePreview(null);
+      } else {
+        setReplaceCommitError(result.message ?? "Replace blocked");
+      }
+    } finally {
+      setReplaceCommitting(false);
+    }
+  }, [onReplaceMatches, replacePreview, replacement]);
 
   const toggles = [
     { label: "Match case", icon: <CaseSensitive className="h-3.5 w-3.5" />, value: caseSensitive, set: setCaseSensitive },
@@ -446,7 +621,7 @@ export function FindInFilesPanel({
   ];
 
   return (
-    <div data-testid="code-workspace-find-in-files-panel" className="h-full min-h-0 flex flex-col text-[11px]">
+    <div data-testid="code-workspace-find-in-files-panel" className="relative h-full min-h-0 flex flex-col text-[11px]">
       <div className="shrink-0 flex flex-wrap items-center gap-1.5 border-b border-[var(--taomni-code-border)] px-2 py-1.5">
         <div className="flex min-w-44 flex-1 items-center gap-1 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
           <Search className="h-3.5 w-3.5 shrink-0 text-[var(--taomni-code-muted)]" />
@@ -486,6 +661,51 @@ export function FindInFilesPanel({
             </button>
           ))}
         </div>
+        <label className="inline-flex h-6 items-center gap-1 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
+          <span className="sr-only">Search scope</span>
+          <select
+            aria-label="Search scope"
+            data-testid="code-workspace-find-scope-select"
+            value={scopeKind}
+            onChange={(event) => setScopeKind(event.target.value as FindInFilesScopeKind)}
+            className="h-full bg-transparent text-[11px] text-[var(--taomni-code-text)] outline-none"
+          >
+            <option value="project">Project</option>
+            <option value="module">Module</option>
+            <option value="directory">Directory</option>
+          </select>
+        </label>
+        {scopeKind === "module" && (
+          <label className="inline-flex h-6 min-w-24 items-center gap-0.5 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
+            <span className="sr-only">Search module</span>
+            <select
+              aria-label="Search module"
+              data-testid="code-workspace-find-module-select"
+              value={scopeModuleId || factsModules[0]?.id || ""}
+              onChange={(event) => setScopeModuleId(event.target.value)}
+              className="h-full min-w-0 flex-1 bg-transparent text-[11px] text-[var(--taomni-code-text)] outline-none"
+            >
+              {factsModules.length === 0 && <option value="">No modules</option>}
+              {factsModules.map((mod) => (
+                <option key={mod.id} value={mod.id}>{mod.id}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {scopeKind === "directory" && (
+          <label className="inline-flex h-6 w-40 items-center gap-0.5 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
+            <input
+              type="text"
+              value={scopeDirectory}
+              placeholder="subdir (empty = root)"
+              aria-label="Search directory"
+              data-testid="code-workspace-find-directory-input"
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-[var(--taomni-code-text)] outline-none placeholder:text-[var(--taomni-code-muted)]"
+              onChange={(event) => setScopeDirectory(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && void startSearch()}
+            />
+          </label>
+        )}
         <label className="inline-flex h-6 w-32 items-center gap-0.5 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5">
           <input
             type="search"
@@ -531,6 +751,7 @@ export function FindInFilesPanel({
           <button
             type="button"
             aria-label="Run search"
+            data-testid="code-workspace-find-run-search"
             disabled={!query.trim() || roots.length === 0}
             className="h-6 inline-flex items-center gap-1 rounded px-1.5 text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-50"
             onClick={() => void startSearch()}
@@ -542,12 +763,13 @@ export function FindInFilesPanel({
         {onReplaceMatches && (
           <button
             type="button"
-            aria-label="Replace all matches"
-            disabled={allMatches.length === 0 || replacing || status === "searching"}
+            aria-label="Preview replace all matches"
+            data-testid="code-workspace-find-replace-all"
+            disabled={allMatches.length === 0 || replaceCommitting || status === "searching"}
             className="h-6 inline-flex items-center gap-1 rounded px-1.5 text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-50"
             onClick={() => void replaceAll()}
           >
-            <span>{replacing ? "Replacing…" : "Replace All"}</span>
+            <span>Replace All</span>
           </button>
         )}
         <span className="ml-auto flex items-center gap-1.5 text-[10px] text-[var(--taomni-code-muted)]">
@@ -563,9 +785,17 @@ export function FindInFilesPanel({
           {summary.cancelled ? "Search cancelled — results are partial." : `Match limit reached (${MAX_TOTAL_MATCHES}) — refine the query to see everything.`}
         </div>
       )}
+      {scopePlan.status !== "ready" && (
+        <div
+          data-testid="code-workspace-find-scope-notice"
+          className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[10px] text-amber-500"
+        >
+          {scopePlan.reason} — switch scope or refresh project facts.
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-auto py-1">
         {error && (
-          <div className="mx-2 mb-1 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-500">{error}</div>
+          <div data-testid="code-workspace-find-error" className="mx-2 mb-1 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-500">{error}</div>
         )}
         {!error && groups.length === 0 && (
           <div className="px-3 py-2 text-[var(--taomni-code-muted)]">
@@ -650,6 +880,21 @@ export function FindInFilesPanel({
           );
         })}
       </div>
+      {replacePreview && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/40 p-4">
+          <ReplacePreviewDialog
+            edit={replacePreview.edit}
+            replacement={replacement}
+            committing={replaceCommitting}
+            commitError={replaceCommitError}
+            onCommit={(excluded) => void commitReplacePreview(excluded)}
+            onCancel={() => {
+              setReplacePreview(null);
+              setReplaceCommitError(null);
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

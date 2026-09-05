@@ -198,6 +198,8 @@ describe("SettingsPanel", () => {
       expect(screen.getByTestId(`settings-group-${id}`)).toHaveAttribute("data-expanded", "false");
       expect(screen.getByTestId(`settings-group-body-${id}`)).not.toBeVisible();
     }
+    expect(screen.queryByTestId("code-view-preview")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("terminal-appearance-settings")).not.toBeInTheDocument();
 
     // Expanding a group reveals its body; title stays on the header either way.
     expect(screen.getByTestId("settings-group-toggle-terminal")).toHaveTextContent("Terminal");

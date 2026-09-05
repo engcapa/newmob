@@ -1,0 +1,41 @@
+{
+  "started_at": "2026-09-04T10:06:31+08:00",
+  "finished_at": "2026-09-04T10:06:36+08:00",
+  "duration_sec": 4.850676536560059,
+  "mode": "browser",
+  "workers": 1,
+  "totals": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "cases": [
+    {
+      "id": "TC-IDE-C7-06-project-facts-failed-refresh-browser",
+      "title": "Project facts failed badge and explicit refresh in browser",
+      "tags": [
+        "code-workspace",
+        "ide-c7",
+        "project-structure",
+        "facts-cache",
+        "browser-gate",
+        "p1"
+      ],
+      "covers": [
+        "F25.5"
+      ],
+      "modes": [
+        "browser"
+      ],
+      "status": "passed",
+      "duration_sec": 4.850499391555786,
+      "step_count": 16,
+      "worker_id": 0,
+      "failure": null,
+      "fixtures_skipped": null,
+      "skipped_reason": null
+    }
+  ],
+  "schema": "qa-ui-auto.summary.v1"
+}

@@ -17,6 +17,7 @@ import type {
 } from "../../../lib/editor/lsp";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import { isInsideStringOrComment } from "./syntaxContext";
+import type { CompletionScopeFactsState } from "./completionScopeAdapter";
 import {
   type BasicCompletionPolicyV2,
   type CompletionCaseMatching,
@@ -40,6 +41,14 @@ export interface CompletionRequestToken {
   documentRevision: number;
   lspSessionGeneration: number;
   requestId: string;
+  /**
+   * ED-COMP-004: the effective project scope recorded for this request.
+   * Resolved from the ready same-workspace facts snapshot at request build;
+   * a scope-facts-missing state (with its reason and generation) is recorded
+   * explicitly instead of guessing module/project scope. Absent only on
+   * document-scope requests that never consult facts.
+   */
+  projectScope?: CompletionScopeFactsState;
 }
 
 /** Live identity captured at request start; requestId is minted per request. */
@@ -75,6 +84,13 @@ export interface LspCompletionHooks {
   /** Observable acceptance diagnostics for status/QA surfaces. */
   reportDiagnostic: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
   /**
+   * ED-COMP-004: fired when an explicitly invoked completion resolves to
+   * scope-facts-missing, so the UI can name the missing prerequisite once
+   * instead of silently completing document-scoped. Typing/trigger popups
+   * never fire this: only deliberate invocations explain scope fallback.
+   */
+  onScopeFallback?: (state: CompletionScopeFactsState, reason: CompletionInvocationReason) => void;
+  /**
    * Resolve gate surface (§8.19.4). When wired, a resolve timeout/failure
    * presents Retry / Insert-without-import instead of inserting anything.
    * Hosts without a gate surface get the block-only behaviour: nothing is
@@ -97,6 +113,13 @@ export interface FixtureCompletionHooks {
   triggerCharacters?: () => string[];
   getDocumentRevision?: () => number;
   reportDiagnostic?: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
+  /**
+   * ED-COMP-004: effective project scope attached to the synthetic identity
+   * (ready scope or explicit scope-facts-missing). Absent means document
+   * scope without facts consultation.
+   */
+  projectScope?: CompletionScopeFactsState;
+  onScopeFallback?: (state: CompletionScopeFactsState, reason: CompletionInvocationReason) => void;
 }
 
 let completionRequestIdCounter = 0;
@@ -203,6 +226,12 @@ export interface RecordedCompletionInvocation extends CompletionInvocationEviden
   providerGeneration: number;
   reason: CompletionInvocationReason;
   at: number;
+  /**
+   * ED-COMP-004: the effective project scope recorded for this request
+   * (ready scope or explicit scope-facts-missing). Null when the request
+   * never consulted facts (document scope).
+   */
+  projectScope?: CompletionScopeFactsState | null;
 }
 
 interface LastBasicInvocation {
@@ -299,12 +328,227 @@ export function recentCompletionInvocations(): readonly RecordedCompletionInvoca
  * `timed-out` / `failed` never fall through to a silent primary-only insert:
  * they surface the resolve gate and wait for an explicit user choice.
  */
+/**
+ * Lifecycle of one item's completionItem/resolve round-trip (§8.19.4 / §ED-COMP-001).
+ * `timed-out` / `failed` / `unavailable` never fall through to a silent primary-only insert:
+ * they surface the resolve gate and wait for an explicit user choice.
+ */
 export type CompletionResolveState =
   | { kind: "not-required" }
   | { kind: "ready"; resolvedAt: number; hasAdditionalEdits: boolean }
   | { kind: "timed-out"; canRetry: true }
   | { kind: "failed"; canRetry: true; message: string }
+  | { kind: "unavailable"; canRetry: boolean; reason: string }
+  | { kind: "cancelled"; reason: string }
   | { kind: "stale" };
+
+/**
+ * 7 typed completion resolve outcome kinds (§ED-COMP-001 / BB7):
+ * - resolved: provider delivered full item + additionalTextEdits
+ * - not-required: item already contained complete additional edits without resolve
+ * - unavailable: resolver is missing / returned null (resolver 缺失不推导 not-required)
+ * - timeout: resolve timed out
+ * - failed: resolver threw an error
+ * - cancelled: resolve was aborted / cancelled
+ * - stale: request token identity or doc revision changed during resolve
+ */
+export type CompletionResolveOutcomeKind =
+  | "resolved"
+  | "not-required"
+  | "unavailable"
+  | "timeout"
+  | "failed"
+  | "cancelled"
+  | "stale";
+
+export type CompletionResolveOutcome =
+  | { kind: "resolved"; item: LspCompletionItem; edits: readonly LspTextEdit[] }
+  | { kind: "not-required"; item: LspCompletionItem }
+  | { kind: "unavailable"; reason: string; item: LspCompletionItem }
+  | { kind: "timeout"; durationMs: number; item: LspCompletionItem }
+  | { kind: "failed"; error: string; item: LspCompletionItem }
+  | { kind: "cancelled"; reason: string; item: LspCompletionItem }
+  | { kind: "stale"; expectedRevision: number; currentRevision: number; item: LspCompletionItem };
+
+export interface ClassifyCompletionResolveInput {
+  item: LspCompletionItem;
+  resolvedItem?: LspCompletionItem | null;
+  error?: unknown;
+  timedOut?: boolean;
+  cancelled?: boolean;
+  hasResolver: boolean;
+  isStale?: boolean;
+  tokenRevision?: number;
+  currentRevision?: number;
+}
+
+/**
+ * Pure classification of completion resolve outcomes (§ED-COMP-001).
+ * Enforces rule: "resolver 缺失不推导 not-required".
+ */
+export function classifyCompletionResolveOutcome(
+  input: ClassifyCompletionResolveInput,
+): CompletionResolveOutcome {
+  const { item } = input;
+  if (input.cancelled) {
+    return { kind: "cancelled", reason: "operation-cancelled", item };
+  }
+  if (input.isStale) {
+    return {
+      kind: "stale",
+      expectedRevision: input.tokenRevision ?? 0,
+      currentRevision: input.currentRevision ?? -1,
+      item,
+    };
+  }
+  if (input.timedOut) {
+    return { kind: "timeout", durationMs: RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS, item };
+  }
+  if (input.error !== undefined && input.error !== null) {
+    const errorMsg = input.error instanceof Error ? input.error.message : String(input.error);
+    return { kind: "failed", error: errorMsg, item };
+  }
+  if (input.resolvedItem) {
+    return {
+      kind: "resolved",
+      item: input.resolvedItem,
+      edits: input.resolvedItem.additionalTextEdits ?? [],
+    };
+  }
+  if (item.additionalTextEdits && item.additionalTextEdits.length > 0) {
+    return { kind: "not-required", item };
+  }
+  if (!input.hasResolver) {
+    // ED-COMP-001: resolver 缺失不推导 not-required
+    return { kind: "unavailable", reason: "missing-resolver", item };
+  }
+  return { kind: "unavailable", reason: "resolver-returned-null", item };
+}
+
+export interface ExecuteCompletionResolveOptions {
+  item: LspCompletionItem;
+  resolve?: (raw: unknown) => Promise<LspCompletionItem | null>;
+  token: CompletionRequestToken;
+  isStillCurrent: (token: CompletionRequestToken) => boolean;
+  timeoutMs?: number;
+  getDocumentRevision?: () => number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Executes an LSP item resolve with full typed outcome classification (§ED-COMP-001).
+ */
+export async function executeCompletionResolve(
+  options: ExecuteCompletionResolveOptions,
+): Promise<CompletionResolveOutcome> {
+  const {
+    item,
+    resolve,
+    token,
+    isStillCurrent,
+    timeoutMs = RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS,
+    getDocumentRevision,
+    signal,
+  } = options;
+
+  if (signal?.aborted) {
+    return classifyCompletionResolveOutcome({ item, hasResolver: !!resolve, cancelled: true });
+  }
+  if (!isStillCurrent(token)) {
+    return classifyCompletionResolveOutcome({
+      item,
+      hasResolver: !!resolve,
+      isStale: true,
+      tokenRevision: token.documentRevision,
+      currentRevision: getDocumentRevision?.(),
+    });
+  }
+  if (item.additionalTextEdits && item.additionalTextEdits.length > 0 && !resolve) {
+    return classifyCompletionResolveOutcome({ item, hasResolver: false });
+  }
+  if (!resolve) {
+    return classifyCompletionResolveOutcome({ item, hasResolver: false });
+  }
+
+  const startRevision = getDocumentRevision?.() ?? token.documentRevision;
+  let timeoutId: number | null = null;
+  const timeoutPromise = new Promise<{ timeout: true }>((res) => {
+    timeoutId = window.setTimeout(() => res({ timeout: true }), timeoutMs);
+  });
+
+  const abortPromise = signal
+    ? new Promise<{ aborted: true }>((res) => {
+        signal.addEventListener("abort", () => res({ aborted: true }), { once: true });
+      })
+    : null;
+
+  try {
+    const rawToResolve = item.raw ?? item;
+    const raceCompetitors: Promise<unknown>[] = [
+      resolve(rawToResolve),
+      timeoutPromise,
+    ];
+    if (abortPromise) raceCompetitors.push(abortPromise);
+
+    const raceResult = await Promise.race(raceCompetitors);
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+
+    if (signal?.aborted || (typeof raceResult === "object" && raceResult !== null && "aborted" in raceResult)) {
+      return classifyCompletionResolveOutcome({ item, hasResolver: true, cancelled: true });
+    }
+    if (typeof raceResult === "object" && raceResult !== null && "timeout" in raceResult) {
+      return classifyCompletionResolveOutcome({ item, hasResolver: true, timedOut: true });
+    }
+
+    if (!isStillCurrent(token)) {
+      return classifyCompletionResolveOutcome({
+        item,
+        hasResolver: true,
+        isStale: true,
+        tokenRevision: token.documentRevision,
+        currentRevision: getDocumentRevision?.(),
+      });
+    }
+    if (getDocumentRevision && getDocumentRevision() !== startRevision) {
+      return classifyCompletionResolveOutcome({
+        item,
+        hasResolver: true,
+        isStale: true,
+        tokenRevision: startRevision,
+        currentRevision: getDocumentRevision(),
+      });
+    }
+
+    const resolved = raceResult as LspCompletionItem | null;
+    if (!resolved) {
+      return classifyCompletionResolveOutcome({ item, hasResolver: true, resolvedItem: null });
+    }
+
+    const mergedItem: LspCompletionItem = {
+      ...item,
+      ...resolved,
+      additionalTextEdits: resolved.additionalTextEdits ?? item.additionalTextEdits,
+    };
+
+    return classifyCompletionResolveOutcome({
+      item,
+      hasResolver: true,
+      resolvedItem: mergedItem,
+    });
+  } catch (err) {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+    if (!isStillCurrent(token)) {
+      return classifyCompletionResolveOutcome({
+        item,
+        hasResolver: true,
+        isStale: true,
+        tokenRevision: token.documentRevision,
+        currentRevision: getDocumentRevision?.(),
+      });
+    }
+    return classifyCompletionResolveOutcome({ item, hasResolver: true, error: err });
+  }
+}
 
 /** Stable-enough identity for QA surfaces; providers rarely send item ids. */
 export function completionItemId(item: LspCompletionItem): string {
@@ -345,9 +589,9 @@ export function buildCompletionAcceptancePlanV2(input: {
   const additional = input.item.additionalTextEdits ?? [];
   const disposition: CompletionAcceptancePlanV2["disposition"] = input.overlapRejected
     ? "blocked-overlap"
-    : input.resolveState.kind === "stale"
+    : input.resolveState.kind === "stale" || input.resolveState.kind === "cancelled"
       ? "blocked-stale"
-      : input.resolveState.kind === "timed-out" || input.resolveState.kind === "failed"
+      : input.resolveState.kind === "timed-out" || input.resolveState.kind === "failed" || input.resolveState.kind === "unavailable"
         ? "needs-explicit-primary-only"
         : "ready";
   return {
@@ -367,8 +611,8 @@ export function buildCompletionAcceptancePlanV2(input: {
   };
 }
 
-/** Why the resolve gate opened; both mean the import edits are unavailable. */
-export type CompletionResolveGateReason = "timeout" | "failed";
+/** Why the resolve gate opened; all mean the import edits are unavailable. */
+export type CompletionResolveGateReason = "timeout" | "failed" | "unavailable";
 
 /**
  * Handed to the host UI when an acceptance needs its import/additional edits
@@ -711,6 +955,55 @@ export function matchCompletionQuery(label: string, query: string): { tier: Comp
   }
 
   return { tier: 5, score: 0 };
+}
+
+export interface CompletionCandidateIdentity {
+  candidateId: string;
+  rawResponseIndex: number;
+  workspaceId: string;
+  fileKey: string;
+  documentRevision: number;
+  lspSessionGeneration: number;
+  policyRevision: number;
+}
+
+export interface CompletionCandidatePair {
+  identity: CompletionCandidateIdentity;
+  rawItem: LspCompletionItem;
+  completion: Completion;
+  matchTier: CompletionMatchTier;
+  matchScore: number;
+}
+
+/**
+ * Pure comparator for completion candidate pairs (§ED-COMP-002).
+ * Rule 1: Match tier is the primary sort key (Tier 1 < Tier 2 < Tier 3 < Tier 4 < Tier 5).
+ * Rule 2: If sortMode is alphabetical, compare labels.
+ * Rule 3: For provider-relevance within the same tier, strictly preserve provider order (rawResponseIndex).
+ */
+export function compareCandidatePairs(
+  a: CompletionCandidatePair,
+  b: CompletionCandidatePair,
+  sortMode: CompletionSortMode = "provider-relevance",
+): number {
+  if (sortMode === "alphabetical") {
+    return a.completion.label.localeCompare(b.completion.label);
+  }
+
+  // 1. Primary sort key: Match tier
+  if (a.matchTier !== b.matchTier) {
+    return a.matchTier - b.matchTier;
+  }
+
+  // 2. Explicit boost differences (e.g. prioritized symbols)
+  const boostA = a.completion.boost ?? 0;
+  const boostB = b.completion.boost ?? 0;
+  if (boostA !== boostB) {
+    return boostB - boostA;
+  }
+
+  // 3. Default tie-breaker within same tier: strictly preserve provider order (rawResponseIndex)
+  return a.identity.rawResponseIndex - b.identity.rawResponseIndex;
 }
 
 export function compareCompletionCandidates(
@@ -1117,7 +1410,7 @@ export function lspSnippetSessionInvalidator(): Extension {
   });
 }
 
-interface PlannedChange {
+export interface PlannedChange {
   from: number;
   to: number;
   insert: string;
@@ -1143,7 +1436,7 @@ function strictOffsetFromLspPosition(doc: Text, position: LspPosition): number |
  * additional edits (e.g. an import) that landed before the primary span.
  * `offsetWithinInsert` may equal `insert.length` for the cursor-at-end case.
  */
-function postImageAnchor(
+export function postImageAnchor(
   changes: PlannedChange[],
   primary: PlannedChange,
   offsetWithinInsert: number,
@@ -1158,7 +1451,7 @@ function postImageAnchor(
   return primary.from + offsetWithinInsert + delta;
 }
 
-interface PlanningChanges {
+export interface PlanningChanges {
   list: PlannedChange[];
   ok: boolean;
 }
@@ -1169,7 +1462,7 @@ interface PlanningChanges {
  * ranges never partially apply: the entire completion is rejected and the
  * invalid-additional-edits diagnostic is reported.
  */
-function planCompletionChanges(
+export function planCompletionChanges(
   view: EditorView,
   primary: PlannedChange,
   additionalEdits: LspTextEdit[],
@@ -1199,14 +1492,14 @@ function planCompletionChanges(
   return { list: ok ? list : [primary], ok };
 }
 
-function commitLspCompletion(
+export function commitLspCompletion(
   view: EditorView,
   item: LspCompletionItem,
   from: number,
   to: number,
   token: CompletionRequestToken,
   isStillCurrent: (token: CompletionRequestToken) => boolean,
-  reportDiagnostic: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
+  reportDiagnostic?: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
   excludedSymbols?: readonly SymbolPatternRule[],
 ): boolean {
   if (!isStillCurrent(token)) {
@@ -1336,13 +1629,24 @@ function applyLspCompletion(
   onResolveGate?: ((request: CompletionResolveGateRequest) => void) | undefined,
   excludedSymbols?: readonly SymbolPatternRule[],
 ): void {
-  if (item.additionalTextEdits?.length || !resolve) {
+  if (item.additionalTextEdits?.length) {
     commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic, excludedSymbols);
     return;
   }
 
   const revisionAtAccept = getDocumentRevision?.();
   const docAtAccept = view.state.doc;
+
+  const runResolve = (resolver: CompletionItemResolver | undefined): Promise<CompletionResolveOutcome> => (
+    executeCompletionResolve({
+      item,
+      resolve: resolver ? () => resolver() : undefined,
+      token,
+      isStillCurrent,
+      timeoutMs: RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS,
+      getDocumentRevision,
+    })
+  );
 
   // §8.19.4 resolve gate: a timeout/failure keeps the chosen item visible and
   // waits for an explicit Retry or Insert-without-import choice. Nothing is
@@ -1383,29 +1687,22 @@ function applyLspCompletion(
       settled = true;
       return "unavailable";
     }
-    let resolved: LspCompletionItem | null;
-    try {
-      // Fresh round-trip: bypasses the info-panel's memoized promise so a
-      // failed first attempt gets a real second chance.
-      resolved = await resolve();
-    } catch {
-      return "unavailable";
-    }
+    const outcome = await runResolve(resolve);
     if (settled) return "unavailable";
-    if (!isStillCurrent(token) || view.state.doc !== docAtAccept) {
-      reportDiagnostic?.("identity-mismatch", "resolve-retry");
+    if (outcome.kind === "stale" || outcome.kind === "cancelled") {
+      reportDiagnostic?.("identity-mismatch", `resolve-retry-${outcome.kind}`);
       settled = true;
       return "unavailable";
     }
-    if (!resolved) return "unavailable";
+    if (outcome.kind !== "resolved" && outcome.kind !== "not-required") return "unavailable";
+    if (!guardCurrent()) {
+      settled = true;
+      return "unavailable";
+    }
     settled = true;
     const committed = commitLspCompletion(
       view,
-      {
-        ...item,
-        ...resolved,
-        additionalTextEdits: resolved.additionalTextEdits ?? item.additionalTextEdits,
-      },
+      outcome.item,
       from,
       to,
       token,
@@ -1432,7 +1729,9 @@ function applyLspCompletion(
       reason,
       message: reason === "timeout"
         ? "Auto-import unavailable — provider resolve timed out"
-        : "Auto-import unavailable — provider resolve failed",
+        : reason === "unavailable"
+          ? "Auto-import unavailable — provider resolve is unavailable"
+          : "Auto-import unavailable — provider resolve failed",
       retry: retryResolve,
       insertWithoutImport,
       dismiss: () => {
@@ -1441,46 +1740,35 @@ function applyLspCompletion(
     });
   };
 
-  let timeoutId: number | null = null;
-  const timeout = new Promise<{ kind: "timeout" }>((resolveTimeout) => {
-    timeoutId = window.setTimeout(
-      () => resolveTimeout({ kind: "timeout" }),
-      RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS,
-    );
-  });
-  void Promise.race([
-    resolve().then((resolved) => ({ kind: "resolved" as const, resolved })),
-    timeout,
-  ])
+  void runResolve(resolve)
     .then((outcome) => {
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-      if (!isStillCurrent(token)) {
-        reportDiagnostic?.("identity-mismatch", "resolve");
-        return;
-      }
-      if (
-        view.state.doc !== docAtAccept
-        || (getDocumentRevision && revisionAtAccept !== undefined && getDocumentRevision() !== revisionAtAccept)
-      ) {
-        reportDiagnostic?.("additional-edit-unavailable", "revision-changed");
+      if (settled) return;
+      if (outcome.kind === "stale" || outcome.kind === "cancelled") {
+        reportDiagnostic?.("identity-mismatch", `resolve-${outcome.kind}`);
+        settled = true;
         return;
       }
       if (outcome.kind === "timeout") {
         presentGate("timeout", "resolve-timeout");
         return;
       }
-      const resolved = outcome.resolved;
-      if (!resolved) {
-        presentGate("failed", "resolve-empty");
+      if (outcome.kind === "failed") {
+        presentGate("failed", "resolve-failed");
         return;
       }
+      if (outcome.kind === "unavailable") {
+        presentGate("unavailable", `resolve-${outcome.reason}`);
+        return;
+      }
+      if (outcome.kind !== "resolved" && outcome.kind !== "not-required") return;
+      if (!guardCurrent()) {
+        settled = true;
+        return;
+      }
+      settled = true;
       commitLspCompletion(
         view,
-        {
-          ...item,
-          ...resolved,
-          additionalTextEdits: resolved.additionalTextEdits ?? item.additionalTextEdits,
-        },
+        outcome.item,
         from,
         to,
         token,
@@ -1490,9 +1778,9 @@ function applyLspCompletion(
       );
     })
     .catch(() => {
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-      if (!isStillCurrent(token) || view.state.doc !== docAtAccept) {
-        reportDiagnostic?.("identity-mismatch", "resolve");
+      if (settled) return;
+      if (!guardCurrent()) {
+        settled = true;
         return;
       }
       presentGate("failed", "resolve-failed");
@@ -1585,6 +1873,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       requestId: `completion-${completionRequestIdCounter}`,
     };
     completionRequestStartedAt.set(token, performance.now());
+    const policyRevisionAtStart = hooks.controller?.getRevision?.() ?? 1;
     recordCompletionTelemetry(token, "fetching");
 
     // LSP responses are tied to a document version. Do not spend renderer time
@@ -1611,6 +1900,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         });
       });
       if (context.aborted) return null;
+      if ((hooks.controller?.getRevision?.() ?? 1) !== policyRevisionAtStart) {
+        recordCompletionTelemetry(token, "stale", { reason: "policy-changed-before-fetch" });
+        return completeAnyWord(context);
+      }
     }
 
     const triggerCharacter = triggerOnly
@@ -1637,6 +1930,13 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     });
     const requestedScope: CompletionInvocationRequest["requestedScope"] =
       invocationOrdinal >= 2 ? "expanded" : "default";
+    // ED-COMP-004: an explicit invocation that falls back for missing scope
+    // facts names its prerequisite once via the hook; typing/trigger popups
+    // stay silent. Fires before fetch so the reason is visible even when the
+    // provider itself is unavailable.
+    if (reason === "explicit" && token.projectScope?.status === "scope-facts-missing") {
+      hooks.onScopeFallback?.(token.projectScope, reason);
+    }
     let result: LspCompletionResult | null = null;
     try {
       result = await hooks.fetch(
@@ -1649,6 +1949,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       result = null;
     }
     if (context.aborted) return null;
+    if ((hooks.controller?.getRevision?.() ?? 1) !== policyRevisionAtStart) {
+      recordCompletionTelemetry(token, "stale", { reason: "policy-changed-after-fetch" });
+      return completeAnyWord(context);
+    }
     // Validate the request identity again after the await: file switch,
     // document revision change or session restart invalidates the response.
     if (!isStillCurrent(token)) {
@@ -1681,6 +1985,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         requestedScope,
         hooks.advertisesScopeExpansion?.() ?? false,
       ),
+      projectScope: token.projectScope ?? null,
       itemCount: result.items.length,
       isIncomplete: result.isIncomplete === true,
       at: Date.now(),
@@ -1696,9 +2001,11 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     }
 
     const typed = word ? word.text : "";
+    const query = word ? context.state.doc.sliceString(word.from, context.pos) : "";
     const rawItems = result.items;
-    const mapped: Completion[] = [];
-    const mappedItems: LspCompletionItem[] = [];
+    const pairs: CompletionCandidatePair[] = [];
+    const policyRev = policyRevisionAtStart;
+
     // The server response is already relevance ordered. Mapping more entries
     // than the popup can consume only allocates closures/documentation helpers
     // on the renderer thread, which is especially visible for jdtls lists.
@@ -1713,6 +2020,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       maxVisibleItems: MAX_COMPLETION_OPTIONS,
       documentation: { enabled: true, delayMs: 250 },
     };
+    const isCandidateStillCurrent = (candidateToken: CompletionRequestToken): boolean => (
+      isStillCurrent(candidateToken)
+      && (hooks.controller?.getRevision?.() ?? 1) === policyRev
+    );
     const maxItemsLimit = policy.maxVisibleItems ?? MAX_COMPLETION_OPTIONS;
     const maxItemsToProcess = Math.min(rawItems.length, maxItemsLimit);
     for (let i = 0; i < maxItemsToProcess; i += 1) {
@@ -1766,7 +2077,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
           }
         : undefined;
       const showDoc = policy.documentation.enabled;
-      mapped.push({
+      const completion: Completion = {
         label,
         displayLabel,
         sortText: item.sortText ?? undefined,
@@ -1784,24 +2095,41 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             to,
             resolveFresh,
             token,
-            isStillCurrent,
+            isCandidateStillCurrent,
             hooks.getDocumentRevision,
             hooks.reportDiagnostic,
             hooks.onResolveGate,
             policy.excludedSymbols,
           ),
+      };
+
+      const match = matchCompletionQuery(label, query);
+      const candidateId = `${token.workspaceId}:${token.fileKey}:cand-${i}:${item.label}`;
+      const candidateIdentity: CompletionCandidateIdentity = {
+        candidateId,
+        rawResponseIndex: i,
+        workspaceId: token.workspaceId,
+        fileKey: token.fileKey,
+        documentRevision: token.documentRevision,
+        lspSessionGeneration: token.lspSessionGeneration,
+        policyRevision: policyRev,
+      };
+
+      pairs.push({
+        identity: candidateIdentity,
+        rawItem: item,
+        completion,
+        matchTier: match.tier,
+        matchScore: isPrioritized ? match.score + 500 : match.score,
       });
-      mappedItems.push(item);
     }
     if (context.aborted) return null;
 
-    // §8.22.7 U2-E: IDEA heuristic ranking vs alphabetical vs provider relevance
-    const query = word ? context.state.doc.sliceString(word.from, context.pos) : "";
-    if (policy.sortMode === "alphabetical") {
-      mapped.sort((a, b) => a.label.localeCompare(b.label));
-    } else {
-      mapped.sort((a, b) => compareCompletionCandidates(a, b, query, policy.sortMode));
-    }
+    // §ED-COMP-002: Sort atomic candidate pairs — never splits raw and mapped pairs
+    pairs.sort((a, b) => compareCandidatePairs(a, b, policy.sortMode));
+
+    const mapped = pairs.map((p) => p.completion);
+    const mappedItems = pairs.map((p) => p.rawItem);
 
     // Prefer textEdit start when every item shares the same replace range so
     // CM's client-side filtering aligns with the server's replace span.
@@ -1823,7 +2151,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       && mapped.length === 1
       && !result.isIncomplete
       && !result.truncated
-      && isStillCurrent(token)
+      && isCandidateStillCurrent(token)
     ) {
       const targetView = hooks.getView?.();
       if (targetView) {
@@ -1847,7 +2175,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             }
           }
           if (itemToCommit) {
-            if (!isStillCurrent(token)) return null;
+            if (!isCandidateStillCurrent(token)) return null;
             hooks.reportDiagnostic?.("auto-inserted-single");
             const applied = commitLspCompletion(
               targetView,
@@ -1855,7 +2183,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
               from,
               context.pos,
               token,
-              isStillCurrent,
+              isCandidateStillCurrent,
               hooks.reportDiagnostic,
               policy.excludedSymbols,
             );
@@ -1875,12 +2203,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     return {
       from,
       options: mapped,
-      // Incomplete lists should re-query on further typing (no sticky validFor).
-      // Complete lists stay open while the user continues the identifier.
-      // Always filter client-side for camelCase/prefix quality on the cap —
-      // incomplete lists still re-query because validFor is unset.
+      // Every LSP item (including resolve data and edit ranges) belongs to
+      // token.documentRevision. Re-query after typing even for complete lists;
+      // reusing them via validFor leaves visible options that cannot be accepted.
       filter: true,
-      validFor: result.isIncomplete ? undefined : /^[\w$@]*$/,
     };
   };
 }
@@ -1900,6 +2226,7 @@ export function createFixtureCompletionSource(hooks: FixtureCompletionHooks): Co
     languageId: "fixture",
     documentRevision: 0,
     lspSessionGeneration: 0,
+    ...(hooks.projectScope !== undefined ? { projectScope: hooks.projectScope } : {}),
   };
   return createLspCompletionSource({
     identity: () => ({
@@ -1913,5 +2240,6 @@ export function createFixtureCompletionSource(hooks: FixtureCompletionHooks): Co
     triggerCharacters: () => hooks.triggerCharacters?.() ?? [],
     getDocumentRevision: hooks.getDocumentRevision ?? (() => identity.documentRevision),
     reportDiagnostic: hooks.reportDiagnostic ?? (() => {}),
+    onScopeFallback: hooks.onScopeFallback,
   });
 }

@@ -15,7 +15,8 @@
         "W4-navigation",
         "W5-project-structure"
       ],
-      "requiredEvidenceLayers": ["unit", "browser"],
+      "requiredEvidenceLayers": ["unit", "browser", "native"],
+      "evidenceRoots": ["qa-ui-auto-report", "evidence"],
       "performanceBudget": {
         "typingP95Ms": 50,
         "localActionP95Ms": 100

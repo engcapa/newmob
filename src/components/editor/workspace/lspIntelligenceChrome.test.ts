@@ -1,8 +1,13 @@
 import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import {
   buildLspIntelligenceDecorations,
+  createLspOverlayChrome,
+  createLspSemanticTokenChrome,
   fallbackWordHighlights,
+  updateLspOverlayChrome,
+  updateLspSemanticTokenChrome,
 } from "./lspIntelligenceChrome";
 
 describe("LSP intelligence chrome", () => {
@@ -68,5 +73,50 @@ describe("LSP intelligence chrome", () => {
     expect(classes.some((item) => item.includes("cm-lsp-sem-function"))).toBe(true);
     expect(classes.some((item) => item.includes("cm-lsp-sem-mod-declaration"))).toBe(true);
     expect(classes.some((item) => item.includes("cm-lsp-sem-mod-defaultLibrary"))).toBe(true);
+  });
+
+  it("maps intelligence decorations through a shortening edit before provider refresh", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const initialDoc = EditorState.create({ doc: "café\nmatrix" }).doc;
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: initialDoc,
+        extensions: [
+          createLspOverlayChrome(initialDoc, [{
+            range: { start: { line: 1, character: 0 }, end: { line: 1, character: 6 } },
+            kind: 2,
+          }], []),
+          createLspSemanticTokenChrome(initialDoc, [{
+            range: { start: { line: 1, character: 0 }, end: { line: 1, character: 6 } },
+            tokenType: "variable",
+            modifiers: [],
+          }]),
+        ],
+      }),
+    });
+
+    expect(() => {
+      view.dispatch({ changes: { from: 0, to: initialDoc.length, insert: "c" } });
+      view.dispatch({
+        effects: [
+          updateLspOverlayChrome([{
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+            kind: 3,
+          }], []),
+          updateLspSemanticTokenChrome([{
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+            tokenType: "keyword",
+            modifiers: [],
+          }]),
+        ],
+      });
+    }).not.toThrow();
+    expect(parent.querySelector(".cm-lsp-usage-write")).not.toBeNull();
+    expect(parent.querySelector(".cm-lsp-sem-keyword")).not.toBeNull();
+
+    view.destroy();
+    parent.remove();
   });
 });

@@ -1,7 +1,7 @@
-id: TC-IDE-C6-02
+id: TC-IDE-C6-04
 title: "Rename preview conflict/apply/undo under jdtls"
 description: |
-  §8.19.10 gate case C6 part 2. Capability ids: rename.preview-conflict /
+  §8.19.10 gate case C6-04. Capability ids: rename.preview-conflict /
   semantic.workspace-edit-undo. Required mode: PROVIDER FIXTURE — rename
   conflict detection and cross-file WorkspaceEdit apply need jdtls.
   Browser runs must report environment-blocked, never passed. Highest

@@ -7,6 +7,11 @@ import {
   IntentionSession,
   intentionCandidateId,
 } from "./intentionSession";
+import {
+  CanonicalCodeActionService,
+  type CodeActionContextIdentity,
+  type CodeActionProviderClient,
+} from "./codeActionProviderAdapter";
 
 const evidence = () => buildCapabilityEvidence({
   capabilityId: "codeAction.quickfix",
@@ -145,5 +150,244 @@ describe("IntentionSession §8.20.4 frozen candidates", () => {
     expect(disabled.disabledReason).toBe("no selection");
     expect(disabled.resolveRequired).toBe(false);
     expect(disabled.evidence).toBeNull();
+  });
+
+  describe("§ED-ACTION-002: Lightbulb & Alt+Enter Canonical Service Migration", () => {
+    it("shares identical request/action/result flow across Lightbulb and Alt+Enter funnels", async () => {
+      const canonicalService = new CanonicalCodeActionService();
+      const session = new IntentionSession();
+
+      const context: CodeActionContextIdentity = {
+        document: {
+          uri: "file:///workspace/src/App.java",
+          revision: 5,
+          languageId: "java",
+        },
+        provider: {
+          id: "jdtls",
+          version: "1.61.0",
+          generation: 2,
+          projectFingerprint: "fp-test",
+          trusted: true,
+        },
+        range: { start: { line: 10, character: 0 }, end: { line: 10, character: 0 } },
+        diagnostics: [],
+      };
+
+      const rawAction: LspCodeAction = {
+        title: "Import 'java.util.Map'",
+        kind: "quickfix",
+        isPreferred: true,
+        edit: null,
+        command: null,
+        commandArguments: null,
+        raw: { data: { fqn: "java.util.Map" } },
+      };
+
+      const client: CodeActionProviderClient = {
+        requestCodeActions: async () => [rawAction],
+        resolveCodeAction: async (act) => ({
+          ...act,
+          edit: {
+            documentEdits: [
+              {
+                uri: "file:///workspace/src/App.java",
+                path: "/workspace/src/App.java",
+                edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "import java.util.Map;\n" }],
+              },
+            ],
+          },
+        }),
+      };
+
+      // 1. Both Lightbulb and Alt+Enter request candidates via CanonicalCodeActionService
+      const requestRes = await canonicalService.requestCandidates(context, client);
+      expect(requestRes.state).toBe("ready");
+      if (requestRes.state === "ready") {
+        expect(requestRes.actions).toHaveLength(1);
+        const candidate = candidateFromProviderAction(requestRes.actions[0]!.action, requestRes.actions[0]!.evidence);
+
+        // 2. Both freeze into IntentionSession
+        const snapshot = session.open([candidate], {
+          fileKey: "src/App.java",
+          uri: context.document.uri,
+          documentRevision: context.document.revision,
+          providerGeneration: context.provider.generation,
+          projectFingerprint: context.provider.projectFingerprint,
+        });
+
+        expect(snapshot.candidates).toHaveLength(1);
+        const frozenCandidate = snapshot.candidates[0]!;
+        expect(frozenCandidate.title).toBe("Import 'java.util.Map'");
+
+        // 3. User clicks -> resolvePlan via CanonicalCodeActionService
+        session.markResolving(frozenCandidate.id);
+        expect(session.getResolveState(frozenCandidate.id).status).toBe("resolving");
+
+        const resolveOutcome = await canonicalService.resolvePlan(
+          { ...frozenCandidate, rawAction: requestRes.actions[0]!.action },
+          context,
+          client,
+          5, // current revision
+          2, // current generation
+        );
+
+        expect(resolveOutcome.state).toBe("resolved");
+        if (resolveOutcome.state === "resolved") {
+          session.markResolved(frozenCandidate.id);
+          expect(session.getResolveState(frozenCandidate.id).status).toBe("resolved");
+          expect(resolveOutcome.plan.edit?.documentEdits).toHaveLength(1);
+        }
+      }
+    });
+
+    it("enforces stale zero-apply when document revision advances before resolve", async () => {
+      const canonicalService = new CanonicalCodeActionService();
+      const session = new IntentionSession();
+
+      const context: CodeActionContextIdentity = {
+        document: {
+          uri: "file:///workspace/src/App.java",
+          revision: 5,
+          languageId: "java",
+        },
+        provider: {
+          id: "jdtls",
+          version: "1.61.0",
+          generation: 2,
+          projectFingerprint: "fp-test",
+          trusted: true,
+        },
+        range: { start: { line: 10, character: 0 }, end: { line: 10, character: 0 } },
+        diagnostics: [],
+      };
+
+      const rawAction: LspCodeAction = {
+        title: "Import 'java.util.List'",
+        kind: "quickfix",
+        isPreferred: true,
+        edit: null,
+        command: null,
+        commandArguments: null,
+        raw: { data: {} },
+      };
+
+      const candidate = candidateFromProviderAction(rawAction, evidence());
+      session.open([candidate], {
+        fileKey: "src/App.java",
+        uri: context.document.uri,
+        documentRevision: 5,
+        providerGeneration: 2,
+        projectFingerprint: "fp-test",
+      });
+
+      const client: CodeActionProviderClient = {
+        requestCodeActions: async () => [rawAction],
+        resolveCodeAction: async (act) => act,
+      };
+
+      // Document advanced to revision 6
+      const resolveOutcome = await canonicalService.resolvePlan(
+        { ...candidate, rawAction },
+        context,
+        client,
+        6, // stale revision!
+        2,
+      );
+
+      expect(resolveOutcome.state).toBe("stale");
+      if (resolveOutcome.state === "stale") {
+        session.markFailed(candidate.id, resolveOutcome.reason);
+        expect(session.getResolveState(candidate.id).status).toBe("failed");
+      }
+    });
+
+    it("keeps candidate list visible and allows retry on resolve failure/timeout", async () => {
+      const canonicalService = new CanonicalCodeActionService();
+      const session = new IntentionSession();
+
+      const context: CodeActionContextIdentity = {
+        document: {
+          uri: "file:///workspace/src/App.java",
+          revision: 1,
+          languageId: "java",
+        },
+        provider: {
+          id: "jdtls",
+          version: "1.61.0",
+          generation: 1,
+          projectFingerprint: "fp-test",
+          trusted: true,
+        },
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        diagnostics: [],
+      };
+
+      const rawAction: LspCodeAction = {
+        title: "Extract Method",
+        kind: "refactor.extract",
+        isPreferred: false,
+        edit: null,
+        command: null,
+        commandArguments: null,
+        raw: { data: {} },
+      };
+
+      const candidate = candidateFromProviderAction(rawAction, evidence());
+      session.open([candidate], {
+        fileKey: "src/App.java",
+        uri: context.document.uri,
+        documentRevision: 1,
+        providerGeneration: 1,
+        projectFingerprint: "fp-test",
+      });
+
+      let fail = true;
+      const client: CodeActionProviderClient = {
+        requestCodeActions: async () => [rawAction],
+        resolveCodeAction: async (act) => {
+          if (fail) throw new Error("Resolve connection timed out");
+          return {
+            ...act,
+            edit: { documentEdits: [] },
+          };
+        },
+      };
+
+      // 1. Initial attempt fails
+      session.markResolving(candidate.id);
+      const outcomeFail = await canonicalService.resolvePlan(
+        { ...candidate, rawAction },
+        context,
+        client,
+        1,
+        1,
+      );
+      expect(outcomeFail.state).toBe("unresolved");
+      if (outcomeFail.state === "unresolved") {
+        session.markFailed(candidate.id, outcomeFail.reason);
+      }
+      expect(session.getResolveState(candidate.id)).toEqual({
+        status: "failed",
+        message: expect.stringContaining("Resolve connection timed out"),
+        retryable: true,
+      });
+      // Candidate list preserved!
+      expect(session.getState()!.candidates).toHaveLength(1);
+
+      // 2. Retry succeeds
+      fail = false;
+      session.markResolving(candidate.id);
+      const outcomeRetry = await canonicalService.resolvePlan(
+        { ...candidate, rawAction },
+        context,
+        client,
+        1,
+        1,
+      );
+      expect(outcomeRetry.state).toBe("resolved");
+      session.markResolved(candidate.id);
+      expect(session.getResolveState(candidate.id).status).toBe("resolved");
+    });
   });
 });

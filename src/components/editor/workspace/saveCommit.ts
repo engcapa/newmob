@@ -11,10 +11,14 @@
 
 import {
   parseWorkspaceWriteError,
+  WorkspaceWriteError,
   type WorkspaceFile,
+  type WorkspaceWriteAck,
   type WorkspaceWriteErrorData,
 } from "../../../lib/editor/workspace";
 import type { OpenFileEol } from "./editorGroupTypes";
+import { sha256Hex, sha256HexBytes } from "./projectAnalysisModel";
+import type { ImmutableSavePlan } from "./saveNormalizationPipeline";
 
 export type SaveEol = "lf" | "crlf" | "cr";
 
@@ -22,6 +26,24 @@ export interface SaveCommitPolicy {
   eol: SaveEol;
   encoding: string;
   bom: boolean;
+}
+
+/** Final receipt generated after the single disk writer succeeds (§ED-SAVE-003). */
+export interface FinalBytesReceipt {
+  receiptId: string;
+  transactionId: string;
+  workspaceId: string;
+  filePath: string;
+  writeCount: number; // strictly 1 on successful commit
+  finalTextSha256: string;
+  encodedBytesSha256: string;
+  encodedByteLength: number;
+  policy: SaveCommitPolicy;
+  diskPreSha256: string | null;
+  diskPostSha256: string;
+  historyId?: string;
+  recoveryId?: string;
+  committedAt: number;
 }
 
 /** Immutable snapshot of everything one save transaction commits. */
@@ -35,6 +57,8 @@ export interface PreparedSave {
   styleGeneration: number;
   expectedDiskHash: string | null;
   policy: SaveCommitPolicy;
+  /** Six-stage prepare record when this write originated from the save pipeline. */
+  normalizationPlan?: ImmutableSavePlan;
 }
 
 /**
@@ -56,19 +80,21 @@ export type ProviderEffect = "not-sent" | "did-save" | "did-change-current" | "d
  */
 export type SaveCommitResult =
   | { kind: "saved-current"; transactionId: string; diskEffect: "committed";
-      memoryEffect: "saved-current"; providerEffect: "did-save" | "not-sent" | "failed"; file: WorkspaceFile }
+      memoryEffect: "saved-current"; providerEffect: "did-save" | "not-sent" | "failed"; file: WorkspaceFile; receipt: FinalBytesReceipt; historyId?: string; recoveryId?: string }
   | { kind: "saved-stale-snapshot"; transactionId: string; diskEffect: "committed";
       memoryEffect: "kept-dirty"; providerEffect: "did-change-current" | "not-sent" | "failed";
-      file: WorkspaceFile; savedRevision: number; currentRevision: number }
+      file: WorkspaceFile; savedRevision: number; currentRevision: number; receipt: FinalBytesReceipt; historyId?: string; recoveryId?: string }
   | { kind: "committed-writeback-discarded"; transactionId: string; diskEffect: "committed";
-      memoryEffect: "writeback-discarded"; providerEffect: "discarded"; file: WorkspaceFile; reason: string }
+      memoryEffect: "writeback-discarded"; providerEffect: "discarded"; file: WorkspaceFile; reason: string; receipt: FinalBytesReceipt; historyId?: string; recoveryId: string }
   | { kind: "cancelled"; transactionId: string; diskEffect: "none";
       memoryEffect: "unchanged"; providerEffect: "not-sent"; phase: "prepare" | "pre-write"; reason: string }
   | { kind: "conflict"; transactionId: string; diskEffect: "none";
       memoryEffect: "unchanged"; providerEffect: "not-sent"; error: WorkspaceWriteErrorData }
-  | { kind: "failed"; transactionId: string; diskEffect: "none" | "unknown";
-      memoryEffect: "unchanged"; providerEffect: "not-sent" | "unknown";
-      error: WorkspaceWriteErrorData; recoveryId?: string };
+  | { kind: "failed"; transactionId: string; diskEffect: "none";
+      memoryEffect: "unchanged"; providerEffect: "not-sent"; error: WorkspaceWriteErrorData }
+  | { kind: "failed"; transactionId: string; diskEffect: "unknown";
+      memoryEffect: "unchanged"; providerEffect: "unknown";
+      error: WorkspaceWriteErrorData; recoveryId: string };
 
 /** Prepare-phase output: either a frozen PreparedSave or a terminal failure. */
 export type PrepareSaveResult =
@@ -77,6 +103,270 @@ export type PrepareSaveResult =
 
 /** The one writer contract: commit a frozen PreparedSave, report full facts. */
 export type PreparedSaveCommitter = (prepared: PreparedSave) => Promise<SaveCommitResult>;
+
+export interface EncodedSaveBytes {
+  bytes: Uint8Array;
+  textSha256: string;
+  bytesSha256: string;
+  byteLength: number;
+}
+
+/**
+ * Canonical logical text handed to the native byte writer. CodeMirror text is
+ * LF-normalized, while the save pipeline may already have applied the target
+ * EOL and represented the BOM as U+FEFF. Normalize idempotently and keep BOM
+ * ownership in the encoding policy so neither EOL nor BOM can be doubled.
+ */
+export function prepareSaveTextForWriter(text: string, policy: SaveCommitPolicy): string {
+  const withoutBom = text.startsWith("\uFEFF") ? text.slice(1) : text;
+  const lfText = withoutBom.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (policy.eol === "crlf") return lfText.replace(/\n/g, "\r\n");
+  if (policy.eol === "cr") return lfText.replace(/\n/g, "\r");
+  return lfText;
+}
+
+/**
+ * Pure byte encoder verifying encoding compatibility and generating final SHA-256 hashes (§ED-SAVE-003).
+ */
+export function encodeSaveBytes(text: string, policy: SaveCommitPolicy): EncodedSaveBytes {
+  const encoding = (policy.encoding || "UTF-8").toUpperCase();
+  const logicalText = prepareSaveTextForWriter(text, policy);
+  const textSha256 = sha256Hex(logicalText);
+  let rawBytes: Uint8Array;
+
+  if (encoding === "UTF-8") {
+    const encoded = new TextEncoder().encode(logicalText);
+    if (!policy.bom) {
+      rawBytes = encoded;
+    } else {
+      rawBytes = new Uint8Array(encoded.length + 3);
+      rawBytes.set([0xef, 0xbb, 0xbf]);
+      rawBytes.set(encoded, 3);
+    }
+  } else if (encoding === "ISO-8859-1" || encoding === "LATIN1") {
+    rawBytes = new Uint8Array(logicalText.length);
+    for (let i = 0; i < logicalText.length; i++) {
+      const code = logicalText.charCodeAt(i);
+      if (code > 255) {
+        throw new WorkspaceWriteError("encoding", `Character '${logicalText[i]}' at position ${i} cannot be represented in Latin-1.`, undefined, undefined, "none");
+      }
+      rawBytes[i] = code & 0xff;
+    }
+  } else if (encoding === "US-ASCII" || encoding === "ASCII") {
+    rawBytes = new Uint8Array(logicalText.length);
+    for (let i = 0; i < logicalText.length; i++) {
+      const code = logicalText.charCodeAt(i);
+      if (code > 127) {
+        throw new WorkspaceWriteError("encoding", `Character '${logicalText[i]}' at position ${i} cannot be represented in US-ASCII.`, undefined, undefined, "none");
+      }
+      rawBytes[i] = code & 0x7f;
+    }
+  } else if (encoding === "UTF-16LE") {
+    const offset = policy.bom ? 2 : 0;
+    rawBytes = new Uint8Array(logicalText.length * 2 + offset);
+    if (policy.bom) rawBytes.set([0xff, 0xfe]);
+    for (let i = 0; i < logicalText.length; i++) {
+      const code = logicalText.charCodeAt(i);
+      rawBytes[offset + i * 2] = code & 0xff;
+      rawBytes[offset + i * 2 + 1] = (code >> 8) & 0xff;
+    }
+  } else if (encoding === "UTF-16BE") {
+    const offset = policy.bom ? 2 : 0;
+    rawBytes = new Uint8Array(logicalText.length * 2 + offset);
+    if (policy.bom) rawBytes.set([0xfe, 0xff]);
+    for (let i = 0; i < logicalText.length; i++) {
+      const code = logicalText.charCodeAt(i);
+      rawBytes[offset + i * 2] = (code >> 8) & 0xff;
+      rawBytes[offset + i * 2 + 1] = code & 0xff;
+    }
+  } else {
+    // Default fallback to UTF-8
+    rawBytes = new TextEncoder().encode(logicalText);
+  }
+
+  const bytesSha256 = sha256HexBytes(rawBytes);
+  return {
+    bytes: rawBytes,
+    textSha256,
+    bytesSha256,
+    byteLength: rawBytes.length,
+  };
+}
+
+/** Build the receipt from the real byte-writer acknowledgement. */
+export function buildFinalBytesReceipt(
+  prepared: PreparedSave,
+  ack: Pick<WorkspaceWriteAck, "writtenHash" | "writtenByteLength" | "intentHash" | "oldHash">,
+  options: {
+    historyId?: string;
+    recoveryId?: string;
+    committedAt?: number;
+  } = {},
+): FinalBytesReceipt {
+  const logicalText = prepareSaveTextForWriter(prepared.text, prepared.policy);
+  return {
+    receiptId: `receipt-${prepared.transactionId}`,
+    transactionId: prepared.transactionId,
+    workspaceId: prepared.workspaceId,
+    filePath: prepared.filePath,
+    writeCount: 1,
+    finalTextSha256: sha256Hex(logicalText),
+    encodedBytesSha256: ack.intentHash || ack.writtenHash,
+    encodedByteLength: ack.writtenByteLength,
+    policy: { ...prepared.policy },
+    diskPreSha256: ack.oldHash !== undefined ? ack.oldHash : prepared.expectedDiskHash,
+    diskPostSha256: ack.writtenHash,
+    ...(options.historyId ? { historyId: options.historyId } : {}),
+    ...(options.recoveryId ? { recoveryId: options.recoveryId } : {}),
+    committedAt: options.committedAt ?? Date.now(),
+  };
+}
+
+export interface SingleWriterCommitterOptions {
+  getLiveBoundary: () => PreparedSaveBoundary | null;
+  getLiveAfterWrite?: () => { documentRevision: number } | null;
+  writeToDisk: (prepared: PreparedSave, encoded: EncodedSaveBytes) => Promise<WorkspaceFile>;
+  generateHistoryId?: (prepared: PreparedSave) => string;
+  generateRecoveryId?: (prepared: PreparedSave) => string;
+}
+
+/**
+ * Creates an atomic single-writer save committer guaranteeing synchronous pre-write boundary checks,
+ * exactly one disk write invocation on success, and comprehensive final receipt reporting (§ED-SAVE-003).
+ */
+export function createSingleWriterSaveCommitter(
+  options: SingleWriterCommitterOptions,
+): PreparedSaveCommitter {
+  return async (prepared: PreparedSave): Promise<SaveCommitResult> => {
+    // 1. Synchronous pre-write boundary check
+    const liveBoundary = options.getLiveBoundary();
+    const boundaryError = validatePreparedSaveBoundary(prepared, liveBoundary);
+    if (boundaryError !== null) {
+      return {
+        kind: "cancelled",
+        transactionId: prepared.transactionId,
+        diskEffect: "none",
+        memoryEffect: "unchanged",
+        providerEffect: "not-sent",
+        phase: "pre-write",
+        reason: boundaryError,
+      };
+    }
+
+    // 2. Encode bytes and compute SHA-256
+    let encoded: EncodedSaveBytes;
+    try {
+      encoded = encodeSaveBytes(prepared.text, prepared.policy);
+    } catch (err) {
+      const parsed = parseWorkspaceWriteError(err);
+      return {
+        kind: "failed",
+        transactionId: prepared.transactionId,
+        diskEffect: "none",
+        memoryEffect: "unchanged",
+        providerEffect: "not-sent",
+        error: parsed,
+      };
+    }
+
+    // 3. Perform the single write to disk
+    let writtenFile: WorkspaceFile;
+    try {
+      writtenFile = await options.writeToDisk(prepared, encoded);
+    } catch (err) {
+      const parsed = parseWorkspaceWriteError(err);
+      if (parsed.kind === "hash-mismatch") {
+        return {
+          kind: "conflict",
+          transactionId: prepared.transactionId,
+          diskEffect: "none",
+          memoryEffect: "unchanged",
+          providerEffect: "not-sent",
+          error: parsed,
+        };
+      }
+      if (parsed.effect === "unknown") {
+        const recoveryId = options.generateRecoveryId
+          ? options.generateRecoveryId(prepared)
+          : prepared.transactionId;
+        return {
+          kind: "failed",
+          transactionId: prepared.transactionId,
+          diskEffect: "unknown",
+          memoryEffect: "unchanged",
+          providerEffect: "unknown",
+          error: parsed,
+          recoveryId,
+        };
+      }
+      return {
+        kind: "failed",
+        transactionId: prepared.transactionId,
+        diskEffect: "none",
+        memoryEffect: "unchanged",
+        providerEffect: "not-sent",
+        error: parsed,
+      };
+    }
+
+    // 4. Post-write classification and final receipt generation
+    const liveAfter = options.getLiveAfterWrite ? options.getLiveAfterWrite() : options.getLiveBoundary();
+    const writeback = classifySaveWriteback(prepared, liveAfter ? { documentRevision: liveAfter.documentRevision } : null);
+
+    const receipt = buildFinalBytesReceipt(prepared, {
+      writtenHash: writtenFile.hash || encoded.bytesSha256,
+      writtenByteLength: encoded.byteLength,
+      intentHash: encoded.bytesSha256,
+      oldHash: prepared.expectedDiskHash,
+    }, {
+      historyId: options.generateHistoryId ? options.generateHistoryId(prepared) : `hist-${prepared.transactionId}`,
+    });
+
+    if (writeback.kind === "saved-current") {
+      return {
+        kind: "saved-current",
+        transactionId: prepared.transactionId,
+        diskEffect: "committed",
+        memoryEffect: "saved-current",
+        providerEffect: "did-save",
+        file: writtenFile,
+        receipt,
+        historyId: receipt.historyId,
+      };
+    }
+
+    if (writeback.kind === "saved-stale-snapshot") {
+      return {
+        kind: "saved-stale-snapshot",
+        transactionId: prepared.transactionId,
+        diskEffect: "committed",
+        memoryEffect: "kept-dirty",
+        providerEffect: "did-change-current",
+        file: writtenFile,
+        savedRevision: prepared.bufferRevision,
+        currentRevision: writeback.currentRevision,
+        receipt,
+        historyId: receipt.historyId,
+      };
+    }
+
+    const recoveryId = options.generateRecoveryId
+      ? options.generateRecoveryId(prepared)
+      : prepared.transactionId;
+    return {
+      kind: "committed-writeback-discarded",
+      transactionId: prepared.transactionId,
+      diskEffect: "committed",
+      memoryEffect: "writeback-discarded",
+      providerEffect: "discarded",
+      file: writtenFile,
+      reason: writeback.reason,
+      receipt: { ...receipt, recoveryId },
+      historyId: receipt.historyId,
+      recoveryId,
+    };
+  };
+}
 
 /**
  * Illegal-transition guard used by tests and debug assertions. Note: a
@@ -300,6 +590,7 @@ export function buildPreparedSave(input: {
   styleGeneration: number;
   expectedDiskHash: string | null;
   policy: SaveCommitPolicy;
+  normalizationPlan?: ImmutableSavePlan;
 }): PreparedSave {
   return { ...input, policy: { ...input.policy } };
 }

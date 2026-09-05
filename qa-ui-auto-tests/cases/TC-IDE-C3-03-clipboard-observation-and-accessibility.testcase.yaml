@@ -1,0 +1,184 @@
+id: TC-IDE-C3-03
+title: "Clipboard observation seam: typed outcome/effect, denial fallback, keyboard focus and zoom"
+description: |
+  ED-CLIP-004 browser behaviour and accessibility slice for the clipboard
+  observation seam added by this card. It drives the production copy/paste
+  owners keyboard-only at the product's 200% editor size and observes only
+  metadata: operation, typed outcome, OS effect, permission epoch, payload
+  shape and caret count.
+
+  It asserts the seam's live-region semantics, that a multi-caret copy reports
+  `success` + `performed` with the real segment/caret shape, and that the seam
+  never carries the copied text. The browser VFS is NOT native clipboard
+  evidence: real OS grant/denial at the X11 boundary belongs to TC-IDE-C3-02,
+  which this case deliberately does not duplicate.
+covers: [F25.5, F1.7]
+tags: [code-workspace, ide-c3, clipboard, accessibility, p0]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+
+  # Product's 200%-of-13px editor size, as in the ED-SAVE-004 a11y slice.
+  - click: '[data-testid="code-workspace-tab"]'
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Editor Appearance Settings
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Editor Appearance Settings'
+  - wait_for: '[data-testid="workspace-editor-appearance-settings-dialog"]'
+  - fill:
+      selector: '[data-testid="workspace-editor-appearance-font-size-px"]'
+      value: "26"
+  - click: '[data-testid="workspace-editor-appearance-apply"]'
+  - wait_for:
+      selector: '[data-testid="workspace-editor-appearance-settings-dialog"]'
+      state: detached
+  - assert_text:
+      selector: '[data-testid="code-workspace-zoom-reset"]'
+      contains: "26px"
+
+  # The seam exists with live-region semantics and no outcome before any
+  # clipboard operation ran.
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: role
+      equals: status
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: aria-live
+      equals: polite
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: aria-atomic
+      equals: "true"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: aria-label
+      equals: Clipboard status
+  - eval_readonly:
+      expression: '!document.getElementById("code-workspace-clipboard-observation")?.hasAttribute("data-outcome")'
+      expect_truthy: true
+
+  # Keyboard-only copy of the whole document through the real keymap.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+a
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+c
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="code-workspace-tab"][data-clipboard-revision="1"]'
+
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-operation
+      equals: copy
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-outcome
+      equals: success
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-system-effect
+      equals: performed
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-workspace-fallback
+      equals: "false"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-caret-count
+      equals: "1"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-history-exclusion
+      equals: recorded
+  # The announcement names outcome and effect separately, per ED-CLIP-002.
+  - assert_text:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      contains: "system clipboard effect performed"
+  # Metadata only: the copied document text never enters the seam.
+  - eval_readonly:
+      expression: '!document.getElementById("code-workspace-clipboard-observation")?.outerHTML.includes("in-memory virtual local filesystem")'
+      expect_truthy: true
+  # Payload SHAPE is reported instead.
+  - eval_readonly:
+      expression: 'Number(document.getElementById("code-workspace-clipboard-observation")?.getAttribute("data-payload-length")) > 0'
+      expect_truthy: true
+
+  # Multi-caret copy updates the reported shape, not just the outcome.
+  - press:
+      key: Control+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Shift+ArrowRight
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+Alt+Shift+ArrowDown
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+c
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="code-workspace-tab"][data-clipboard-revision="2"]'
+  - eval_readonly:
+      expression: 'Number(document.getElementById("code-workspace-clipboard-observation")?.getAttribute("data-caret-count")) >= 2'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'Number(document.getElementById("code-workspace-clipboard-observation")?.getAttribute("data-segment-count")) >= 2'
+      expect_truthy: true
+
+  # Paste keeps the editor focused and accessible; the seam records the paste.
+  - press:
+      key: Escape
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+End
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+v
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait: 1
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-operation
+      equals: paste
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      name: role
+      equals: textbox
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      name: aria-multiline
+      equals: "true"
+  - eval_readonly:
+      expression: 'document.activeElement === document.querySelectorAll(".cm-content")[0]'
+      expect_truthy: true
+
+  # One undo reverses the paste transaction with focus retained.
+  - press:
+      key: Control+z
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait: 0.5
+  - eval_readonly:
+      expression: 'document.activeElement === document.querySelectorAll(".cm-content")[0]'
+      expect_truthy: true
+  - screenshot: tc-ide-c3-03-clipboard-observation.png

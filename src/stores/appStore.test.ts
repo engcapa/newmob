@@ -18,6 +18,31 @@ const tab = (id: string, overrides: Partial<Tab> = {}): Tab => ({
   ...overrides,
 });
 
+describe("appStore status writes", () => {
+  it("does not publish equal status messages but publishes semantic changes", () => {
+    const originalStatus = useAppStore.getState().statusMessage;
+    useAppStore.setState({ statusMessage: "Ready" });
+    const beforeEqualWrite = useAppStore.getState();
+    let notifications = 0;
+    const unsubscribe = useAppStore.subscribe(() => {
+      notifications += 1;
+    });
+
+    try {
+      useAppStore.getState().setStatusMessage("Ready");
+      expect(useAppStore.getState()).toBe(beforeEqualWrite);
+      expect(notifications).toBe(0);
+
+      useAppStore.getState().setStatusMessage("Typing");
+      expect(useAppStore.getState().statusMessage).toBe("Typing");
+      expect(notifications).toBe(1);
+    } finally {
+      unsubscribe();
+      useAppStore.setState({ statusMessage: originalStatus });
+    }
+  });
+});
+
 describe("appStore.moveTab", () => {
   beforeEach(() => {
     useAppStore.setState({

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LspLocation, LspWorkspaceEdit } from "../../../lib/editor/lsp";
 import { buildCapabilityEvidence } from "./capabilityEvidence";
+import type { ProjectStructureSnapshotV2 } from "./projectStructureModel";
 import {
   buildRefactorPlan,
   refactorApplyGate,
@@ -361,5 +362,211 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => 
         expect(avail.attestation.proof.id).toBe("java.action.safeDelete");
       }
     });
+  });
+
+  describe("ED-REF-001: Multi-file rename, dirty conflicts, and library guards", () => {
+    it("builds multi-file rename plan and blocks on dirty buffer conflict", () => {
+      const multiFileEdit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            uri: "file:///workspace/core/User.java",
+            path: "/workspace/core/User.java",
+            version: 1,
+            edits: [{ range: { start: { line: 5, character: 13 }, end: { line: 5, character: 17 } }, newText: "Account" }],
+          },
+          {
+            uri: "file:///workspace/app/UserService.java",
+            path: "/workspace/app/UserService.java",
+            version: 2,
+            edits: [{ range: { start: { line: 12, character: 8 }, end: { line: 12, character: 12 } }, newText: "Account" }],
+          },
+        ],
+      };
+
+      const plan = buildRefactorPlan({
+        actionId: "rename-user-account",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit: multiFileEdit,
+        roots: [{ path: "/workspace" }],
+        openFiles: {
+          "/workspace/core/User.java": { revision: 1, documentRevision: 1, diskHash: "hash-user" },
+          "/workspace/app/UserService.java": { revision: 2, documentRevision: 3, diskHash: "hash-service" }, // Revision mismatch (dirty)
+        },
+        conflicts: [
+          {
+            severity: "error",
+            message: "File '/workspace/app/UserService.java' has unsaved buffer edits",
+            location: null,
+            // The dirty-buffer conflict is observed by the client from local buffer
+            // revisions, which is what client-observed-bounded denotes. "derived" was
+            // never a member of the closed provenance union.
+            source: "client-observed-bounded",
+          },
+        ],
+      });
+
+      const gate = refactorApplyGate(plan);
+      expect(gate.allowed).toBe(false);
+      expect(gate.reason).toContain("unsaved buffer edits");
+      expect(gate.blockingConflicts).toHaveLength(1);
+    });
+
+    it("hard blocks when refactoring touches read-only jar library", () => {
+      const libraryEdit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            // A jar: library buffer has no workspace file, so path stays null.
+            uri: "jar:file:///root/.m2/repository/com/google/guava/guava.jar!/ImmutableList.class",
+            path: null,
+            version: null,
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } }, newText: "List" }],
+          },
+        ],
+      };
+
+      const plan = buildRefactorPlan({
+        actionId: "rename-library",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit: libraryEdit,
+        roots: [{ path: "/workspace" }],
+      });
+
+      const gate = refactorApplyGate(plan);
+      expect(gate.allowed).toBe(false);
+      expect(gate.reason).toContain("read-only library resource");
+    });
+  });
+});
+
+
+describe("ED-PROJECT-005: refactor plan facts generation pinning", () => {
+  const factsPinnedPlan = (projectFacts: RefactorPlanV4["projectFacts"]): RefactorPlanV4 => ({
+    actionId: "rename-facts",
+    kind: "rename",
+    evidence: dummyEvidence,
+    completeness: { value: "complete", source: "provider-asserted", proof: "p" },
+    conflicts: [],
+    operations: [],
+    documents: [{ uri: "file:///workspace/src/A.java", canonicalPath: "/workspace/src/A.java", expectedDocumentRevision: 1, expectedDiskHash: null, owner: "workspace" }],
+    requiredOperationIndexes: [],
+    affectedUris: [{ uri: "file:///workspace/src/A.java", revision: 1, owner: "workspace" }],
+    excludableGroups: [],
+    projectFacts,
+  });
+
+  it("records the explicit facts snapshot on the plan (A1)", () => {
+    const plan = buildRefactorPlan({
+      actionId: "rename-explicit",
+      kind: "rename",
+      evidence: dummyEvidence,
+      edit: {
+        documentEdits: [
+          {
+            uri: "file:///workspace/src/A.java",
+            path: "/workspace/src/A.java",
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } }, newText: "A2" }],
+          },
+        ],
+      },
+      roots: [{ path: "/workspace" }],
+      projectFacts: { workspaceRoot: "/workspace", generation: 7, fingerprint: "fp-7" },
+    });
+
+    expect(plan.projectFacts).toEqual({ workspaceRoot: "/workspace", generation: 7, fingerprint: "fp-7" });
+  });
+
+  it("resolves the live ready snapshot when the input omits it (A1)", async () => {
+    const { useProjectFactsStore } = await import("../../../stores/projectFactsStore");
+    useProjectFactsStore.setState({ workspaces: {} });
+    useProjectFactsStore.setState({
+      workspaces: {
+        "/workspace": {
+          workspaceRoot: "/workspace",
+          generation: 4,
+          status: "ready",
+          reason: null,
+          fingerprint: "fp-4",
+          structure: { modules: [] } as unknown as ProjectStructureSnapshotV2,
+          provenance: null,
+          isStale: false,
+          abortController: null,
+        },
+      },
+    });
+
+    const plan = buildRefactorPlan({
+      actionId: "rename-live",
+      kind: "rename",
+      evidence: dummyEvidence,
+      edit: {
+        documentEdits: [
+          {
+            uri: "file:///workspace/src/A.java",
+            path: "/workspace/src/A.java",
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } }, newText: "A2" }],
+          },
+        ],
+      },
+      roots: [{ path: "/workspace" }],
+    });
+
+    expect(plan.projectFacts).toEqual({ workspaceRoot: "/workspace", generation: 4, fingerprint: "fp-4" });
+    useProjectFactsStore.setState({ workspaces: {} });
+  });
+
+  it("blocks apply when the pinned generation went stale (A2)", async () => {
+    const { useProjectFactsStore } = await import("../../../stores/projectFactsStore");
+    useProjectFactsStore.setState({
+      workspaces: {
+        "/workspace": {
+          workspaceRoot: "/workspace",
+          generation: 5,
+          status: "ready",
+          reason: null,
+          fingerprint: "fp-5",
+          structure: { modules: [] } as unknown as ProjectStructureSnapshotV2,
+          provenance: null,
+          isStale: false,
+          abortController: null,
+        },
+      },
+    });
+
+    const gate = refactorApplyGate(
+      factsPinnedPlan({ workspaceRoot: "/workspace", generation: 4, fingerprint: "fp-4" }),
+    );
+    expect(gate.allowed).toBe(false);
+    expect(gate.reason).toContain("G4 -> G5");
+    useProjectFactsStore.setState({ workspaces: {} });
+  });
+
+  it("allows apply when the pinned generation is current and when unpinned (A2)", async () => {
+    const { useProjectFactsStore } = await import("../../../stores/projectFactsStore");
+    useProjectFactsStore.setState({
+      workspaces: {
+        "/workspace": {
+          workspaceRoot: "/workspace",
+          generation: 4,
+          status: "ready",
+          reason: null,
+          fingerprint: "fp-4",
+          structure: { modules: [] } as unknown as ProjectStructureSnapshotV2,
+          provenance: null,
+          isStale: false,
+          abortController: null,
+        },
+      },
+    });
+
+    const current = refactorApplyGate(
+      factsPinnedPlan({ workspaceRoot: "/workspace", generation: 4, fingerprint: "fp-4" }),
+    );
+    expect(current.allowed).toBe(true);
+
+    const unpinned = refactorApplyGate(factsPinnedPlan(null));
+    expect(unpinned.allowed).toBe(true);
+    useProjectFactsStore.setState({ workspaces: {} });
   });
 });

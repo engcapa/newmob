@@ -142,4 +142,175 @@ describe("§8.22.9 U4 WorkspaceSemanticQueryHost", () => {
     expect(result.status).toBe("stale");
     expect(result.items).toEqual([]);
   });
+
+  describe("§ED-QUERY-001: Semantic Query Envelope, Four-Phase Live Guards & Multi-Tier Cancel", () => {
+    it("passes complete semantic query envelope context to fetcher", async () => {
+      const host = new WorkspaceSemanticQueryHost();
+      let capturedContext: any = null;
+
+      const result = await host.executeEnvelope({
+        kind: "definitions",
+        identity: {
+          workspaceId: "ws-test",
+          fileKey: "src/App.tsx",
+          uri: "file:///workspace/src/App.tsx",
+          position: { line: 15, character: 10 },
+          documentRevision: 8,
+          lspSessionGeneration: 3,
+          projectGeneration: 2,
+          requestId: "custom-req-42",
+        },
+        fetcher: async (ctx) => {
+          capturedContext = ctx;
+          return [{ targetUri: "file:///workspace/src/Target.tsx", targetRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 10 } } }];
+        },
+      });
+
+      expect(result.status).toBe("success");
+      expect(result.queryId).toBe("custom-req-42");
+      expect(result.identity?.workspaceId).toBe("ws-test");
+      expect(result.identity?.fileKey).toBe("src/App.tsx");
+      expect(result.identity?.documentRevision).toBe(8);
+      expect(result.identity?.lspSessionGeneration).toBe(3);
+      expect(result.identity?.projectGeneration).toBe(2);
+
+      expect(capturedContext.workspaceId).toBe("ws-test");
+      expect(capturedContext.fileKey).toBe("src/App.tsx");
+      expect(capturedContext.position).toEqual({ line: 15, character: 10 });
+      expect(capturedContext.signal).toBeDefined();
+      expect(capturedContext.signal.aborted).toBe(false);
+    });
+
+    it("Phase 1 Pre-flight Guard: aborts before fetcher if revision or generation is already stale", async () => {
+      const host = new WorkspaceSemanticQueryHost();
+      let fetcherCalled = false;
+
+      const result = await host.executeEnvelope({
+        kind: "typeDefinitions",
+        identity: {
+          uri: "file:///a.ts",
+          position: { line: 1, character: 1 },
+          documentRevision: 5,
+          lspSessionGeneration: 2,
+        },
+        fetcher: async () => {
+          fetcherCalled = true;
+          return [];
+        },
+        guards: {
+          getLiveDocumentRevision: () => 6, // Already at revision 6
+          getLiveLspGeneration: () => 2,
+        },
+      });
+
+      expect(fetcherCalled).toBe(false);
+      expect(result.status).toBe("stale");
+    });
+
+    it("Phase 2 In-Flight Guard: aborts transport when cancelAll or cancelFile is invoked", async () => {
+      const host = new WorkspaceSemanticQueryHost();
+      let aborted = false;
+
+      const promise = host.executeEnvelope({
+        kind: "references",
+        identity: {
+          workspaceId: "ws-alpha",
+          fileKey: "a.ts",
+          uri: "file:///a.ts",
+          position: { line: 1, character: 1 },
+        },
+        fetcher: async (ctx) => {
+          return new Promise<string[]>((resolve) => {
+            ctx.signal.addEventListener("abort", () => {
+              aborted = true;
+              resolve([]);
+            });
+          });
+        },
+      });
+
+      // Cancel specifically by file
+      host.cancelFile("ws-alpha", "a.ts");
+      const result = await promise;
+
+      expect(aborted).toBe(true);
+      expect(result.status).toBe("cancelled");
+    });
+
+    it("Phase 3 Post-fetch Guard: dynamically queries live getters and detects staleness after await", async () => {
+      const host = new WorkspaceSemanticQueryHost();
+      let liveRevision = 10;
+      let liveSessionGen = 1;
+
+      const result = await host.executeEnvelope({
+        kind: "implementations",
+        identity: {
+          uri: "file:///b.ts",
+          position: { line: 5, character: 2 },
+          documentRevision: 10,
+          lspSessionGeneration: 1,
+        },
+        fetcher: async () => {
+          // User typed while network request was resolving!
+          liveRevision = 11;
+          return ["implA"];
+        },
+        guards: {
+          getLiveDocumentRevision: () => liveRevision,
+          getLiveLspGeneration: () => liveSessionGen,
+        },
+      });
+
+      expect(result.status).toBe("stale");
+      expect(result.items).toEqual([]);
+    });
+
+    it("Phase 4 Delivery Guard: blocks UI reveal if active tab changed or unmounted", async () => {
+      const host = new WorkspaceSemanticQueryHost();
+      let isVisible = false;
+
+      const result = await host.executeEnvelope({
+        kind: "definitions",
+        identity: {
+          uri: "file:///c.ts",
+          position: { line: 2, character: 4 },
+        },
+        fetcher: async () => ["defA"],
+        guards: {
+          guardDelivery: () => isVisible,
+        },
+      });
+
+      expect(result.status).toBe("stale");
+      expect(result.items).toEqual([]);
+    });
+
+    it("cancels multi-tier scopes: cancelSession and cancelAll", async () => {
+      const host = new WorkspaceSemanticQueryHost();
+      let q1Aborted = false;
+      let q2Aborted = false;
+
+      const p1 = host.executeEnvelope({
+        kind: "definitions",
+        identity: { workspaceId: "ws-1", uri: "file:///1.ts", position: { line: 0, character: 0 } },
+        fetcher: async (ctx) => new Promise<string[]>((resolve) => ctx.signal.addEventListener("abort", () => { q1Aborted = true; resolve([]); })),
+      });
+
+      const p2 = host.executeEnvelope({
+        kind: "references",
+        identity: { workspaceId: "ws-2", uri: "file:///2.ts", position: { line: 0, character: 0 } },
+        fetcher: async (ctx) => new Promise<string[]>((resolve) => ctx.signal.addEventListener("abort", () => { q2Aborted = true; resolve([]); })),
+      });
+
+      host.cancelWorkspace("ws-1");
+      const r1 = await p1;
+      expect(q1Aborted).toBe(true);
+      expect(r1.status).toBe("cancelled");
+
+      host.cancelAll();
+      const r2 = await p2;
+      expect(q2Aborted).toBe(true);
+      expect(r2.status).toBe("cancelled");
+    });
+  });
 });

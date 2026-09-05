@@ -4,6 +4,7 @@ import type { PreparedActionEvaluation } from "./workspaceActionHost";
 
 export interface EditorContextMenuCapabilities {
   definition?: boolean;
+  declaration?: boolean;
   typeDefinition?: boolean;
   implementation?: boolean;
   references?: boolean;
@@ -165,6 +166,7 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
 
   return [
     bindRow("editor-context-goto-definition", "Go to Definition", "F12", "workspace.gotoDefinition", input),
+    bindRow("editor-context-goto-declaration", "Go to Declaration", "Ctrl+B", "workspace.gotoDeclaration", input),
     bindRow("editor-context-goto-type-definition", "Go to Type Definition", "Ctrl+Shift+B", "workspace.gotoTypeDefinition", input),
     bindRow("editor-context-goto-implementation", "Go to Implementation", "Ctrl+Alt+B", "workspace.gotoImplementation", input),
     bindRow("editor-context-find-usages", "Find Usages", "Shift+F12", "workspace.findReferences", input),

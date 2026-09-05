@@ -1,0 +1,124 @@
+id: TC-IDE-CHROME-01
+title: "Per-file highlighting widget level menu and no-provider state"
+description: |
+  ED-CHROME-001 browser slice. Opens the browser-VFS README buffer and verifies
+  the production highlighting widget exposes an explicit no-language-server
+  state, accessible level menu radio semantics, all three level choices, and
+  editor focus restoration after a choice. Browser VFS has no diagnostics
+  provider, so it does not claim provider-backed counts or native evidence.
+  Highest claim on green: L1 browser-wired highlighting chrome contract.
+covers: [F25.5]
+tags: [code-workspace, ide-chrome, highlighting, unavailable-contract, p1, smoke]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 120
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="code-workspace-highlighting-widget"]'
+
+  # A3: browser preview has no provider; the production UI says so explicitly.
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-highlighting-widget"]'
+      name: role
+      equals: region
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-highlighting-widget"]'
+      name: data-diagnostic-provider
+      equals: none
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-highlighting-widget"]'
+      name: data-diagnostics-ready
+      equals: "false"
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - click: '[data-testid="highlighting-widget-level-button"]'
+  - wait_for: '[data-testid="highlighting-widget-menu"]'
+  - assert_attribute:
+      selector: '[data-testid="highlighting-widget-menu"]'
+      name: role
+      equals: menu
+  - assert_attribute:
+      selector: '[data-testid="highlighting-widget-menu"]'
+      name: aria-label
+      equals: Highlighting level options
+  - assert_text:
+      selector: '[data-testid="highlighting-widget-provider"]'
+      contains: "No active language server"
+  - assert_text:
+      selector: '[data-testid="highlighting-widget-diagnostic-status"]'
+      contains: "Diagnostics unavailable without a language server"
+  - assert_attribute:
+      selector: '[data-testid="highlighting-level-option-all"]'
+      name: role
+      equals: menuitemradio
+  - assert_attribute:
+      selector: '[data-testid="highlighting-level-option-all"]'
+      name: aria-checked
+      equals: "true"
+
+  # A3: menu keyboard ownership stays inside the widget surface.
+  - press:
+      key: ArrowDown
+      selector: '[data-testid="highlighting-level-option-all"]'
+  - eval_readonly:
+      expression: "document.activeElement?.getAttribute('data-testid') === 'highlighting-level-option-syntax'"
+      expect_truthy: true
+  - press:
+      key: End
+      selector: '[data-testid="highlighting-level-option-syntax"]'
+  - eval_readonly:
+      expression: "document.activeElement?.getAttribute('data-testid') === 'highlighting-level-option-none'"
+      expect_truthy: true
+  - press:
+      key: Home
+      selector: '[data-testid="highlighting-level-option-none"]'
+  - eval_readonly:
+      expression: "document.activeElement?.getAttribute('data-testid') === 'highlighting-level-option-all'"
+      expect_truthy: true
+  - press:
+      key: Escape
+      selector: '[data-testid="highlighting-level-option-all"]'
+  - assert_not_visible: '[data-testid="highlighting-widget-menu"]'
+  - eval_readonly:
+      expression: "document.activeElement?.getAttribute('data-testid') === 'highlighting-widget-level-button'"
+      expect_truthy: true
+
+  # A2: every choice is a real state transition and returns focus to CodeMirror.
+  - click: '[data-testid="highlighting-widget-level-button"]'
+  - click: '[data-testid="highlighting-level-option-syntax"]'
+  - assert_text:
+      selector: '[data-testid="highlighting-widget-level-button"]'
+      contains: Syntax
+  - eval_readonly:
+      expression: "document.activeElement?.classList.contains('cm-content')"
+      expect_truthy: true
+  - click: '[data-testid="highlighting-widget-level-button"]'
+  - assert_attribute:
+      selector: '[data-testid="highlighting-level-option-syntax"]'
+      name: aria-checked
+      equals: "true"
+  - click: '[data-testid="highlighting-level-option-none"]'
+  - assert_text:
+      selector: '[data-testid="highlighting-widget-level-button"]'
+      contains: None
+  - eval_readonly:
+      expression: "document.activeElement?.classList.contains('cm-content')"
+      expect_truthy: true
+  - click: '[data-testid="highlighting-widget-level-button"]'
+  - click: '[data-testid="highlighting-level-option-all"]'
+  - assert_text:
+      selector: '[data-testid="highlighting-widget-level-button"]'
+      contains: "All Problems"
+  - eval_readonly:
+      expression: "document.activeElement?.classList.contains('cm-content')"
+      expect_truthy: true

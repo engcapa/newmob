@@ -1,0 +1,294 @@
+id: TC-IDE-C3-02
+title: "Packaged clipboard OS grant, real X11 denial, multi-caret distribution, and recovery"
+description: |
+  ED-CLIP-004 A4 packaged Linux/WebKitGTK slice. It enters a real host workspace
+  through persisted recents and drives the production copy/paste owners against
+  the REAL X11 CLIPBOARD selection.
+
+  Grant is proven from outside the app: after an editor Copy, a separate
+  process reads the exact payload back through a real X11 selection transfer, so
+  the typed `performed` effect is corroborated at the OS boundary rather than
+  self-reported. Denial is a real OS-level failure, not a stub: an external owner
+  takes the selection and is then replaced by an owner that advertises standard
+  text targets but rejects their conversion, so every client's text read
+  genuinely fails at the OS boundary. The
+  case asserts the production owner then reports `unavailable` with
+  `unknown` effect and a VISIBLE workspace-slot fallback, never success. It then
+  restores the granted owner and proves the OS read path recovers and distributes segments
+  across two carets in one undo.
+
+  The clipboard observation seam is metadata only: outcome, effect, permission
+  epoch, payload shape. The copied text never appears in the DOM.
+covers: [F25.5, F1.7]
+tags: [code-workspace, ide-c3, clipboard, native-gate, accessibility, p0]
+modes: [native]
+fixtures: [reset_db, workspace_root]
+timeout_sec: 420
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+
+  # Enter the real host file through persisted recents (no native picker).
+  # Clipboard evidence does not depend on the separate workspace-tree listing
+  # surface: a loose file still crosses the native filesystem read boundary and
+  # reaches the same production editor/clipboard owners.
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-c3","name":"qa-c3","roots":[],"looseFiles":[{"id":"readme","name":"README.md","path":"${fixture.workspace_root}/README.md"}],"lastActiveFile":{"kind":"loose","id":"readme","path":"${fixture.workspace_root}/README.md"},"lastOpenedAt":1756100000000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.workspace_root}/README.md"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+
+  # Deterministic two-line fixture for multi-caret copy.
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: "alpha-one\nbeta-two"
+  - wait: 0.5
+
+  # The observation seam exists with live-region semantics before any clipboard
+  # operation, and carries no outcome yet.
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: role
+      equals: status
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: aria-live
+      equals: polite
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: aria-label
+      equals: Clipboard status
+  - eval_readonly:
+      expression: '!document.getElementById("code-workspace-clipboard-observation")?.hasAttribute("data-outcome")'
+      expect_truthy: true
+
+  # ---------------------------------------------------------------- GRANT ----
+  # Keyboard-only multi-caret selection, then Copy through the real keymap.
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - press:
+      key: Control+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Control+a
+  # Keep the live selection: native `press` with a selector intentionally
+  # clicks to focus first, which would collapse it before Copy.
+  - press: Control+c
+  - wait: 1
+
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-operation
+      equals: copy
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-outcome
+      equals: success
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-system-effect
+      equals: performed
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-workspace-fallback
+      equals: "false"
+  # Independent OS-boundary corroboration: a separate process reads the exact
+  # bytes the packaged app handed to X11.
+  - assert_system_clipboard:
+      equals: "alpha-one\nbeta-two"
+  # The seam never carries the payload itself.
+  - eval_readonly:
+      expression: '!document.getElementById("code-workspace-clipboard-observation")?.outerHTML.includes("alpha-one")'
+      expect_truthy: true
+
+  # --------------------------------------------------------------- DENIAL ----
+  # An external process takes the selection, then transfers it to a denying
+  # owner that advertises standard text targets but rejects conversion. This is
+  # an immediate real X11 failure, avoiding a timeout-only fault path.
+  - native_clipboard_owner:
+      action: grant
+      text: "external-owner-payload"
+  - assert_system_clipboard:
+      equals: "external-owner-payload"
+  # Prepare the paste destination and record DOM focus before the external
+  # fault. No WebDriver command runs while the selection owner denies reads;
+  # the withdrawn owner never takes focus, and native_keys reactivates the
+  # uniquely identified Taomni window before injection.
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      keys: ["Control+End", "Return"]
+  - eval_readonly:
+      expression: 'document.activeElement === document.querySelectorAll(".cm-content")[0]'
+      expect_truthy: true
+  - native_clipboard_owner:
+      action: deny
+  - assert_system_clipboard:
+      readable: false
+
+  # Paste under denial: the production owner must report the typed failure and
+  # fall back visibly to the workspace slot, never claim success.
+  # WebKitWebDriver rejects a synthetic Ctrl+V while an X11 selection owner is
+  # unresponsive. Inject the physical chord through XTest into the same focused
+  # packaged window so the production keyboard owner still receives user input.
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      keys: ["Control+v"]
+      focus_prechecked: true
+  - wait: 15
+
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-operation
+      equals: paste
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-outcome
+      equals: unavailable
+  - eval_readonly:
+      expression: 'document.getElementById("code-workspace-clipboard-observation")?.getAttribute("data-outcome") !== "success"'
+      expect_truthy: true
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-workspace-fallback
+      equals: "true"
+  - eval_readonly:
+      expression: 'document.getElementById("code-workspace-clipboard-observation")?.getAttribute("data-system-effect") !== "performed"'
+      expect_truthy: true
+  # The fallback is visible to the user, not silent.
+  - assert_text:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      contains: "workspace clipboard slot"
+  # The fallback really inserted the workspace payload, so "denied" did not mean
+  # "nothing happened in the editor".
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content .cm-line").length === 4 && document.querySelectorAll(".cm-content .cm-line")[0]?.textContent === "alpha-one" && document.querySelectorAll(".cm-content .cm-line")[1]?.textContent === "beta-two" && document.querySelectorAll(".cm-content .cm-line")[2]?.textContent === "alpha-one" && document.querySelectorAll(".cm-content .cm-line")[3]?.textContent === "beta-two"'
+      expect_truthy: true
+  - screenshot: tc-ide-c3-02-denied-fallback.png
+
+  # ------------------------------------------------------------- RECOVERY ----
+  - native_clipboard_owner:
+      action: resume
+  - assert_system_clipboard:
+      equals: "external-owner-payload"
+
+  # One undo removes the fallback paste transaction before the recovery paste.
+  - press: Control+z
+  - wait: 1
+
+  # Multi-caret recovery paste: two carets, the OS read now answers, and the
+  # single-segment payload lands at both carets in one transaction.
+  - press:
+      key: Control+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - press: Control+Alt+Shift+ArrowDown
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-cursor").length >= 2'
+      expect_truthy: true
+  - press: Control+v
+  - wait: 3
+
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-outcome
+      equals: success
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-system-effect
+      equals: performed
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-workspace-fallback
+      equals: "false"
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-caret-count
+      equals: "2"
+  # The external OS payload reached both carets.
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content")[0]?.textContent?.split("external-owner-payload").length === 3'
+      expect_truthy: true
+
+  # One undo removes the whole multi-caret paste transaction.
+  - press: Control+z
+  - wait: 1
+  - eval_readonly:
+      expression: '!document.querySelectorAll(".cm-content")[0]?.textContent?.includes("external-owner-payload")'
+      expect_truthy: true
+
+  # ----------------------------------------------------------- RECTANGLE ----
+  # Replace columns 1..4 on the first two lines through CodeMirror's production
+  # Alt+pointer rectangularSelection extension. The runner only resolves the
+  # line/column coordinates; the packaged WebKitGTK editor owns the gesture.
+  - native_clipboard_owner:
+      action: grant
+      text: "R"
+  - assert_system_clipboard:
+      equals: "R"
+  - native_pointer_drag:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      from: {line: 1, column: 1}
+      to: {line: 2, column: 4}
+      modifiers: [Alt]
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-selectionBackground").length === 2'
+      expect_truthy: true
+  - press: Control+v
+  - wait: 3
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-outcome
+      equals: success
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-clipboard-observation"]'
+      name: data-caret-count
+      equals: "2"
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content .cm-line").length === 3 && document.querySelectorAll(".cm-content .cm-line")[0]?.textContent === "aRa-one" && document.querySelectorAll(".cm-content .cm-line")[1]?.textContent === "bR-two" && document.querySelectorAll(".cm-content .cm-line")[2]?.textContent === ""'
+      expect_truthy: true
+  # Rectangular replacement is one transaction across both ranges.
+  - press: Control+z
+  - wait: 1
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-content .cm-line").length === 3 && document.querySelectorAll(".cm-content .cm-line")[0]?.textContent === "alpha-one" && document.querySelectorAll(".cm-content .cm-line")[1]?.textContent === "beta-two" && document.querySelectorAll(".cm-content .cm-line")[2]?.textContent === ""'
+      expect_truthy: true
+
+  # --------------------------------------------------- ACCESSIBILITY / IME ----
+  # The editor keeps its accessible role/state and focus across the whole
+  # clipboard workflow, driven keyboard-only.
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      name: role
+      equals: textbox
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      name: aria-multiline
+      equals: "true"
+  - eval_readonly:
+      expression: 'document.activeElement === document.querySelectorAll(".cm-content")[0]'
+      expect_truthy: true
+
+  # Real fcitx5 IME composition through X11: paste must not fire mid-composition
+  # (the production guard is `view.composing`), and the seam must not record a
+  # new outcome for a suppressed paste.
+  - native_ime_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      expected_engine: wbpy
+      keys: ["n", "i", "h", "a", "o"]
+  - screenshot: tc-ide-c3-02-ime-composition.png
+  # A paste issued while the IME is composing must be suppressed by the
+  # production `view.composing` guard: the OS payload must NOT reappear in the
+  # document, and the editor keeps focus and its accessible state.
+  - press: Control+v
+  - wait: 2
+  - eval_readonly:
+      expression: '!document.querySelectorAll(".cm-content")[0]?.textContent?.includes("external-owner-payload")'
+      expect_truthy: true
+  - press: Escape
+  - eval_readonly:
+      expression: 'document.activeElement === document.querySelectorAll(".cm-content")[0]'
+      expect_truthy: true
+
+  - native_clipboard_owner:
+      action: release

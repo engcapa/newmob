@@ -46,6 +46,7 @@ describe("buildEditorContextMenuItems", () => {
     const items = buildEditorContextMenuItems(baseInput({
       bindings: {
         "workspace.gotoDefinition": binding("workspace.gotoDefinition"),
+        "workspace.gotoDeclaration": binding("workspace.gotoDeclaration"),
         "workspace.editor.paste": binding("workspace.editor.paste", { available: false }),
       },
     }));
@@ -81,6 +82,7 @@ describe("buildEditorContextMenuItems", () => {
   it("keeps the documented labels and shortcuts for every mapped row", () => {
     const actionIds = [
       "workspace.gotoDefinition",
+      "workspace.gotoDeclaration",
       "workspace.gotoTypeDefinition",
       "workspace.gotoImplementation",
       "workspace.findReferences",
@@ -102,6 +104,7 @@ describe("buildEditorContextMenuItems", () => {
     }));
     const expected = [
       ["editor-context-goto-definition", "Go to Definition", "F12"],
+      ["editor-context-goto-declaration", "Go to Declaration", "Ctrl+B"],
       ["editor-context-goto-type-definition", "Go to Type Definition", "Ctrl+Shift+B"],
       ["editor-context-goto-implementation", "Go to Implementation", "Ctrl+Alt+B"],
       ["editor-context-find-usages", "Find Usages", "Shift+F12"],
@@ -324,4 +327,3 @@ describe("buildEditorContextMenuItems", () => {
     expect(withSelection.find((i) => i.testId === "editor-context-copy")?.disabled).toBe(false);
   });
 });
-

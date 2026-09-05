@@ -827,10 +827,13 @@ describe("TerminalPanel focus behavior", () => {
 
     fireEvent.keyDown(window, { key: "Insert", shiftKey: true });
 
+    // The dialog enters the document one commit before its autofocus effect moves
+    // focus to the confirm button, so presence does not imply focus. Both facts are
+    // asserted under the same gate rather than gating on the earlier one.
     await waitFor(() => {
       expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument();
+      expect(screen.getByTestId("confirm-dialog-confirm")).toHaveFocus();
     });
-    expect(screen.getByTestId("confirm-dialog-confirm")).toHaveFocus();
     expect(screen.getByTestId("confirm-dialog-message")).toHaveTextContent("/home/user/project");
 
     fireEvent.click(screen.getByTestId("confirm-dialog-confirm"));

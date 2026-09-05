@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LspDocumentSymbol } from "../../../lib/editor/lsp";
 import {
@@ -6,6 +6,7 @@ import {
   collapsedBreadcrumbItems,
   symbolChainAtPosition,
   symbolSiblingsAt,
+  type BreadcrumbPathChild,
 } from "./Breadcrumbs";
 
 afterEach(() => {
@@ -205,5 +206,180 @@ describe("Breadcrumbs", () => {
     expect(appBtn).toBeTruthy();
     fireEvent.click(appBtn!);
     expect(screen.getByTestId("code-workspace-breadcrumb-popup")).toBeTruthy();
+  });
+
+  it("supports keyboard navigation when activeNavigationBar is enabled", () => {
+    const onCloseNavigationBar = vi.fn();
+    render(
+      <Breadcrumbs
+        pathSegments={[
+          { label: "repo", path: "", kind: "root" },
+          { label: "src", path: "src", kind: "directory" },
+          { label: "App.tsx", path: "src/App.tsx", kind: "file" },
+        ]}
+        symbols={symbols}
+        position={{ line: 7, character: 1 }}
+        activeNavigationBar={true}
+        onCloseNavigationBar={onCloseNavigationBar}
+      />,
+    );
+
+    const nav = breadcrumbNav();
+    // Navigate with Left arrow
+    fireEvent.keyDown(nav, { key: "ArrowLeft" });
+    const focused = nav.querySelector("[data-focused='true']");
+    expect(focused).toBeTruthy();
+
+    // Escape closes navigation bar
+    fireEvent.keyDown(nav, { key: "Escape" });
+    expect(onCloseNavigationBar).toHaveBeenCalledTimes(1);
+  });
+
+  it("traverses all navigation segments with Home, End, and arrow keys", async () => {
+    render(
+      <Breadcrumbs
+        pathSegments={[
+          { label: "repo", path: "", kind: "root" },
+          { label: "src", path: "src", kind: "directory" },
+          { label: "App.tsx", path: "src/App.tsx", kind: "file" },
+        ]}
+        symbols={[]}
+        position={{ line: 0, character: 0 }}
+        activeNavigationBar={true}
+      />,
+    );
+
+    const nav = breadcrumbNav();
+    await waitFor(() => expect(document.activeElement).toBe(nav));
+    expect(nav).toHaveAttribute("aria-activedescendant", "code-workspace-breadcrumb-segment-2");
+
+    fireEvent.keyDown(nav, { key: "Home" });
+    expect(nav).toHaveAttribute("aria-activedescendant", "code-workspace-breadcrumb-segment-0");
+    expect(nav.querySelector("[data-nav-index='0']")).toHaveAttribute("data-focused", "true");
+
+    fireEvent.keyDown(nav, { key: "ArrowRight" });
+    expect(nav).toHaveAttribute("aria-activedescendant", "code-workspace-breadcrumb-segment-1");
+    fireEvent.keyDown(nav, { key: "ArrowLeft" });
+    expect(nav).toHaveAttribute("aria-activedescendant", "code-workspace-breadcrumb-segment-0");
+
+    fireEvent.keyDown(nav, { key: "End" });
+    expect(nav).toHaveAttribute("aria-activedescendant", "code-workspace-breadcrumb-segment-2");
+  });
+
+  it("sorts path options before selecting the active entry with the keyboard", async () => {
+    const loadPathChildren = vi.fn().mockResolvedValue([
+      { label: "zeta.ts", path: "src/zeta.ts", kind: "file", active: true },
+      { label: "alpha", path: "src/alpha", kind: "directory" },
+    ]);
+    const onPathNavigate = vi.fn();
+    render(
+      <Breadcrumbs
+        pathSegments={[
+          { label: "repo", path: "", kind: "root" },
+          { label: "src", path: "src", kind: "directory" },
+          { label: "App.tsx", path: "src/App.tsx", kind: "file" },
+        ]}
+        symbols={[]}
+        position={{ line: 0, character: 0 }}
+        loadPathChildren={loadPathChildren}
+        onPathNavigate={onPathNavigate}
+        activeNavigationBar={true}
+      />,
+    );
+
+    const nav = breadcrumbNav();
+    await waitFor(() => expect(document.activeElement).toBe(nav));
+    fireEvent.keyDown(nav, { key: "Home" });
+    fireEvent.keyDown(nav, { key: "ArrowRight" });
+    fireEvent.keyDown(nav, { key: "Enter" });
+
+    const popup = await screen.findByTestId("code-workspace-breadcrumb-popup");
+    const options = within(popup).getAllByRole("option");
+    expect(options.map((option) => option.textContent?.trim())).toEqual(["alpha", "zeta.ts"]);
+    expect(options[1]).toHaveAttribute("aria-selected", "true");
+    expect(popup).toHaveAttribute("aria-activedescendant", options[1].id);
+    expect(within(popup).getByRole("combobox")).toHaveAttribute("aria-controls", popup.id);
+
+    fireEvent.keyDown(within(popup).getByRole("combobox"), { key: "ArrowUp" });
+    fireEvent.keyDown(within(popup).getByRole("combobox"), { key: "Enter" });
+    expect(onPathNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({ label: "alpha", kind: "directory" }),
+      expect.objectContaining({ path: "src" }),
+    );
+    await waitFor(() => expect(screen.queryByTestId("code-workspace-breadcrumb-popup")).toBeNull());
+  });
+
+  it("restores navigation-bar focus when Escape cancels a popup", async () => {
+    render(
+      <Breadcrumbs
+        pathSegments={[
+          { label: "repo", path: "", kind: "root" },
+          { label: "src", path: "src", kind: "directory" },
+        ]}
+        symbols={[]}
+        position={{ line: 0, character: 0 }}
+        loadPathChildren={vi.fn().mockResolvedValue([])}
+        activeNavigationBar={true}
+      />,
+    );
+
+    const nav = breadcrumbNav();
+    await waitFor(() => expect(document.activeElement).toBe(nav));
+    fireEvent.keyDown(nav, { key: "Home" });
+    fireEvent.keyDown(nav, { key: "ArrowRight" });
+    fireEvent.keyDown(nav, { key: "Enter" });
+    const popup = await screen.findByTestId("code-workspace-breadcrumb-popup");
+    const filter = within(popup).getByRole("combobox");
+    await waitFor(() => expect(document.activeElement).toBe(filter));
+
+    fireEvent.keyDown(filter, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("code-workspace-breadcrumb-popup")).toBeNull());
+    expect(document.activeElement).toBe(nav);
+    expect(nav).toHaveAttribute("aria-activedescendant", "code-workspace-breadcrumb-segment-1");
+  });
+
+  it("does not reopen a stale path popup after the active trail changes", async () => {
+    let resolveListing: (children: BreadcrumbPathChild[]) => void = () => undefined;
+    const loadPathChildren = vi.fn(() => new Promise<BreadcrumbPathChild[]>((resolve) => {
+      resolveListing = resolve;
+    }));
+    const onPathNavigate = vi.fn();
+    const initialPath = [
+      { label: "repo", path: "", kind: "root" as const },
+      { label: "src", path: "src", kind: "directory" as const },
+      { label: "App.tsx", path: "src/App.tsx", kind: "file" as const },
+    ];
+    const { rerender } = render(
+      <Breadcrumbs
+        pathSegments={initialPath}
+        symbols={[]}
+        position={{ line: 0, character: 0 }}
+        loadPathChildren={loadPathChildren}
+        onPathNavigate={onPathNavigate}
+      />,
+    );
+
+    clickPathSegment("directory", /src/);
+    await screen.findByTestId("code-workspace-breadcrumb-popup");
+    rerender(
+      <Breadcrumbs
+        pathSegments={[
+          { label: "repo", path: "", kind: "root" },
+          { label: "lib", path: "lib", kind: "directory" },
+          { label: "App.tsx", path: "lib/App.tsx", kind: "file" },
+        ]}
+        symbols={[]}
+        position={{ line: 0, character: 0 }}
+        loadPathChildren={loadPathChildren}
+        onPathNavigate={onPathNavigate}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByTestId("code-workspace-breadcrumb-popup")).toBeNull());
+
+    await act(async () => {
+      resolveListing([{ label: "late.ts", path: "src/late.ts", kind: "file" }]);
+    });
+    expect(screen.queryByTestId("code-workspace-breadcrumb-popup")).toBeNull();
+    expect(onPathNavigate).not.toHaveBeenCalled();
   });
 });

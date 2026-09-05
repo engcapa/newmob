@@ -52,10 +52,10 @@ export type TraceAssertion =
   | { type: "analysis-broken-classpath-flagged" }
   /**
    * §8.20.4 W3: the unresolved-type diagnostic IS published, but jdt.ls 1.61
-   * never ANSWERS textDocument/codeAction (hang on healthy and broken files
-   * alike). The trace must record that honestly instead of faking a fix.
+   * returns a real import quick fix whose resolved edit changes the document
+   * and whose inverse restores the original hash.
    */
-  | { type: "quickfix-provider-hang-recorded" }
+  | { type: "quickfix-apply-undo"; importContains: string }
   /** §8.20.6 W5: rename capability registered by provider in real trace. */
   | { type: "rename-provider-registered" };
 
@@ -303,8 +303,8 @@ export const JDTLS_FIXTURE_EXPECTATIONS: readonly JdtlsTraceExpectation[] = [
     caseId: "import-quick-fix",
     fixture: "maven-single",
     scenarioKey: "__quickFix",
-    assert: { type: "quickfix-provider-hang-recorded" },
-    ideaExpected: "IDEA offers Import on an unresolved simple name and one undo restores the pre-fix state. Real jdt.ls 1.61 under this launch recipe never answers codeAction — a documented provider difference (re-open when the server-side block is identified or a newer jdt.ls responds).",
+    assert: { type: "quickfix-apply-undo", importContains: "import org.apache.commons.lang3.StringUtils;" },
+    ideaExpected: "IDEA offers Import on an unresolved simple name and one undo restores the pre-fix state; real jdt.ls returns the same provider-level edit and hash round-trip under this fixture recipe.",
   },
   {
     caseId: "rename-provider-registered",

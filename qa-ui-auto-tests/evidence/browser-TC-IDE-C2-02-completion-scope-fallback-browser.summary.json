@@ -1,0 +1,40 @@
+{
+  "started_at": "2026-09-04T10:06:23+08:00",
+  "finished_at": "2026-09-04T10:06:29+08:00",
+  "duration_sec": 6.094946384429932,
+  "mode": "browser",
+  "workers": 1,
+  "totals": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "cases": [
+    {
+      "id": "TC-IDE-C2-02-completion-scope-fallback-browser",
+      "title": "Explicit completion names missing project scope in browser",
+      "tags": [
+        "code-workspace",
+        "ide-c2",
+        "completion",
+        "browser-gate",
+        "p1"
+      ],
+      "covers": [
+        "F25.5"
+      ],
+      "modes": [
+        "browser"
+      ],
+      "status": "passed",
+      "duration_sec": 6.094706296920776,
+      "step_count": 17,
+      "worker_id": 0,
+      "failure": null,
+      "fixtures_skipped": null,
+      "skipped_reason": null
+    }
+  ],
+  "schema": "qa-ui-auto.summary.v1"
+}

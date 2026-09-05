@@ -1,0 +1,151 @@
+id: TC-IDE-C8-01
+title: "Virtual space mixed carets, selection reversal, composition, and one undo"
+description: |
+  §8.19.10 gate case C8 / ED-VSPACE-003 browser slice. Through the production
+  editor and ActionHost, verifies independent desired columns for three mixed
+  carets, exact deferred padding, one undo, Shift anchor reversal, browser
+  composition bypass, keyboard focus, textbox semantics, and 200% editor zoom.
+  This case is browser-only and never substitutes for packaged Linux IME.
+  Highest claim on green: L2 browser behavioral slice.
+covers: [F25.5, F25.3]
+tags: [code-workspace, ide-c8, virtual-space, navigation, caret, accessibility, p0]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 120
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+
+  # Enable both virtual-space policies from the real action palette. Set the
+  # editor from the 13px default to 26px, the product's 200% equivalent.
+  - click: '[data-testid="code-workspace-tab"]'
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Editor Appearance Settings
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Editor Appearance Settings'
+  - wait_for: '[data-testid="workspace-editor-appearance-settings-dialog"]'
+  - set_check:
+      selector: '[data-testid="workspace-editor-appearance-virtual-space-after-line-end"]'
+      checked: true
+  - set_check:
+      selector: '[data-testid="workspace-editor-appearance-virtual-space-at-file-bottom"]'
+      checked: true
+  - fill:
+      selector: '[data-testid="workspace-editor-appearance-font-size-px"]'
+      value: "26"
+  - click: '[data-testid="workspace-editor-appearance-apply"]'
+  - wait_for:
+      selector: '[data-testid="workspace-editor-appearance-settings-dialog"]'
+      state: detached
+  - assert_text:
+      selector: '[data-testid="code-workspace-zoom-reset"]'
+      contains: "26px"
+
+  # Replace the preview document with a deterministic three-line fixture.
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: "prefixX\nX\nlongprefixX"
+  - wait: 1.0
+
+  # The mounted surface remains keyboard-focused and exposes the expected
+  # multiline textbox role/state at 200% editor zoom.
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      name: role
+      equals: textbox
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      name: aria-multiline
+      equals: "true"
+  - eval_readonly:
+      expression: 'document.querySelector(".cm-content:focus")?.matches(".cm-content")'
+      expect_truthy: true
+
+  # Select the X at line 1, then add the X occurrences at visual columns 0
+  # and 10. ArrowRight collapses each selection at its own right edge. A
+  # single ArrowDown must keep desired columns 7, 1, and 11 independently.
+  - press: Control+Home
+  - press: End
+  - press: Shift+ArrowLeft
+  - press: Alt+j
+  - press: Alt+j
+  - press: ArrowRight
+  - press: ArrowDown
+  - type: Z
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[0]?.textContent === "prefixX"'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[1]?.textContent === "X      Z"'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[2]?.textContent === "lZongprefixXZ"'
+      expect_truthy: true
+
+  # One undo removes the typed payload and its deferred padding from every
+  # caret, restoring the exact pre-transaction document.
+  - press: Control+z
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[0]?.textContent === "prefixX"'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[1]?.textContent === "X"'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[2]?.textContent === "longprefixX"'
+      expect_truthy: true
+
+  # Reverse a Shift selection through its line-2 anchor, then move back to the
+  # anchor. With a stable anchor, typing Q inserts at line 2; swapping anchor
+  # and head would replace the first two lines instead.
+  - press: Escape
+  - press: Control+Home
+  - press: ArrowDown
+  - press: Shift+ArrowDown
+  - press: Shift+ArrowUp
+  - press: Shift+ArrowUp
+  - press: Shift+ArrowDown
+  - type: Q
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[0]?.textContent === "prefixX"'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[1]?.textContent === "QX"'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[2]?.textContent === "longprefixX"'
+      expect_truthy: true
+  - press: Control+z
+
+  # Browser composition: the composing ArrowDown must not dispatch a workspace
+  # movement. The committed glyph therefore remains at line 1 column 0.
+  - press: Control+Home
+  - compose_text:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      text: "你"
+      during_key: ArrowDown
+  - eval_readonly:
+      expression: 'document.querySelectorAll(".cm-line")[0]?.textContent === "你prefixX" && document.querySelectorAll(".cm-line")[1]?.textContent === "X"'
+      expect_truthy: true
+  - eval_readonly:
+      expression: 'document.querySelector(".cm-content:focus")?.matches(".cm-content")'
+      expect_truthy: true
+  - screenshot: tc-ide-c8-virtual-space-behavior.png
+  - click: '[data-testid="code-workspace-zoom-reset"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-zoom-reset"]'
+      contains: "13px"

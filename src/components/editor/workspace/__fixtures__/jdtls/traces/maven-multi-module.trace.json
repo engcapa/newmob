@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-multi-module",
-  "generatedAt": "2026-08-26T05:31:01.691Z",
+  "generatedAt": "2026-09-04T00:02:34.857Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 2156,
+          "msTotal": 2358,
           "itemCount": 1,
           "isIncomplete": false,
           "satisfied": true,
@@ -46,7 +46,7 @@
         }
       ],
       "resolve": {
-        "ms": 328,
+        "ms": 310,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport com.example.core.CoreUtil;\n\n"
@@ -72,7 +72,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 135,
+          "msTotal": 141,
           "itemCount": 7,
           "isIncomplete": false,
           "satisfied": true,
@@ -91,7 +91,6 @@
     "declaredStaticDataChannel": false,
     "topLevelCapabilityKeys": [
       "callHierarchyProvider",
-      "codeActionProvider",
       "codeLensProvider",
       "declarationProvider",
       "definitionProvider",
@@ -119,7 +118,11 @@
     "hoverProviderDeclaredStatically": false,
     "signatureHelpProvenByScenarios": false,
     "hoverProvenByScenarios": false,
-    "dynamicRegistrations": []
+    "dynamicRegistrations": [
+      "textDocument/codeAction",
+      "textDocument/completion",
+      "textDocument/signatureHelp"
+    ]
   },
   "analysis": {
     "serverInfo": {
@@ -164,6 +167,6 @@
     }
   },
   "analysisTiming": {
-    "firstCompletionSatisfiedMs": 6030
+    "firstCompletionSatisfiedMs": 6064
   }
 }

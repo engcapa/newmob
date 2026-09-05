@@ -278,6 +278,7 @@ export function FileTreePane({
           <div className="min-w-0 flex-1 flex items-center gap-0.5">
             <input
               type="search"
+              data-testid="code-workspace-tree-filter"
               value={filter}
               onChange={(event) => onFilterChange(event.target.value)}
               placeholder="Filter"
@@ -364,4 +365,3 @@ export function FileTreePane({
 
 /** Default before first measure — treat as wide so SSR/tests show full primary actions. */
 const TREE_DEFAULT_WIDTH_ASSUMPTION = 360;
-

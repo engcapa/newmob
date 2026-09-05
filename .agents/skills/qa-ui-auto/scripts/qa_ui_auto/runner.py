@@ -344,6 +344,7 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                         break
                 else:
                     session = harness.create_session()
+                    nctx: NativeStepContext | None = None
                     try:
                         nctx = NativeStepContext(session, case_dir, cfg)
                         last_step, last_verb, last_args = 0, "<setup>", None
@@ -357,6 +358,8 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                             nctx.case_dir.mkdir(parents=True, exist_ok=True)
                             run_native_step(nctx, verb, args)
                     finally:
+                        if nctx is not None:
+                            nctx.restore_host_permissions()
                         console = []
                         with suppress(Exception):
                             console = session.console_entries()
@@ -582,6 +585,22 @@ def main(argv: list[str] | None = None) -> int:
     md = reporter.write_markdown(report_root, summary)
     reporter.write_junit(report_root, summary)
     print("\n" + md.read_text(encoding="utf-8"))
+
+    # ED-REL-001: emit runner-owned execution receipt
+    from .runner_receipt import emit_runner_receipt
+    try:
+        receipt_path = emit_runner_receipt(
+            report_root=report_root,
+            mode=mode,
+            executed_cmd=sys.argv,
+            started_at=started_iso,
+            finished_at=reporter.now_iso(),
+            duration_sec=duration,
+            exit_code=0 if summary["totals"]["failed"] == 0 else 1,
+        )
+        print(f"qa-ui-auto: runner receipt emitted: {receipt_path.name}")
+    except Exception as e:
+        print(f"qa-ui-auto: warning: failed to emit runner receipt: {e}", file=sys.stderr)
 
     keep = int(cfg.get("report", {}).get("keep_runs", 5))
     _rotate_runs(report_dir, keep)

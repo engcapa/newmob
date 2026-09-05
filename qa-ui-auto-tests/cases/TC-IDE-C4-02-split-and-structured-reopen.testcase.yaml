@@ -1,9 +1,8 @@
-id: TC-IDE-C4-01
+id: TC-IDE-C4-02
 title: "Three-leaf split management and structured reopen (browser portion)"
 description: |
-  §8.19.10 gate case C4 (browser portion). Capability ids:
-  workspace.split-management / workspace.reopen-closed-tab /
-  workspace.tab-policy. Browser verifies the store/UI/action contract:
+  §8.19.10 / §ED-TABS-004: Split management and structured reopen case.
+  Browser verifies the store/UI/action contract:
   three leaves via split-right/split-down, equalize + unsplit-all without
   losing buffers, leaf close and structured reopen via Ctrl+Shift+T.
   The hold-modifier Ctrl+Tab switcher cycle (and its graded Backspace)
@@ -11,7 +10,7 @@ description: |
   it; that portion is pinned by CodeWorkspaceTab.test.tsx and belongs to
   the NATIVE keyboard run. Highest claim on green here: L1 browser-wired
   split/reopen.
-covers: [F25.5]
+covers: [F25.1, F25.5]
 tags: [code-workspace, ide-c4, switcher, split, reopen, p1]
 modes: [browser]
 fixtures: [reset_db]

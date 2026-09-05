@@ -10,16 +10,6 @@ export interface WorkspaceTodoItem {
   text: string;
 }
 
-export interface WorkspaceBookmark {
-  id: string;
-  fileKey: string;
-  pathLabel: string;
-  line: number;
-  character: number;
-  label: string;
-  createdAt: number;
-}
-
 export interface WorkspaceTodoFile {
   key: string;
   pathLabel: string;
@@ -126,6 +116,33 @@ export function sameWorkspaceTodoItems(
   });
 }
 
+export interface WorkspaceBookmark {
+  id: string;
+  fileKey: string;
+  pathLabel: string;
+  line: number;
+  character: number;
+  label: string;
+  mnemonic?: string | null;
+  group?: string | null;
+  /** A deleted resource keeps its identity so the panel can explain the gap. */
+  state?: "current" | "missing";
+  createdAt: number;
+}
+
+export function isValidMnemonic(char: string): boolean {
+  return /^[0-9a-zA-Z]$/.test(char);
+}
+
+export function normalizeMnemonic(char: string): string {
+  return char.toUpperCase();
+}
+
+export function workspaceBookmarkGroupName(bookmark: WorkspaceBookmark): string {
+  const group = bookmark.group?.trim();
+  return group || (bookmark.mnemonic ? "Mnemonic Bookmarks" : "General Bookmarks");
+}
+
 function bookmarksKey(workspaceInstanceId: string): string {
   return `${BOOKMARKS_PREFIX}${workspaceInstanceId}`;
 }
@@ -149,6 +166,12 @@ export function readWorkspaceBookmarks(workspaceInstanceId: string): WorkspaceBo
         && typeof item.label === "string"
         && typeof item.createdAt === "number"
       ))
+      .map((item) => ({
+        ...item,
+        mnemonic: typeof item.mnemonic === "string" ? item.mnemonic : null,
+        group: typeof item.group === "string" ? item.group : null,
+        state: item.state === "missing" ? "missing" as const : "current" as const,
+      }))
       .slice(0, 200);
   } catch {
     return [];
@@ -181,10 +204,161 @@ export function toggleWorkspaceBookmark(
         {
           id: `${candidate.fileKey}:${candidate.line}:${Date.now()}`,
           createdAt: Date.now(),
+          mnemonic: candidate.mnemonic ?? null,
+          group: candidate.group ?? (candidate.mnemonic ? "Mnemonic" : "General"),
           ...candidate,
+          state: candidate.state ?? "current",
         },
         ...current,
       ].slice(0, 200);
   writeWorkspaceBookmarks(workspaceInstanceId, next);
+  return next;
+}
+
+export function setMnemonicBookmark(
+  workspaceInstanceId: string,
+  candidate: Omit<WorkspaceBookmark, "id" | "createdAt"> & { mnemonic: string },
+  current: WorkspaceBookmark[] = readWorkspaceBookmarks(workspaceInstanceId),
+): WorkspaceBookmark[] {
+  const mnemonic = normalizeMnemonic(candidate.mnemonic);
+  if (!isValidMnemonic(mnemonic)) return current;
+
+  // 1. If exact line already has this mnemonic, toggle it off
+  const sameLineExisting = current.find(
+    (item) => item.fileKey === candidate.fileKey && item.line === candidate.line,
+  );
+  if (sameLineExisting && sameLineExisting.mnemonic === mnemonic) {
+    const next = current.filter((item) => item.id !== sameLineExisting.id);
+    writeWorkspaceBookmarks(workspaceInstanceId, next);
+    return next;
+  }
+
+  // 2. Remove mnemonic collision from any other bookmark (conflict replacement)
+  const deduped = current
+    .filter((item) => item.id !== sameLineExisting?.id)
+    .map((item) => (item.mnemonic === mnemonic ? { ...item, mnemonic: null } : item));
+
+  const next: WorkspaceBookmark[] = [
+    {
+      id: `${candidate.fileKey}:${candidate.line}:${Date.now()}`,
+      createdAt: Date.now(),
+      ...candidate,
+      mnemonic,
+      group: candidate.group ?? "Mnemonic",
+      state: candidate.state ?? "current",
+    },
+    ...deduped,
+  ].slice(0, 200);
+
+  writeWorkspaceBookmarks(workspaceInstanceId, next);
+  return next;
+}
+
+export function findBookmarkByMnemonic(
+  bookmarks: readonly WorkspaceBookmark[],
+  mnemonic: string,
+): WorkspaceBookmark | null {
+  const target = normalizeMnemonic(mnemonic);
+  return bookmarks.find((item) => item.mnemonic === target) ?? null;
+}
+
+export function updateBookmarksOnPathRename(
+  bookmarks: readonly WorkspaceBookmark[],
+  oldFileKey: string,
+  newFileKey: string,
+  newPathLabel: string,
+): WorkspaceBookmark[] {
+  return bookmarks.map((item) => {
+    if (item.fileKey === oldFileKey) {
+      return {
+        ...item,
+        fileKey: newFileKey,
+        pathLabel: newPathLabel,
+        state: "current",
+      };
+    }
+    return item;
+  });
+}
+
+export function removeBookmarksForFile(
+  bookmarks: readonly WorkspaceBookmark[],
+  fileKey: string,
+): WorkspaceBookmark[] {
+  return bookmarks.filter((item) => item.fileKey !== fileKey);
+}
+
+export function renameWorkspaceBookmarkGroup(
+  workspaceInstanceId: string,
+  oldGroupName: string,
+  newGroupName: string,
+  current: WorkspaceBookmark[] = readWorkspaceBookmarks(workspaceInstanceId),
+): WorkspaceBookmark[] {
+  const oldName = oldGroupName.trim();
+  const nextName = newGroupName.trim();
+  if (!oldName || !nextName || oldName === nextName) return current;
+  let changed = false;
+  const next = current.map((bookmark) => {
+    if (workspaceBookmarkGroupName(bookmark) !== oldName) return bookmark;
+    changed = true;
+    return { ...bookmark, group: nextName };
+  });
+  if (changed) writeWorkspaceBookmarks(workspaceInstanceId, next);
+  return changed ? next : current;
+}
+
+export function markWorkspaceBookmarksMissingForFile(
+  bookmarks: readonly WorkspaceBookmark[],
+  fileKey: string,
+): WorkspaceBookmark[] {
+  let changed = false;
+  const next = bookmarks.map((bookmark) => {
+    if (bookmark.fileKey !== fileKey || bookmark.state === "missing") return bookmark;
+    changed = true;
+    return { ...bookmark, state: "missing" as const };
+  });
+  return changed ? next : bookmarks.slice();
+}
+
+export function restoreWorkspaceBookmarksForFile(
+  bookmarks: readonly WorkspaceBookmark[],
+  fileKey: string,
+  pathLabel?: string,
+): WorkspaceBookmark[] {
+  let changed = false;
+  const next = bookmarks.map((bookmark) => {
+    if (bookmark.fileKey !== fileKey || bookmark.state !== "missing") return bookmark;
+    changed = true;
+    return {
+      ...bookmark,
+      state: "current" as const,
+      ...(pathLabel ? { pathLabel } : {}),
+    };
+  });
+  return changed ? next : bookmarks.slice();
+}
+
+/** Merge only the bookmark identities touched by a workspace transaction. */
+export function mergeWorkspaceBookmarkSnapshot(
+  current: readonly WorkspaceBookmark[],
+  snapshot: readonly WorkspaceBookmark[],
+  affectedIds: readonly string[],
+): WorkspaceBookmark[] {
+  const affected = new Set(affectedIds);
+  if (affected.size === 0) return current.slice();
+  const snapshotById = new Map(snapshot
+    .filter((bookmark) => affected.has(bookmark.id))
+    .map((bookmark) => [bookmark.id, bookmark]));
+  const restored = new Set<string>();
+  const next = current.flatMap((bookmark) => {
+    if (!affected.has(bookmark.id)) return [bookmark];
+    const replacement = snapshotById.get(bookmark.id);
+    if (!replacement) return [];
+    restored.add(bookmark.id);
+    return [replacement];
+  });
+  for (const bookmark of snapshot) {
+    if (affected.has(bookmark.id) && !restored.has(bookmark.id)) next.push(bookmark);
+  }
   return next;
 }

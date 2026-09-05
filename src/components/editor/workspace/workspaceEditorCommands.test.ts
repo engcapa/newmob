@@ -38,6 +38,11 @@ import {
   unselectOccurrence,
   workspaceEditorKeymap,
 } from "./workspaceEditorCommands";
+import {
+  virtualOverflowAt,
+  virtualSpaceOverflowField,
+  virtualSpaceTypingHandler,
+} from "./workspaceVirtualSpace";
 
 
 /** Region services bound to concrete paths (grammar comes from the path). */
@@ -168,7 +173,7 @@ describe("workspace editor commands", () => {
     view.destroy();
   });
 
-  it("pads short lines only when virtual space after line end is enabled", () => {
+  it("records short-line virtual overflow without padding the document", () => {
     const view = new EditorView({
       state: EditorState.create({
         doc: "abcdef\nx",
@@ -176,18 +181,47 @@ describe("workspace editor commands", () => {
         extensions: [
           EditorState.allowMultipleSelections.of(true),
           editorVirtualSpacePolicy.of({ afterLineEnd: true, atFileBottom: false }),
+          virtualSpaceOverflowField,
         ],
       }),
     });
 
     expect(cloneCaretBelow(view)).toBe(true);
-    expect(view.state.doc.toString()).toBe("abcdef\nx    ");
-    expect(view.state.selection.ranges.map((range) => range.head)).toEqual([5, 12]);
+    expect(view.state.doc.toString()).toBe("abcdef\nx");
+    expect(view.state.selection.ranges.map((range) => range.head)).toEqual([5, 8]);
+    expect(virtualOverflowAt(view.state, 8)).toBe(4);
     expect(view.state.selection.main.head).toBe(5);
     view.destroy();
   });
 
-  it("creates a final virtual line only when file-bottom virtual space is enabled", () => {
+  it("defers cloned-caret padding until typing so one undo removes padding and payload", () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "abcdef\nx",
+        selection: EditorSelection.cursor(5),
+        extensions: [
+          EditorState.allowMultipleSelections.of(true),
+          editorVirtualSpacePolicy.of({ afterLineEnd: true, atFileBottom: false }),
+          virtualSpaceOverflowField,
+          virtualSpaceTypingHandler,
+          history(),
+        ],
+      }),
+    });
+
+    expect(cloneCaretBelow(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("abcdef\nx");
+    expect(view.state.selection.ranges.map((range) => range.head)).toEqual([5, 8]);
+    expect(virtualOverflowAt(view.state, 8)).toBe(4);
+
+    expect((virtualSpaceTypingHandler as any).value(view, 5, 5, "X")).toBe(true);
+    expect(view.state.doc.toString()).toBe("abcdeXf\nx    X");
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("abcdef\nx");
+    view.destroy();
+  });
+
+  it("does not manufacture a final line merely to clone a caret", () => {
     const disabled = new EditorView({
       state: EditorState.create({ doc: "last", selection: EditorSelection.cursor(4) }),
     });
@@ -205,9 +239,9 @@ describe("workspace editor commands", () => {
         ],
       }),
     });
-    expect(cloneCaretBelow(enabled)).toBe(true);
-    expect(enabled.state.doc.toString()).toBe("last\n    ");
-    expect(enabled.state.selection.ranges.map((range) => range.head)).toEqual([4, 9]);
+    expect(cloneCaretBelow(enabled)).toBe(false);
+    expect(enabled.state.doc.toString()).toBe("last");
+    expect(enabled.state.selection.ranges.map((range) => range.head)).toEqual([4]);
     enabled.destroy();
   });
 

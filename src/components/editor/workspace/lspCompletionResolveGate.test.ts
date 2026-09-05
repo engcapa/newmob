@@ -6,14 +6,19 @@ import { history, undo } from "@codemirror/commands";
 import type { LspCompletionItem, LspCompletionResult, LspDocumentStatus } from "../../../lib/editor/lsp";
 import {
   buildCompletionAcceptancePlanV2,
+  classifyCompletionResolveOutcome,
+  commitLspCompletion,
   completionItemId,
   createLspCompletionSource,
+  executeCompletionResolve,
+  planCompletionChanges,
   providerScopeFor,
   recentCompletionInvocations,
   recordBasicCompletionInvocation,
   resetBasicCompletionSession,
   resetCompletionTelemetry,
   type CompletionRequestIdentity,
+  type CompletionRequestToken,
   type CompletionResolveGateRequest,
   type LspCompletionHooks,
 } from "./lspCompletion";
@@ -288,6 +293,44 @@ describe("§8.19.4 resolve gate acceptance", () => {
     view.destroy();
   });
 
+  it("distinguishes a null resolve result as unavailable", async () => {
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    const source = createLspCompletionSource(makeHooks({
+      resolve: async () => null,
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(gates).toHaveLength(1);
+    expect(gates[0].reason).toBe("unavailable");
+    expect(view.state.doc.toString()).toBe("\nasL");
+    view.destroy();
+  });
+
+  it("treats a missing resolver as unavailable and waits for explicit primary-only choice", async () => {
+    const view = mountView("\nasL");
+    const gates: CompletionResolveGateRequest[] = [];
+    const source = createLspCompletionSource(makeHooks({
+      onResolveGate: (request) => gates.push(request),
+    }));
+    const result = await source(new CompletionContext(view.state, 4, true));
+    applyFirstOption(view, result);
+    await settle();
+
+    expect(gates).toHaveLength(1);
+    expect(gates[0].reason).toBe("unavailable");
+    expect(gates[0].message).toContain("provider resolve is unavailable");
+    expect(view.state.doc.toString()).toBe("\nasL");
+    expect(await gates[0].retry()).toBe("unavailable");
+    expect(view.state.doc.toString()).toBe("\nasL");
+    expect(gates[0].insertWithoutImport()).toBe(true);
+    expect(view.state.doc.toString()).toBe("\nasList");
+    view.destroy();
+  });
+
   it("retry performs a fresh resolve and lands import + primary as one dispatch/one undo", async () => {
     const view = mountView("\nasL");
     const originalDoc = view.state.doc.toString();
@@ -423,6 +466,258 @@ describe("§8.19.4 resolve gate acceptance", () => {
 
     expect(gates).toHaveLength(0);
     expect(view.state.doc.toString()).toBe("import java.util.Arrays;\n\nasList");
+    view.destroy();
+  });
+});
+
+describe("§ED-COMP-001: Typed Completion Resolve Outcomes", () => {
+  const token: CompletionRequestToken = {
+    workspaceId: "ws-r3",
+    fileKey: "A.java",
+    filePath: "/repo/A.java",
+    uri: "file:///repo/A.java",
+    languageId: "java",
+    documentRevision: 7,
+    lspSessionGeneration: 3,
+    requestId: "req-1",
+  };
+
+  it("classifies all 7 typed outcomes accurately", () => {
+    const item = makeItem();
+
+    // 1. resolved
+    const resolvedItem = makeItem({
+      additionalTextEdits: [{
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        newText: "import java.util.List;\n",
+      }],
+    });
+    const resolved = classifyCompletionResolveOutcome({ item, hasResolver: true, resolvedItem });
+    expect(resolved.kind).toBe("resolved");
+    if (resolved.kind === "resolved") {
+      expect(resolved.edits).toHaveLength(1);
+    }
+
+    // 2. not-required
+    const notReqItem = makeItem({
+      additionalTextEdits: [{
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        newText: "import java.util.List;\n",
+      }],
+    });
+    const notRequired = classifyCompletionResolveOutcome({ item: notReqItem, hasResolver: false });
+    expect(notRequired.kind).toBe("not-required");
+
+    // 3. unavailable (resolver 缺失不推导 not-required)
+    const missingResolver = classifyCompletionResolveOutcome({ item, hasResolver: false });
+    expect(missingResolver.kind).toBe("unavailable");
+    if (missingResolver.kind === "unavailable") {
+      expect(missingResolver.reason).toBe("missing-resolver");
+    }
+
+    const resolverReturnedNull = classifyCompletionResolveOutcome({ item, hasResolver: true, resolvedItem: null });
+    expect(resolverReturnedNull.kind).toBe("unavailable");
+    if (resolverReturnedNull.kind === "unavailable") {
+      expect(resolverReturnedNull.reason).toBe("resolver-returned-null");
+    }
+
+    // 4. timeout
+    const timeout = classifyCompletionResolveOutcome({ item, hasResolver: true, timedOut: true });
+    expect(timeout.kind).toBe("timeout");
+
+    // 5. failed
+    const failed = classifyCompletionResolveOutcome({ item, hasResolver: true, error: new Error("network down") });
+    expect(failed.kind).toBe("failed");
+    if (failed.kind === "failed") {
+      expect(failed.error).toBe("network down");
+    }
+
+    // 6. cancelled
+    const cancelled = classifyCompletionResolveOutcome({ item, hasResolver: true, cancelled: true });
+    expect(cancelled.kind).toBe("cancelled");
+
+    // 7. stale
+    const stale = classifyCompletionResolveOutcome({
+      item,
+      hasResolver: true,
+      isStale: true,
+      tokenRevision: 7,
+      currentRevision: 8,
+    });
+    expect(stale.kind).toBe("stale");
+    if (stale.kind === "stale") {
+      expect(stale.expectedRevision).toBe(7);
+      expect(stale.currentRevision).toBe(8);
+    }
+  });
+
+  it("executeCompletionResolve handles timeout, throw, null, cancel, and revision drift safely", async () => {
+    vi.useFakeTimers();
+    const item = makeItem();
+
+    // Missing resolver returns unavailable
+    const missing = await executeCompletionResolve({
+      item,
+      token,
+      isStillCurrent: () => true,
+    });
+    expect(missing.kind).toBe("unavailable");
+
+    // Throw returns failed
+    const throwResult = await executeCompletionResolve({
+      item,
+      resolve: async () => { throw new Error("lsp crashed"); },
+      token,
+      isStillCurrent: () => true,
+    });
+    expect(throwResult.kind).toBe("failed");
+
+    // Null returns unavailable
+    const nullResult = await executeCompletionResolve({
+      item,
+      resolve: async () => null,
+      token,
+      isStillCurrent: () => true,
+    });
+    expect(nullResult.kind).toBe("unavailable");
+
+    // Cancel via AbortSignal returns cancelled
+    const controller = new AbortController();
+    controller.abort();
+    const cancelResult = await executeCompletionResolve({
+      item,
+      resolve: async () => makeItem(),
+      token,
+      isStillCurrent: () => true,
+      signal: controller.signal,
+    });
+    expect(cancelResult.kind).toBe("cancelled");
+
+    // Stale revision returns stale
+    let docRev = 7;
+    const stalePromise = executeCompletionResolve({
+      item,
+      resolve: async () => {
+        docRev = 8; // User typed!
+        return makeItem();
+      },
+      token,
+      isStillCurrent: () => true,
+      getDocumentRevision: () => docRev,
+    });
+    const staleResult = await stalePromise;
+    expect(staleResult.kind).toBe("stale");
+
+    // Timeout returns timeout
+    const timeoutPromise = executeCompletionResolve({
+      item,
+      resolve: async () => new Promise<LspCompletionItem | null>(() => {}),
+      token,
+      isStillCurrent: () => true,
+      timeoutMs: 100,
+    });
+    await vi.advanceTimersByTimeAsync(150);
+    const timeoutResult = await timeoutPromise;
+    expect(timeoutResult.kind).toBe("timeout");
+  });
+});
+
+describe("§ED-COMP-003: Atomic Acceptance & Single Undo", () => {
+  const token: CompletionRequestToken = {
+    workspaceId: "ws-r3",
+    fileKey: "A.java",
+    filePath: "/repo/A.java",
+    uri: "file:///repo/A.java",
+    languageId: "java",
+    documentRevision: 7,
+    lspSessionGeneration: 3,
+    requestId: "req-1",
+  };
+
+  it("plans changes and detects overlapping or out-of-order edits with zero mutation", () => {
+    const view = mountView("class App {\n  void main() {\n    Lis\n  }\n}");
+    const primary = { from: 31, to: 34, insert: "List" };
+
+    // Valid non-overlapping import edit at line 0
+    const validEdit = {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+      newText: "import java.util.List;\n",
+    };
+    const validPlan = planCompletionChanges(view, primary, [validEdit]);
+    expect(validPlan.ok).toBe(true);
+    expect(validPlan.list).toHaveLength(2);
+    expect(validPlan.list[0].from).toBe(0); // import first
+    expect(validPlan.list[1].from).toBe(31); // primary second
+
+    // Overlapping edit colliding with primary span
+    const overlappingEdit = {
+      range: { start: { line: 2, character: 3 }, end: { line: 2, character: 6 } },
+      newText: "List",
+    };
+    const badPlan = planCompletionChanges(view, primary, [overlappingEdit]);
+    expect(badPlan.ok).toBe(false);
+    view.destroy();
+  });
+
+  it("commits snippet with preceding auto-import in exactly one dispatch and reverts in exactly one undo", () => {
+    const view = mountView("class App {\n  void main() {\n    Lis\n  }\n}");
+    const initialDoc = view.state.doc.toString();
+    const item = makeItem({
+      label: "List",
+      insertText: "List<${1:String}>",
+      insertTextFormat: 2,
+      textEdit: null,
+      additionalTextEdits: [{
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        newText: "import java.util.List;\n",
+      }],
+    });
+
+    const dispatchSpy = vi.spyOn(view, "dispatch");
+    const diagnostics: string[] = [];
+    const committed = commitLspCompletion(
+      view,
+      item,
+      31,
+      34,
+      token,
+      () => true,
+      (diag) => diagnostics.push(diag),
+    );
+
+    expect(committed).toBe(true);
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toHaveLength(0);
+
+    const docAfter = view.state.doc.toString();
+    expect(docAfter).toContain("import java.util.List;\nclass App");
+    expect(docAfter).toContain("List<String>");
+
+    // Exactly one undo reverts everything back to initial document
+    undo(view);
+    expect(view.state.doc.toString()).toBe(initialDoc);
+    view.destroy();
+  });
+
+  it("rejects stale token without any document dispatch", () => {
+    const view = mountView("class App {\n  void main() {\n    Lis\n  }\n}");
+    const initialDoc = view.state.doc.toString();
+    const item = makeItem({ label: "List" });
+    const diagnostics: string[] = [];
+
+    const committed = commitLspCompletion(
+      view,
+      item,
+      31,
+      34,
+      token,
+      () => false, // Token is stale!
+      (diag) => diagnostics.push(diag),
+    );
+
+    expect(committed).toBe(false);
+    expect(diagnostics).toContain("identity-mismatch");
+    expect(view.state.doc.toString()).toBe(initialDoc);
     view.destroy();
   });
 });

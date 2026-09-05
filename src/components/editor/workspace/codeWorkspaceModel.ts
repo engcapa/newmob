@@ -9,6 +9,7 @@ import type { GitChange } from "../../../lib/git";
 import { DEFAULT_CODE_VIEW_PROFILE } from "../../../lib/codeViewProfile";
 import type { OpenFileEol, OpenFileViewModel } from "./editorGroupTypes";
 import type { FileTreeViewMode } from "./FileTreePane";
+import type { DiagnosticScope } from "./diagnosticScopeModel";
 
 export type MermaidApi = typeof import("mermaid").default;
 
@@ -93,9 +94,12 @@ export interface CompactChainState {
 export interface LspFileState {
   status: LspDocumentStatus | null;
   diagnostics: LspDiagnostic[];
+  diagnosticScope: DiagnosticScope | null;
   syncing: boolean;
   syncedText: string | null;
   error: string | null;
+  /** Increments when a failed condition reappears after being cleared. */
+  errorGeneration: number;
 }
 
 export type TreeSelection =
@@ -1444,9 +1448,11 @@ export function emptyLspFileState(): LspFileState {
   return {
     status: null,
     diagnostics: [],
+    diagnosticScope: null,
     syncing: false,
     syncedText: null,
     error: null,
+    errorGeneration: 0,
   };
 }
 

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_WORKSPACE_TAB_POLICY_V3,
@@ -28,7 +28,7 @@ describe("WorkspaceTabPolicySettingsDialog", () => {
     expect(screen.getByTestId("workspace-tab-policy-reuse-preview")).toBeChecked();
   });
 
-  it("edits fields and calls onApply with clamped limit", () => {
+  it("edits fields and calls onApply with clamped limit", async () => {
     const onApply = vi.fn();
     const onClose = vi.fn();
 
@@ -70,15 +70,14 @@ describe("WorkspaceTabPolicySettingsDialog", () => {
       previewMode: false,
       reusePreview: true,
     });
-    expect(onClose).toHaveBeenCalledOnce();
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
   });
 
   it("previews candidate evictions when limit is reduced below open tabs", () => {
     const openTabs = [
-      { key: "a.ts", title: "a.ts", dirty: false, pinned: false },
-      { key: "b.ts", title: "b.ts", dirty: false, pinned: false },
-      { key: "dirty.ts", title: "dirty.ts", dirty: true, pinned: false },
       { key: "pinned.ts", title: "pinned.ts", dirty: false, pinned: true },
+      { key: "clean.ts", title: "clean.ts", dirty: false, pinned: false },
+      { key: "dirty.ts", title: "dirty.ts", dirty: true, pinned: false },
     ];
 
     render(
@@ -92,19 +91,20 @@ describe("WorkspaceTabPolicySettingsDialog", () => {
     );
 
     fireEvent.change(screen.getByTestId("workspace-tab-policy-limit"), {
-      target: { value: "2" },
+      target: { value: "1" },
     });
 
     const preview = screen.getByTestId("workspace-tab-policy-eviction-preview");
     expect(preview).toBeInTheDocument();
-    expect(preview).toHaveTextContent("Tightening limit to 2 will evict 2 tab(s)");
-    // b.ts is least recently used (lowest simulated timestamp based on index)
-    expect(preview).toHaveTextContent("b.ts");
+    expect(preview).toHaveTextContent("Tightening limit to 1 will evict 2 tab(s)");
+    expect(preview).toHaveTextContent("clean.ts");
+    expect(preview).toHaveTextContent("dirty.ts");
+    expect(preview).toHaveTextContent("1 tab(s) with unsaved changes require confirmation");
   });
 
-  it("shows protected over-limit warning when all open tabs are protected", () => {
+  it("shows protected over-limit warning when all open tabs are pinned", () => {
     const openTabs = [
-      { key: "dirty1.ts", title: "dirty1.ts", dirty: true, pinned: false },
+      { key: "pinned0.ts", title: "pinned0.ts", dirty: false, pinned: true },
       { key: "pinned1.ts", title: "pinned1.ts", dirty: false, pinned: true },
     ];
 
@@ -125,6 +125,25 @@ describe("WorkspaceTabPolicySettingsDialog", () => {
     const warning = screen.getByTestId("workspace-tab-policy-over-limit-warning");
     expect(warning).toBeInTheDocument();
     expect(warning).toHaveTextContent("Tab limit (1) reached with no closable tab");
+  });
+
+  it("keeps the dialog open and restores Apply focus when dirty confirmation cancels", async () => {
+    const onClose = vi.fn();
+    render(
+      <WorkspaceTabPolicySettingsDialog
+        open
+        policy={DEFAULT_WORKSPACE_TAB_POLICY_V3}
+        onApply={vi.fn(async () => false)}
+        onClose={onClose}
+      />,
+    );
+
+    expect(screen.getByTestId("workspace-tab-policy-limit")).toHaveFocus();
+    fireEvent.click(screen.getByTestId("workspace-tab-policy-apply"));
+
+    await waitFor(() => expect(screen.getByTestId("workspace-tab-policy-apply")).toHaveFocus());
+    expect(screen.getByTestId("workspace-tab-policy-settings-dialog")).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("resets to default policy when reset button is clicked", () => {

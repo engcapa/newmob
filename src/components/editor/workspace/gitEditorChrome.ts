@@ -1,4 +1,11 @@
-import { RangeSetBuilder, Text, type Extension } from "@codemirror/state";
+import {
+  RangeSet,
+  RangeSetBuilder,
+  StateEffect,
+  StateField,
+  Text,
+  type Extension,
+} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -191,33 +198,92 @@ const GIT_EDITOR_THEME = EditorView.theme({
   },
 });
 
+interface GitEditorChromeConfig {
+  changes: readonly GitLineChange[];
+  blame: GitBlameLine | null;
+  onChangeClick?: (change: GitLineChange) => void;
+}
+
+interface GitEditorChromeState extends GitEditorChromeConfig {
+  markers: RangeSet<GutterMarker>;
+}
+
+const setGitEditorChromeState = StateEffect.define<GitEditorChromeConfig>();
+
+function buildGitChangeMarkers(
+  doc: Text,
+  { changes, onChangeClick }: GitEditorChromeConfig,
+): RangeSet<GutterMarker> {
+  const lineChanges = new Map<number, GitLineChange>();
+  for (const change of changes) {
+    for (let line = change.startLine; line <= change.endLine; line += 1) {
+      lineChanges.set(line, change);
+    }
+  }
+  const builder = new RangeSetBuilder<GutterMarker>();
+  for (const [lineNumber, change] of [...lineChanges].sort(([left], [right]) => left - right)) {
+    if (lineNumber < 0 || lineNumber >= doc.lines) continue;
+    const line = doc.line(lineNumber + 1);
+    builder.add(line.from, line.from, new GitChangeMarker(change, onChangeClick));
+  }
+  return builder.finish();
+}
+
+const gitEditorChromeState = StateField.define<GitEditorChromeState>({
+  create: () => ({ changes: [], blame: null, markers: RangeSet.empty }),
+  update: (current, transaction) => {
+    let config: GitEditorChromeConfig = current;
+    for (const effect of transaction.effects) {
+      if (effect.is(setGitEditorChromeState)) config = effect.value;
+    }
+    if (config === current && !transaction.docChanged) return current;
+    return {
+      ...config,
+      markers: buildGitChangeMarkers(transaction.newDoc, config),
+    };
+  },
+});
+
+const GIT_CHANGE_GUTTER = gutter({
+  class: "cm-git-change-gutter",
+  markers: (view) => view.state.field(gitEditorChromeState).markers,
+});
+
+const GIT_BLAME_DECORATIONS = EditorView.decorations.compute(
+  ["doc", gitEditorChromeState],
+  (state) => {
+    const { blame } = state.field(gitEditorChromeState);
+    if (!blame || blame.line < 1 || blame.line > state.doc.lines) return Decoration.none;
+    const line = state.doc.line(blame.line);
+    return Decoration.set([
+      Decoration.widget({ widget: new InlineBlameWidget(blame), side: 1 }).range(line.to),
+    ]);
+  },
+);
+
+export function updateGitEditorChrome(
+  changes: readonly GitLineChange[],
+  blame: GitBlameLine | null,
+  onChangeClick?: (change: GitLineChange) => void,
+): StateEffect<GitEditorChromeConfig> {
+  return setGitEditorChromeState.of({ changes, blame, onChangeClick });
+}
+
 export function createGitEditorChrome(
   changes: GitLineChange[],
   blame: GitBlameLine | null,
   onChangeClick?: (change: GitLineChange) => void,
 ): Extension[] {
-  const lineChanges = new Map<number, GitLineChange>();
-  for (const change of changes) {
-    for (let line = change.startLine; line <= change.endLine; line += 1) lineChanges.set(line, change);
-  }
-  const gitGutter = gutter({
-    class: "cm-git-change-gutter",
-    markers: (view) => {
-      const builder = new RangeSetBuilder<GutterMarker>();
-      for (const [lineNumber, change] of [...lineChanges].sort(([left], [right]) => left - right)) {
-        if (lineNumber < 0 || lineNumber >= view.state.doc.lines) continue;
-        const line = view.state.doc.line(lineNumber + 1);
-        builder.add(line.from, line.from, new GitChangeMarker(change, onChangeClick));
-      }
-      return builder.finish();
-    },
-  });
-  const blameDecoration = EditorView.decorations.of((view) => {
-    if (!blame || blame.line < 1 || blame.line > view.state.doc.lines) return Decoration.none;
-    const line = view.state.doc.line(blame.line);
-    return Decoration.set([
-      Decoration.widget({ widget: new InlineBlameWidget(blame), side: 1 }).range(line.to),
-    ]);
-  });
-  return [gitGutter, blameDecoration, GIT_EDITOR_THEME];
+  return [
+    gitEditorChromeState.init((state) => {
+      const config = { changes, blame, onChangeClick };
+      return {
+        ...config,
+        markers: buildGitChangeMarkers(state.doc, config),
+      };
+    }),
+    GIT_CHANGE_GUTTER,
+    GIT_BLAME_DECORATIONS,
+    GIT_EDITOR_THEME,
+  ];
 }

@@ -67,6 +67,13 @@ function catalogBindingSet(): Set<string> {
 }
 
 describe("§8.19.2 keymap inventory", () => {
+  it("registers Alt+/ as a default Basic Completion shortcut", () => {
+    const action = buildEditorHostActions(NOOP_HANDLERS)
+      .find((candidate) => candidate.id === "editor.basicCompletion");
+    expect(action?.keybinding).toBe("Ctrl+Space");
+    expect(action?.secondaryKeybindings).toContain("Alt+/");
+  });
+
   it("every legacy business binding resolves to an action id or the allowlist", () => {
     const catalog = catalogBindingSet();
     const unresolved: string[] = [];

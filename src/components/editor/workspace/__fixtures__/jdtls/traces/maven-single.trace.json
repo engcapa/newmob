@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "maven-single",
-  "generatedAt": "2026-08-26T11:37:48.532Z",
+  "generatedAt": "2026-09-04T00:02:08.228Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 2178,
+          "msTotal": 2224,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -61,7 +61,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 491,
+          "msTotal": 392,
           "itemCount": 58,
           "isIncomplete": true,
           "satisfied": true,
@@ -85,7 +85,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 36,
+          "msTotal": 60,
           "itemCount": 14,
           "isIncomplete": false,
           "satisfied": true,
@@ -167,7 +167,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 141,
+          "msTotal": 133,
           "itemCount": 2,
           "isIncomplete": false,
           "satisfied": true,
@@ -176,7 +176,7 @@
         }
       ],
       "resolve": {
-        "ms": 520,
+        "ms": 645,
         "additionalEditCount": 1,
         "additionalEditTexts": [
           "\n\nimport org.apache.commons.lang3.StringUtils;"
@@ -202,7 +202,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 148,
+          "msTotal": 171,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -225,7 +225,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 65,
+        "msTotal": 123,
         "signaturesCount": 13,
         "labels": [
           "append(double d) : StringBuilder",
@@ -261,7 +261,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 81,
+        "msTotal": 74,
         "signaturesCount": 13,
         "labels": [
           "append(double d) : StringBuilder",
@@ -297,7 +297,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 95,
+        "msTotal": 91,
         "signaturesCount": 3,
         "labels": [
           "parseInt(String s) : int",
@@ -323,7 +323,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 64,
+        "msTotal": 65,
         "signaturesCount": 9,
         "labels": [
           "valueOf(double d) : String",
@@ -355,7 +355,7 @@
       "scopeRequested": "default",
       "signatureHelp": {
         "attempts": 1,
-        "msTotal": 128,
+        "msTotal": 162,
         "signaturesCount": 1,
         "labels": [
           "singletonList(T o) : List<T>"
@@ -383,7 +383,7 @@
         "firstCancelled": true,
         "msFirst": 59,
         "secondSatisfied": true,
-        "msSecond": 56
+        "msSecond": 53
       },
       "notes": "$/cancelRequest on the in-flight request mirrors the production cancel bridge; second request must satisfy"
     },
@@ -397,7 +397,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 51,
+        "msFirst": 54,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -418,7 +418,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 110,
+        "msFirst": 123,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -439,7 +439,7 @@
       },
       "scopeRequested": "default",
       "hover": {
-        "msFirst": 48,
+        "msFirst": 43,
         "attempts": 1,
         "contentsPresent": true,
         "contentsKind": "markup-array",
@@ -484,27 +484,79 @@
     "hoverProviderDeclaredStatically": false,
     "signatureHelpProvenByScenarios": true,
     "hoverProvenByScenarios": true,
-    "dynamicRegistrations": []
+    "dynamicRegistrations": [
+      "textDocument/codeAction",
+      "textDocument/completion",
+      "textDocument/signatureHelp"
+    ]
   },
   "quickFix": {
     "caseId": "import-quick-fix",
     "file": "src/main/java/com/example/single/QuickFixTarget.java",
     "diagnosticMessage": "StringUtils cannot be resolved",
-    "actionTitle": null,
-    "actionKind": null,
-    "isPreferred": null,
-    "offeredTitles": [],
-    "resolved": false,
+    "actionTitle": "Import 'StringUtils' (org.apache.commons.lang3)",
+    "actionKind": "quickfix",
+    "isPreferred": false,
+    "offeredTitles": [
+      "Import 'StringUtils' (com.sun.tools.javac.util)",
+      "Import 'StringUtils' (org.apache.commons.lang3)",
+      "Add all missing imports",
+      "Create class 'StringUtils'",
+      "Create enum 'StringUtils'",
+      "Create interface 'StringUtils'",
+      "Create record 'StringUtils'",
+      "Create constant 'StringUtils'"
+    ],
+    "resolved": true,
     "resolveFailure": null,
-    "importInsertText": null,
-    "appliedSha256": null,
-    "originalSha256": null,
-    "revertedRestoresOriginalHash": false,
-    "msTotal": 245004,
-    "satisfied": false,
-    "reason": "provider-hang: textDocument/codeAction gave no response across 1 attempt(s) (healthy + broken files alike)",
-    "providerHang": {
-      "attempts": 1
+    "importInsertText": "import org.apache.commons.lang3.StringUtils;",
+    "appliedSha256": "a1a321c4326cdfef25e6aec6ccce42ec1f06395f10ba44154a0f424b5105dec2",
+    "originalSha256": "f2de5c8ab98b58cf18ff998ebc47d19c127bb6f4290550d2827a40a37552e70a",
+    "revertedRestoresOriginalHash": true,
+    "msTotal": 730,
+    "satisfied": true,
+    "reason": null,
+    "resolvedShape": {
+      "actionKeys": [
+        "data",
+        "diagnostics",
+        "edit",
+        "kind",
+        "title"
+      ],
+      "command": null,
+      "commandArgumentCount": null,
+      "editKeys": [
+        "changes"
+      ],
+      "changeUris": [
+        "file://${project}/src/main/java/com/example/single/QuickFixTarget.java"
+      ],
+      "changeEditCounts": [
+        1
+      ],
+      "documentChanges": [],
+      "requestedUri": "file://${project}/src/main/java/com/example/single/QuickFixTarget.java",
+      "exactUriMatch": true,
+      "encodedUriMatch": true,
+      "targetEditShapes": [
+        {
+          "keys": [
+            "newText",
+            "range"
+          ],
+          "rangeKeys": [
+            "end",
+            "start"
+          ],
+          "newTextType": "string",
+          "newTextLength": 75,
+          "containsImport": true
+        }
+      ]
+    },
+    "quickFixCancel": {
+      "outcome": "rejected:-32800"
     }
   },
   "analysis": {
@@ -523,7 +575,7 @@
       }
     ],
     "importProgress": {
-      "events": 44,
+      "events": 42,
       "beginTokens": 13,
       "titles": [
         "Synchronizing projects",
@@ -532,8 +584,8 @@
         "Detect installed JVMs",
         "LookupJDKToolchainsJob",
         "Reporting encoding changes.",
-        "Validate documents",
-        "Searching..."
+        "Searching...",
+        "Validate documents"
       ],
       "anyWithPercentage": true
     },
@@ -548,16 +600,16 @@
     }
   },
   "analysisTiming": {
-    "firstCompletionSatisfiedMs": 251869,
+    "firstCompletionSatisfiedMs": 8642,
     "offlineCacheHint": {
-      "coldSessionFirstSatisfiedMs": 251869,
-      "restartedSessionFirstSatisfiedMs": 5037,
+      "coldSessionFirstSatisfiedMs": 8642,
+      "restartedSessionFirstSatisfiedMs": 5976,
       "fasterThanCold": true
     }
   },
   "restart": {
     "performed": true,
-    "msToReadyAfterRestart": 5152,
+    "msToReadyAfterRestart": 6083,
     "completionOkAfterRestart": true,
     "signatureHelpOkAfterRestart": true,
     "reason": null,

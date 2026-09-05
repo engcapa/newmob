@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "fixtureId": "gradle-single",
-  "generatedAt": "2026-08-26T05:31:12.843Z",
+  "generatedAt": "2026-09-04T00:02:46.020Z",
   "sanitized": true,
   "toolchain": {
     "java": {
@@ -37,7 +37,7 @@
       "requests": [
         {
           "attempts": 1,
-          "msTotal": 12908,
+          "msTotal": 12270,
           "itemCount": 50,
           "isIncomplete": true,
           "satisfied": true,
@@ -56,7 +56,6 @@
     "declaredStaticDataChannel": false,
     "topLevelCapabilityKeys": [
       "callHierarchyProvider",
-      "codeActionProvider",
       "codeLensProvider",
       "declarationProvider",
       "definitionProvider",
@@ -84,7 +83,11 @@
     "hoverProviderDeclaredStatically": false,
     "signatureHelpProvenByScenarios": false,
     "hoverProvenByScenarios": false,
-    "dynamicRegistrations": []
+    "dynamicRegistrations": [
+      "textDocument/codeAction",
+      "textDocument/completion",
+      "textDocument/signatureHelp"
+    ]
   },
   "analysis": {
     "serverInfo": {
@@ -106,8 +109,8 @@
       }
     ],
     "importProgress": {
-      "events": 34,
-      "beginTokens": 6,
+      "events": 35,
+      "beginTokens": 7,
       "titles": [
         "Synchronizing projects",
         "Building",
@@ -122,6 +125,6 @@
     }
   },
   "analysisTiming": {
-    "firstCompletionSatisfiedMs": 16184
+    "firstCompletionSatisfiedMs": 15568
   }
 }

@@ -1,0 +1,55 @@
+id: TC-IDE-DEBUG-01-java25-breakpoint-native
+title: "Java 25 packaged-app breakpoint debug session"
+description: |
+  Creates and compiles isolated Maven and Gradle Java 25 projects, then launches
+  the Maven main class in the packaged desktop app with no saved Java bundle
+  configuration. A physical Ctrl+F8 sets a source breakpoint; the test requires
+  automatic java-debug bundle discovery, a real stopped/breakpoint DAP state,
+  and current-line editor decoration before terminating the session. The fixture
+  build receipt proves both Maven and Gradle projects compiled on the host before
+  the debug run. Highest claim on green: L2 provider-backed native DAP behavior.
+covers: [F25.5]
+tags: [code-workspace, java25, debug, dap, native-gate, p0]
+modes: [native]
+fixtures: [reset_db, java25_projects]
+timeout_sec: 600
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-java25-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-java25-debug","name":"maven-java25","roots":[{"id":"maven-java25","name":"maven-java25","path":"${fixture.java25_maven_root}","kind":"folder"}],"looseFiles":[],"lastActiveFile":{"kind":"root","rootId":"maven-java25","path":"src/main/java/com/example/app/App.java"},"lastOpenedAt":1788537600000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.java25_maven_root}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: 'System.out.println("debug-value=" + value);'
+      timeout_sec: 60
+  - assert_text:
+      selector: '[data-testid="code-workspace-lsp-status-pill"]'
+      contains: "Java"
+      timeout_sec: 60
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Control+Home", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "Home", "Control+F8"]
+  - native_click:
+      selector: '[data-testid="code-workspace-debug-target"]'
+  - assert_text:
+      selector: '[data-testid="debug-panel"]'
+      contains: "stopped · breakpoint"
+      timeout_sec: 60
+  - wait_for:
+      selector: '.taomni-debug-current-line'
+      timeout_sec: 30
+  - screenshot: tc-ide-debug-01-java25-breakpoint.png
+  - native_click:
+      selector: '[data-testid="debug-stop"]'
+  - assert_text:
+      selector: '[data-testid="debug-panel"]'
+      contains: "terminated"
+      timeout_sec: 30

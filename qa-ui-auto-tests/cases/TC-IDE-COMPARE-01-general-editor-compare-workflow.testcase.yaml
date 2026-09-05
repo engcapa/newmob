@@ -1,0 +1,118 @@
+id: TC-IDE-COMPARE-01
+title: "General editor compare workflow: clipboard, file, local history"
+description: |
+  ED-COMPARE-001 browser gate. The mounted production workspace routes all
+  three compare commands into the shared compare dialog, preserves the buffer
+  metadata surface, and reports the browser clipboard/VFS and local-history
+  unavailable contracts honestly. Browser clipboard/VFS and
+  local-history stubs only prove the L1 mounted workflow; native OS effects
+  and packaged Tauri behavior require the native layer.
+covers: [F25.5]
+tags: [code-workspace, ide-compare, compare, clipboard, local-history, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  # Add the browser-VFS preview folder (/preview is prefilled).
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+
+  # Clipboard source: use the mounted editor copy path as the user gesture,
+  # then invoke the compare action through the same production owner. The
+  # runner's Chromium context intentionally has no clipboard permission, so
+  # this verifies the typed native-read failure rather than fabricating text.
+  - press: Home
+  - press: Shift+End
+  - press: Control+c
+  - wait: 0.5
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Compare with Clipboard
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Compare with Clipboard'
+  - wait_for: '[data-testid="code-workspace-compare-dialog"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-compare-dialog"]'
+      contains: "Compare"
+  - assert_text:
+      selector: '[data-testid="compare-session-metadata"]'
+      contains: "clipboard"
+  - assert_text:
+      selector: '[data-testid="compare-left-unavailable"]'
+      contains: "read-failed"
+  - assert_disabled: '[data-testid="compare-apply-left-to-right"]'
+  - assert_text:
+      selector: '[data-testid^="compare-right-line-"]'
+      contains: "Browser preview"
+  - assert_disabled: '[data-testid="compare-copy-left"]'
+  - click: '[data-testid="compare-dialog-close"]'
+
+  # File source: choose a missing browser-VFS path and preserve a typed
+  # read-failed surface rather than collapsing it into success.
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Compare with File
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Compare with File…'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - fill:
+      selector: '[data-testid="text-input-dialog-input"]'
+      value: /preview/missing-compare.txt
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-compare-dialog"]'
+  - assert_text:
+      selector: '[data-testid="compare-session-metadata"]'
+      contains: "file"
+  - assert_text:
+      selector: '[data-testid="compare-left-unavailable"]'
+      contains: "read-failed"
+  - assert_disabled: '[data-testid="compare-copy-left"]'
+  - click: '[data-testid="compare-dialog-close"]'
+
+  # Local History source: the browser provider has no native history store, so
+  # the shared surface must show the explicit no-history state.
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Compare with Local History
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Compare with Local History'
+  - wait_for: '[data-testid="code-workspace-compare-dialog"]'
+  - assert_text:
+      selector: '[data-testid="compare-session-metadata"]'
+      contains: "local-history"
+  - assert_text:
+      selector: '[data-testid="compare-left-unavailable"]'
+      contains: "no-history"
+  - assert_disabled: '[data-testid="compare-apply-left-to-right"]'
+  # Only the close action is focusable in this unavailable state. Verify the
+  # dialog's accessible focus name and Escape recovery without a mouse.
+  - wait: 0.2
+  - eval_readonly:
+      expression: 'document.activeElement?.getAttribute("data-testid") === "compare-dialog-close"'
+      expect_truthy: true
+  - press: Tab
+  - eval_readonly:
+      expression: 'document.activeElement?.getAttribute("data-testid") === "compare-copy-right"'
+      expect_truthy: true
+  - press: Escape
+  - assert_not_visible: '[data-testid="code-workspace-compare-dialog"]'

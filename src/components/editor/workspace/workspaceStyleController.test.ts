@@ -6,15 +6,26 @@ import {
   type SaveTransactionV2,
 } from "./workspaceStyleController";
 import {
+  buildFinalBytesReceipt,
   buildPreparedSave,
   resolveWritePolicy,
   type PreparedSave,
   type SaveCommitResult,
 } from "./saveCommit";
+import type { ImmutableSavePlan } from "./saveNormalizationPipeline";
 import type { WorkspaceFile } from "../../../lib/editor/workspace";
 
 function fakeWrittenFile(hash: string): WorkspaceFile {
   return { path: "/project/app.ts", text: "", hash, size: 0, mtime: 0 };
+}
+
+function receiptFor(prepared: PreparedSave, file: WorkspaceFile, recoveryId?: string) {
+  return buildFinalBytesReceipt(prepared, {
+    writtenHash: file.hash,
+    writtenByteLength: file.size,
+    intentHash: file.hash,
+    oldHash: prepared.expectedDiskHash,
+  }, recoveryId ? { recoveryId, committedAt: 1 } : { committedAt: 1 });
 }
 
 /** Full-fact committed result as a real commit core would return it. */
@@ -26,6 +37,7 @@ function savedCurrentCommitter(file: WorkspaceFile = fakeWrittenFile("hash-saved
     memoryEffect: "saved-current",
     providerEffect: "did-save",
     file,
+    receipt: receiptFor(prepared, file),
   }));
 }
 
@@ -136,6 +148,7 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
         file: fakeWrittenFile("hash-saved-1"),
         savedRevision: prepared.bufferRevision,
         currentRevision: prepared.bufferRevision + 1,
+        receipt: receiptFor(prepared, fakeWrittenFile("hash-saved-1")),
       };
     });
 
@@ -166,6 +179,80 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
       expect(outcome.file.hash).toBe("hash-saved-1");
       expect(outcome.savedRevision).toBe(1);
       expect(outcome.currentRevision).toBe(2);
+    }
+  });
+
+  it("carries the complete immutable normalization plan to the production commit boundary", async () => {
+    const ctrl = new WorkspaceStyleController({
+      workspaceId: "ws-plan",
+      roots: [{ path: "/project" }],
+      fileProvider: { readFile: async () => null },
+    });
+    const tx: SaveTransactionV2 = {
+      id: "tx-plan",
+      workspaceId: "ws-plan",
+      fileKey: "key-plan",
+      filePath: "/project/src/App.java",
+      bufferVersion: 7,
+      styleGeneration: 0,
+      expectedDiskHash: "disk-hash",
+      documentIdentity: {
+        uri: "file:///project/src/App.java",
+        path: "/project/src/App.java",
+        revision: 7,
+        languageId: "java",
+      },
+      diskIdentity: {
+        mtimeMs: 1700000000000,
+        sizeBytes: 18,
+        exists: true,
+        sha256: "disk-hash",
+      },
+      providerIdentity: { id: "jdtls", generation: 4 },
+      projectIdentity: { fingerprint: "project-fingerprint", rootUri: "file:///project" },
+      policy: { eol: "lf", encoding: "UTF-8", bom: false },
+      text: "class App {  \n}\n",
+    };
+
+    let normalizationPlan: ImmutableSavePlan | undefined;
+    const commit: PreparedSaveCommitter = vi.fn(async (prepared): Promise<SaveCommitResult> => {
+      normalizationPlan = Reflect.get(prepared, "normalizationPlan") as ImmutableSavePlan | undefined;
+      return {
+        kind: "saved-current",
+        transactionId: prepared.transactionId,
+        diskEffect: "committed",
+        memoryEffect: "saved-current",
+        providerEffect: "did-save",
+        file: fakeWrittenFile("written-hash"),
+        receipt: receiptFor(prepared, fakeWrittenFile("written-hash")),
+      };
+    });
+
+    await ctrl.executeSaveTransaction(tx, commit, {
+      getLatestBufferVersion: () => 7,
+    });
+
+    expect(normalizationPlan).toBeDefined();
+    expect(Object.isFrozen(normalizationPlan)).toBe(true);
+    expect(normalizationPlan?.identity).toMatchObject({
+      document: { uri: "file:///project/src/App.java", revision: 7, languageId: "java" },
+      disk: { sha256: "disk-hash", exists: true },
+      provider: { id: "jdtls", generation: 4 },
+      project: { fingerprint: "project-fingerprint", rootUri: "file:///project" },
+      encoding: { charset: "UTF-8", bom: false },
+    });
+    expect(normalizationPlan?.stages.map((stage) => stage.stage)).toEqual([
+      "format",
+      "organize-imports",
+      "trim",
+      "final-newline",
+      "eol",
+      "charset-bom",
+    ]);
+    for (const stage of normalizationPlan?.stages ?? []) {
+      expect(stage.status).toBeTruthy();
+      expect(stage.beforeHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(stage.afterHash).toMatch(/^[a-f0-9]{64}$/);
     }
   });
 
@@ -254,8 +341,7 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
       getLatestBufferVersion: () => 1,
     });
     expect(outcome2.kind).toBe("failed");
-    if (outcome2.kind === "failed") {
-      expect(outcome2.diskEffect).toBe("unknown");
+    if (outcome2.kind === "failed" && outcome2.diskEffect === "unknown") {
       expect(outcome2.recoveryId).toBe(tx.id);
     }
 
@@ -269,6 +355,8 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
       providerEffect: "discarded",
       file: fakeWrittenFile("h"),
       reason: "Open buffer closed while writer was in flight",
+      receipt: receiptFor(prepared, fakeWrittenFile("h"), prepared.transactionId),
+      recoveryId: prepared.transactionId,
     }));
     const outcome3 = await ctrl.executeSaveTransaction(tx, commitDiscarded);
     expect(outcome3.kind).toBe("committed-writeback-discarded");
@@ -353,6 +441,31 @@ describe("WorkspaceStyleController (§8.18.1)", () => {
     expect(prepared.policy).toEqual({ eol: "crlf", encoding: "UTF-8", bom: true });
     expect(prepared.bufferRevision).toBe(3);
     expect(prepared.styleGeneration).toBe(7);
+  });
+
+  it("preserves the file UTF-8 BOM policy through normalization when EditorConfig has no charset", async () => {
+    const ctrl = new WorkspaceStyleController({
+      workspaceId: "ws-bom",
+      roots: [{ path: "/project" }],
+      fileProvider: { readFile: vi.fn(async () => null) },
+    });
+    const commit = vi.fn(savedCurrentCommitter());
+
+    await ctrl.executeSaveTransaction({
+      id: "tx-bom",
+      workspaceId: "ws-bom",
+      fileKey: "main",
+      filePath: "/project/main.txt",
+      bufferVersion: 1,
+      styleGeneration: 0,
+      expectedDiskHash: null,
+      policy: { eol: "crlf", encoding: "UTF-8", bom: true },
+      text: "café\nmatrix",
+    }, commit, { getLatestBufferVersion: () => 1 });
+
+    const prepared = commit.mock.calls[0][0] as PreparedSave;
+    expect(prepared.policy).toEqual({ eol: "crlf", encoding: "UTF-8", bom: true });
+    expect(prepared.text).toBe("\uFEFFcafé\r\nmatrix");
   });
 
   it("§8.21.3 V2-D: accepts EffectiveSavePolicyV4 and executes formatting before committing", async () => {

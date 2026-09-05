@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { RotateCcw, X } from "lucide-react";
 import {
   DEFAULT_WORKSPACE_TAB_POLICY_V3,
@@ -15,8 +15,9 @@ export interface WorkspaceTabPolicySettingsDialogProps {
     title: string;
     dirty?: boolean;
     pinned?: boolean;
+    preview?: boolean;
   }[];
-  onApply: (policy: WorkspaceTabPolicyV3) => void;
+  onApply: (policy: WorkspaceTabPolicyV3) => boolean | void | Promise<boolean | void>;
   onClose: () => void;
 }
 
@@ -28,10 +29,13 @@ export function WorkspaceTabPolicySettingsDialog({
   onClose,
 }: WorkspaceTabPolicySettingsDialogProps) {
   const [draft, setDraft] = useState<WorkspaceTabPolicyV3>(() => ({ ...policy }));
+  const [applying, setApplying] = useState(false);
+  const applyButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (open) {
       setDraft({ ...policy });
+      setApplying(false);
     }
   }, [open, policy]);
 
@@ -46,14 +50,18 @@ export function WorkspaceTabPolicySettingsDialog({
           key: tab.key,
           dirty: !!tab.dirty,
           pinned: !!tab.pinned,
-          preview: false,
+          preview: !!tab.preview,
           lastUsedAt: 1_000_000 - idx,
         },
       ]),
     );
     const keys = openTabs.map((tab) => tab.key);
-    return enforceTabPolicy(keys, meta, draft);
+    return enforceTabPolicy(keys, meta, draft, { allowDirty: true });
   }, [draft, openTabs]);
+
+  const dirtyEvictionCount = evictionPreview?.kind === "evicted"
+    ? evictionPreview.evictedKeys.filter((key) => openTabs.find((tab) => tab.key === key)?.dirty).length
+    : 0;
 
   if (!open) return null;
 
@@ -61,11 +69,18 @@ export function WorkspaceTabPolicySettingsDialog({
     setDraft((current) => ({ ...current, ...patch }));
   };
 
-  const handleApply = () => {
-    onApply({
+  const handleApply = async () => {
+    if (applying) return;
+    setApplying(true);
+    const shouldClose = await onApply({
       ...draft,
       limitPerLeaf: Math.max(1, Math.min(50, Math.round(draft.limitPerLeaf))),
     });
+    if (shouldClose === false) {
+      setApplying(false);
+      requestAnimationFrame(() => applyButtonRef.current?.focus());
+      return;
+    }
     onClose();
   };
 
@@ -120,6 +135,7 @@ export function WorkspaceTabPolicySettingsDialog({
                 step={1}
                 data-testid="workspace-tab-policy-limit"
                 aria-label="Tab limit per editor split"
+                autoFocus
                 value={draft.limitPerLeaf}
                 onChange={(event) =>
                   updateDraft({ limitPerLeaf: Number(event.target.value) })
@@ -145,7 +161,10 @@ export function WorkspaceTabPolicySettingsDialog({
                       )
                       .join(", ")}
                   </span>
-                  . Pinned tabs and tabs with unsaved changes are protected.
+                  . Pinned tabs stay protected.
+                  {dirtyEvictionCount > 0
+                    ? ` ${dirtyEvictionCount} tab(s) with unsaved changes require confirmation.`
+                    : ""}
                 </div>
               </div>
             )}
@@ -323,10 +342,12 @@ export function WorkspaceTabPolicySettingsDialog({
           <button
             type="button"
             data-testid="workspace-tab-policy-apply"
+            ref={applyButtonRef}
             className="taomni-btn h-7 px-3"
-            onClick={handleApply}
+            disabled={applying}
+            onClick={() => void handleApply()}
           >
-            Apply
+            {applying ? "Applying..." : "Apply"}
           </button>
         </div>
       </div>

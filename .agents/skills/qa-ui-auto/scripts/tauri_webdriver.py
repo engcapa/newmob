@@ -265,8 +265,137 @@ class NativeSession:
         )
         return f"double-clicked {selector}"
 
+    def pointer_click(self, selector: str) -> dict[str, int]:
+        """Click through W3C pointer actions instead of element /click."""
+        element = self.find(selector, interactive=True)
+        rect = self.request("GET", self.element_path(element, "/rect"))
+        x = int((rect.get("x", 0) + rect.get("width", 0) / 2)) if isinstance(rect, dict) else 0
+        y = int((rect.get("y", 0) + rect.get("height", 0) / 2)) if isinstance(rect, dict) else 0
+        self.request(
+            "POST",
+            self.endpoint("/actions"),
+            {
+                "actions": [
+                    {
+                        "type": "pointer",
+                        "id": "native-pointer",
+                        "parameters": {"pointerType": "mouse"},
+                        "actions": [
+                            {"type": "pointerMove", "duration": 100, "x": x, "y": y, "origin": "viewport"},
+                            {"type": "pointerDown", "button": 0},
+                            {"type": "pause", "duration": 80},
+                            {"type": "pointerUp", "button": 0},
+                        ],
+                    }
+                ]
+            },
+        )
+        return {"x": x, "y": y}
+
+    def pointer_drag(
+        self,
+        start: dict[str, int],
+        end: dict[str, int],
+        modifiers: list[str] | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Drag between viewport coordinates while holding W3C modifiers."""
+        modifier_names = modifiers or []
+        modifier_values: list[str] = []
+        for name in modifier_names:
+            value = self.MODIFIER_MAP.get(name)
+            if value is None:
+                raise WebDriverError(f"pointer_drag: unknown modifier {name!r}")
+            modifier_values.append(value)
+
+        pointer_core = [
+            {
+                "type": "pointerMove",
+                "duration": 100,
+                "x": int(start["x"]),
+                "y": int(start["y"]),
+                "origin": "viewport",
+            },
+            {"type": "pointerDown", "button": 0},
+            {
+                "type": "pointerMove",
+                "duration": 400,
+                "x": int(end["x"]),
+                "y": int(end["y"]),
+                "origin": "viewport",
+            },
+            {"type": "pause", "duration": 100},
+            {"type": "pointerUp", "button": 0},
+        ]
+        pointer_actions = (
+            [{"type": "pause", "duration": 0} for _ in modifier_values]
+            + pointer_core
+            + [{"type": "pause", "duration": 0} for _ in modifier_values]
+        )
+        key_actions: list[dict[str, Any]] = []
+        if modifier_values:
+            key_actions.extend(
+                {"type": "keyDown", "value": value} for value in modifier_values
+            )
+            key_actions.extend(
+                {"type": "pause", "duration": 0}
+                for _ in pointer_core
+            )
+            key_actions.extend(
+                {"type": "keyUp", "value": value}
+                for value in reversed(modifier_values)
+            )
+
+        actions: list[dict[str, Any]] = []
+        if key_actions:
+            actions.append({"type": "key", "id": "drag-keyboard", "actions": key_actions})
+        actions.append({
+            "type": "pointer",
+            "id": "native-drag-pointer",
+            "parameters": {"pointerType": "mouse"},
+            "actions": pointer_actions,
+        })
+        try:
+            self.request("POST", self.endpoint("/actions"), {"actions": actions})
+        finally:
+            # Release any input source left depressed by a failed driver action.
+            try:
+                self.request("DELETE", self.endpoint("/actions"))
+            except WebDriverError:
+                pass
+        return {
+            "start": {"x": int(start["x"]), "y": int(start["y"])},
+            "end": {"x": int(end["x"]), "y": int(end["y"])},
+        }
+
     def fill(self, selector: str, text: str) -> str:
         element = self.find(selector)
+        contenteditable = self.execute(
+            f"const el = document.querySelector({json.dumps(selector)});"
+            "return !!el?.isContentEditable;"
+        )
+        if contenteditable is True:
+            # WebKit accepts element /value for contenteditable nodes without
+            # dispatching the beforeinput/input events CodeMirror owns. Drive
+            # real key actions so the editor creates a normal transaction.
+            for _ in range(3):
+                self.request("POST", self.element_path(element, "/click"), {})
+                focused = self.execute(
+                    f"const el = document.querySelector({json.dumps(selector)});"
+                    "return !!el && document.activeElement === el;"
+                )
+                if focused is True:
+                    break
+                time.sleep(0.1)
+            else:
+                raise WebDriverError(f"contenteditable did not receive focus: {selector}")
+            self.press_combo("Control+a")
+            lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            for index, line in enumerate(lines):
+                if index:
+                    self.press_combo("Enter")
+                if line:
+                    self.type_text(line)
+            return f"filled contenteditable {selector}"
         try:
             self.request("POST", self.element_path(element, "/clear"), {})
         except WebDriverError:
@@ -332,10 +461,7 @@ class NativeSession:
         "Command": "\ue03d",
     }
 
-    def press_combo(self, combo: str) -> str:
-        """Press a chord like `Control+s`, `Control+Shift+p`, or a bare
-        named key (`Enter`). Sends real key events through the W3C Actions
-        API so CodeMirror/keydown handlers in the native WebView see them."""
+    def _combo_actions(self, combo: str) -> list[dict[str, Any]]:
         parts = [p.strip() for p in combo.split("+") if p.strip()]
         if not parts:
             raise WebDriverError(f"press_combo: empty combo {combo!r}")
@@ -351,19 +477,48 @@ class NativeSession:
         seq.append({"type": "pause", "duration": 30})
         seq.append({"type": "keyUp", "value": value})
         seq += [{"type": "keyUp", "value": m} for m in reversed(mods)]
-        self.request(
-            "POST",
-            self.endpoint("/actions"),
-            {"actions": [{"type": "key", "id": "keyboard", "actions": seq}]},
-        )
-        return f"pressed {combo}"
+        seq.append({"type": "pause", "duration": 30})
+        return seq
+
+    def press_combo(self, combo: str) -> str:
+        """Press a chord like `Control+s`, `Control+Shift+p`, or a bare
+        named key (`Enter`). Sends real key events through the W3C Actions
+        API so CodeMirror/keydown handlers in the native WebView see them."""
+        return self.press_combos([combo])
+
+    def press_combos(self, combos: list[str]) -> str:
+        """Send multiple chords in one W3C action request.
+
+        WebKitWebDriver can reset its connection after many back-to-back
+        /actions requests. A single input source preserves the same native
+        keydown/keyup semantics without exercising that driver failure.
+        """
+        seq = [action for combo in combos for action in self._combo_actions(combo)]
+        try:
+            self.request(
+                "POST",
+                self.endpoint("/actions"),
+                {"actions": [{"type": "key", "id": "keyboard", "actions": seq}]},
+            )
+        finally:
+            # WebKitWebDriver may retain pressedCharKey even after explicit
+            # keyUp events. Releasing all input sources keeps the next command
+            # independent, especially after Enter and clipboard shortcuts.
+            try:
+                self.request("DELETE", self.endpoint("/actions"))
+            except WebDriverError:
+                pass
+        return f"pressed {len(combos)} combo(s)"
 
     def type_text(self, text: str) -> str:
-        """Type text into the focused element, one key event pair per char."""
+        """Type text into the focused element, one paced key pair per char."""
         seq: list[dict[str, Any]] = []
         for ch in text:
             seq.append({"type": "keyDown", "value": ch})
             seq.append({"type": "keyUp", "value": ch})
+            # Let WebKit deliver the input transaction and CodeMirror finish
+            # its scheduled measure before the next native character arrives.
+            seq.append({"type": "pause", "duration": 20})
         self.request(
             "POST",
             self.endpoint("/actions"),

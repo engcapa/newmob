@@ -41,8 +41,9 @@ impl WorkspaceSdkEnvironment {
     pub fn passthrough(workspace_root: &Path, scope_path: &Path) -> Self {
         let workspace_root = path_string(workspace_root);
         let scope_path = path_string(scope_path);
-        let fingerprint =
-            fingerprint(&[workspace_root.as_str(), scope_path.as_str(), "passthrough"]);
+        // The requested file directory is diagnostic metadata, not process
+        // identity. Keeping it here spawned one language server per package.
+        let fingerprint = fingerprint(&[workspace_root.as_str(), "passthrough"]);
         Self {
             project_scope_path: workspace_root.clone(),
             workspace_root,
@@ -164,11 +165,11 @@ pub fn build_workspace_environment(
     let scope_path = path_string(&requested_scope);
     let project_scope_path = path_string(&project_scope);
 
-    let mut fingerprint_parts = vec![
-        workspace_root.as_str(),
-        scope_path.as_str(),
-        project_scope_path.as_str(),
-    ];
+    // `scope_path` is the current file's parent directory. The selected SDKs
+    // and nearest project scope below already capture every environment input;
+    // including the request directory made otherwise-identical files in two
+    // packages produce distinct LSP session keys and relaunch jdtls.
+    let mut fingerprint_parts = vec![workspace_root.as_str(), project_scope_path.as_str()];
     for sdk in selected.into_iter().flatten() {
         fingerprint_parts.extend([
             sdk.id.as_str(),
@@ -845,5 +846,49 @@ mod tests {
             environment.path_entries.get(1).map(String::as_str),
             Some(path_string(&project_java_path.join("bin")).as_str())
         );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_packages_in_the_same_project_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let package_a = root.join("src/main/java/com/example/a");
+        let package_b = root.join("src/main/java/com/example/b");
+        std::fs::create_dir_all(&package_a).unwrap();
+        std::fs::create_dir_all(&package_b).unwrap();
+
+        let root_string = path_string(root);
+        let project_java = installation("jdk-25", SdkKind::Java, "25.0.2", "/sdk/jdk-25");
+        let registry = SdkRegistry {
+            installations: vec![project_java.clone()],
+            ..SdkRegistry::default()
+        };
+        let resolution = resolution(
+            &root_string,
+            &root_string,
+            vec![resolved(
+                &root_string,
+                SdkKind::Java,
+                SdkRole::Project,
+                project_java,
+            )],
+        );
+
+        let first = build_workspace_environment(&resolution, &registry, &package_a);
+        let second = build_workspace_environment(&resolution, &registry, &package_b);
+
+        assert_ne!(first.scope_path, second.scope_path);
+        assert_eq!(first.project_scope_path, second.project_scope_path);
+        assert_eq!(first.fingerprint, second.fingerprint);
+    }
+
+    #[test]
+    fn passthrough_fingerprint_is_stable_across_workspace_directories() {
+        let root = Path::new("/repo/project");
+        let first = WorkspaceSdkEnvironment::passthrough(root, Path::new("/repo/project/pkg/a"));
+        let second = WorkspaceSdkEnvironment::passthrough(root, Path::new("/repo/project/pkg/b"));
+
+        assert_ne!(first.scope_path, second.scope_path);
+        assert_eq!(first.fingerprint, second.fingerprint);
     }
 }

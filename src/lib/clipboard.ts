@@ -65,6 +65,22 @@ export interface ClipboardTextReadResult {
   text: string;
 }
 
+/**
+ * Read through the desktop IPC boundary without falling back to Web Clipboard.
+ *
+ * WebKitGTK may resolve readText() with cached text after the current X11 owner
+ * rejects a conversion. Callers that must distinguish a real native failure
+ * from a cached webview value use this stricter result.
+ */
+export async function readNativeTextResult(): Promise<ClipboardTextReadResult> {
+  if (!isTauriRuntime()) return { ok: false, text: "" };
+  try {
+    return { ok: true, text: await invoke<string>("clipboard_read_text") };
+  } catch {
+    return { ok: false, text: "" };
+  }
+}
+
 export async function readTextResult(): Promise<ClipboardTextReadResult> {
   // On macOS WKWebView, navigator.clipboard.readText() can show the native
   // "Paste" confirmation popover even for a user-triggered terminal paste.

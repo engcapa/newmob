@@ -1,0 +1,93 @@
+id: TC-IDE-NAV-01
+title: "Navigation bar keyboard traversal, popup selection, and cancel"
+description: |
+  ED-NAV-001 browser slice. Opens a browser-VFS workspace and exercises the
+  production Navigation Bar entry with Alt+Home, Home/End and arrow traversal,
+  keyboard popup selection, and Escape cancellation. Browser evidence proves
+  mounted UI routing and observable ARIA state only; it does not claim native
+  filesystem or provider-backed symbol resolution.
+  Highest claim on green: L1 browser-wired navigation bar contract.
+covers: [F25.5]
+tags: [code-workspace, ide-nav, navigation, breadcrumbs, p1, smoke]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 120
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - wait_for: '[data-testid="code-workspace-breadcrumbs"]'
+
+  # Alt+Home activates the production Navigation Bar owner and transfers focus.
+  - press:
+      key: Alt+Home
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+      name: tabindex
+      equals: "0"
+  - press:
+      key: Home
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+  - press:
+      key: ArrowRight
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+  - press:
+      key: End
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+  - press:
+      key: ArrowLeft
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+      name: aria-label
+      equals: Editor breadcrumbs
+
+  # Enter opens the selected path popup; the active file is selected after the
+  # production directory listing is sorted into IDEA-style order.
+  - press:
+      key: Home
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+  - press:
+      key: Enter
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+  - wait_for: '[data-testid="code-workspace-breadcrumb-popup"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-breadcrumb-popup"]'
+      name: role
+      equals: listbox
+  - wait_for: '[data-testid="code-workspace-breadcrumb-entry-file"]'
+  - assert_attribute:
+      selector: '[data-testid="code-workspace-breadcrumb-popup-filter"]'
+      name: role
+      equals: combobox
+  - press:
+      key: Enter
+      selector: '[data-testid="code-workspace-breadcrumb-popup-filter"]'
+  - assert_not_visible: '[data-testid="code-workspace-breadcrumb-popup"]'
+
+  # Reopen the popup and cancel it; focus remains on the navigation bar.
+  - press:
+      key: Home
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+  - press:
+      key: Enter
+      selector: '[data-testid="code-workspace-breadcrumbs"]'
+  - wait_for: '[data-testid="code-workspace-breadcrumb-popup-filter"]'
+  - press:
+      key: Escape
+      selector: '[data-testid="code-workspace-breadcrumb-popup-filter"]'
+  - assert_not_visible: '[data-testid="code-workspace-breadcrumb-popup"]'
+  - eval_readonly:
+      expression: "document.activeElement?.getAttribute('data-testid') === 'code-workspace-breadcrumbs'"
+      expect_truthy: true

@@ -254,18 +254,22 @@ describe("§8.19.5 clipboard history ring", () => {
     });
 
     const detachA = handle.attachConsumer("consumer-a");
-    const detachA2 = handle.attachConsumer("consumer-a"); // duplicate attach with same consumer id
-    expect(handle.getSnapshot().consumerCount).toBe(1);
+    const detachA2 = handle.attachConsumer("consumer-a"); // duplicate attach with same consumer id produces independent lease
+    expect(handle.getSnapshot().consumerCount).toBe(2);
 
     writeText(handle, "payload-z1");
     expect(notifications.length).toBeGreaterThan(0);
 
-    // Detach A once
-    detachA();
+    // Detach first lease
+    expect(detachA()).toBe("detached");
+    expect(handle.getSnapshot().consumerCount).toBe(1);
+
+    // Detach second lease
+    expect(detachA2()).toBe("detached");
     expect(handle.getSnapshot().consumerCount).toBe(0);
 
-    // Detaching second time is a safe no-op
-    detachA2();
+    // Detaching again is idempotent
+    expect(detachA2()).toBe("already-detached");
     expect(handle.getSnapshot().consumerCount).toBe(0);
 
     unsubscribe();

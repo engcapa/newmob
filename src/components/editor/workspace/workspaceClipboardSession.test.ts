@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CLIPBOARD_HISTORY_MAX_ITEMS,
   acquireClipboardStore,
   clipboardStoreForWorkspace,
+  createDefaultClipboardPermissionAdapter,
+  createNativeClipboardPermissionAdapter,
+  createWebClipboardPermissionAdapter,
   planPaste,
   resetWorkspaceClipboardStores,
+  type ClipboardPermissionAdapter,
+  type ClipboardPermissionState,
 } from "./workspaceClipboardSession";
 
 describe("workspaceClipboardSession (§8.17.6 step 1)", () => {
@@ -195,5 +200,498 @@ describe("§8.18.4 paste plan (documented segment/caret mapping)", () => {
     const plan = planPaste({ segments: null, plainText: "block", caretCount: 2, rectangular: false, sourceEol: "lf" });
     expect(plan.perCaret).toEqual([null, null]);
     expect(plan.degraded).toBe("whole-block");
+  });
+});
+
+describe("§8.27.2 BB1 clipboard lease model and permission epoch", () => {
+  it("manages independent consumer leases and idempotent detach without releasing root", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-bb1-lease");
+    const lease1 = handle.attachConsumer("split-1", "editor");
+    const lease2 = handle.attachConsumer("split-2", "editor");
+
+    expect(lease1.token).toBeDefined();
+    expect(lease2.token).toBeDefined();
+    expect(lease1.token).not.toBe(lease2.token);
+
+    const snap = handle.getSnapshot();
+    expect(snap.consumers).toHaveLength(2);
+    expect(snap.lifecycleRevision).toBe(2);
+
+    // Idempotent detach
+    expect(lease1.detach()).toBe("detached");
+    expect(lease1.detach()).toBe("already-detached");
+
+    const snapAfter1 = handle.getSnapshot();
+    expect(snapAfter1.consumers).toHaveLength(1);
+    expect(snapAfter1.consumers[0].token).toBe(lease2.token);
+
+    // Detaching lease2 does not destroy the root handle
+    expect(lease2.detach()).toBe("detached");
+    expect(handle.getSnapshot().consumers).toHaveLength(0);
+
+    // Root write and read still work
+    handle.write({ sourceViewId: null, plainText: "test", rectangular: false, sourceEol: "lf" });
+    expect(handle.read()?.plainText).toBe("test");
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("updates permission generation ONLY on actual permission changes", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-bb1-perm");
+
+    expect(handle.permission()).toBe("unknown");
+    expect(handle.getSnapshot().permissionGeneration).toBe(1);
+
+    // Setting the same permission does not bump generation
+    handle.setPermission("unknown");
+    expect(handle.getSnapshot().permissionGeneration).toBe(1);
+
+    // Changing permission bumps generation
+    handle.setPermission("granted");
+    expect(handle.permission()).toBe("granted");
+    expect(handle.getSnapshot().permissionGeneration).toBe(2);
+
+    handle.setPermission("granted");
+    expect(handle.getSnapshot().permissionGeneration).toBe(2);
+
+    handle.setPermission("denied");
+    expect(handle.permission()).toBe("denied");
+    expect(handle.getSnapshot().permissionGeneration).toBe(3);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("increments revisions accurately (no bump for same-value policy or pure read)", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-bb1-rev");
+
+    const snap0 = handle.getSnapshot();
+    expect(snap0.payloadRevision).toBe(0);
+    expect(snap0.historyRevision).toBe(0);
+    expect(snap0.policyRevision).toBe(0);
+
+    // Pure read does not increment revisions
+    handle.read();
+    expect(handle.getSnapshot().payloadRevision).toBe(0);
+
+    // Write increments payloadRevision and historyRevision (if eligible)
+    handle.write({ sourceViewId: null, plainText: "hello", rectangular: false, sourceEol: "lf" });
+    const snap1 = handle.getSnapshot();
+    expect(snap1.payloadRevision).toBe(1);
+    expect(snap1.historyRevision).toBe(1);
+
+    // Sensitive write does not enter history and does not increment historyRevision
+    handle.write({
+      sourceViewId: null,
+      plainText: "AKIAIOSFODNN7EXAMPLE",
+      rectangular: false,
+      sourceEol: "lf",
+      sensitive: true,
+    });
+    const snap2 = handle.getSnapshot();
+    expect(snap2.payloadRevision).toBe(2);
+    expect(snap2.historyRevision).toBe(1); // unchanged
+
+    // Setting same policy limits does not increment policyRevision
+    handle.setHistoryLimits(CLIPBOARD_HISTORY_MAX_ITEMS, 1024 * 1024);
+    expect(handle.getSnapshot().policyRevision).toBe(0);
+
+    // Changing policy limits increments policyRevision
+    handle.setHistoryLimits(10, 2048);
+    expect(handle.getSnapshot().policyRevision).toBe(1);
+
+    // Setting same limits again does not increment
+    handle.setHistoryLimits(10, 2048);
+    expect(handle.getSnapshot().policyRevision).toBe(1);
+
+    // Failed remove does not increment historyRevision
+    const removed = handle.removeHistoryEntry(999);
+    expect(removed).toBe(false);
+    expect(handle.getSnapshot().historyRevision).toBe(1);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("isolates subscriber errors without breaking store operations", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-bb1-sub-err");
+    let goodListenerCalled = 0;
+
+    handle.subscribe(() => {
+      throw new Error("Subscriber crash!");
+    });
+    handle.subscribe(() => {
+      goodListenerCalled += 1;
+    });
+
+    handle.write({ sourceViewId: null, plainText: "safe", rectangular: false, sourceEol: "lf" });
+    expect(goodListenerCalled).toBe(1);
+    expect(handle.read()?.plainText).toBe("safe");
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+});
+
+describe("ED-CLIP-001 consumer lease token ownership & accounting", () => {
+  it("allocates independent tokens for duplicate consumerId and retains both leases", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-dup-id");
+    const lease1 = handle.attachConsumer("split-main", "editor");
+    const lease2 = handle.attachConsumer("split-main", "editor");
+
+    expect(lease1.token).toBeDefined();
+    expect(lease2.token).toBeDefined();
+    expect(lease1.token).not.toBe(lease2.token);
+    expect(lease1.consumerId).toBe("split-main");
+    expect(lease2.consumerId).toBe("split-main");
+
+    const snap = handle.getSnapshot();
+    expect(snap.consumers).toHaveLength(2);
+    expect(snap.consumerCount).toBe(2);
+    expect(snap.consumers.map((c) => c.token)).toContain(lease1.token);
+    expect(snap.consumers.map((c) => c.token)).toContain(lease2.token);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("supports arbitrary detach order without deleting newer or older leases", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-detach-order");
+    const leaseA = handle.attachConsumer("same-consumer", "editor");
+    const leaseB = handle.attachConsumer("same-consumer", "editor");
+    const leaseC = handle.attachConsumer("same-consumer", "editor");
+
+    expect(handle.getSnapshot().consumers).toHaveLength(3);
+
+    // Detach middle lease (leaseB) first
+    expect(leaseB.detach()).toBe("detached");
+    let snap = handle.getSnapshot();
+    expect(snap.consumers).toHaveLength(2);
+    expect(snap.consumers.map((c) => c.token)).toEqual([leaseA.token, leaseC.token]);
+
+    // Detach oldest lease (leaseA)
+    expect(leaseA.detach()).toBe("detached");
+    snap = handle.getSnapshot();
+    expect(snap.consumers).toHaveLength(1);
+    expect(snap.consumers[0].token).toBe(leaseC.token);
+
+    // Old lease detach MUST NOT have affected leaseC
+    expect(leaseC.detach()).toBe("detached");
+    expect(handle.getSnapshot().consumers).toHaveLength(0);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("isolates duplicate consumerIds across different workspace instances", () => {
+    resetWorkspaceClipboardStores();
+    const ws1 = acquireClipboardStore("ws-inst-1");
+    const ws2 = acquireClipboardStore("ws-inst-2");
+
+    const lease1 = ws1.attachConsumer("shared-file-key", "codemirror-host");
+    const lease2 = ws2.attachConsumer("shared-file-key", "codemirror-host");
+
+    expect(ws1.getSnapshot().consumerCount).toBe(1);
+    expect(ws2.getSnapshot().consumerCount).toBe(1);
+    expect(lease1.token).not.toBe(lease2.token);
+
+    expect(lease1.detach()).toBe("detached");
+    expect(ws1.getSnapshot().consumerCount).toBe(0);
+    expect(ws2.getSnapshot().consumerCount).toBe(1);
+
+    expect(lease2.detach()).toBe("detached");
+    expect(ws2.getSnapshot().consumerCount).toBe(0);
+
+    ws1.release();
+    ws2.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("enforces idempotent detach without mutating active consumers or re-triggering revisions", () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-idempotent");
+    const lease = handle.attachConsumer("consumer-1");
+    const initialRevision = handle.getSnapshot().lifecycleRevision;
+
+    expect(lease.detach()).toBe("detached");
+    const afterDetachRev = handle.getSnapshot().lifecycleRevision;
+    expect(afterDetachRev).toBe(initialRevision + 1);
+
+    // Second and third calls must be idempotent
+    expect(lease.detach()).toBe("already-detached");
+    expect(lease()).toBe("already-detached");
+    expect(handle.getSnapshot().lifecycleRevision).toBe(afterDetachRev);
+    expect(handle.getSnapshot().consumerCount).toBe(0);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("segregates root acquisition refcount from consumer leases and cleans up on last root release", async () => {
+    resetWorkspaceClipboardStores();
+    const root1 = acquireClipboardStore("ws-segregation");
+    const root2 = acquireClipboardStore("ws-segregation");
+
+    const lease1 = root1.attachConsumer("child-1");
+    const lease2 = root1.attachConsumer("child-2");
+
+    root1.write({
+      sourceViewId: null,
+      plainText: "segregated-payload",
+      rectangular: false,
+      sourceEol: "lf",
+    });
+    expect(root2.read()?.plainText).toBe("segregated-payload");
+
+    // Releasing root1 does not destroy the slot because root2 is still active
+    root1.release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(root2.read()?.plainText).toBe("segregated-payload");
+
+    // Detaching all consumers does not destroy the slot if root2 is active
+    expect(lease1.detach()).toBe("detached");
+    expect(lease2.detach()).toBe("detached");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(root2.read()?.plainText).toBe("segregated-payload");
+
+    // Releasing root2 (the last root) triggers deferred teardown
+    root2.release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const fresh = acquireClipboardStore("ws-segregation");
+    expect(fresh.read()).toBeNull();
+    expect(fresh.getSnapshot().consumerCount).toBe(0);
+
+    fresh.release();
+    resetWorkspaceClipboardStores();
+  });
+});
+
+describe("ED-CLIP-002 clipboard permission epoch and guarded system read/write", () => {
+  it("attaches a permission adapter, queries initial state, and subscribes to changes", async () => {
+    resetWorkspaceClipboardStores();
+    let currentPerm: ClipboardPermissionState = "unknown";
+    let listenerFn: ((perm: ClipboardPermissionState) => void) | null = null;
+
+    const mockAdapter: ClipboardPermissionAdapter = {
+      queryPermission: vi.fn(async () => currentPerm),
+      subscribe: vi.fn((listener) => {
+        listenerFn = listener;
+        return () => {
+          listenerFn = null;
+        };
+      }),
+    };
+
+    const handle = acquireClipboardStore("ws-perm-adapter", { permissionAdapter: mockAdapter });
+    await Promise.resolve();
+
+    expect(handle.permission()).toBe("unknown");
+    expect(handle.getSnapshot().permissionGeneration).toBe(1);
+
+    // Simulate adapter emitting "granted"
+    listenerFn!("granted");
+    expect(handle.permission()).toBe("granted");
+    expect(handle.getSnapshot().permissionGeneration).toBe(2);
+
+    // Emitting same "granted" does not bump generation
+    listenerFn!("granted");
+    expect(handle.getSnapshot().permissionGeneration).toBe(2);
+
+    // Emitting "denied" bumps generation
+    listenerFn!("denied");
+    expect(handle.permission()).toBe("denied");
+    expect(handle.getSnapshot().permissionGeneration).toBe(3);
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("keeps a native capability probe separate from permission state", async () => {
+    const webAdapter = createWebClipboardPermissionAdapter();
+    const probeCapabilities = vi.fn(async () => ({
+      platform: "linux",
+      displayBackend: "wayland",
+      webkitApiExpected: true,
+      nativeBackend: "arboard",
+      wlPaste: true,
+      wlCopy: true,
+      xclip: false,
+      xsel: false,
+      htmlRtfNative: false,
+    }));
+    const nativeAdapter = createNativeClipboardPermissionAdapter({
+      isRuntime: () => true,
+      probeCapabilities,
+    });
+    const defaultAdapter = createDefaultClipboardPermissionAdapter();
+
+    const webRes = await webAdapter.queryPermission();
+    expect(["unknown", "granted", "denied"]).toContain(webRes);
+
+    const nativeRes = await nativeAdapter.queryPermission();
+    expect(probeCapabilities).toHaveBeenCalledOnce();
+    expect(nativeRes).toBe("unknown");
+
+    const defRes = await defaultAdapter.queryPermission();
+    expect(["unknown", "granted", "denied"]).toContain(defRes);
+  });
+
+  it("writeSystemClipboard: reports not-performed when permission denies before the OS call", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-write-denied");
+    handle.setPermission("denied");
+
+    const mockWriter = vi.fn(async () => {});
+    const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
+
+    expect(result.outcome).toBe("denied");
+    expect(result.systemEffect).toBe("not-performed");
+    expect(mockWriter).not.toHaveBeenCalled();
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("writeSystemClipboard: preserves performed effect when permission changes after the OS write", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-write-stale");
+    handle.setPermission("granted");
+    expect(handle.getSnapshot().permissionGeneration).toBe(2);
+
+    const mockWriter = vi.fn(async () => {
+      // Simulate external permission change during async IO
+      handle.setPermission("denied");
+    });
+
+    const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
+
+    expect(result.outcome).toBe("stale-generation");
+    expect(result.systemEffect).toBe("performed");
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("writeSystemClipboard: reports unknown effect when an entered OS write throws", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-write-fail");
+    handle.setPermission("granted");
+
+    const mockWriter = vi.fn(async () => {
+      throw new Error("Clipboard write failed");
+    });
+
+    const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
+
+    expect(result.outcome).toBe("unavailable");
+    expect(result.systemEffect).toBe("unknown");
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("writeSystemClipboard: returns success with performed effect on valid write", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-write-ok");
+    handle.setPermission("granted");
+
+    const mockWriter = vi.fn(async () => {});
+    const result = await handle.writeSystemClipboard("hello", { writeText: mockWriter });
+
+    expect(result.outcome).toBe("success");
+    expect(result.systemEffect).toBe("performed");
+    expect(mockWriter).toHaveBeenCalledWith("hello");
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("readSystemClipboard: reports not-performed and a visible fallback when denied before read", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-read-denied");
+    handle.write({ sourceViewId: null, plainText: "fallback text", rectangular: false, sourceEol: "lf" });
+    handle.setPermission("denied");
+
+    const mockReader = vi.fn(async () => ({ ok: true, text: "system text" }));
+    const result = await handle.readSystemClipboard({ readTextResult: mockReader });
+
+    expect(result.outcome).toBe("denied");
+    expect(result.systemEffect).toBe("not-performed");
+    if (result.outcome === "denied") {
+      expect(result.fallbackSession?.plainText).toBe("fallback text");
+    }
+    expect(mockReader).not.toHaveBeenCalled();
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("readSystemClipboard: detects permission change mid-await and returns stale-generation", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-read-stale");
+    handle.write({ sourceViewId: null, plainText: "fallback text", rectangular: false, sourceEol: "lf" });
+    handle.setPermission("granted");
+
+    const mockReader = vi.fn(async () => {
+      // Permission changed mid-await
+      handle.setPermission("denied");
+      return { ok: true, text: "system text" };
+    });
+
+    const result = await handle.readSystemClipboard({ readTextResult: mockReader });
+
+    expect(result.outcome).toBe("stale-generation");
+    expect(result.systemEffect).toBe("performed");
+    if (result.outcome === "stale-generation") {
+      expect(result.fallbackSession?.plainText).toBe("fallback text");
+    }
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("readSystemClipboard: reports unknown effect with fallback when the adapter cannot confirm a read", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-read-unavail");
+    handle.write({ sourceViewId: null, plainText: "fallback text", rectangular: false, sourceEol: "lf" });
+    handle.setPermission("unknown");
+
+    const mockReader = vi.fn(async () => ({ ok: false, text: "" }));
+    const result = await handle.readSystemClipboard({ readTextResult: mockReader });
+
+    expect(result.outcome).toBe("unavailable");
+    expect(result.systemEffect).toBe("unknown");
+    if (result.outcome === "unavailable") {
+      expect(result.fallbackSession?.plainText).toBe("fallback text");
+    }
+
+    handle.release();
+    resetWorkspaceClipboardStores();
+  });
+
+  it("readSystemClipboard: returns success with text and performed effect on valid read", async () => {
+    resetWorkspaceClipboardStores();
+    const handle = acquireClipboardStore("ws-read-ok");
+    handle.setPermission("granted");
+
+    const mockReader = vi.fn(async () => ({ ok: true, text: "remote-clip" }));
+    const result = await handle.readSystemClipboard({ readTextResult: mockReader });
+
+    expect(result.outcome).toBe("success");
+    if (result.outcome === "success") {
+      expect(result.text).toBe("remote-clip");
+    }
+    expect(result.systemEffect).toBe("performed");
+
+    handle.release();
+    resetWorkspaceClipboardStores();
   });
 });

@@ -1,0 +1,60 @@
+id: TC-IDE-D2-01-replace-preview-exclude-cancel-browser
+title: "Replace preview exclusion and cancel in browser"
+description: |
+  Browser gate case (ED-FIND-004 A1/A2). Fills the preview file with two
+  needle lines, searches through the stub VFS backend, opens the structured
+  replace preview, excludes one occurrence, and proves the count rebuilds
+  (2 of 2 -> 1 of 2) and Cancel commits nothing (editor text byte-identical).
+  The commit/undo path against real files is covered by unit tests and the
+  native provider gate.
+covers: [F25.5]
+tags: [code-workspace, ide-find, replace, browser-gate, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: "first needle line\nsecond needle line\n"
+  - press: Control+s
+  - wait: 1
+  - press: Control+Shift+F
+  - wait_for: '[data-testid="code-workspace-find-in-files-panel"]'
+  - fill:
+      selector: '[aria-label="Search query"]'
+      value: "needle"
+  - press: Enter
+  - wait_for: '[data-testid="code-workspace-find-file-group"]'
+  - fill:
+      selector: '[aria-label="Replace text"]'
+      value: "thread"
+  - click: '[data-testid="code-workspace-find-replace-all"]'
+  - wait_for: '[data-testid="code-workspace-replace-preview"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-replace-counts"]'
+      contains: "2 of 2"
+      timeout_sec: 10
+  - click: '[data-testid="code-workspace-replace-usage"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-replace-counts"]'
+      contains: "1 of 2"
+      timeout_sec: 10
+  - click: '[data-testid="code-workspace-replace-cancel"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "second needle line"
+      timeout_sec: 10
+  - screenshot: tc-ide-d2-01-replace-cancel.png

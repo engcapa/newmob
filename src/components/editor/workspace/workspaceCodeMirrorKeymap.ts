@@ -11,13 +11,23 @@
 import type { EditorView } from "@codemirror/view";
 import {
   copyLineDown,
+  cursorCharLeft,
+  cursorCharRight,
+  cursorLineBoundaryBackward,
+  cursorLineBoundaryForward,
   defaultKeymap,
+  deleteCharBackward,
+  deleteCharForward,
   deleteLine,
   historyKeymap,
   indentWithTab,
+  insertNewlineAndIndent,
   moveLineDown,
   moveLineUp,
   redo,
+  selectCharLeft,
+  selectCharRight,
+  selectLineBoundaryForward,
   toggleBlockComment,
   toggleComment,
   undo,
@@ -43,6 +53,17 @@ import {
   unselectOccurrence,
 } from "./workspaceEditorCommands";
 import {
+  virtualBackspaceCommand,
+  virtualDeleteCommand,
+  virtualEnterCommand,
+  virtualHomeCommand,
+  virtualLineEndCommand,
+  virtualMoveLeftCommand,
+  virtualMoveRightCommand,
+  virtualTabCommand,
+  virtualVerticalMoveCommand,
+} from "./workspaceVirtualSpace";
+import {
   type PreparedActionEvaluation,
   type ResolvedBindingSource,
   type WorkspaceActionHost,
@@ -50,6 +71,7 @@ import {
 import {
   type ActionDisabledReason,
   type ActionResult,
+  type ActionState,
   type WorkspaceActionContext,
 } from "./workspaceActionRegistry";
 
@@ -69,6 +91,24 @@ function runViaHandlers(
   command: (view: EditorView) => boolean,
 ): ActionResult {
   return commandResult(handlers.runEditorCommand(command));
+}
+
+function virtualOrFallback(
+  virtualCommand: (view: EditorView) => boolean,
+  fallbackCommand: (view: EditorView) => boolean,
+): (view: EditorView) => boolean {
+  return (view) => virtualCommand(view) || fallbackCommand(view);
+}
+
+function runSharedHistoryOrLocal(
+  handlers: EditorHostActionHandlers,
+  shared: (() => boolean | undefined) | undefined,
+  local: (view: EditorView) => boolean,
+): ActionResult {
+  const handled = shared?.();
+  return handled === undefined
+    ? runViaHandlers(handlers, local)
+    : commandResult(handled);
 }
 
 /** Options for the editor-scoped adapter. */
@@ -146,6 +186,11 @@ export interface EditorHostActionHandlers {
    * migration channel for the previously inline keymap business bindings).
    */
   runEditorCommand(command: (view: EditorView) => boolean): boolean;
+  /** Live display geometry gate used before consuming PageUp/PageDown. */
+  isEditorGeometryReady?(): boolean;
+  /** Shared document history owner; undefined keeps standalone CM history. */
+  undo?(): boolean | undefined;
+  redo?(): boolean | undefined;
 }
 
 function editorAction(input: {
@@ -156,6 +201,7 @@ function editorAction(input: {
   secondary?: readonly string[];
   keywords?: readonly string[];
   requiresEditor: boolean;
+  getState?: (context: WorkspaceActionContext) => ActionState;
   run: (context: WorkspaceActionContext) => Promise<ActionResult>;
 }) {
   return {
@@ -166,10 +212,30 @@ function editorAction(input: {
     ...(input.secondary ? { secondaryKeybindings: [...input.secondary] } : {}),
     ...(input.keywords ? { keywords: [...input.keywords] } : {}),
     provenance: "local" as const,
+    ...(input.getState ? { getState: input.getState } : {}),
     when: input.requiresEditor
       ? (context: WorkspaceActionContext) => context.focus === "editor" && !!context.hasActiveFile
       : undefined,
     run: input.run,
+  };
+}
+
+function editorGeometryActionState(
+  handlers: EditorHostActionHandlers,
+  context: WorkspaceActionContext,
+): ActionState {
+  const hasEditorOwner = context.focus === "editor" && !!context.hasActiveFile;
+  const geometryReady = handlers.isEditorGeometryReady?.() ?? true;
+  const available = hasEditorOwner && geometryReady;
+  return {
+    availability: available ? "available" : "disabled",
+    disabledReason: available
+      ? undefined
+      : (hasEditorOwner ? "geometryUnavailable" : "noEditor"),
+    source: "local",
+    scope: "editor",
+    freshness: "current",
+    completeness: geometryReady ? "complete" : "unavailable",
   };
 }
 
@@ -329,6 +395,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       title: "Basic Completion",
       category: "Edit",
       defaultKeybinding: "Ctrl+Space",
+      secondary: ["Alt+/"],
       keywords: ["complete", "suggest", "popup", "intellisense"],
       requiresEditor: true,
       run: async () => {
@@ -385,7 +452,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       secondary: ["Meta+z"],
       keywords: ["history", "undo"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, undo),
+      run: async () => runSharedHistoryOrLocal(handlers, handlers.undo, undo),
     }),
     editorAction({
       id: "workspace.redo",
@@ -395,7 +462,7 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       secondary: ["Meta+Shift+z"],
       keywords: ["history", "redo"],
       requiresEditor: true,
-      run: async () => runViaHandlers(handlers, redo),
+      run: async () => runSharedHistoryOrLocal(handlers, handlers.redo, redo),
     }),
     editorAction({
       id: "editor.find",
@@ -434,6 +501,213 @@ export function buildEditorHostActions(handlers: EditorHostActionHandlers) {
       keywords: ["occurrence", "multi-caret", "selection"],
       requiresEditor: true,
       run: async () => runViaHandlers(handlers, selectSelectionMatches),
+    }),
+
+    // ---- §ED-VSPACE-001: Unified Virtual Space & Movement actions ----
+    editorAction({
+      id: "editor.moveUp",
+      title: "Up",
+      category: "View",
+      defaultKeybinding: "ArrowUp",
+      keywords: ["up", "cursor", "line", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "up", false)),
+    }),
+    editorAction({
+      id: "editor.moveDown",
+      title: "Down",
+      category: "View",
+      defaultKeybinding: "ArrowDown",
+      keywords: ["down", "cursor", "line", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "down", false)),
+    }),
+    editorAction({
+      id: "editor.selectUp",
+      title: "Select Up",
+      category: "View",
+      defaultKeybinding: "Shift+ArrowUp",
+      keywords: ["up", "select", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "up", true)),
+    }),
+    editorAction({
+      id: "editor.selectDown",
+      title: "Select Down",
+      category: "View",
+      defaultKeybinding: "Shift+ArrowDown",
+      keywords: ["down", "select", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "down", true)),
+    }),
+    editorAction({
+      id: "editor.pageUp",
+      title: "Page Up",
+      category: "View",
+      defaultKeybinding: "PageUp",
+      keywords: ["page", "up", "scroll", "virtual space"],
+      requiresEditor: true,
+      getState: (context) => editorGeometryActionState(handlers, context),
+      run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "pageUp", false)),
+    }),
+    editorAction({
+      id: "editor.selectPageUp",
+      title: "Select Page Up",
+      category: "View",
+      defaultKeybinding: "Shift+PageUp",
+      keywords: ["page", "up", "select", "virtual space"],
+      requiresEditor: true,
+      getState: (context) => editorGeometryActionState(handlers, context),
+      run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "pageUp", true)),
+    }),
+    editorAction({
+      id: "editor.pageDown",
+      title: "Page Down",
+      category: "View",
+      defaultKeybinding: "PageDown",
+      keywords: ["page", "down", "scroll", "virtual space"],
+      requiresEditor: true,
+      getState: (context) => editorGeometryActionState(handlers, context),
+      run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "pageDown", false)),
+    }),
+    editorAction({
+      id: "editor.selectPageDown",
+      title: "Select Page Down",
+      category: "View",
+      defaultKeybinding: "Shift+PageDown",
+      keywords: ["page", "down", "select", "virtual space"],
+      requiresEditor: true,
+      getState: (context) => editorGeometryActionState(handlers, context),
+      run: async () => runViaHandlers(handlers, (view) => virtualVerticalMoveCommand(view, "pageDown", true)),
+    }),
+    editorAction({
+      id: "editor.moveLeft",
+      title: "Left",
+      category: "View",
+      defaultKeybinding: "ArrowLeft",
+      keywords: ["left", "cursor", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualMoveLeftCommand(view, false),
+        cursorCharLeft,
+      )),
+    }),
+    editorAction({
+      id: "editor.selectLeft",
+      title: "Select Left",
+      category: "View",
+      defaultKeybinding: "Shift+ArrowLeft",
+      keywords: ["left", "select", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualMoveLeftCommand(view, true),
+        selectCharLeft,
+      )),
+    }),
+    editorAction({
+      id: "editor.moveRight",
+      title: "Right",
+      category: "View",
+      defaultKeybinding: "ArrowRight",
+      keywords: ["right", "cursor", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualMoveRightCommand(view, false),
+        cursorCharRight,
+      )),
+    }),
+    editorAction({
+      id: "editor.selectRight",
+      title: "Select Right",
+      category: "View",
+      defaultKeybinding: "Shift+ArrowRight",
+      keywords: ["right", "select", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualMoveRightCommand(view, true),
+        selectCharRight,
+      )),
+    }),
+    editorAction({
+      id: "editor.moveToLineStart",
+      title: "Move to Line Start",
+      category: "View",
+      defaultKeybinding: "Home",
+      keywords: ["home", "start", "line"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        virtualHomeCommand,
+        cursorLineBoundaryBackward,
+      )),
+    }),
+    editorAction({
+      id: "editor.moveToLineEnd",
+      title: "Move to Line End",
+      category: "View",
+      defaultKeybinding: "End",
+      keywords: ["end", "line", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualLineEndCommand(view, false),
+        cursorLineBoundaryForward,
+      )),
+    }),
+    editorAction({
+      id: "editor.selectToLineEnd",
+      title: "Select to Line End",
+      category: "View",
+      defaultKeybinding: "Shift+End",
+      keywords: ["end", "line", "select", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        (view) => virtualLineEndCommand(view, true),
+        selectLineBoundaryForward,
+      )),
+    }),
+    editorAction({
+      id: "editor.deleteBackward",
+      title: "Delete Backward",
+      category: "Edit",
+      defaultKeybinding: "Backspace",
+      keywords: ["backspace", "delete", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        virtualBackspaceCommand,
+        deleteCharBackward,
+      )),
+    }),
+    editorAction({
+      id: "editor.deleteForward",
+      title: "Delete Forward",
+      category: "Edit",
+      defaultKeybinding: "Delete",
+      keywords: ["delete", "forward", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        virtualDeleteCommand,
+        deleteCharForward,
+      )),
+    }),
+    editorAction({
+      id: "editor.insertNewline",
+      title: "Insert Newline",
+      category: "Edit",
+      defaultKeybinding: "Enter",
+      keywords: ["enter", "newline", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualOrFallback(
+        virtualEnterCommand,
+        insertNewlineAndIndent,
+      )),
+    }),
+    editorAction({
+      id: "editor.insertTab",
+      title: "Insert Tab",
+      category: "Edit",
+      defaultKeybinding: "Tab",
+      keywords: ["tab", "indent", "virtual space"],
+      requiresEditor: true,
+      run: async () => runViaHandlers(handlers, virtualTabCommand),
     }),
   ];
 }
@@ -530,6 +804,22 @@ function cmPatternIdentities(pattern: string): string[] {
   return [expand(mods)];
 }
 
+const PRIMITIVE_KEYS = new Set([
+  "enter",
+  "backspace",
+  "delete",
+  "tab",
+  "escape",
+  "arrowleft",
+  "arrowright",
+  "arrowup",
+  "arrowdown",
+  "home",
+  "end",
+  "pageup",
+  "pagedown",
+]);
+
 /** Identities of every binding an action owns (host dispatch wins these). */
 function actionOwnedPatterns(): Set<string> {
   const owned = new Set<string>();
@@ -542,6 +832,7 @@ function actionOwnedPatterns(): Set<string> {
       const parts = binding.split("+").map((part) => part.trim()).filter(Boolean);
       const key = parts.pop();
       if (!key) continue;
+      if (parts.length === 0 && PRIMITIVE_KEYS.has(key.toLowerCase())) continue;
       owned.add(canonicalBindingIdentity([...parts, key]));
     }
   }

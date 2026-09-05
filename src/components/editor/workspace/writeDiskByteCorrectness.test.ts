@@ -4,12 +4,21 @@ import {
   type PreparedSaveCommitter,
   type SaveTransactionV2,
 } from "./workspaceStyleController";
-import { saveCommitResultFromError } from "./saveCommit";
+import { buildFinalBytesReceipt, saveCommitResultFromError } from "./saveCommit";
 import type { PreparedSave, SaveCommitResult } from "./saveCommit";
 import type { WorkspaceFile } from "../../../lib/editor/workspace";
 
 function fakeWrittenFile(hash: string): WorkspaceFile {
   return { path: "/workspace/src/test.txt", text: "", hash, size: 0, mtime: 0 };
+}
+
+function receiptFor(prepared: PreparedSave, file: WorkspaceFile) {
+  return buildFinalBytesReceipt(prepared, {
+    writtenHash: file.hash,
+    writtenByteLength: file.size,
+    intentHash: file.hash,
+    oldHash: prepared.expectedDiskHash,
+  }, { committedAt: 1 });
 }
 
 /** Committer mock that records the frozen PreparedSave fields it receives. */
@@ -36,6 +45,7 @@ function committedCommitter(file: WorkspaceFile): PreparedSaveCommitter {
     memoryEffect: "saved-current",
     providerEffect: "did-save",
     file,
+    receipt: receiptFor(prepared, file),
   }));
 }
 import { applyWorkspaceEdit, type WorkspaceEditApplyHooks } from "./workspaceEditApply";
@@ -48,13 +58,26 @@ import codeWorkspaceTabSource from "../CodeWorkspaceTab.tsx?raw";
 
 /** Typed committed result satisfying the §8.19.1 closed-file hook contract. */
 function committedDiskResult(): SaveCommitResult {
+  const prepared: PreparedSave = {
+    transactionId: "tx-closed-test",
+    workspaceId: "ws-test",
+    fileKey: "closed:/workspace/src/test.txt",
+    filePath: "/workspace/src/test.txt",
+    text: "",
+    bufferRevision: 0,
+    styleGeneration: 0,
+    expectedDiskHash: null,
+    policy: { eol: "lf", encoding: "UTF-8", bom: false },
+  };
+  const written = fakeWrittenFile("written");
   return {
     kind: "saved-current",
-    transactionId: "tx-closed-test",
+    transactionId: prepared.transactionId,
     diskEffect: "committed",
     memoryEffect: "saved-current",
     providerEffect: "not-sent",
-    file: fakeWrittenFile("written"),
+    file: written,
+    receipt: receiptFor(prepared, written),
   };
 }
 
@@ -89,6 +112,17 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
             memoryEffect: "saved-current",
             providerEffect: "did-save",
             file: fakeWrittenFile("new-disk-hash"),
+            receipt: receiptFor({
+              transactionId: "tx-save",
+              workspaceId: "ws-test",
+              fileKey: "key-1",
+              filePath: "/workspace/src/test.txt",
+              text,
+              bufferRevision: 1,
+              styleGeneration: 0,
+              expectedDiskHash: expectedHash,
+              policy: { eol: eol as "lf" | "crlf" | "cr", encoding: "UTF-8", bom: false },
+            }, fakeWrittenFile("new-disk-hash")),
           };
         });
 

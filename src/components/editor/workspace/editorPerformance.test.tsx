@@ -1,10 +1,42 @@
-import { describe, expect, it, vi } from "vitest";
-import { render } from "@testing-library/react";
-import { EditorState } from "@codemirror/state";
+import { useCallback, useState } from "react";
+import { act, render, waitFor } from "@testing-library/react";
+import { Compartment, EditorState } from "@codemirror/state";
 import { CompletionContext } from "@codemirror/autocomplete";
+import { EditorView } from "@codemirror/view";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFixtureCompletionSource, MAX_COMPLETION_OPTIONS } from "./lspCompletion";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import type { LspCompletionResult, LspDiagnostic, LspDocumentStatus } from "../../../lib/editor/lsp";
+
+const TYPING_FIXTURE = Array.from({ length: 400 }, (_, line) =>
+  `const value${line} = ${line}; // stable editor benchmark fixture`,
+).join("\n");
+const TYPING_WARMUP_SAMPLES = 20;
+const TYPING_MEASURED_SAMPLES = 205;
+
+function EditorTypingBenchmarkHarness() {
+  const [doc, setDoc] = useState(TYPING_FIXTURE);
+  const onChange = useCallback((nextDoc: string) => {
+    setDoc(nextDoc);
+  }, []);
+
+  return (
+    <CodeMirrorHost
+      path="src/performance-fixture.ts"
+      doc={doc}
+      visible
+      diagnostics={[]}
+      reveal={null}
+      onChange={onChange}
+      onSave={vi.fn()}
+      onHover={async () => null}
+      onDefinition={async () => false}
+      onReferences={async () => undefined}
+      getCompletionIdentity={() => null}
+      onCompletionDiagnostic={vi.fn()}
+    />
+  );
+}
 
 function testDocStatus(active = true): LspDocumentStatus {
   return {
@@ -43,6 +75,10 @@ function testCompletionResult(itemsCount = 500): LspCompletionResult {
 }
 
 describe("Editor typing and completion performance verification", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("debounces rapid continuous typing burst to avoid spamming LSP fetches", async () => {
     const fetch = vi.fn(async () => testCompletionResult(100));
     const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
@@ -207,5 +243,94 @@ describe("Editor typing and completion performance verification", () => {
       />,
     );
     expect(editorRoot.className).toBe(themeClasses);
+  });
+
+  it("reconfigures once for a semantic change and zero times for equal props", async () => {
+    const reconfigure = vi.spyOn(Compartment.prototype, "reconfigure");
+    const props = {
+      path: "Main.java",
+      doc: "public class Main {}",
+      visible: true,
+      diagnostics: [],
+      reveal: null,
+      readOnly: false,
+      onChange: vi.fn(),
+      onSave: vi.fn(),
+      onHover: vi.fn(async () => null),
+      onDefinition: vi.fn(async () => false),
+      onReferences: vi.fn(async () => {}),
+      getCompletionIdentity: vi.fn(() => null),
+      onCompletionDiagnostic: vi.fn(),
+    };
+
+    const rendered = render(<CodeMirrorHost {...props} />);
+    await waitFor(() => expect(reconfigure.mock.calls.length).toBeGreaterThan(0));
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    reconfigure.mockClear();
+
+    rendered.rerender(<CodeMirrorHost {...props} diagnostics={[]} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(reconfigure).toHaveBeenCalledTimes(0);
+
+    const diagnostic: LspDiagnostic = {
+      range: { start: { line: 0, character: 13 }, end: { line: 0, character: 17 } },
+      severity: 1,
+      code: null,
+      source: "jdtls",
+      message: "cannot find symbol",
+    };
+    rendered.rerender(<CodeMirrorHost {...props} diagnostics={[diagnostic]} />);
+    await waitFor(() => expect(reconfigure).toHaveBeenCalledTimes(1));
+
+    // A new array with the same semantic entries is still a no-op.
+    rendered.rerender(<CodeMirrorHost {...props} diagnostics={[diagnostic]} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(reconfigure).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(
+      <CodeMirrorHost
+        {...props}
+        diagnostics={[{ ...diagnostic, message: "incompatible types" }]}
+      />,
+    );
+    await waitFor(() => expect(reconfigure).toHaveBeenCalledTimes(2));
+  });
+
+  it("measures controlled-editor typing without changing document semantics", () => {
+    const rendered = render(<EditorTypingBenchmarkHarness />);
+    const editorRoot = rendered.container.querySelector<HTMLElement>(".cm-editor");
+    const view = editorRoot ? EditorView.findFromDOM(editorRoot) : null;
+    expect(view).not.toBeNull();
+
+    const warmupSamplesMs: number[] = [];
+    const samplesMs: number[] = [];
+    const typeCharacter = (index: number, samples: number[]) => {
+      const position = view!.state.doc.length;
+      const startedAt = performance.now();
+      act(() => {
+        view!.dispatch({
+          changes: { from: position, to: position, insert: String.fromCharCode(97 + (index % 26)) },
+          selection: { anchor: position + 1 },
+          userEvent: "input.type",
+        });
+      });
+      samples.push(performance.now() - startedAt);
+    };
+
+    for (let index = 0; index < TYPING_WARMUP_SAMPLES; index += 1) {
+      typeCharacter(index, warmupSamplesMs);
+    }
+    for (let index = 0; index < TYPING_MEASURED_SAMPLES; index += 1) {
+      typeCharacter(TYPING_WARMUP_SAMPLES + index, samplesMs);
+    }
+
+    expect(samplesMs).toHaveLength(TYPING_MEASURED_SAMPLES);
+    expect(view!.state.doc.length).toBe(TYPING_FIXTURE.length + TYPING_WARMUP_SAMPLES + TYPING_MEASURED_SAMPLES);
   });
 });

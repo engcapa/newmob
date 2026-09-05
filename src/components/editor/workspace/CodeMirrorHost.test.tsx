@@ -1,11 +1,15 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
 import { EditorSelection } from "@codemirror/state";
 import { undoDepth } from "@codemirror/commands";
+import { startCompletion } from "@codemirror/autocomplete";
 import { EditorView } from "@codemirror/view";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import { virtualSpaceOverflowField } from "./workspaceVirtualSpace";
+import { WorkspaceActionHost } from "./workspaceActionHost";
+import { WorkspaceDocumentTransactionOwner } from "./workspaceDocumentTransactionOwner";
+import type { GitLineChange } from "./gitEditorChrome";
 
 function renderEditor(
   doc: string,
@@ -32,6 +36,55 @@ function renderEditor(
   expect(content).not.toBeNull();
   return { ...result, content: content!, onChange, props };
 }
+
+describe("ED-DOC-001 mounted Reader Mode", () => {
+  afterEach(() => cleanup());
+
+  it("renders in place, returns to source, and preserves document selection", async () => {
+    const source = "/** Hello **world** */\nconst answer = 42;";
+    const onRaw = vi.fn();
+    const rendered = renderEditor(source, vi.fn(), {
+      renderedDocEnabled: true,
+      renderedDocLanguageId: "typescript",
+      onToggleRenderedDocRaw: onRaw,
+    });
+    const editor = rendered.container.querySelector<HTMLElement>(".cm-editor");
+    const view = EditorView.findFromDOM(editor!);
+    expect(view).not.toBeNull();
+    expect(rendered.container.querySelector(".cm-rendered-doc-comment")).toBeInTheDocument();
+    expect(rendered.container.querySelector(".cm-rendered-doc-body")).toHaveTextContent("Hello world");
+
+    view!.dispatch({ selection: EditorSelection.range(4, 16) });
+    const selectionBeforeToggle = view!.state.selection;
+    fireEvent.click(screen.getByRole("button", { name: "View raw documentation comment" }));
+    expect(onRaw).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(
+      <CodeMirrorHost
+        {...rendered.props}
+        renderedDocEnabled={false}
+      />,
+    );
+    await waitFor(() => expect(rendered.container.querySelector(".cm-rendered-doc-comment")).toBeNull());
+    expect(view!.state.doc.toString()).toBe(source);
+    expect(view!.state.selection.eq(selectionBeforeToggle, true)).toBe(true);
+  });
+
+  it("rebuilds rendered blocks from the live document after an edit", async () => {
+    const rendered = renderEditor("/** Before */\nconst value = 1;", vi.fn(), {
+      renderedDocEnabled: true,
+      renderedDocLanguageId: "ts",
+    });
+    const editor = rendered.container.querySelector<HTMLElement>(".cm-editor");
+    const view = EditorView.findFromDOM(editor!);
+    expect(view).not.toBeNull();
+    expect(rendered.container.querySelector(".cm-rendered-doc-body")).toHaveTextContent("Before");
+
+    view!.dispatch({ changes: { from: 4, to: 10, insert: "After" } });
+    await waitFor(() => expect(rendered.container.querySelector(".cm-rendered-doc-body")).toHaveTextContent("After"));
+    expect(view!.state.doc.toString()).toContain("/** After */");
+  });
+});
 
 describe("CodeMirrorHost search", () => {
   afterEach(() => cleanup());
@@ -102,6 +155,31 @@ describe("CodeMirrorHost search", () => {
       );
     });
     expect(screen.getByText("0 matches")).toBeInTheDocument();
+  });
+
+  it("routes Preserve Case through the mounted replace-all workflow", async () => {
+    const onChange = vi.fn();
+    const { content } = renderEditor("FOO foo Foo", onChange);
+    fireEvent.keyDown(content, { key: "r", code: "KeyR", ctrlKey: true });
+
+    fireEvent.input(await screen.findByRole("searchbox", { name: "Find" }), {
+      target: { value: "foo" },
+    });
+    fireEvent.input(screen.getByRole("textbox", { name: "Replace" }), {
+      target: { value: "bar" },
+    });
+    const preserveCase = screen.getByRole("button", { name: "Preserve case" });
+    fireEvent.click(preserveCase);
+    expect(preserveCase).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Replace all matches" }));
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenLastCalledWith(
+        "BAR bar Bar",
+        expect.objectContaining({ line: expect.any(Number), character: expect.any(Number) }),
+        expect.any(Number),
+      );
+    });
   });
 
   it("opens replacement mode with Ctrl+R and closes with Escape", async () => {
@@ -217,6 +295,29 @@ describe("CodeMirrorHost search", () => {
       token: expect.any(Object),
       port: expect.any(Object),
     }));
+  });
+
+  it("publishes live completion state through the command port", async () => {
+    const registration = vi.fn();
+    const rendered = renderEditor("sout", vi.fn(), {
+      path: "src/App.java",
+      fileKey: "root:app:src/App.java",
+      onCommandPortChange: registration,
+    });
+    const view = EditorView.findFromDOM(rendered.container.querySelector(".cm-editor")!);
+    expect(view).not.toBeNull();
+    await waitFor(() => expect(
+      registration.mock.calls.find((call) => call[0].port),
+    ).toBeTruthy());
+    const { port } = registration.mock.calls.find((call) => call[0].port)![0];
+
+    expect(port.state().completionActive).toBe(false);
+    act(() => {
+      view!.dispatch({ selection: EditorSelection.cursor(view!.state.doc.length) });
+      startCompletion(view!);
+    });
+    await waitFor(() => expect(document.querySelector(".cm-tooltip-autocomplete")).not.toBeNull());
+    expect(port.state().completionActive).toBe(true);
   });
 
   it("runs Complete Statement from the command port on the caret line", async () => {
@@ -335,6 +436,29 @@ describe("CodeMirrorHost search", () => {
     expect(typeof request.cut).toBe("function");
     expect(typeof request.copy).toBe("function");
     expect(typeof request.paste).toBe("function");
+  });
+
+  it("restores CodeMirror focus when a WebKit pointer leaves focus on body", () => {
+    const { content, container } = renderEditor("hello world", vi.fn(), {
+      appearance: {
+        fontFamily: "monospace",
+        fontSizePx: 14,
+        lineHeight: 1.5,
+        ligatures: false,
+        colorSchemeId: "default",
+        highContrast: false,
+        virtualSpace: { afterLineEnd: true, atFileBottom: true },
+      },
+    });
+    content.blur();
+    expect(document.activeElement).not.toBe(content);
+
+    const line = container.querySelector<HTMLElement>(".cm-line");
+    expect(line).not.toBeNull();
+    fireEvent.mouseDown(line!, { button: 0 });
+
+    const editor = container.querySelector<HTMLElement>(".cm-editor");
+    expect(editor?.contains(document.activeElement)).toBe(true);
   });
 
   it("renders usage/inlay chrome, reports its viewport, and requests semantic selection", async () => {
@@ -676,7 +800,9 @@ describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", 
   afterEach(() => cleanup());
 
   it("consumes appearance.virtualSpace policy in production editor", async () => {
+    const actionHost = new WorkspaceActionHost({ workspaceId: "ws-test-vspace" });
     const rendered = renderEditor("first line\nsecond", vi.fn(), {
+      workspaceActionHost: actionHost,
       appearance: {
         fontFamily: "monospace",
         fontSizePx: 14,
@@ -693,8 +819,26 @@ describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", 
 
     // Place caret at line 1 EOL
     view!.dispatch({ selection: { anchor: 10 } });
-    // Pressing End key moves into virtual space
-    fireEvent.keyDown(rendered.content, { key: "End" });
+    // Pressing End key moves into virtual space via ActionHost dispatch
+    const dispatchResult = actionHost.dispatchKeydownV2({
+      event: {
+        key: "End",
+        code: "End",
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      },
+      workspaceId: "ws-test-vspace",
+      targetViewId: "src/example.ts",
+    });
+    expect(dispatchResult.kind).toBe("executed");
+    if (dispatchResult.kind === "executed") {
+      expect(dispatchResult.actionId).toBe("editor.moveToLineEnd");
+    }
+    await Promise.resolve();
     const overflow = view!.state.field(virtualSpaceOverflowField, false)?.get(10) ?? 0;
     expect(overflow).toBeGreaterThan(0);
   });
@@ -715,5 +859,277 @@ describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", 
     await waitFor(() => {
       expect(onFoldProvenanceChange).toHaveBeenCalledWith("explicit-comment");
     });
+  });
+});
+
+describe("§8.26 ED-MULTIVIEW-002 shared document host wiring", () => {
+  afterEach(() => cleanup());
+
+  function sharedProps(
+    owner: WorkspaceDocumentTransactionOwner,
+    viewId: string,
+    doc: string,
+    onChange: ComponentProps<typeof CodeMirrorHost>["onChange"],
+    workspaceActionHost?: WorkspaceActionHost,
+  ): ComponentProps<typeof CodeMirrorHost> {
+    return {
+      path: "src/shared.ts",
+      fileKey: "shared.ts",
+      viewId,
+      transactionOwner: owner,
+      documentRevision: 0,
+      doc,
+      visible: true,
+      diagnostics: [],
+      reveal: null,
+      onChange,
+      onSave: vi.fn(),
+      onHover: vi.fn(async () => null),
+      onDefinition: vi.fn(async () => false),
+      onReferences: vi.fn(async () => undefined),
+      getCompletionIdentity: () => null,
+      onCompletionDiagnostic: vi.fn(),
+      ...(workspaceActionHost ? { workspaceActionHost } : {}),
+    };
+  }
+
+  it("broadcasts one incremental edit and preserves the sibling selection", () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    const initial = "hello world";
+    const primaryOnChange = vi.fn();
+    const secondaryOnChange = vi.fn();
+    const rendered = render(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, primaryOnChange)} />
+        <CodeMirrorHost {...sharedProps(owner, "secondary", initial, secondaryOnChange)} />
+      </div>,
+    );
+    const views = [...rendered.container.querySelectorAll<HTMLElement>(".cm-editor")]
+      .map((element) => EditorView.findFromDOM(element)!);
+    const primary = views[0]!;
+    const secondary = views[1]!;
+    const transactions: Array<{ sourceViewId: string; changes: readonly { from: number; to: number; insert: string }[] }> = [];
+    const unsubscribe = owner.subscribe("shared.ts", (transaction) => {
+      transactions.push(transaction);
+    });
+
+    secondary.dispatch({ selection: { anchor: initial.length } });
+    primary.dispatch({ changes: { from: 0, to: 0, insert: "say " } });
+
+    expect(primary.state.doc.toString()).toBe("say hello world");
+    expect(secondary.state.doc.toString()).toBe("say hello world");
+    expect(secondary.state.selection.main.head).toBe(initial.length + 4);
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0]?.sourceViewId).toBe("primary");
+    expect(transactions[0]?.changes).toEqual([{ from: 0, to: 0, insert: "say " }]);
+    expect(primaryOnChange).toHaveBeenCalledTimes(1);
+    expect(secondaryOnChange).not.toHaveBeenCalled();
+    expect(owner.getHistoryState("shared.ts")).toMatchObject({ canUndo: true, undoDepth: 1 });
+    unsubscribe();
+  });
+
+  it("routes undo and redo through the shared owner for both mounted views", async () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    const actionHost = new WorkspaceActionHost({ workspaceId: "ws-shared-history" });
+    const initial = "hello";
+    const rendered = render(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, vi.fn(), actionHost)} />
+        <CodeMirrorHost {...sharedProps(owner, "secondary", initial, vi.fn(), actionHost)} />
+      </div>,
+    );
+    const views = [...rendered.container.querySelectorAll<HTMLElement>(".cm-editor")]
+      .map((element) => EditorView.findFromDOM(element)!);
+    const primary = views[0]!;
+    const secondary = views[1]!;
+    primary.dispatch({ changes: { from: initial.length, to: initial.length, insert: "!" } });
+    expect(primary.state.doc.toString()).toBe("hello!");
+    expect(secondary.state.doc.toString()).toBe("hello!");
+
+    await act(async () => {
+      const result = await actionHost.execute("workspace.undo", { focus: "editor", hasActiveFile: true });
+      expect(result.kind).toBe("applied");
+    });
+    expect(primary.state.doc.toString()).toBe(initial);
+    expect(secondary.state.doc.toString()).toBe(initial);
+    expect(owner.getHistoryState("shared.ts")).toMatchObject({ canUndo: false, canRedo: true });
+
+    await act(async () => {
+      const result = await actionHost.execute("workspace.redo", { focus: "editor", hasActiveFile: true });
+      expect(result.kind).toBe("applied");
+    });
+    expect(primary.state.doc.toString()).toBe("hello!");
+    expect(secondary.state.doc.toString()).toBe("hello!");
+    expect(owner.getHistoryState("shared.ts")).toMatchObject({ canUndo: true, canRedo: false });
+  });
+
+  it("keeps a native replacement burst ahead of delayed controlled document echoes after undo", async () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    const actionHost = new WorkspaceActionHost({ workspaceId: "ws-shared-recovery" });
+    const initial = "café\nmatrix";
+    const onChange = vi.fn();
+    const rendered = render(
+      <CodeMirrorHost {...sharedProps(owner, "primary", initial, onChange, actionHost)} />,
+    );
+    const view = EditorView.findFromDOM(rendered.container.querySelector<HTMLElement>(".cm-editor")!);
+    expect(view).not.toBeNull();
+
+    view!.dispatch({ changes: { from: initial.length, to: initial.length, insert: "你" } });
+    await act(async () => {
+      const result = await actionHost.execute("workspace.undo", {
+        focus: "editor",
+        hasActiveFile: true,
+      });
+      expect(result.kind).toBe("applied");
+    });
+    expect(view!.state.doc.toString()).toBe(initial);
+    expect(owner.getDocument("shared.ts")).toBe(initial);
+
+    // Save/external synchronization has its own owner revision stream and
+    // does not advance the store's controlled documentRevision metadata.
+    expect(owner.replaceDocument(
+      "shared.ts",
+      "save-writer",
+      `C${initial.slice(1)}`,
+      "external-disk",
+    )).not.toBeNull();
+    expect(owner.replaceDocument(
+      "shared.ts",
+      "save-writer",
+      initial,
+      "external-disk",
+    )).not.toBeNull();
+    expect(view!.state.doc.toString()).toBe(initial);
+    expect(owner.getRevision("shared.ts")).toBe(4);
+
+    // WebDriver contenteditable fill emits character-level document updates.
+    // React may render the first controlled echo after the next character has
+    // already reached both the live view and the shared transaction owner.
+    view!.dispatch({ changes: { from: 0, to: initial.length, insert: "恢" } });
+    view!.dispatch({ changes: { from: 1, to: 1, insert: "复" } });
+    expect(view!.state.doc.toString()).toBe("恢复");
+    expect(owner.getDocument("shared.ts")).toBe("恢复");
+
+    // Model a later native transaction that has reached the shared owner but
+    // whose CodeMirror dispatch is still in flight. The delayed "恢" prop is
+    // only an acknowledgement and must not synchronously replace the view.
+    expect(owner.replaceDocument(
+      "shared.ts",
+      "primary",
+      "恢中",
+      "external-disk",
+    )).not.toBeNull();
+    expect(view!.state.doc.toString()).toBe("恢复");
+    expect(owner.getDocument("shared.ts")).toBe("恢中");
+
+    rendered.rerender(
+      <CodeMirrorHost
+        {...sharedProps(owner, "primary", "恢", onChange, actionHost)}
+        documentRevision={3}
+      />,
+    );
+    expect(view!.state.doc.toString()).toBe("恢复");
+    expect(owner.getDocument("shared.ts")).toBe("恢中");
+
+    rendered.rerender(
+      <CodeMirrorHost
+        {...sharedProps(owner, "primary", "恢复", onChange, actionHost)}
+        documentRevision={4}
+      />,
+    );
+    expect(view!.state.doc.toString()).toBe("恢复");
+    expect(owner.getDocument("shared.ts")).toBe("恢中");
+  });
+
+  it("retains canonical text and history after a non-final unmount, then cleans up finally", () => {
+    const owner = new WorkspaceDocumentTransactionOwner();
+    const initial = "hello";
+    const rendered = render(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, vi.fn())} />
+        <CodeMirrorHost {...sharedProps(owner, "secondary", initial, vi.fn())} />
+      </div>,
+    );
+    const primary = EditorView.findFromDOM(rendered.container.querySelectorAll<HTMLElement>(".cm-editor")[0]!);
+    primary!.dispatch({ changes: { from: 0, to: 0, insert: "say " } });
+    expect(owner.getDocument("shared.ts")).toBe("say hello");
+
+    // Unmount only the secondary host; the first lease keeps the document alive.
+    rendered.rerender(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, vi.fn())} />
+      </div>,
+    );
+    expect(owner.getDocument("shared.ts")).toBe("say hello");
+    expect(owner.getHistoryState("shared.ts").canUndo).toBe(true);
+
+    rendered.rerender(
+      <div>
+        <CodeMirrorHost {...sharedProps(owner, "primary", initial, vi.fn())} />
+        <CodeMirrorHost {...sharedProps(owner, "secondary", initial, vi.fn())} />
+      </div>,
+    );
+    const reopenedViews = [...rendered.container.querySelectorAll<HTMLElement>(".cm-editor")]
+      .map((element) => EditorView.findFromDOM(element)!);
+    expect(reopenedViews).toHaveLength(2);
+    expect(reopenedViews[1]!.state.doc.toString()).toBe("say hello");
+    expect(owner.getHistoryState("shared.ts").canUndo).toBe(true);
+
+    rendered.unmount();
+    expect(owner.getDocument("shared.ts")).toBeNull();
+    expect(owner.getHistoryState("shared.ts")).toEqual({
+      canUndo: false,
+      canRedo: false,
+      undoDepth: 0,
+      redoDepth: 0,
+    });
+  });
+});
+
+describe("ED-SAVE-004 editor recovery decoration synchronization", () => {
+  afterEach(() => cleanup());
+
+  it("reconfigures Git markers after a native replacement shortens the document", async () => {
+    const initial = "café\nmatrix";
+    const secondLineChange: GitLineChange = {
+      kind: "modified",
+      startLine: 1,
+      endLine: 1,
+      oldStartLine: 1,
+      oldEndLine: 1,
+      oldText: "old",
+      newText: "matrix",
+    };
+    const firstLineChange: GitLineChange = {
+      ...secondLineChange,
+      startLine: 0,
+      endLine: 0,
+      oldStartLine: 0,
+      oldEndLine: 0,
+      newText: "c",
+    };
+    const onChange = vi.fn();
+    const rendered = renderEditor(initial, onChange, { gitChanges: [secondLineChange] });
+    const view = EditorView.findFromDOM(rendered.container.querySelector<HTMLElement>(".cm-editor")!);
+    const dispatchSpy = vi.spyOn(view!, "dispatch");
+
+    expect(() => {
+      view!.dispatch({ changes: { from: 0, to: initial.length, insert: "c" } });
+      rendered.rerender(
+        <CodeMirrorHost
+          {...rendered.props}
+          doc="c"
+          documentRevision={1}
+          gitChanges={[firstLineChange]}
+        />,
+      );
+    }).not.toThrow();
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(view!.state.doc.toString()).toBe("c");
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+    expect(dispatchSpy.mock.calls.length).toBeGreaterThan(1);
+    expect(rendered.container.querySelector(".cm-git-change-modified")).toBeTruthy();
   });
 });

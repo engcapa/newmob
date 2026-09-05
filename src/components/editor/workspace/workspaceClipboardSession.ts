@@ -1,5 +1,13 @@
 import { createContext, useContext } from "react";
 import type { ClipboardSourceEol } from "./workspaceEditorCommands";
+import { isTauriRuntime } from "../../../lib/runtime";
+import {
+  probeClipboardCapabilities,
+  readTextResult,
+  writeText,
+  type ClipboardCapabilities,
+  type ClipboardTextReadResult,
+} from "../../../lib/clipboard";
 
 /**
  * Workspace-scoped clipboard session (§8.17.6 N9.3/N14.4, upgraded §8.18.4 P0-C3).
@@ -269,28 +277,139 @@ export class WorkspaceClipboardStore {
   }
 }
 
-const storesByWorkspace = new Map<string, WorkspaceClipboardStore>();
-const refcountsByWorkspace = new Map<string, number>();
-const storeRevisionsByWorkspace = new Map<string, number>();
-const consumersByWorkspace = new Map<string, Set<string>>();
-const listenersByWorkspace = new Map<string, Set<(snapshot: WorkspaceClipboardSnapshot) => void>>();
-const permissionGenerationsByWorkspace = new Map<string, number>();
-
-export interface WorkspaceClipboardSnapshot {
-  revision: number;
-  history: readonly EditorClipboardSession[];
-  exclusion: ClipboardHistoryExclusion;
-  isHistoryEnabled: boolean;
-  limits: { maxItems: number; maxTotalBytes: number };
-  consumerCount: number;
-  permissionGeneration: number;
+export interface ClipboardConsumerLease {
+  (): "detached" | "already-detached";
+  readonly token: string;
+  readonly consumerId: string;
+  readonly kind: string;
+  detach(): "detached" | "already-detached";
 }
+
+export type ClipboardPermissionState = "unknown" | "granted" | "denied";
+
+export interface ClipboardPermissionAdapter {
+  queryPermission(): Promise<ClipboardPermissionState>;
+  subscribe?(listener: (permission: ClipboardPermissionState) => void): () => void;
+}
+
+export interface GuardedClipboardIO {
+  writeText?: (text: string) => Promise<void>;
+  readTextResult?: () => Promise<ClipboardTextReadResult>;
+}
+
+export type GuardedSystemEffect = "not-performed" | "performed" | "unknown";
+
+export type GuardedSystemWriteResult =
+  | { outcome: "success"; systemEffect: "performed" }
+  | { outcome: "denied"; systemEffect: "not-performed" | "performed" }
+  | { outcome: "stale-generation"; baseGeneration: number; currentGeneration: number; systemEffect: "performed" | "unknown" }
+  | { outcome: "unavailable" | "error"; error?: string; systemEffect: "unknown" };
+
+export type GuardedSystemReadResult =
+  | { outcome: "success"; text: string; systemEffect: "performed" }
+  | { outcome: "denied"; systemEffect: "not-performed" | "performed"; fallbackSession: EditorClipboardSession | null }
+  | { outcome: "stale-generation"; baseGeneration: number; currentGeneration: number; systemEffect: "performed" | "unknown"; fallbackSession: EditorClipboardSession | null }
+  | { outcome: "unavailable" | "error"; error?: string; systemEffect: "unknown"; fallbackSession: EditorClipboardSession | null };
+
+export function createWebClipboardPermissionAdapter(): ClipboardPermissionAdapter {
+  return {
+    async queryPermission(): Promise<ClipboardPermissionState> {
+      if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+        return "unknown";
+      }
+      try {
+        const status = await navigator.permissions.query({ name: "clipboard-read" as PermissionName });
+        if (status.state === "granted") return "granted";
+        if (status.state === "denied") return "denied";
+        return "unknown";
+      } catch {
+        return "unknown";
+      }
+    },
+    subscribe(listener: (permission: ClipboardPermissionState) => void): () => void {
+      if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+        return () => {};
+      }
+      let active = true;
+      let cleanup: (() => void) | null = null;
+      navigator.permissions
+        .query({ name: "clipboard-read" as PermissionName })
+        .then((status) => {
+          if (!active) return;
+          const handler = () => {
+            if (status.state === "granted") listener("granted");
+            else if (status.state === "denied") listener("denied");
+            else listener("unknown");
+          };
+          status.addEventListener("change", handler);
+          cleanup = () => status.removeEventListener("change", handler);
+        })
+        .catch(() => {});
+      return () => {
+        active = false;
+        cleanup?.();
+      };
+    },
+  };
+}
+
+export interface NativeClipboardPermissionAdapterOptions {
+  isRuntime?: () => boolean;
+  probeCapabilities?: () => Promise<ClipboardCapabilities | null>;
+}
+
+export function createNativeClipboardPermissionAdapter(
+  options: NativeClipboardPermissionAdapterOptions = {},
+): ClipboardPermissionAdapter {
+  const runtimeAvailable = options.isRuntime ?? isTauriRuntime;
+  const probeCapabilities = options.probeCapabilities ?? probeClipboardCapabilities;
+  return {
+    async queryPermission(): Promise<ClipboardPermissionState> {
+      if (!runtimeAvailable()) return "unknown";
+      try {
+        // Backend availability is not an OS permission grant. The native
+        // boundary has no permission-query command, so a successful probe
+        // deliberately leaves permission unknown until a real read/write.
+        await probeCapabilities();
+      } catch {
+        // Permission remains unknown when capability discovery itself fails.
+      }
+      return "unknown";
+    },
+  };
+}
+
+export function createDefaultClipboardPermissionAdapter(): ClipboardPermissionAdapter {
+  if (isTauriRuntime()) {
+    return createNativeClipboardPermissionAdapter();
+  }
+  return createWebClipboardPermissionAdapter();
+}
+
+export interface WorkspaceClipboardSnapshotV3 {
+  readonly payloadRevision: number;
+  readonly historyRevision: number;
+  readonly policyRevision: number;
+  readonly permissionGeneration: number;
+  readonly lifecycleRevision: number;
+  readonly permission: ClipboardPermissionState;
+  readonly consumers: readonly { token: string; id: string; kind: string }[];
+  /** Backwards-compatibility alias for payloadRevision */
+  readonly revision: number;
+  readonly history: readonly EditorClipboardSession[];
+  readonly exclusion: ClipboardHistoryExclusion;
+  readonly isHistoryEnabled: boolean;
+  readonly limits: { maxItems: number; maxTotalBytes: number };
+  readonly consumerCount: number;
+}
+
+export type WorkspaceClipboardSnapshot = WorkspaceClipboardSnapshotV3;
 
 export interface WorkspaceClipboardHandle {
   readonly workspaceId: string;
-  attachConsumer(consumerId?: string): () => void;
-  getSnapshot(): WorkspaceClipboardSnapshot;
-  subscribe(listener: (snapshot: WorkspaceClipboardSnapshot) => void): () => void;
+  attachConsumer(consumerId?: string, kind?: string): ClipboardConsumerLease;
+  getSnapshot(): WorkspaceClipboardSnapshotV3;
+  subscribe(listener: (snapshot: WorkspaceClipboardSnapshotV3) => void): () => void;
   write(input: Parameters<WorkspaceClipboardStore["write"]>[0]): EditorClipboardSession;
   read(): EditorClipboardSession | null;
   clear(reason?: ClipboardClearReason): void;
@@ -304,6 +423,12 @@ export interface WorkspaceClipboardHandle {
   setHistoryLimits(maxItems: number, maxTotalBytes: number): void;
   historyLimits(): { maxItems: number; maxTotalBytes: number };
   historyExclusion(): ClipboardHistoryExclusion;
+  setPermission(permission: ClipboardPermissionState): void;
+  permission(): ClipboardPermissionState;
+  attachPermissionAdapter(adapter: ClipboardPermissionAdapter): () => void;
+  syncPermission(adapter?: ClipboardPermissionAdapter): Promise<ClipboardPermissionState>;
+  writeSystemClipboard(text: string, io?: GuardedClipboardIO): Promise<GuardedSystemWriteResult>;
+  readSystemClipboard(io?: GuardedClipboardIO): Promise<GuardedSystemReadResult>;
 }
 
 export const WorkspaceClipboardSessionContext = createContext<WorkspaceClipboardHandle | null>(null);
@@ -312,158 +437,341 @@ export function useWorkspaceClipboardSession(): WorkspaceClipboardHandle | null 
   return useContext(WorkspaceClipboardSessionContext);
 }
 
+interface WorkspaceSlotState {
+  store: WorkspaceClipboardStore;
+  payloadRevision: number;
+  historyRevision: number;
+  policyRevision: number;
+  permissionGeneration: number;
+  lifecycleRevision: number;
+  permission: "unknown" | "granted" | "denied";
+  consumers: Map<string, { token: string; id: string; kind: string }>;
+  listeners: Set<(snapshot: WorkspaceClipboardSnapshotV3) => void>;
+  rootAcquisitions: number;
+  leaseSeq: number;
+  cachedSnapshot: WorkspaceClipboardSnapshotV3 | null;
+  cachedRevision: string;
+}
+
+const slotStatesByWorkspace = new Map<string, WorkspaceSlotState>();
+
+function getOrCreateSlot(workspaceInstanceId: string): WorkspaceSlotState {
+  let slot = slotStatesByWorkspace.get(workspaceInstanceId);
+  if (!slot) {
+    slot = {
+      store: new WorkspaceClipboardStore(),
+      payloadRevision: 0,
+      historyRevision: 0,
+      policyRevision: 0,
+      permissionGeneration: 1,
+      lifecycleRevision: 0,
+      permission: "unknown",
+      consumers: new Map(),
+      listeners: new Set(),
+      rootAcquisitions: 0,
+      leaseSeq: 0,
+      cachedSnapshot: null,
+      cachedRevision: "",
+    };
+    slotStatesByWorkspace.set(workspaceInstanceId, slot);
+  }
+  return slot;
+}
+
 /**
  * Acquire one handle for an editor host instance. Refcounted per workspace
  * instance: the last `release()` clears and deletes the slot immediately, so
- * closing a workspace cannot leak its clipboard payload (§8.18.4 lifecycle).
+ * closing a workspace cannot leak its clipboard payload (§8.18.4/§8.27.2 lifecycle).
  */
-export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceClipboardHandle {
-  let store = storesByWorkspace.get(workspaceInstanceId);
-  if (!store) {
-    store = new WorkspaceClipboardStore();
-    storesByWorkspace.set(workspaceInstanceId, store);
-    storeRevisionsByWorkspace.set(workspaceInstanceId, 0);
-    consumersByWorkspace.set(workspaceInstanceId, new Set());
-    listenersByWorkspace.set(workspaceInstanceId, new Set());
-    permissionGenerationsByWorkspace.set(workspaceInstanceId, 1);
-  }
-  refcountsByWorkspace.set(workspaceInstanceId, (refcountsByWorkspace.get(workspaceInstanceId) ?? 0) + 1);
+export function acquireClipboardStore(
+  workspaceInstanceId: string,
+  options?: { permissionAdapter?: ClipboardPermissionAdapter },
+): WorkspaceClipboardHandle {
+  const slot = getOrCreateSlot(workspaceInstanceId);
+  slot.rootAcquisitions += 1;
+  let handleReleased = false;
 
-  const getSnapshot = (): WorkspaceClipboardSnapshot => {
-    const current = storesByWorkspace.get(workspaceInstanceId) ?? store!;
-    return {
-      revision: storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0,
-      history: current.historyEntries(),
-      exclusion: current.historyExclusion(),
-      isHistoryEnabled: current.isHistoryEnabled(),
-      limits: current.historyLimits(),
-      consumerCount: consumersByWorkspace.get(workspaceInstanceId)?.size ?? 0,
-      permissionGeneration: permissionGenerationsByWorkspace.get(workspaceInstanceId) ?? 1,
-    };
+  const getSnapshot = (): WorkspaceClipboardSnapshotV3 => {
+    const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+    const combinedRevision = `${current.payloadRevision}:${current.historyRevision}:${current.policyRevision}:${current.permissionGeneration}:${current.lifecycleRevision}:${current.consumers.size}`;
+    if (!current.cachedSnapshot || current.cachedRevision !== combinedRevision) {
+      current.cachedSnapshot = buildWorkspaceClipboardSnapshot(current);
+      current.cachedRevision = combinedRevision;
+    }
+    return current.cachedSnapshot;
   };
 
   const notify = () => {
-    const listeners = listenersByWorkspace.get(workspaceInstanceId);
-    if (!listeners || listeners.size === 0) return;
+    const current = slotStatesByWorkspace.get(workspaceInstanceId);
+    if (!current || current.listeners.size === 0) return;
     const snap = getSnapshot();
-    for (const listener of listeners) {
+    for (const listener of current.listeners) {
       try {
         listener(snap);
       } catch {
-        // ignore subscriber errors
+        // ignore subscriber errors (§8.27.2 subscriber throw isolation)
       }
     }
   };
 
-  const bump = () => {
-    const next = (storeRevisionsByWorkspace.get(workspaceInstanceId) ?? 0) + 1;
-    storeRevisionsByWorkspace.set(workspaceInstanceId, next);
-    notify();
-  };
-
-  const live = (): WorkspaceClipboardStore => {
-    const current = storesByWorkspace.get(workspaceInstanceId) ?? store!;
-    return current;
-  };
-
   const handle: WorkspaceClipboardHandle = {
     workspaceId: workspaceInstanceId,
-    attachConsumer(consumerId?: string) {
-      const id = consumerId || `anon-${Math.random().toString(36).slice(2, 9)}`;
-      let consumers = consumersByWorkspace.get(workspaceInstanceId);
-      if (!consumers) {
-        consumers = new Set();
-        consumersByWorkspace.set(workspaceInstanceId, consumers);
-      }
-      if (consumers.has(id)) {
-        return () => {
-          if (consumers?.has(id)) {
-            consumers.delete(id);
-            handle.release();
-            notify();
-          }
-        };
-      }
-      consumers.add(id);
-      refcountsByWorkspace.set(workspaceInstanceId, (refcountsByWorkspace.get(workspaceInstanceId) ?? 0) + 1);
+    attachConsumer(consumerId?: string, kind: string = "editor"): ClipboardConsumerLease {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      current.leaseSeq += 1;
+      const token = `lease-${workspaceInstanceId}-${current.leaseSeq}-${Math.random().toString(36).slice(2, 7)}`;
+      const id = consumerId || `anon-${current.leaseSeq}`;
+
+      const entry = { token, id, kind };
+      current.consumers.set(token, entry);
+      current.lifecycleRevision += 1;
       notify();
-      return () => {
-        if (consumers?.has(id)) {
-          consumers.delete(id);
-          handle.release();
+
+      let active = true;
+      const detachFn = function () {
+        if (!active) return "already-detached";
+        active = false;
+        const liveSlot = slotStatesByWorkspace.get(workspaceInstanceId);
+        if (liveSlot && liveSlot.consumers.has(token)) {
+          liveSlot.consumers.delete(token);
+          liveSlot.lifecycleRevision += 1;
           notify();
+          return "detached";
         }
+        return "already-detached";
       };
+
+      const lease = Object.assign(detachFn, {
+        token,
+        consumerId: id,
+        kind,
+        detach: detachFn,
+      }) as ClipboardConsumerLease;
+      return lease;
     },
     getSnapshot,
     subscribe(listener) {
-      let listeners = listenersByWorkspace.get(workspaceInstanceId);
-      if (!listeners) {
-        listeners = new Set();
-        listenersByWorkspace.set(workspaceInstanceId, listeners);
-      }
-      listeners.add(listener);
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      current.listeners.add(listener);
       return () => {
-        listeners?.delete(listener);
+        const liveSlot = slotStatesByWorkspace.get(workspaceInstanceId);
+        liveSlot?.listeners.delete(listener);
       };
     },
     write: (input) => {
-      bump();
-      return live().write(input);
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      const session = current.store.write(input);
+      current.payloadRevision += 1;
+      if (current.store.historyExclusion() === "recorded") {
+        current.historyRevision += 1;
+      }
+      notify();
+      return session;
     },
-    read: () => live().read(),
+    read: () => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      return current.store.read();
+    },
     clear: (reason) => {
-      bump();
-      live().clear(reason);
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      if (current.store.read() !== null || current.store.historyEntries().length > 0) {
+        current.payloadRevision += 1;
+        current.historyRevision += 1;
+        current.store.clear(reason);
+        notify();
+      }
     },
     release() {
-      const next = (refcountsByWorkspace.get(workspaceInstanceId) ?? 1) - 1;
-      if (next > 0) {
-        refcountsByWorkspace.set(workspaceInstanceId, next);
+      if (handleReleased) return;
+      handleReleased = true;
+      const current = slotStatesByWorkspace.get(workspaceInstanceId);
+      if (!current) return;
+      current.rootAcquisitions = Math.max(0, current.rootAcquisitions - 1);
+      current.lifecycleRevision += 1;
+      notify();
+      if (current.rootAcquisitions > 0) {
         return;
       }
-      refcountsByWorkspace.set(workspaceInstanceId, 0);
       // Deferred by a microtask so a synchronous view remount (cleanup →
       // setup in one commit) does not transiently wipe the payload; if no
       // re-acquire happens, the slot really is going away.
       queueMicrotask(() => {
-        if ((refcountsByWorkspace.get(workspaceInstanceId) ?? 0) !== 0) return;
-        refcountsByWorkspace.delete(workspaceInstanceId);
-        storesByWorkspace.delete(workspaceInstanceId);
-        storeRevisionsByWorkspace.delete(workspaceInstanceId);
-        consumersByWorkspace.delete(workspaceInstanceId);
-        listenersByWorkspace.delete(workspaceInstanceId);
-        permissionGenerationsByWorkspace.delete(workspaceInstanceId);
-        store!.clear("workspace-close");
+        const liveSlot = slotStatesByWorkspace.get(workspaceInstanceId);
+        if (!liveSlot || liveSlot.rootAcquisitions > 0) return;
+        slotStatesByWorkspace.delete(workspaceInstanceId);
+        liveSlot.store.clear("workspace-close");
+        liveSlot.consumers.clear();
+        liveSlot.listeners.clear();
       });
     },
-    historyEntries: () => live().historyEntries(),
+    historyEntries: () => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      return current.store.historyEntries();
+    },
     pasteFromHistory(index) {
-      return live().pasteFromHistory(index);
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      const session = current.store.pasteFromHistory(index);
+      if (session) {
+        current.payloadRevision += 1;
+        notify();
+      }
+      return session;
     },
     removeHistoryEntry: (index) => {
-      const removed = live().removeHistoryEntry(index);
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      const removed = current.store.removeHistoryEntry(index);
       if (removed) {
-        bump();
+        current.historyRevision += 1;
+        notify();
       }
       return removed;
     },
     clearHistory: () => {
-      bump();
-      live().clearHistory();
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      if (current.store.historyEntries().length > 0) {
+        current.historyRevision += 1;
+        current.store.clearHistory();
+        notify();
+      }
     },
     setHistoryEnabled: (enabled) => {
-      bump();
-      live().setHistoryEnabled(enabled);
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      if (current.store.isHistoryEnabled() !== enabled) {
+        current.policyRevision += 1;
+        current.store.setHistoryEnabled(enabled);
+        if (!enabled) {
+          current.historyRevision += 1;
+        }
+        notify();
+      }
     },
-    isHistoryEnabled: () => live().isHistoryEnabled(),
+    isHistoryEnabled: () => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      return current.store.isHistoryEnabled();
+    },
     setHistoryLimits: (maxItems, maxTotalBytes) => {
-      bump();
-      live().setHistoryLimits(maxItems, maxTotalBytes);
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      const oldLimits = current.store.historyLimits();
+      const nextItems = Math.min(50, Math.max(1, Math.floor(maxItems)));
+      const nextBytes = Math.max(1024, Math.floor(maxTotalBytes));
+      if (oldLimits.maxItems !== nextItems || oldLimits.maxTotalBytes !== nextBytes) {
+        current.policyRevision += 1;
+        current.store.setHistoryLimits(nextItems, nextBytes);
+        notify();
+      }
     },
-    historyLimits: () => live().historyLimits(),
-    historyExclusion: () => live().historyExclusion(),
+    historyLimits: () => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      return current.store.historyLimits();
+    },
+    historyExclusion: () => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      return current.store.historyExclusion();
+    },
+    setPermission: (permission) => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      if (current.permission !== permission) {
+        current.permission = permission;
+        current.permissionGeneration += 1;
+        notify();
+      }
+    },
+    permission: () => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      return current.permission;
+    },
+    attachPermissionAdapter: (adapter: ClipboardPermissionAdapter) => {
+      void handle.syncPermission(adapter);
+      if (typeof adapter.subscribe === "function") {
+        return adapter.subscribe((perm) => {
+          handle.setPermission(perm);
+        });
+      }
+      return () => {};
+    },
+    syncPermission: async (adapter?: ClipboardPermissionAdapter) => {
+      const activeAdapter = adapter ?? createDefaultClipboardPermissionAdapter();
+      try {
+        const perm = await activeAdapter.queryPermission();
+        handle.setPermission(perm);
+        return perm;
+      } catch {
+        return handle.permission();
+      }
+    },
+    writeSystemClipboard: async (text: string, io?: GuardedClipboardIO): Promise<GuardedSystemWriteResult> => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      if (current.permission === "denied") {
+        return { outcome: "denied", systemEffect: "not-performed" };
+      }
+      const baseGeneration = current.permissionGeneration;
+      const writeFn = io?.writeText ?? writeText;
+      try {
+        await writeFn(text);
+      } catch (err) {
+        return {
+          outcome: "unavailable",
+          error: err instanceof Error ? err.message : String(err),
+          systemEffect: "unknown",
+        };
+      }
+      const postSlot = slotStatesByWorkspace.get(workspaceInstanceId);
+      if (!postSlot || postSlot.permissionGeneration !== baseGeneration) {
+        return {
+          outcome: "stale-generation",
+          baseGeneration,
+          currentGeneration: postSlot ? postSlot.permissionGeneration : -1,
+          systemEffect: "performed",
+        };
+      }
+      if (postSlot.permission === "denied") {
+        return { outcome: "denied", systemEffect: "performed" };
+      }
+      return { outcome: "success", systemEffect: "performed" };
+    },
+    readSystemClipboard: async (io?: GuardedClipboardIO): Promise<GuardedSystemReadResult> => {
+      const current = slotStatesByWorkspace.get(workspaceInstanceId) ?? slot;
+      if (current.permission === "denied") {
+        return { outcome: "denied", systemEffect: "not-performed", fallbackSession: current.store.read() };
+      }
+      const baseGeneration = current.permissionGeneration;
+      const readFn = io?.readTextResult ?? readTextResult;
+      let res: ClipboardTextReadResult;
+      try {
+        res = await readFn();
+      } catch (err) {
+        const postSlot = slotStatesByWorkspace.get(workspaceInstanceId) ?? current;
+        return {
+          outcome: "error",
+          error: err instanceof Error ? err.message : String(err),
+          systemEffect: "unknown",
+          fallbackSession: postSlot.store.read(),
+        };
+      }
+      const systemEffect: GuardedSystemEffect = res.ok ? "performed" : "unknown";
+      const postSlot = slotStatesByWorkspace.get(workspaceInstanceId);
+      if (!postSlot || postSlot.permissionGeneration !== baseGeneration) {
+        return {
+          outcome: "stale-generation",
+          baseGeneration,
+          currentGeneration: postSlot ? postSlot.permissionGeneration : -1,
+          systemEffect,
+          fallbackSession: postSlot ? postSlot.store.read() : null,
+        };
+      }
+      if (postSlot.permission === "denied") {
+        return { outcome: "denied", systemEffect: "performed", fallbackSession: postSlot.store.read() };
+      }
+      if (!res.ok) {
+        return { outcome: "unavailable", systemEffect: "unknown", fallbackSession: postSlot.store.read() };
+      }
+      return { outcome: "success", text: res.text, systemEffect: "performed" };
+    },
   };
+
+  if (options?.permissionAdapter) {
+    handle.attachPermissionAdapter(options.permissionAdapter);
+  }
 
   return handle;
 }
@@ -473,20 +781,45 @@ export function acquireClipboardStore(workspaceInstanceId: string): WorkspaceCli
  * menus, tests). New editor hosts must use `acquireClipboardStore`.
  */
 export function clipboardStoreForWorkspace(workspaceId: string): WorkspaceClipboardStore {
-  let store = storesByWorkspace.get(workspaceId);
-  if (!store) {
-    store = new WorkspaceClipboardStore();
-    storesByWorkspace.set(workspaceId, store);
-  }
-  return store;
+  const slot = getOrCreateSlot(workspaceId);
+  return slot.store;
 }
 
 /** Test/diagnostic reset of every workspace slot. */
 export function resetWorkspaceClipboardStores(): void {
-  storesByWorkspace.clear();
-  refcountsByWorkspace.clear();
-  storeRevisionsByWorkspace.clear();
-  consumersByWorkspace.clear();
-  listenersByWorkspace.clear();
-  permissionGenerationsByWorkspace.clear();
+  slotStatesByWorkspace.clear();
+}
+
+function buildWorkspaceClipboardSnapshot(slot: WorkspaceSlotState): WorkspaceClipboardSnapshot {
+  return {
+    payloadRevision: slot.payloadRevision,
+    historyRevision: slot.historyRevision,
+    policyRevision: slot.policyRevision,
+    permissionGeneration: slot.permissionGeneration,
+    lifecycleRevision: slot.lifecycleRevision,
+    permission: slot.permission,
+    consumers: Array.from(slot.consumers.values()),
+    revision: slot.payloadRevision,
+    history: slot.store.historyEntries(),
+    exclusion: slot.store.historyExclusion(),
+    isHistoryEnabled: slot.store.isHistoryEnabled(),
+    limits: slot.store.historyLimits(),
+    consumerCount: slot.consumers.size,
+  };
+}
+
+if (typeof window !== "undefined") {
+  (window as unknown as { __taomniClipboardObserve?: (workspaceInstanceId?: string) => unknown }).__taomniClipboardObserve = (
+    workspaceInstanceId?: string,
+  ) => {
+    if (!workspaceInstanceId) {
+      const all: Record<string, WorkspaceClipboardSnapshot> = {};
+      for (const [id, slot] of slotStatesByWorkspace) {
+        all[id] = buildWorkspaceClipboardSnapshot(slot);
+      }
+      return all;
+    }
+    const slot = slotStatesByWorkspace.get(workspaceInstanceId);
+    return slot ? buildWorkspaceClipboardSnapshot(slot) : null;
+  };
 }

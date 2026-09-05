@@ -1,0 +1,46 @@
+id: TC-IDE-C8-03-reformat-unavailable-zero-commit-browser
+title: "Reformat unavailable provider keeps marker text untouched in browser"
+description: |
+  Browser gate case (ED-STYLE-001). Fills the preview README with a
+  formatter-marker block plus badly indented code, fires Format Document
+  (Ctrl+Alt+L) through the production keymap, and proves the typed
+  unavailable path: the status bar reports no running formatter provider and
+  the editor still holds the exact marker text and unformatted snippet
+  (zero commit, marker regions never touched). Provider-backed commit/undo
+  is covered by mounted unit tests and the live JDT LS provider fixture.
+covers: [F25.5]
+tags: [code-workspace, ide-c8, reformat, browser-gate, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tree-add-folder"]'
+  - wait_for: '[data-testid="text-input-dialog"]'
+  - click: '[data-testid="text-input-dialog-confirm"]'
+  - wait_for: '[data-testid="code-workspace-tree-file"]'
+  - click: '[data-testid="code-workspace-tree-file"]'
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - fill:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      value: "public class ReformatProbe {\n    // @formatter:off\n       badly_indented();\n    // @formatter:on\n        also_bad();\n}"
+  - press: Control+Alt+l
+  - assert_text:
+      selector: '[data-testid="status-bar-message"]'
+      contains: "No formatter provider"
+      timeout_sec: 20
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "@formatter:off"
+      timeout_sec: 10
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "badly_indented();"
+      timeout_sec: 10
+  - screenshot: tc-ide-c8-03-reformat-unavailable.png

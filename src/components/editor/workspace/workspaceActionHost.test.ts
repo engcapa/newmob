@@ -114,6 +114,45 @@ describe("WorkspaceActionHost (N0.1)", () => {
     expect(res1.kind).toBe("applied");
   });
 
+  it("releases synchronous actions before the next keydown dispatch", async () => {
+    const host = new WorkspaceActionHost({
+      workspaceId: "ws-sync-repeat",
+      getDefaultContext: () => ({ focus: "editor", hasActiveFile: true }),
+    });
+    const run = vi.fn(() => ({ kind: "applied" as const }));
+    host.registerAction({
+      id: "editor.selectNextOccurrence",
+      title: "Select Next Occurrence",
+      category: "Edit",
+      provenance: "local",
+      keybinding: "Alt+J",
+      run,
+    });
+    const makeEvent = () => ({
+      key: "j",
+      code: "KeyJ",
+      ctrlKey: false,
+      altKey: true,
+      shiftKey: false,
+      metaKey: false,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+
+    expect(host.dispatchKeydownV2({
+      event: makeEvent(),
+      workspaceId: "ws-sync-repeat",
+      targetViewId: null,
+    })).toMatchObject({ kind: "executed", actionId: "editor.selectNextOccurrence" });
+    expect(host.dispatchKeydownV2({
+      event: makeEvent(),
+      workspaceId: "ws-sync-repeat",
+      targetViewId: null,
+    })).toMatchObject({ kind: "executed", actionId: "editor.selectNextOccurrence" });
+
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+  });
+
   it("builds context with correct focus precedence and clean payload (Gate R0)", () => {
     const defaultCtx: Partial<WorkspaceActionContext> = { hasActiveFile: true };
     const mockTreeElement = { id: "tree-node" } as unknown as EventTarget;
@@ -283,6 +322,41 @@ describe("WorkspaceActionHost (N0.1)", () => {
       retryable: true,
     });
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("restores the surviving split view action after registrations unmount out of order", async () => {
+    const host = new WorkspaceActionHost({ workspaceId: "ws-split-actions" });
+    const runPrimary = vi.fn(() => ({ kind: "applied" as const }));
+    const runSecondary = vi.fn(() => ({ kind: "applied" as const }));
+    const primary = {
+      id: "editor.undo",
+      title: "Undo",
+      category: "Edit" as const,
+      provenance: "local" as const,
+      run: runPrimary,
+    };
+    const secondary = { ...primary, run: runSecondary };
+
+    const disposePrimary = host.registerActions([primary]);
+    const disposeSecondary = host.registerActions([secondary]);
+
+    await expect(host.execute("editor.undo")).resolves.toMatchObject({ kind: "applied" });
+    expect(runSecondary).toHaveBeenCalledOnce();
+    expect(runPrimary).not.toHaveBeenCalled();
+
+    disposeSecondary();
+    await expect(host.execute("editor.undo")).resolves.toMatchObject({ kind: "applied" });
+    expect(runPrimary).toHaveBeenCalledOnce();
+
+    disposePrimary();
+    await expect(host.execute("editor.undo")).resolves.toMatchObject({ kind: "failed" });
+
+    const disposeAgain = host.registerActions([secondary]);
+    const disposeOlder = host.registerActions([primary]);
+    disposeOlder();
+    await expect(host.execute("editor.undo")).resolves.toMatchObject({ kind: "applied" });
+    expect(runSecondary).toHaveBeenCalledTimes(2);
+    disposeAgain();
   });
 
   it("reports deterministic binding conflicts with the first registered action as winner", () => {

@@ -114,6 +114,7 @@
 - `[data-testid="workspace-editor-appearance-color-scheme-id"]` — interactive [optional] — F25.3.appearance-color-scheme-id
 - `[data-testid="workspace-editor-appearance-high-contrast"]` — interactive [optional] — F25.3.appearance-high-contrast
 - `[data-testid="workspace-editor-appearance-zoom-scope"]` — interactive [optional] — F25.3.appearance-zoom-scope
+- `[data-testid="code-workspace-zoom-reset"]` — interactive [optional] — F25.3.editor-zoom-reset
 - `[data-testid="workspace-editor-appearance-soft-wrap-patterns"]` — interactive [optional] — F25.3.appearance-soft-wrap-patterns
 - `[data-testid="workspace-editor-appearance-soft-wrap-use-original-indent"]` — interactive [optional] — F25.3.appearance-soft-wrap-use-original-indent
 - `[data-testid="workspace-editor-appearance-soft-wrap-additional-indent"]` — interactive [optional] — F25.3.appearance-soft-wrap-additional-indent
@@ -142,18 +143,83 @@
 - `[data-testid="editor-context-copy"]` — interactive [optional] — F25.3.context-copy
 - `[data-testid="editor-context-paste"]` — interactive [optional] — F25.3.context-paste
 - `[data-testid="editor-context-goto-definition"]` — interactive [optional] — F25.3.context-goto-definition
+- `[data-testid="editor-context-goto-declaration"]` — interactive [optional] — F25.3.context-goto-declaration
 - `[data-testid="editor-context-format"]` — interactive [optional] — F25.3.context-format
 
 ## code-workspace/editor-shell (F25.5)
 
 - `[data-testid="code-workspace-tree-add-folder"]` — interactive [optional] — F25.5.tree-add-folder
+- `[data-testid="code-workspace-tree-pane"]` — display [optional] — F25.5.tree-pane
+- `[data-testid="code-workspace-tree-root"]` — interactive [optional] — F25.5.tree-root-row
 - `[data-testid="code-workspace-tree-file"]` — interactive [optional] — F25.5.tree-file-row
+- `[data-testid="code-workspace-tree-filter"]` — interactive [optional] — F25.5.tree-filter
+- `[data-testid="code-workspace-flat-file"]` — interactive [optional] — F25.5.tree-flat-file-row
 - `[data-testid="code-workspace-editor-pane"]` — display — F25.5.editor-pane
+- `[data-testid="code-workspace-editor"]` — display [optional] — F25.5.editor-host
 - `[data-testid="code-workspace-editor-tab-strip"]` — display [optional] — F25.5.editor-tab-strip
 - `[data-testid="code-workspace-editor"] .cm-content` — interactive [optional] — F25.5.editor-content
+- `.cm-tooltip-autocomplete` — display [optional] — F25.5.editor-completion-popup
 - `[data-testid="code-workspace-file-status"]` — display [optional] — F25.5.file-status
+- `[data-testid="code-workspace-save-observation"]` — display [optional] — F25.5.save-observation
+- `[data-testid="code-workspace-clipboard-observation"]` — display [optional] — F25.5.clipboard-observation
+- `[data-testid="file-encoding-dialog"]` — display [optional] — F25.5.file-encoding-dialog
+- `[data-testid="file-encoding-select"]` — interactive [optional] — F25.5.file-encoding-select
+- `[data-testid="file-encoding-bom"]` — interactive [optional] — F25.5.file-encoding-bom
+- `[data-testid="file-encoding-reload"]` — interactive [optional] — F25.5.file-encoding-reload
+- `[data-testid="file-encoding-convert"]` — interactive [optional] — F25.5.file-encoding-convert
+- `[data-testid="code-workspace-highlighting-widget"]` — display — F25.5.highlighting-widget
+- `[data-testid="highlighting-widget-prev-error"]` — interactive [optional] — F25.5.highlighting-widget-prev-error
+- `[data-testid="highlighting-widget-next-error"]` — interactive [optional] — F25.5.highlighting-widget-next-error
+- `[data-testid="highlighting-widget-level-button"]` — interactive — F25.5.highlighting-widget-level-button
+- `[data-testid="highlighting-widget-menu"]` — display [optional] — F25.5.highlighting-widget-menu
+- `[data-testid="highlighting-level-option-none"]` — interactive [optional] — F25.5.highlighting-level-option-none
+- `[data-testid="highlighting-level-option-syntax"]` — interactive [optional] — F25.5.highlighting-level-option-syntax
+- `[data-testid="highlighting-level-option-all"]` — interactive [optional] — F25.5.highlighting-level-option-all
+- `[data-testid="highlighting-widget-provider"]` — display [optional] — F25.5.highlighting-widget-provider
+- `[data-testid="highlighting-widget-diagnostic-status"]` — display [optional] — F25.5.highlighting-widget-diagnostic-status
+- `[data-testid="highlighting-widget-open-settings"]` — interactive [optional] — F25.5.highlighting-widget-open-settings
+- `[data-testid="project-facts-status-badge"]` — display [optional] — F25.5.project-facts-status-badge
+- `[data-testid="project-facts-discovery-status"]` — display [optional] — F25.5.project-facts-discovery-status
+- `[data-testid="project-facts-refresh-btn"]` — interactive [optional] — F25.5.project-facts-refresh
+- `[data-testid="project-facts-loading-icon"]` — display [optional] — F25.5.project-facts-loading-icon
+- `[data-testid="project-facts-ready-icon"]` — display [optional] — F25.5.project-facts-ready-icon
+- `[data-testid="code-workspace-lsp-status-pill"]` — display [optional] — F25.5.lsp-status-pill
+- `[data-testid="project-facts-untrusted-icon"]` — display [optional] — F25.5.project-facts-untrusted-icon
+- `[data-testid="project-facts-stale-icon"]` — display [optional] — F25.5.project-facts-stale-icon
+- `[data-testid="project-facts-failed-icon"]` — display [optional] — F25.5.project-facts-failed-icon
+- `[data-testid="code-workspace-tree-new-file"]` — interactive [optional] — F25.5.tree-new-file
 - `[data-testid="code-workspace-search-everywhere"]` — display [optional] — F25.5.search-everywhere
+- `[data-testid="code-workspace-find-in-files-panel"]` — display [optional] — F25.5.find-panel
+- `[aria-label="Search query"]` — interactive [optional] — F25.5.find-query-input
+- `[aria-label="Include globs"]` — interactive [optional] — F25.5.find-include-globs
+- `[aria-label="Replace text"]` — interactive [optional] — F25.5.find-replace-input
+- `[data-testid="code-workspace-find-replace-all"]` — interactive [optional] — F25.5.find-replace-all
+- `[data-testid="code-workspace-find-run-search"]` — interactive [optional] — F25.5.find-run-search
+- `[data-testid="code-workspace-find-scope-select"]` — interactive [optional] — F25.5.find-scope-select
+- `[data-testid="code-workspace-find-module-select"]` — interactive [optional] — F25.5.find-module-select
+- `[data-testid="code-workspace-find-directory-input"]` — interactive [optional] — F25.5.find-directory-input
+- `[data-testid="code-workspace-find-scope-notice"]` — display [optional] — F25.5.find-scope-notice
+- `[data-testid="code-workspace-find-error"]` — display [optional] — F25.5.find-error
+- `[data-testid="code-workspace-find-file-group"]` — display [optional] — F25.5.find-file-group
+- `[data-testid="code-workspace-find-match-hit"]` — display [optional] — F25.5.find-match-hit
+- `[data-testid="code-workspace-replace-preview"]` — display [optional] — F25.5.replace-preview
+- `[data-testid="code-workspace-replace-counts"]` — display [optional] — F25.5.replace-counts
+- `[data-testid="code-workspace-replace-usage"]` — interactive [optional] — F25.5.replace-usage
+- `[data-testid="code-workspace-replace-file-toggle"]` — interactive [optional] — F25.5.replace-file-toggle
+- `[data-testid="code-workspace-replace-commit"]` — interactive [optional] — F25.5.replace-commit
+- `[data-testid="code-workspace-replace-cancel"]` — interactive [optional] — F25.5.replace-cancel
+- `[data-testid="code-workspace-replace-commit-error"]` — display [optional] — F25.5.replace-commit-error
 - `[data-testid="code-workspace-bottom-tab-terminal"]` — interactive [optional] — F25.5.bottom-dock-terminal-tab
+- `[data-testid="code-workspace-bottom-tab-search"]` — interactive [optional] — F25.5.bottom-dock-search-tab
+- `[data-testid="code-workspace-tab-policy-settings"]` — interactive [optional] — F25.5.tab-policy-settings
+- `[data-testid="workspace-tab-policy-settings-dialog"]` — display [optional] — F25.5.tab-policy-dialog
+- `[data-testid="workspace-tab-policy-limit"]` — interactive [optional] — F25.5.tab-policy-limit
+- `[data-testid="workspace-tab-policy-eviction-preview"]` — display [optional] — F25.5.tab-policy-eviction-preview
+- `[data-testid="workspace-tab-policy-apply"]` — interactive [optional] — F25.5.tab-policy-apply
+- `[data-testid="workspace-tab-policy-close"]` — interactive [optional] — F25.5.tab-policy-close
+- `[data-testid="workspace-resource-cleanup-recovery"]` — display [optional] — F25.5.resource-cleanup-recovery
+- `[data-testid="workspace-resource-cleanup-recovery-item"]` — display [optional] — F25.5.resource-cleanup-recovery-item
+- `[data-testid="workspace-resource-cleanup-retry"]` — interactive [optional] — F25.5.resource-cleanup-retry
 - `[data-testid="code-workspace-split-down"]` — interactive [optional] — F25.5.split-down
 - `[data-testid="code-workspace-split-close"]` — interactive [optional] — F25.5.split-close
 - `[data-testid="keymap-scheme-select"]` — interactive [optional] — F25.5.keymap-scheme-select
@@ -163,11 +229,50 @@
 - `[data-testid="keymap-replace-editor.replace-0"]` — display [optional] — F25.5.keymap-replace-slot
 - `[data-testid="code-workspace-parameter-info"]` — display [optional] — F25.5.parameter-info-tooltip
 - `[data-testid="code-workspace-quick-doc"]` — display [optional] — F25.5.quick-doc-popup
+- `[data-testid="code-workspace-editor-banners"]` — display [optional] — F25.5.editor-banners
+- `[data-testid="banner-action-open-settings"]` — interactive [optional] — F25.5.editor-banner-open-settings
+- `[data-testid="banner-action-error-open-settings"]` — display [optional] — F25.5.editor-banner-action-error
+- `[data-testid^="banner-dismiss-"]` — interactive [optional] — F25.5.editor-banner-dismiss
 - `[data-testid="code-workspace-bottom-tab-problems"]` — interactive [optional] — F25.5.problems-dock-tab
 - `[data-testid="code-workspace-problems-panel"]` — display [optional] — F25.5.problems-panel
 - `[data-testid="problems-scope-project"]` — interactive [optional] — F25.5.problems-scope-project
 - `[data-testid="problems-full-project-note"]` — display [optional] — F25.5.problems-full-project-note
 - `[data-testid="keymap-settings-close"]` — interactive [optional] — F25.5.keymap-settings-close
+- `[data-testid="clipboard-history-popup"]` — display [optional] — F25.5.clipboard-history-popup
+- `[data-testid="clipboard-history-search"]` — interactive [optional] — F25.5.clipboard-history-search
+- `[data-testid="clipboard-history-entry-0"]` — interactive [optional] — F25.5.clipboard-history-entry-0
+- `[data-testid="clipboard-history-close"]` — interactive [optional] — F25.5.clipboard-history-close
+- `[data-testid="code-workspace-breadcrumbs"]` — interactive [optional] — F25.5.navigation-bar
+- `[data-testid="code-workspace-nav-back"]` — interactive [optional] — F25.5.navigation-back
+- `[data-testid="code-workspace-breadcrumb-popup"]` — display [optional] — F25.5.navigation-bar-popup
+- `[data-testid="code-workspace-breadcrumb-popup-filter"]` — interactive [optional] — F25.5.navigation-bar-popup-filter
+- `[data-testid="code-workspace-breadcrumb-entry-directory"]` — interactive [optional] — F25.5.navigation-bar-popup-directory-entry
+- `[data-testid="code-workspace-breadcrumb-entry-file"]` — interactive [optional] — F25.5.navigation-bar-popup-file-entry
+- `[data-testid="code-workspace-todos-panel"]` — display [optional] — F25.5.todos-bookmarks-panel
+- `[data-testid="code-workspace-bookmark-group"]` — display [optional] — F25.5.bookmark-group
+- `[data-testid="code-workspace-bookmark-group-rename"]` — interactive [optional] — F25.5.bookmark-group-rename
+- `[data-testid="code-workspace-bookmark-group-input"]` — interactive [optional] — F25.5.bookmark-group-input
+- `[data-testid="code-workspace-bookmark-group-save"]` — interactive [optional] — F25.5.bookmark-group-save
+- `[data-testid="code-workspace-bookmark-group-cancel"]` — interactive [optional] — F25.5.bookmark-group-cancel
+- `[data-testid="code-workspace-bookmark-item"]` — display [optional] — F25.5.bookmark-item
+- `[data-testid="code-workspace-bookmark-open"]` — interactive [optional] — F25.5.bookmark-open
+- `[data-testid="code-workspace-bookmark-mnemonic"]` — display [optional] — F25.5.bookmark-mnemonic
+- `[data-testid="code-workspace-bookmark-remove"]` — interactive [optional] — F25.5.bookmark-remove
+- `[data-testid="code-workspace-bookmark-missing"]` — display [optional] — F25.5.bookmark-missing
+- `[data-testid="code-workspace-compare-dialog"]` — display [optional] — F25.5.compare-dialog
+- `[data-testid="compare-session-metadata"]` — display [optional] — F25.5.compare-session-metadata
+- `[data-testid^="compare-left-line-"]` — display [optional] — F25.5.compare-left-line
+- `[data-testid^="compare-right-line-"]` — display [optional] — F25.5.compare-right-line
+- `[data-testid="compare-copy-left"]` — interactive [optional] — F25.5.compare-copy-left
+- `[data-testid="compare-copy-right"]` — interactive [optional] — F25.5.compare-copy-right
+- `[data-testid="compare-apply-left-to-right"]` — interactive [optional] — F25.5.compare-apply
+- `[data-testid="compare-dialog-close"]` — interactive [optional] — F25.5.compare-dialog-close
+- `[data-testid="compare-apply-error"]` — display [optional] — F25.5.compare-apply-error
+- `[data-testid="compare-left-unavailable"]` — display [optional] — F25.5.compare-left-unavailable
+- `[data-testid="compare-right-unavailable"]` — display [optional] — F25.5.compare-right-unavailable
+- `[data-testid="code-workspace-local-history-dialog"]` — display [optional] — F25.5.local-history-dialog
+- `[data-testid="code-workspace-local-history-compare"]` — interactive [optional] — F25.5.local-history-compare
+- `[data-testid="code-workspace-local-history-restore"]` — interactive [optional] — F25.5.local-history-restore
 
 ## code-workspace/execution (F25.1)
 
@@ -221,6 +326,8 @@
 - `[data-testid^="tests-rerun-"]` — interactive [optional] — F25.1.tests-rerun
 - `[data-testid^="tests-failure-details-"]` — interactive [optional] — F25.1.tests-failure-details
 - `[data-testid="debug-panel"]` — display — F25.1.debug-panel
+- `[data-testid="debug-stop"]` — interactive [optional] — F25.1.debug-stop
+- `.taomni-debug-current-line` — display [optional] — F25.1.debug-current-line
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic
 - `[data-testid="debug-active-session"]` — interactive [optional] — F25.1.debug-active-session
@@ -576,6 +683,8 @@
 
 - `[data-testid="status-bar"]` — display — F1.7.status-bar
 - `[data-testid="status-bar-message"]` — display [optional] — F1.7.status-message
+- `[data-testid="status-bar-workspace-encoding"]` — interactive [optional] — F1.7.workspace-encoding
+- `[data-testid="status-bar-workspace-eol"]` — interactive [optional] — F1.7.workspace-eol
 
 ## main/tabs (F1.5)
 
@@ -979,6 +1088,9 @@
 - `[data-testid^="workspace-sdk-root-"]` — display [optional] — F11.2.workspace-sdk-root
 - `[data-testid^="workspace-kotlin-profile-"]` — display [optional] — F11.2.workspace-kotlin-profile
 - `[data-testid^="workspace-sdk-binding-"]` — interactive [optional] — F11.2.workspace-sdk-binding
+- `[data-testid="language-servers-settings"]` — display [optional] — F11.2.language-servers-settings
+- `[data-testid^="language-server-row-"]` — display [optional] — F11.2.language-server-row
+  ↳ `[data-testid="language-server-row-csharp"]` — alias
 
 ## sftp (F7.2)
 

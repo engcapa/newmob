@@ -5,6 +5,7 @@ export const WORKSPACE_FILE_ENCODINGS = [
   "UTF-8",
   "UTF-16LE",
   "UTF-16BE",
+  "ISO-8859-1",
   "windows-1252",
   "GBK",
   "Big5",
@@ -49,10 +50,15 @@ export function FileEncodingDialog({
   const [bom, setBom] = useState(currentBom);
   const [busy, setBusy] = useState(false);
   const selectRef = useRef<HTMLSelectElement>(null);
+  const bomRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setEncoding(displayEncoding(currentEncoding || "UTF-8"));
+    const nextEncoding = displayEncoding(currentEncoding || "UTF-8");
+    setEncoding(nextEncoding);
     setBom(currentBom);
+    if (bomRef.current) {
+      bomRef.current.checked = supportsBom(nextEncoding) && currentBom;
+    }
     window.setTimeout(() => selectRef.current?.focus(), 0);
   }, [currentBom, currentEncoding, path]);
 
@@ -109,6 +115,7 @@ export function FileEncodingDialog({
             Encoding
             <select
               ref={selectRef}
+              data-testid="file-encoding-select"
               aria-label="Encoding"
               value={encoding}
               disabled={busy}
@@ -116,7 +123,10 @@ export function FileEncodingDialog({
               onChange={(event) => {
                 const next = event.target.value;
                 setEncoding(next);
-                if (!supportsBom(next)) setBom(false);
+                if (!supportsBom(next)) {
+                  setBom(false);
+                  if (bomRef.current) bomRef.current.checked = false;
+                }
               }}
             >
               {WORKSPACE_FILE_ENCODINGS.map((option) => <option key={option} value={option}>{option}</option>)}
@@ -125,9 +135,12 @@ export function FileEncodingDialog({
 
           <label className={`flex items-center gap-2 text-[11px] ${bomEnabled ? "text-[var(--taomni-code-text)]" : "text-[var(--taomni-code-muted)]"}`}>
             <input
+              ref={bomRef}
+              data-testid="file-encoding-bom"
               type="checkbox"
-              checked={bomEnabled && bom}
+              defaultChecked={supportsBom(currentEncoding) && currentBom}
               disabled={!bomEnabled || busy}
+              onClick={(event) => setBom(event.currentTarget.checked)}
               onChange={(event) => setBom(event.target.checked)}
             />
             Write byte-order marker (BOM)
@@ -143,6 +156,7 @@ export function FileEncodingDialog({
         <footer className="flex flex-wrap justify-end gap-2 border-t border-[var(--taomni-code-border)] px-3 py-2">
           <button
             type="button"
+            data-testid="file-encoding-reload"
             className="inline-flex h-8 items-center gap-1.5 rounded px-3 text-[11px] hover:bg-[var(--taomni-code-active-line-bg)]"
             disabled={busy}
             onClick={() => void reload()}
@@ -152,10 +166,11 @@ export function FileEncodingDialog({
           </button>
           <button
             type="button"
+            data-testid="file-encoding-convert"
             className="inline-flex h-8 items-center gap-1.5 rounded bg-[var(--taomni-accent)] px-3 text-[11px] text-white hover:brightness-110 disabled:opacity-50"
             disabled={busy}
             onClick={() => {
-              onConvert(encoding, bomEnabled && bom);
+              onConvert(encoding, bomEnabled && (bomRef.current?.checked ?? bom));
               onClose();
             }}
           >

@@ -31,7 +31,9 @@ def setup(ctx: Any) -> None:
             "workspace_root provisions a host directory; browser-VFS preview "
             "cannot observe it (case must run in native mode)"
         )
-    report_root = Path(getattr(ctx, "report_root", Path("qa-ui-auto-report")))
+    # The packaged app may be launched with a different working directory than
+    # the runner. Native IPC must therefore receive an absolute host path.
+    report_root = Path(getattr(ctx, "report_root", Path("qa-ui-auto-report"))).resolve()
     base = report_root / "native-workspaces"
     base.mkdir(parents=True, exist_ok=True)
     case_id = str(getattr(ctx, "case_id", "case"))
@@ -40,7 +42,7 @@ def setup(ctx: Any) -> None:
     for name, content in SEED_FILES.items():
         (root / name).write_text(content, encoding="utf-8")
     values: dict[str, str] = getattr(ctx, "values")
-    values["workspace_root"] = str(root)
+    values["workspace_root"] = str(root.resolve())
 
 
 def teardown(ctx: Any) -> None:

@@ -543,6 +543,7 @@ pub struct LspCapabilitySummary {
     pub signature_help: bool,
     pub hover: bool,
     pub definition: bool,
+    pub declaration: bool,
     pub type_definition: bool,
     pub implementation: bool,
     pub references: bool,
@@ -2609,20 +2610,46 @@ fn begin_reference_request(cancel_key: &str, request_seq: u64) -> CancellationTo
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cancellation = tokio_util::sync::CancellationToken::new();
-    if let Some((previous_seq, previous)) =
-        guard.insert(cancel_key.to_string(), (request_seq, cancellation.clone()))
-    {
-        if previous_seq <= request_seq {
-            previous.cancel();
+    if let Some((previous_seq, previous)) = guard.get(cancel_key) {
+        if *previous_seq >= request_seq {
+            // A late renderer invocation must not replace a newer request.
+            // Return an already-cancelled token so it cannot reach the provider.
+            cancellation.cancel();
+            return cancellation;
         }
+        previous.cancel();
     }
+    guard.insert(cancel_key.to_string(), (request_seq, cancellation.clone()));
     cancellation
 }
 
-fn cancel_reference_request(cancel_key: &str) -> bool {
+fn finish_reference_request(cancel_key: Option<&str>, request_seq: Option<u64>) {
+    let (Some(cancel_key), Some(request_seq)) = (cancel_key, request_seq) else {
+        return;
+    };
     let mut guard = reference_cancellations()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard
+        .get(cancel_key)
+        .is_some_and(|(current_seq, _)| *current_seq == request_seq)
+    {
+        guard.remove(cancel_key);
+    }
+}
+
+fn cancel_reference_request(cancel_key: &str, request_seq: Option<u64>) -> bool {
+    let mut guard = reference_cancellations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let should_remove = match (guard.get(cancel_key), request_seq) {
+        (Some((current_seq, _)), Some(request_seq)) => *current_seq == request_seq,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    if !should_remove {
+        return false;
+    }
     match guard.remove(cancel_key) {
         Some((_, cancellation)) => {
             cancellation.cancel();
@@ -5958,6 +5985,10 @@ pub async fn lsp_hover(
         resolve_document(workspace_id, root_path, file_path, language_id, 0)?,
         document_uri,
     );
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => CancellationToken::new(),
+    };
     let session = match state
         .lsp
         .active_session(
@@ -5977,6 +6008,7 @@ pub async fn lsp_hover(
                     custom_server_command.as_ref(),
                 )
                 .await;
+            finish_reference_request(cancel_key.as_deref(), request_seq);
             return Ok(LspHoverResult {
                 status,
                 contents: None,
@@ -5987,10 +6019,6 @@ pub async fn lsp_hover(
     // §8.18.6: when the caller supplies a cancellation identity, a newer
     // request for the same key aborts this one via `$/cancelRequest` and the
     // in-flight await returns immediately instead of racing the response.
-    let cancellation = match (cancel_key.as_deref(), request_seq) {
-        (Some(key), Some(seq)) => begin_reference_request(key, seq),
-        _ => tokio_util::sync::CancellationToken::new(),
-    };
     let result = session
         .request_with_cancellation(
             "textDocument/hover",
@@ -6002,6 +6030,7 @@ pub async fn lsp_hover(
         )
         .await
         .unwrap_or(Value::Null);
+    finish_reference_request(cancel_key.as_deref(), request_seq);
     if cancellation.is_cancelled() {
         // Cancelled requests report no content; the status snapshot stays
         // fresh so the next hover can proceed immediately.
@@ -6038,8 +6067,8 @@ pub async fn lsp_hover(
 /// replacement (popup close, workspace unmount). Returns true when a live
 /// request was actually aborted.
 #[tauri::command]
-pub fn lsp_cancel_reference_request(cancel_key: String) -> bool {
-    cancel_reference_request(&cancel_key)
+pub fn lsp_cancel_reference_request(cancel_key: String, request_seq: Option<u64>) -> bool {
+    cancel_reference_request(&cancel_key, request_seq)
 }
 
 #[tauri::command]
@@ -6054,6 +6083,8 @@ pub async fn lsp_definition(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspLocationsResult, String> {
     lsp_location_request(
         state,
@@ -6066,7 +6097,43 @@ pub async fn lsp_definition(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "textDocument/definition",
+        json!({}),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn lsp_declaration(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    document_uri: Option<String>,
+    line: u32,
+    character: u32,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
+) -> Result<LspLocationsResult, String> {
+    lsp_location_request(
+        state,
+        workspace_id,
+        root_path,
+        file_path,
+        document_uri,
+        line,
+        character,
+        language_id,
+        server_command_id,
+        custom_server_command,
+        cancel_key,
+        request_seq,
+        "textDocument/declaration",
         json!({}),
     )
     .await
@@ -6085,6 +6152,8 @@ pub async fn lsp_references(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspLocationsResult, String> {
     lsp_location_request(
         state,
@@ -6097,6 +6166,8 @@ pub async fn lsp_references(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "textDocument/references",
         json!({
             "context": {
@@ -6118,6 +6189,8 @@ async fn lsp_location_request(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
     method: &str,
     mut extra: Value,
 ) -> Result<LspLocationsResult, String> {
@@ -6125,6 +6198,10 @@ async fn lsp_location_request(
         resolve_document(workspace_id, root_path, file_path, language_id, 0)?,
         document_uri,
     );
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => CancellationToken::new(),
+    };
     let session = match state
         .lsp
         .active_session(
@@ -6144,6 +6221,7 @@ async fn lsp_location_request(
                     custom_server_command.as_ref(),
                 )
                 .await;
+            finish_reference_request(cancel_key.as_deref(), request_seq);
             return Ok(LspLocationsResult {
                 status,
                 locations: Vec::new(),
@@ -6152,7 +6230,17 @@ async fn lsp_location_request(
     };
     extra["textDocument"] = json!({ "uri": document.uri });
     extra["position"] = json!({ "line": line, "character": character });
-    let result = session.request(method, extra).await.unwrap_or(Value::Null);
+    let result = match session
+        .request_with_cancellation(method, extra, &cancellation)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            finish_reference_request(cancel_key.as_deref(), request_seq);
+            return Err(error);
+        }
+    };
+    finish_reference_request(cancel_key.as_deref(), request_seq);
     let status = state
         .lsp
         .document_status(
@@ -6757,6 +6845,8 @@ pub async fn lsp_type_definition(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspLocationsResult, String> {
     lsp_location_request(
         state,
@@ -6769,6 +6859,8 @@ pub async fn lsp_type_definition(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "textDocument/typeDefinition",
         json!({}),
     )
@@ -6787,6 +6879,8 @@ pub async fn lsp_implementation(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspLocationsResult, String> {
     lsp_location_request(
         state,
@@ -6799,6 +6893,8 @@ pub async fn lsp_implementation(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "textDocument/implementation",
         json!({}),
     )
@@ -7461,6 +7557,8 @@ pub async fn lsp_prepare_call_hierarchy(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspHierarchyPrepareResult, String> {
     lsp_hierarchy_prepare_request(
         state,
@@ -7472,6 +7570,8 @@ pub async fn lsp_prepare_call_hierarchy(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "textDocument/prepareCallHierarchy",
     )
     .await
@@ -7488,6 +7588,8 @@ pub async fn lsp_prepare_type_hierarchy(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspHierarchyPrepareResult, String> {
     lsp_hierarchy_prepare_request(
         state,
@@ -7499,6 +7601,8 @@ pub async fn lsp_prepare_type_hierarchy(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "textDocument/prepareTypeHierarchy",
     )
     .await
@@ -7514,9 +7618,15 @@ async fn lsp_hierarchy_prepare_request(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
     method: &str,
 ) -> Result<LspHierarchyPrepareResult, String> {
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => CancellationToken::new(),
+    };
     let Some(session) = state
         .lsp
         .active_session(
@@ -7534,21 +7644,24 @@ async fn lsp_hierarchy_prepare_request(
                 custom_server_command.as_ref(),
             )
             .await;
+        finish_reference_request(cancel_key.as_deref(), request_seq);
         return Ok(LspHierarchyPrepareResult {
             status,
             items: Vec::new(),
         });
     };
     let result = session
-        .request(
+        .request_with_cancellation(
             method,
             json!({
                 "textDocument": { "uri": document.uri },
                 "position": { "line": line, "character": character },
             }),
+            &cancellation,
         )
         .await
         .unwrap_or(Value::Null);
+    finish_reference_request(cancel_key.as_deref(), request_seq);
     let status = state
         .lsp
         .document_status(
@@ -7573,6 +7686,8 @@ pub async fn lsp_call_hierarchy_incoming(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspCallHierarchyResult, String> {
     let (status, value) = lsp_hierarchy_item_request(
         state,
@@ -7583,6 +7698,8 @@ pub async fn lsp_call_hierarchy_incoming(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "callHierarchy/incomingCalls",
     )
     .await?;
@@ -7602,6 +7719,8 @@ pub async fn lsp_call_hierarchy_outgoing(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspCallHierarchyResult, String> {
     let (status, value) = lsp_hierarchy_item_request(
         state,
@@ -7612,6 +7731,8 @@ pub async fn lsp_call_hierarchy_outgoing(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "callHierarchy/outgoingCalls",
     )
     .await?;
@@ -7631,6 +7752,8 @@ pub async fn lsp_type_hierarchy_supertypes(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspTypeHierarchyResult, String> {
     let (status, value) = lsp_hierarchy_item_request(
         state,
@@ -7641,6 +7764,8 @@ pub async fn lsp_type_hierarchy_supertypes(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "typeHierarchy/supertypes",
     )
     .await?;
@@ -7660,6 +7785,8 @@ pub async fn lsp_type_hierarchy_subtypes(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspTypeHierarchyResult, String> {
     let (status, value) = lsp_hierarchy_item_request(
         state,
@@ -7670,6 +7797,8 @@ pub async fn lsp_type_hierarchy_subtypes(
         language_id,
         server_command_id,
         custom_server_command,
+        cancel_key,
+        request_seq,
         "typeHierarchy/subtypes",
     )
     .await?;
@@ -7688,9 +7817,15 @@ async fn lsp_hierarchy_item_request(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
     method: &str,
 ) -> Result<(LspDocumentStatus, Value), String> {
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => CancellationToken::new(),
+    };
     let result = match state
         .lsp
         .active_session(
@@ -7701,11 +7836,15 @@ async fn lsp_hierarchy_item_request(
         .await
     {
         Some(session) => session
-            .request(method, json!({ "item": item }))
+            .request_with_cancellation(method, json!({ "item": item }), &cancellation)
             .await
             .unwrap_or(Value::Null),
-        None => Value::Null,
+        None => {
+            finish_reference_request(cancel_key.as_deref(), request_seq);
+            Value::Null
+        }
     };
+    finish_reference_request(cancel_key.as_deref(), request_seq);
     let status = state
         .lsp
         .document_status(
@@ -8395,6 +8534,10 @@ pub async fn lsp_signature_help(
     request_seq: Option<u64>,
 ) -> Result<LspSignatureHelpResult, String> {
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => CancellationToken::new(),
+    };
     let session = match state
         .lsp
         .active_session(
@@ -8414,6 +8557,7 @@ pub async fn lsp_signature_help(
                     custom_server_command.as_ref(),
                 )
                 .await;
+            finish_reference_request(cancel_key.as_deref(), request_seq);
             return Ok(LspSignatureHelpResult {
                 status,
                 signatures: Vec::new(),
@@ -8432,10 +8576,6 @@ pub async fn lsp_signature_help(
     };
     // §8.20.2 W1: same cancellation identity as lsp_hover — a newer request
     // for the same key aborts this one via `$/cancelRequest`.
-    let cancellation = match (cancel_key.as_deref(), request_seq) {
-        (Some(key), Some(seq)) => begin_reference_request(key, seq),
-        _ => tokio_util::sync::CancellationToken::new(),
-    };
     let result = session
         .request_with_cancellation(
             "textDocument/signatureHelp",
@@ -8448,6 +8588,7 @@ pub async fn lsp_signature_help(
         )
         .await
         .unwrap_or(Value::Null);
+    finish_reference_request(cancel_key.as_deref(), request_seq);
     let cancelled = cancellation.is_cancelled();
     let status = state
         .lsp
@@ -9678,6 +9819,7 @@ fn capability_summary_from(capabilities: &Value) -> LspCapabilitySummary {
         signature_help: has_provider(capabilities, "signatureHelpProvider"),
         hover: has_provider(capabilities, "hoverProvider"),
         definition: has_provider(capabilities, "definitionProvider"),
+        declaration: has_provider(capabilities, "declarationProvider"),
         type_definition: has_provider(capabilities, "typeDefinitionProvider"),
         implementation: has_provider(capabilities, "implementationProvider"),
         references: has_provider(capabilities, "referencesProvider"),
@@ -9876,6 +10018,7 @@ fn apply_dynamic_capability(
         }
         "textDocument/hover" => summary.hover = true,
         "textDocument/definition" => summary.definition = true,
+        "textDocument/declaration" => summary.declaration = true,
         "textDocument/typeDefinition" => summary.type_definition = true,
         "textDocument/implementation" => summary.implementation = true,
         "textDocument/references" => summary.references = true,
@@ -12982,6 +13125,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
             "completionProvider": { "triggerCharacters": [".", "::"], "resolveProvider": true },
             "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
             "hoverProvider": true,
+            "declarationProvider": true,
             "workspaceSymbolProvider": { "resolveProvider": true },
             "renameProvider": { "prepareProvider": true },
             "selectionRangeProvider": true,
@@ -12994,6 +13138,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert!(summary.signature_help);
         assert_eq!(summary.signature_trigger_characters, vec!["(", ","]);
         assert!(summary.hover);
+        assert!(summary.declaration);
         assert!(summary.rename);
         assert!(summary.selection_range);
         assert!(!summary.formatting);
@@ -14051,6 +14196,23 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert_eq!(incoming[0].from_ranges[0].start.line, 3);
         assert_eq!(outgoing.len(), 1);
         assert_eq!(outgoing[0].item.name, "caller");
+    }
+
+    #[test]
+    fn reference_cancellation_registry_rejects_stale_sequences() {
+        let key = format!("__ed_query_001_{:?}", std::thread::current().id());
+        let first = begin_reference_request(&key, 1);
+        let second = begin_reference_request(&key, 2);
+
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert!(!cancel_reference_request(&key, Some(1)));
+        assert!(!second.is_cancelled());
+
+        finish_reference_request(Some(&key), Some(1));
+        assert!(!second.is_cancelled());
+        assert!(cancel_reference_request(&key, Some(2)));
+        assert!(second.is_cancelled());
     }
 
     #[test]

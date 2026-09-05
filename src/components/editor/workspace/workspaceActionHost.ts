@@ -26,8 +26,9 @@ import {
 /** Accept KeyboardEventLike whose optional `code` falls back to `key`. */
 function strokeFromEvent(event: KeyboardEventLike): ShortcutStroke {
   // jsdom/fireEvent produce `code: ""` (not undefined) for unspecified codes;
-  // treat any empty code as absent so `key` remains the fallback identity.
-  const code = event.code && event.code.length > 0 ? event.code : event.key;
+  // map `key` to its physical code fallback so matching against definition strokes succeeds.
+  const rawCode = event.code && event.code.length > 0 ? event.code : undefined;
+  const code = rawCode ?? (event.key ? logicalKeyToCode(event.key) ?? event.key : "");
   return strokeFromKeyboardEvent({
     code,
     key: event.key,
@@ -289,10 +290,21 @@ function executeConsuming(
   return host.executePrepared(evaluation);
 }
 
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return value !== null
+    && (typeof value === "object" || typeof value === "function")
+    && typeof (value as { then?: unknown }).then === "function";
+}
+
 /** A mounted editor view registered with the host's action bridge. */
 export interface EditorActionBridgeViewRegistration {
   viewId: string;
   dispose(): void;
+}
+
+export interface WorkspaceActionRegistrationOptions {
+  /** Restrict these dynamic action handlers to one mounted editor view. */
+  ownerViewId?: string;
 }
 
 /**
@@ -323,6 +335,13 @@ export class WorkspaceActionHost {
   private readonly onExecuted?: (actionId: string, result: ActionResult) => void;
 
   private actions = new Map<string, WorkspaceActionDefinition>();
+  /** Layered registrations let split views unmount in either order. */
+  private actionLayers = new Map<string, Array<{
+    token: symbol;
+    action: WorkspaceActionDefinition;
+    ownerViewId: string | null;
+  }>>();
+  private actionLayerBases = new Map<string, WorkspaceActionDefinition | undefined>();
   private commands = new Map<string, WorkspaceCommand>();
   private inFlightActions = new Set<string>();
   private generation = 0;
@@ -370,6 +389,8 @@ export class WorkspaceActionHost {
     this.inFlightActions.clear();
     this.registeredViewIds.clear();
     this.actions.clear();
+    this.actionLayers.clear();
+    this.actionLayerBases.clear();
     this.commands.clear();
   }
 
@@ -448,28 +469,86 @@ export class WorkspaceActionHost {
 
   registerAction(action: WorkspaceActionDefinition): () => void {
     if (this.disposed) return () => {};
-    this.actions.set(action.id, action);
+    const token = Symbol(`action:${action.id}`);
+    this.pushActionLayer(action, token, null);
     this.generation += 1;
-    return () => {
-      if (this.actions.get(action.id) !== action) return;
-      this.actions.delete(action.id);
-      this.generation += 1;
-    };
+    return () => this.removeActionLayer(action.id, token);
   }
 
-  registerActions(actions: readonly WorkspaceActionDefinition[]): () => void {
+  registerActions(
+    actions: readonly WorkspaceActionDefinition[],
+    options: WorkspaceActionRegistrationOptions = {},
+  ): () => void {
     if (this.disposed) return () => {};
-    for (const action of actions) this.actions.set(action.id, action);
+    const token = Symbol("actions");
+    const ownerViewId = options.ownerViewId ?? null;
+    for (const action of actions) this.pushActionLayer(action, token, ownerViewId);
     this.generation += 1;
     return () => {
       let changed = false;
       for (const action of actions) {
-        if (this.actions.get(action.id) !== action) continue;
-        this.actions.delete(action.id);
-        changed = true;
+        changed = this.removeActionLayer(action.id, token, false) || changed;
       }
       if (changed) this.generation += 1;
     };
+  }
+
+  private pushActionLayer(
+    action: WorkspaceActionDefinition,
+    token: symbol,
+    ownerViewId: string | null,
+  ): void {
+    let layers = this.actionLayers.get(action.id);
+    if (!layers) {
+      layers = [];
+      this.actionLayers.set(action.id, layers);
+      this.actionLayerBases.set(action.id, this.actions.get(action.id));
+    }
+    layers.push({ token, action, ownerViewId });
+    this.actions.set(action.id, action);
+  }
+
+  private actionForContext(
+    actionId: string,
+    context: Readonly<WorkspaceActionContext>,
+  ): WorkspaceActionDefinition | undefined {
+    const ownerViewId = typeof context.editorViewId === "string"
+      ? context.editorViewId
+      : null;
+    const layers = this.actionLayers.get(actionId);
+    if (!ownerViewId || !layers?.some((layer) => layer.ownerViewId !== null)) {
+      return this.actions.get(actionId);
+    }
+
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+      const layer = layers[index];
+      if (layer?.ownerViewId === ownerViewId) return layer.action;
+    }
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+      const layer = layers[index];
+      if (layer?.ownerViewId === null) return layer.action;
+    }
+    return this.actionLayerBases.get(actionId);
+  }
+
+  private removeActionLayer(actionId: string, token: symbol, bumpGeneration = true): boolean {
+    const layers = this.actionLayers.get(actionId);
+    if (!layers) return false;
+    const index = layers.findIndex((layer) => layer.token === token);
+    if (index < 0) return false;
+    const wasCurrent = this.actions.get(actionId) === layers[layers.length - 1]?.action;
+    layers.splice(index, 1);
+    if (layers.length > 0) {
+      if (wasCurrent) this.actions.set(actionId, layers[layers.length - 1]!.action);
+    } else {
+      this.actionLayers.delete(actionId);
+      const base = this.actionLayerBases.get(actionId);
+      this.actionLayerBases.delete(actionId);
+      if (base) this.actions.set(actionId, base);
+      else this.actions.delete(actionId);
+    }
+    if (bumpGeneration) this.generation += 1;
+    return true;
   }
 
   registerCommands(commands: readonly WorkspaceCommand[]): () => void {
@@ -658,7 +737,7 @@ export class WorkspaceActionHost {
     context: Readonly<WorkspaceActionContext>,
     kind: ActionInvocationKind,
   ): PreparedActionEvaluation {
-    const action = this.actions.get(id) ?? null;
+    const action = this.actionForContext(id, context) ?? null;
     this.evaluationCounter += 1;
     return Object.freeze({
       workspaceId: this.workspaceId,
@@ -709,7 +788,7 @@ export class WorkspaceActionHost {
       || prepared.workspaceId !== this.workspaceId
       || prepared.hostGeneration !== this.generation
       || !prepared.action
-      || this.actions.get(prepared.actionId) !== prepared.action
+      || this.actionForContext(prepared.actionId, prepared.context) !== prepared.action
     ) {
       return {
         kind: "failed",
@@ -751,10 +830,13 @@ export class WorkspaceActionHost {
           message: "Action cancelled before run.",
         };
       }
-      const response = await prepared.action.run(
+      const pending = prepared.action.run(
         prepared.context as WorkspaceActionContext,
         signal,
       );
+      const response = isPromiseLike<ActionResult | void>(pending)
+        ? await pending
+        : pending;
       const result = response ?? { kind: "applied" as const };
       this.onExecuted?.(prepared.actionId, result);
       return result;
@@ -954,7 +1036,7 @@ export class WorkspaceActionHost {
     if (this.disposed) {
       return { kind: "rejected", reason: "stale-owner" };
     }
-    if (context.composing || event.isComposing === true) {
+    if (context.composing || event.isComposing === true || event.key === "Process" || event.key === "Unidentified") {
       return { kind: "rejected", reason: "composing" };
     }
     if (event.key === "Dead" || context.deadKey) {
@@ -969,9 +1051,17 @@ export class WorkspaceActionHost {
       return { kind: "rejected", reason: "stale-owner" };
     }
 
+    const target = (event as KeyboardEventLike & { target?: EventTarget | null }).target ?? null;
+    const targetNode = target instanceof Node ? target : null;
+    const targetEl = targetNode instanceof Element ? targetNode : targetNode?.parentElement;
+    const isExternalInput = (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) && !targetEl.closest?.(".cm-editor");
+
     const resolved = this.prepareBinding(event, {
       kind: "keyboard",
-      eventTarget: (event as KeyboardEventLike & { target?: EventTarget | null }).target ?? null,
+      eventTarget: target,
+      context: (context.targetViewId && !isExternalInput)
+        ? { focus: "editor", hasActiveFile: true, editorViewId: context.targetViewId }
+        : undefined,
     });
     if (resolved.resolution === "shadowed" && resolved.reason === "chord-pending") {
       return {

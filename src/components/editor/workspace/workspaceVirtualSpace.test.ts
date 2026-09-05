@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { EditorSelection, EditorState } from "@codemirror/state";
+import { describe, expect, it, vi } from "vitest";
+import { EditorSelection, EditorState, type SelectionRange } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import {
   charVisualWidth,
@@ -7,6 +7,7 @@ import {
   documentColumnForVisualColumn,
   measureVisualPositions,
   setVirtualHead,
+  setVirtualOverflow,
   virtualBackspaceCommand,
   virtualDeleteCommand,
   virtualEnterCommand,
@@ -17,25 +18,52 @@ import {
   virtualMoveLeftCommand,
   virtualMoveRightCommand,
   virtualOverflowAt,
+  virtualPageDown,
+  virtualPageUp,
   virtualSelectDown,
+  virtualSelectUp,
+  virtualSelectPageDown,
+  virtualSelectPageUp,
   virtualSpaceClickHandler,
-  virtualSpaceKeymap,
   virtualSpaceOverflowField,
   virtualSpaceTypingHandler,
   virtualTabCommand,
+  visualColumnFor,
+  isEditorGeometryReady,
   VirtualSpaceController,
   VIRTUAL_SPACE_KNOWN_GAPS,
 } from "./workspaceVirtualSpace";
 import { editorVirtualSpacePolicy } from "./workspaceEditorCommands";
+import { buildEditorHostActions } from "./workspaceCodeMirrorKeymap";
+import { DEFAULT_WORKSPACE_ACTIONS } from "./workspaceActionRegistry";
+import { WorkspaceActionHost, EditorActionBridge } from "./workspaceActionHost";
+import { history, undo } from "@codemirror/commands";
 
 const POLICY = editorVirtualSpacePolicy.of({ afterLineEnd: true, atFileBottom: true });
 
 function visualColumnOf(text: string, column: number, tabWidth: number): number {
-  let visual = 0;
-  for (let index = 0; index < column; index += 1) {
-    visual += charVisualWidth(text[index], visual, tabWidth);
-  }
-  return visual;
+  return visualColumnFor(text, column, tabWidth);
+}
+
+function installPhysicalLineVerticalGeometry(view: EditorView, lineHeight: number) {
+  const moveVertically = vi.fn((start: SelectionRange, forward: boolean, distance?: number) => {
+    const current = view.state.doc.lineAt(start.head);
+    const lineDelta = Math.max(1, Math.round((distance ?? lineHeight) / lineHeight));
+    const targetNumber = Math.min(
+      view.state.doc.lines,
+      Math.max(1, current.number + (forward ? lineDelta : -lineDelta)),
+    );
+    const target = view.state.doc.line(targetNumber);
+    const documentColumn = Math.min(start.head - current.from, target.length);
+    return EditorSelection.cursor(
+      target.from + documentColumn,
+      1,
+      undefined,
+      start.goalColumn ?? undefined,
+    );
+  });
+  Object.defineProperty(view, "moveVertically", { value: moveVertically, configurable: true });
+  return moveVertically;
 }
 
 function mount(doc: string, policyEnabled = true): EditorView {
@@ -355,26 +383,797 @@ describe("§8.19.5 virtual caret lifecycle", () => {
       expect(virtualOverflowAt(view.state, 3)).toBe(5);
     });
 
-    it("exports complete virtualSpaceKeymap and VirtualSpaceController", () => {
-      expect(virtualSpaceKeymap.length).toBeGreaterThanOrEqual(15);
-      const keys = virtualSpaceKeymap.map((b) => b.key);
-      expect(keys).toContain("ArrowUp");
-      expect(keys).toContain("ArrowDown");
-      expect(keys).toContain("ArrowLeft");
-      expect(keys).toContain("ArrowRight");
-      expect(keys).toContain("Home");
-      expect(keys).toContain("End");
-      expect(keys).toContain("Backspace");
-      expect(keys).toContain("Delete");
-      expect(keys).toContain("Enter");
-      expect(keys).toContain("Tab");
-      expect(keys).toContain("Escape");
-      expect(keys).toContain("PageUp");
-      expect(keys).toContain("PageDown");
-      expect(keys).toContain("Shift-PageUp");
-      expect(keys).toContain("Shift-PageDown");
+    it("§ED-VSPACE-001: registers all virtual space actions into WorkspaceActionHost with unified definition", () => {
+      const NOOP_HANDLERS = {
+        save: () => {},
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: () => false,
+      };
+      const editorActions = buildEditorHostActions(NOOP_HANDLERS);
+      const actionIds = new Set(editorActions.map((a) => a.id));
 
-      expect(VirtualSpaceController.keymap).toBe(virtualSpaceKeymap);
+      const expectedIds = [
+        "editor.moveUp",
+        "editor.moveDown",
+        "editor.selectUp",
+        "editor.selectDown",
+        "editor.pageUp",
+        "editor.selectPageUp",
+        "editor.pageDown",
+        "editor.selectPageDown",
+        "editor.moveLeft",
+        "editor.selectLeft",
+        "editor.moveRight",
+        "editor.selectRight",
+        "editor.moveToLineStart",
+        "editor.moveToLineEnd",
+        "editor.selectToLineEnd",
+        "editor.deleteBackward",
+        "editor.deleteForward",
+        "editor.insertNewline",
+        "editor.insertTab",
+      ];
+
+      for (const id of expectedIds) {
+        expect(actionIds.has(id)).toBe(true);
+        // Matching catalog action in DEFAULT_WORKSPACE_ACTIONS
+        const catalogAction = DEFAULT_WORKSPACE_ACTIONS.find((a) => a.id === id);
+        expect(catalogAction).toBeDefined();
+      }
+
+      expect("keymap" in VirtualSpaceController).toBe(false);
+    });
+
+    it("§ED-VSPACE-001: dispatches keystroke exactly once to focused editor and zero times to non-owner focus", async () => {
+      const host = new WorkspaceActionHost({ workspaceId: "ws-vspace-test" });
+      const bridge = new EditorActionBridge(host);
+      bridge.registerView("editor-view-1");
+
+      let commandRunCount = 0;
+
+      const actions = buildEditorHostActions({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: (_command) => {
+          commandRunCount += 1;
+          return true;
+        },
+      });
+
+      host.registerActions(actions);
+
+      const makeEvent = (key: string, code: string, modifiers: { shiftKey?: boolean; ctrlKey?: boolean } = {}) => ({
+        key,
+        code,
+        shiftKey: modifiers.shiftKey ?? false,
+        ctrlKey: modifiers.ctrlKey ?? false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+      });
+
+      // 1. Dispatch ArrowUp with editor focus on registered view -> single dispatch
+      const result1 = host.dispatchKeydownV2({
+        event: makeEvent("ArrowUp", "ArrowUp"),
+        workspaceId: "ws-vspace-test",
+        targetViewId: "editor-view-1",
+      });
+
+      expect(result1.kind).toBe("executed");
+      if (result1.kind === "executed") {
+        expect(result1.actionId).toBe("editor.moveUp");
+      }
+      await Promise.resolve();
+      expect(commandRunCount).toBe(1);
+
+      // 2. Dispatch with non-owner focus (e.g. tree/search focus, targetViewId: null) -> rejected/zero dispatch
+      commandRunCount = 0;
+      const result2 = host.dispatchKeydownV2({
+        event: makeEvent("ArrowUp", "ArrowUp"),
+        workspaceId: "ws-vspace-test",
+        targetViewId: null,
+      });
+
+      // Editor-scoped action requires editor focus, so non-editor focus rejects with disabled/no-match
+      expect(result2.kind).toBe("rejected");
+      await Promise.resolve();
+      expect(commandRunCount).toBe(0); // Zero dispatch to editor!
+    });
+
+    it("§ED-VSPACE-001: routes the shared action definition to the focused split owner", async () => {
+      const host = new WorkspaceActionHost({ workspaceId: "ws-vspace-splits" });
+      const bridge = new EditorActionBridge(host);
+      bridge.registerView("primary");
+      bridge.registerView("secondary");
+
+      let primaryRuns = 0;
+      let secondaryRuns = 0;
+      const handlers = (owner: "primary" | "secondary") => ({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: () => {
+          if (owner === "primary") primaryRuns += 1;
+          else secondaryRuns += 1;
+          return true;
+        },
+      });
+
+      host.registerActions(buildEditorHostActions(handlers("primary")), { ownerViewId: "primary" });
+      host.registerActions(buildEditorHostActions(handlers("secondary")), { ownerViewId: "secondary" });
+
+      const focusedContext = {
+        focus: "editor" as const,
+        hasActiveFile: true,
+        editorViewId: "primary",
+      };
+      const paletteEvaluation = host.getSnapshot(focusedContext)
+        .find((item) => item.id === "editor.moveUp")?.evaluation;
+      const menuEvaluation = host.prepare("editor.moveUp", {
+        kind: "menu",
+        context: focusedContext,
+      });
+      expect(paletteEvaluation?.action).toBe(menuEvaluation.action);
+      await expect(host.executePrepared(menuEvaluation)).resolves.toMatchObject({ kind: "applied" });
+      expect(primaryRuns).toBe(1);
+      expect(secondaryRuns).toBe(0);
+
+      const result = host.dispatchKeydownV2({
+        event: {
+          key: "ArrowUp",
+          code: "ArrowUp",
+          shiftKey: false,
+          ctrlKey: false,
+          altKey: false,
+          metaKey: false,
+          preventDefault: () => {},
+          stopPropagation: () => {},
+        },
+        workspaceId: "ws-vspace-splits",
+        targetViewId: "primary",
+      });
+
+      expect(result).toMatchObject({ kind: "executed", actionId: "editor.moveUp" });
+      await Promise.resolve();
+      expect(primaryRuns).toBe(2);
+      expect(secondaryRuns).toBe(0);
+    });
+  });
+
+  describe("§ED-VSPACE-002: Real Display Geometry Page & Vertical Movement", () => {
+    it("isEditorGeometryReady detects unready vs ready geometry", () => {
+      const view = new EditorView({
+        state: EditorState.create({ doc: "hello\nworld", extensions: [POLICY] }),
+      });
+      // Headless / jsdom view without layout geometry:
+      expect(isEditorGeometryReady(view)).toBe(false);
+
+      // With mock layout geometry:
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      expect(isEditorGeometryReady(view)).toBe(true);
+    });
+
+    it("yields to default handler (returns false) for PageUp/PageDown when geometry is not ready", () => {
+      const view = new EditorView({
+        state: EditorState.create({ doc: "line1\nline2\nline3", extensions: [POLICY] }),
+      });
+      expect(isEditorGeometryReady(view)).toBe(false);
+
+      // Without geometry, PageUp/PageDown does NOT use fake 15-line fallback, but returns false
+      expect(virtualPageDown(view)).toBe(false);
+      expect(virtualPageUp(view)).toBe(false);
+      expect(virtualSelectPageDown(view)).toBe(false);
+      expect(virtualSelectPageUp(view)).toBe(false);
+    });
+
+    it("§ED-VSPACE-002: leaves PageDown unconsumed when the focused editor geometry is unavailable", async () => {
+      const host = new WorkspaceActionHost({ workspaceId: "ws-vspace-geometry" });
+      new EditorActionBridge(host).registerView("primary");
+      let commandRuns = 0;
+      host.registerActions(buildEditorHostActions({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        isEditorGeometryReady: () => false,
+        runEditorCommand: () => {
+          commandRuns += 1;
+          return false;
+        },
+      }), { ownerViewId: "primary" });
+      const event = {
+        key: "PageDown",
+        code: "PageDown",
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      };
+
+      const result = host.dispatchKeydownV2({
+        event,
+        workspaceId: "ws-vspace-geometry",
+        targetViewId: "primary",
+      });
+
+      expect(result).toMatchObject({ kind: "rejected", reason: "disabled" });
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopPropagation).not.toHaveBeenCalled();
+      await Promise.resolve();
+      expect(commandRuns).toBe(0);
+    });
+
+    it("performs real geometry PageDown and PageUp based on viewport height and line height", () => {
+      const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n");
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: lines,
+          extensions: [virtualSpaceOverflowField, desiredVisualColumnField, POLICY],
+        }),
+      });
+
+      // Mock 20px line height, 200px viewport -> 9 lines per page jump (200/20 - 1 = 9 lines)
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      Object.defineProperty(view, "contentHeight", { value: 1000, configurable: true });
+
+      const moveVertically = installPhysicalLineVerticalGeometry(view, 20);
+
+      // Caret on Line 1 offset 0
+      view.dispatch({ selection: EditorSelection.cursor(0) });
+      expect(virtualPageDown(view)).toBe(true);
+
+      // Should land on Line 10 (1 + 9)
+      const head1 = view.state.selection.main.head;
+      const line1 = view.state.doc.lineAt(head1);
+      expect(line1.number).toBe(10);
+      expect(moveVertically).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        true,
+        180,
+      );
+
+      // PageDown again -> Line 19
+      expect(virtualPageDown(view)).toBe(true);
+      const head2 = view.state.selection.main.head;
+      expect(view.state.doc.lineAt(head2).number).toBe(19);
+
+      // PageUp -> back to Line 10
+      expect(virtualPageUp(view)).toBe(true);
+      const head3 = view.state.selection.main.head;
+      expect(view.state.doc.lineAt(head3).number).toBe(10);
+    });
+
+    it("dynamically adapts page jump distance upon viewport resize", () => {
+      const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n");
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: lines,
+          extensions: [virtualSpaceOverflowField, desiredVisualColumnField, POLICY],
+        }),
+      });
+
+      // Initial viewport 200px (9 lines)
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      Object.defineProperty(view, "contentHeight", { value: 1000, configurable: true });
+
+      const moveVertically = installPhysicalLineVerticalGeometry(view, 20);
+
+      // Resize viewport to 400px (400 - 20 = 380px = 19 lines jump)
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 400, configurable: true });
+
+      view.dispatch({ selection: EditorSelection.cursor(0) });
+      expect(virtualPageDown(view)).toBe(true);
+
+      // Should land on Line 20 (1 + 19)
+      const head = view.state.selection.main.head;
+      expect(view.state.doc.lineAt(head).number).toBe(20);
+      expect(moveVertically).toHaveBeenCalledWith(expect.anything(), true, 380);
+    });
+
+    it("§ED-VSPACE-002: delegates wrapped visual-line movement to CodeMirror geometry", () => {
+      const doc = "0123456789ABCDEFGHIJ";
+      const view = new EditorView({
+        state: EditorState.create({
+          doc,
+          extensions: [
+            virtualSpaceOverflowField,
+            desiredVisualColumnField,
+            POLICY,
+            EditorView.lineWrapping,
+          ],
+        }),
+      });
+
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      Object.defineProperty(view, "contentHeight", { value: 40, configurable: true });
+
+      // Real CodeMirror lineBlockAt spans the physical line even when it wraps.
+      (view as any).lineBlockAt = () => ({
+        from: 0,
+        to: 20,
+        top: 0,
+        bottom: 40,
+        height: 40,
+        type: 0,
+      });
+      (view as any).lineBlockAtHeight = () => ({
+        from: 0,
+        to: 20,
+        top: 0,
+        bottom: 40,
+        height: 40,
+        type: 0,
+      });
+      const moveVertically = vi.fn((start: SelectionRange) => {
+        expect(start.goalColumn).toBeUndefined();
+        return EditorSelection.cursor(13);
+      });
+      Object.defineProperty(view, "moveVertically", { value: moveVertically, configurable: true });
+
+      view.dispatch({ selection: EditorSelection.cursor(3) });
+      expect(virtualMoveDown(view)).toBe(true);
+      expect(view.state.selection.main.head).toBe(13);
+      expect(virtualOverflowAt(view.state, 13)).toBe(0);
+      expect(moveVertically).toHaveBeenCalledOnce();
+    });
+
+    it("handles top and bottom boundaries and preserves virtual overflow at file bottom", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "first line\nlast line",
+          extensions: [virtualSpaceOverflowField, desiredVisualColumnField, POLICY],
+        }),
+      });
+
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      Object.defineProperty(view, "contentHeight", { value: 40, configurable: true });
+
+      (view as any).lineBlockAt = (pos: number) => {
+        const line = view.state.doc.lineAt(pos);
+        const top = (line.number - 1) * 20;
+        return { from: line.from, to: line.to, top, bottom: top + 20, height: 20, type: 0 };
+      };
+      (view as any).lineBlockAtHeight = (height: number) => {
+        const lineNum = Math.min(2, Math.max(1, Math.floor(height / 20) + 1));
+        const line = view.state.doc.line(lineNum);
+        const top = (line.number - 1) * 20;
+        return { from: line.from, to: line.to, top, bottom: top + 20, height: 20, type: 0 };
+      };
+
+      // Caret at top line 1
+      view.dispatch({ selection: EditorSelection.cursor(0) });
+      expect(virtualPageUp(view)).toBe(false); // already at top boundary
+
+      // Caret at bottom line with desired column 30 (line length 9 -> overflow 21)
+      view.dispatch({ selection: EditorSelection.cursor(11) }); // "last line" start
+      // Place desired visual column 30
+      view.dispatch({
+        selection: EditorSelection.cursor(20),
+        effects: [setVirtualOverflow.of(new Map([[20, 21]]))],
+      });
+      expect(virtualOverflowAt(view.state, 20)).toBe(21);
+
+      // PageDown at bottom boundary preserves caret at file bottom and retains virtual overflow
+      expect(virtualPageDown(view)).toBe(false);
+      expect(view.state.selection.main.head).toBe(20);
+    });
+
+    it("keeps exact mixed-caret columns when rendered pixel goals include editor padding", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "prefixX\nX\nlongprefixX",
+          selection: EditorSelection.create([
+            EditorSelection.cursor(7),
+            EditorSelection.cursor(9),
+            EditorSelection.cursor(21),
+          ]),
+          extensions: [
+            EditorState.allowMultipleSelections.of(true),
+            virtualSpaceOverflowField,
+            desiredVisualColumnField,
+            virtualSpaceTypingHandler,
+            POLICY,
+          ],
+        }),
+      });
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 15, configurable: true });
+      Object.defineProperty(view, "moveVertically", {
+        configurable: true,
+        value: vi.fn((start: SelectionRange) => {
+          if (start.head === 7) return EditorSelection.cursor(9, 1, undefined, 120);
+          if (start.head === 9) return EditorSelection.cursor(12, 1, undefined, 30);
+          return EditorSelection.cursor(21, 1, undefined, 180);
+        }),
+      });
+
+      expect(virtualMoveDown(view)).toBe(true);
+      expect(view.state.selection.ranges.map((range) => range.head)).toEqual([9, 11, 21]);
+      expect(virtualOverflowAt(view.state, 9)).toBe(6);
+      expect(virtualOverflowAt(view.state, 11)).toBe(0);
+      expect(virtualOverflowAt(view.state, 21)).toBe(0);
+
+      expect((virtualSpaceTypingHandler as any).value(view, 9, 9, "Z")).toBe(true);
+      expect(view.state.doc.toString()).toBe("prefixX\nX      Z\nlZongprefixXZ");
+    });
+
+    it("collapses mixed-direction occurrence selections before entering virtual space", () => {
+      const view = mount("prefixX\nX\nlongprefixX");
+      view.dispatch({
+        selection: EditorSelection.create([
+          EditorSelection.range(7, 6),
+          EditorSelection.range(8, 9),
+          EditorSelection.range(20, 21),
+        ]),
+      });
+
+      expect(virtualMoveRightCommand(view, false)).toBe(true);
+      expect(view.state.selection.ranges.map((range) => range.head)).toEqual([7, 9, 21]);
+      expect(view.state.selection.ranges.every((range) => range.empty)).toBe(true);
+      expect(view.state.selection.ranges.map((range) => virtualOverflowAt(view.state, range.head)))
+        .toEqual([0, 0, 0]);
+
+      expect(virtualMoveDown(view)).toBe(true);
+      expect((virtualSpaceTypingHandler as any).value(view, 9, 9, "Z")).toBe(true);
+      expect(view.state.doc.toString()).toBe("prefixX\nX      Z\nlZongprefixXZ");
+    });
+
+    it("respects tabSize 2 vs tabSize 8 and wide CJK/Emoji characters in vertical navigation", () => {
+      // In tabSize 2: "\tfoo" has "\t" (width 2) + "foo" (width 3) = visual col 5
+      expect(visualColumnOf("\tfoo", 4, 2)).toBe(5);
+
+      // In tabSize 8: "\tfoo" has "\t" (width 8) + "foo" (width 3) = visual col 11
+      expect(visualColumnOf("\tfoo", 4, 8)).toBe(11);
+
+      // CJK "你好" has 2 chars, each width 2 -> visual width 4
+      expect(visualColumnOf("你好", 2, 4)).toBe(4);
+      // Emoji "🚀" (astral code point, string length 2) -> visual width 2
+      expect(visualColumnOf("🚀", 2, 4)).toBe(2);
+      // Combining marks and ZWJ emoji are each one grapheme cluster.
+      expect(visualColumnOf("e\u0301", 2, 4)).toBe(1);
+      const family = "👨‍👩‍👧‍👦";
+      expect(visualColumnOf(family, family.length, 4)).toBe(2);
+      expect(documentColumnForVisualColumn(family, 2, 4)).toBe(family.length);
+    });
+
+    it("preserves tab and wide-grapheme desired columns through CodeMirror geometry", () => {
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: "\tfoo\n你好🚀",
+          extensions: [
+            EditorState.tabSize.of(2),
+            virtualSpaceOverflowField,
+            desiredVisualColumnField,
+            POLICY,
+          ],
+        }),
+      });
+      Object.defineProperty(view.scrollDOM, "clientHeight", { value: 200, configurable: true });
+      Object.defineProperty(view, "defaultLineHeight", { value: 20, configurable: true });
+      Object.defineProperty(view, "defaultCharacterWidth", { value: 8, configurable: true });
+      const secondLine = view.state.doc.line(2);
+      const moveVertically = vi.fn((start: SelectionRange) => {
+        expect(start.goalColumn).toBe(40); // tabSize 2: "\tfoo" is 5 visual columns
+        return EditorSelection.cursor(secondLine.from + 2, 1, undefined, start.goalColumn ?? undefined);
+      });
+      Object.defineProperty(view, "moveVertically", { value: moveVertically, configurable: true });
+
+      view.dispatch({ selection: EditorSelection.cursor(4, 1, undefined, 40) });
+      expect(virtualMoveDown(view)).toBe(true);
+      expect(view.state.selection.main.head).toBe(secondLine.from + 2);
+      expect(view.state.field(desiredVisualColumnField)).toEqual([5]);
+      expect(moveVertically).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("§ED-VSPACE-003: Multi-Caret, Selection, and Composition Transactions", () => {
+    it("leaves vertical movement unconsumed while the editor is composing", () => {
+      const view = mount("first\nsecond");
+      view.dispatch({ selection: EditorSelection.cursor(2) });
+      Object.defineProperty(view, "composing", { value: true, configurable: true });
+
+      expect(virtualMoveDown(view)).toBe(false);
+      expect(view.state.selection.main.head).toBe(2);
+      expect(view.state.doc.toString()).toBe("first\nsecond");
+      expect(virtualOverflowAt(view.state, 2)).toBe(0);
+    });
+
+    it("falls back to the ordinary CodeMirror command when no virtual movement applies", async () => {
+      const view = mount("abc");
+      view.dispatch({ selection: EditorSelection.cursor(1) });
+
+      const host = new WorkspaceActionHost({ workspaceId: "ws-vspace-fallback" });
+      new EditorActionBridge(host).registerView("primary");
+      host.registerActions(buildEditorHostActions({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: (command) => command(view),
+      }), { ownerViewId: "primary" });
+
+      const event = {
+        key: "ArrowLeft",
+        code: "ArrowLeft",
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      };
+      expect(host.dispatchKeydownV2({
+        event,
+        workspaceId: "ws-vspace-fallback",
+        targetViewId: "primary",
+      })).toMatchObject({ kind: "executed", actionId: "editor.moveLeft" });
+
+      await vi.waitFor(() => expect(view.state.selection.main.head).toBe(0));
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      expect(event.stopPropagation).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      { actionId: "editor.moveRight", doc: "abc", head: 1, expectedDoc: "abc", expectedHead: 2 },
+      { actionId: "editor.moveToLineStart", doc: "  abc", head: 4, expectedDoc: "  abc", expectedHead: 2 },
+      { actionId: "editor.moveToLineEnd", doc: "abc", head: 1, expectedDoc: "abc", expectedHead: 3 },
+      { actionId: "editor.deleteBackward", doc: "abc", head: 1, expectedDoc: "bc", expectedHead: 0 },
+      { actionId: "editor.deleteForward", doc: "abc", head: 1, expectedDoc: "ac", expectedHead: 1 },
+      { actionId: "editor.insertNewline", doc: "abc", head: 1, expectedDoc: "a\nbc", expectedHead: 2 },
+    ])("preserves the ordinary $actionId behavior outside virtual space", async ({
+      actionId,
+      doc,
+      head,
+      expectedDoc,
+      expectedHead,
+    }) => {
+      const view = mount(doc);
+      view.dispatch({ selection: EditorSelection.cursor(head) });
+      const action = buildEditorHostActions({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: (command) => command(view),
+      }).find((candidate) => candidate.id === actionId);
+
+      expect(action).toBeDefined();
+      await expect(action!.run({ focus: "editor", hasActiveFile: true } as never))
+        .resolves.toMatchObject({ kind: "applied" });
+      expect(view.state.doc.toString()).toBe(expectedDoc);
+      expect(view.state.selection.main.head).toBe(expectedHead);
+    });
+
+    it("tracks independent desired visual column and anchor for each caret across short and long lines", () => {
+      // 3 lines: line 1 (11 chars), line 2 (3 chars), line 3 (13 chars)
+      const doc = "hello world\nabc\ngoodbye world";
+      const view = new EditorView({
+        state: EditorState.create({
+          doc,
+          extensions: [
+            EditorState.allowMultipleSelections.of(true),
+            virtualSpaceOverflowField,
+            desiredVisualColumnField,
+            POLICY,
+          ],
+        }),
+      });
+
+      // Place 2 carets: Caret 1 at line 1 end (col 11), Caret 2 at line 2 end (col 3)
+      view.dispatch({
+        selection: EditorSelection.create([
+          EditorSelection.cursor(11), // "hello world" end
+          EditorSelection.cursor(15), // "abc" end (12 + 3)
+        ]),
+      });
+
+      // Move down: Caret 1 moves to line 2 with overflow 8 (desired visual col 11 - 3), Caret 2 moves to line 3 col 3
+      expect(virtualMoveDown(view)).toBe(true);
+      expect(view.state.selection.ranges).toHaveLength(2);
+      expect(view.state.selection.ranges[0].head).toBe(15); // line 2 end
+      expect(virtualOverflowAt(view.state, 15)).toBe(8);
+      expect(view.state.selection.ranges[1].head).toBe(19); // line 3 offset 3 ("goo")
+      expect(virtualOverflowAt(view.state, 19)).toBe(0);
+
+      // Move down again: Caret 1 moves to line 3 col 11 (offset 27), Caret 2 clamped on line 3 col 3 (offset 19)
+      // CodeMirror sorts selection ranges by document offset (19, then 27)
+      expect(virtualMoveDown(view)).toBe(true);
+      expect(view.state.selection.ranges).toHaveLength(2);
+      expect(view.state.selection.ranges[0].head).toBe(19); // line 3 offset 3
+      expect(view.state.selection.ranges[1].head).toBe(27); // line 3 offset 11
+      expect(virtualOverflowAt(view.state, 27)).toBe(0);
+    });
+
+    it("preserves selection anchors independently during multi-caret Shift extension", () => {
+      const doc = "line 1\nline 2\nline 3";
+      const view = new EditorView({
+        state: EditorState.create({
+          doc,
+          extensions: [
+            EditorState.allowMultipleSelections.of(true),
+            virtualSpaceOverflowField,
+            desiredVisualColumnField,
+            POLICY,
+          ],
+        }),
+      });
+
+      // 2 carets with initial positions at line starts
+      view.dispatch({
+        selection: EditorSelection.create([
+          EditorSelection.cursor(0), // line 1 start
+          EditorSelection.cursor(7), // line 2 start
+        ]),
+      });
+
+      // Select down with Shift
+      expect(virtualSelectDown(view)).toBe(true);
+      expect(view.state.selection.ranges).toHaveLength(2);
+
+      // Range 0: anchor 0, head 7
+      expect(view.state.selection.ranges[0].anchor).toBe(0);
+      expect(view.state.selection.ranges[0].head).toBe(7);
+
+      // Range 1: anchor 7, head 14
+      expect(view.state.selection.ranges[1].anchor).toBe(7);
+      expect(view.state.selection.ranges[1].head).toBe(14);
+    });
+
+    it("keeps the anchor stable when Shift movement reverses through it", () => {
+      const view = mount("line 1\nline 2\nline 3");
+      view.dispatch({ selection: EditorSelection.range(7, 14) });
+
+      expect(virtualSelectUp(view)).toBe(true);
+      expect(view.state.selection.main.anchor).toBe(7);
+      expect(view.state.selection.main.head).toBe(7);
+
+      expect(virtualSelectUp(view)).toBe(true);
+      expect(view.state.selection.main.anchor).toBe(7);
+      expect(view.state.selection.main.head).toBe(0);
+      expect(view.state.selection.main.from).toBe(0);
+      expect(view.state.selection.main.to).toBe(7);
+    });
+
+    it("materializes multi-caret padding in a single atomic transaction that undoes in 1 step", () => {
+      const doc = "short\nanother line\nend";
+      const view = new EditorView({
+        state: EditorState.create({
+          doc,
+          extensions: [
+            EditorState.allowMultipleSelections.of(true),
+            virtualSpaceOverflowField,
+            desiredVisualColumnField,
+            POLICY,
+            history(),
+            virtualSpaceTypingHandler,
+          ],
+        }),
+      });
+
+      // Place 2 virtual carets: Caret 1 at line 1 with overflow 5, Caret 2 at line 3 with overflow 3
+      // line 1 "short" -> offset 5
+      // line 2 "another line" -> length 12
+      // line 3 "end" -> offset 5 + 1 + 12 + 1 + 3 = 22
+      view.dispatch({
+        selection: EditorSelection.create([
+          EditorSelection.cursor(5),
+          EditorSelection.cursor(22),
+        ]),
+        effects: [
+          setVirtualOverflow.of(new Map([
+            [5, 5],
+            [22, 3],
+          ])),
+        ],
+      });
+
+      expect(virtualOverflowAt(view.state, 5)).toBe(5);
+      expect(virtualOverflowAt(view.state, 22)).toBe(3);
+
+      // Type character 'X' across both carets
+      // In CodeMirror, inputHandler handles insertion
+      const handled = (virtualSpaceTypingHandler as any).value(view, 5, 5, "X");
+      expect(handled).toBe(true);
+
+      // Check document content:
+      // Line 1: "short     X"
+      // Line 2: "another line"
+      // Line 3: "end   X"
+      expect(view.state.doc.sliceString(0)).toBe("short     X\nanother line\nend   X");
+
+      // Verify that a single undo reverts BOTH insertions atomically:
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.sliceString(0)).toBe("short\nanother line\nend");
+    });
+
+    it("rejects composing, dead key, process key, and AltGraph events from dispatching actions", () => {
+      const host = new WorkspaceActionHost({ workspaceId: "ws-vspace-comp" });
+      const bridge = new EditorActionBridge(host);
+      bridge.registerView("editor-view-comp");
+
+      let commandRunCount = 0;
+      const actions = buildEditorHostActions({
+        openReplacePanel: () => false,
+        expandSemanticSelection: () => false,
+        startBasicCompletion: () => false,
+        escapeStack: () => false,
+        runEditorCommand: () => {
+          commandRunCount += 1;
+          return true;
+        },
+      });
+      host.registerActions(actions);
+
+      const makeEvent = (key: string, code: string, extra: Record<string, any> = {}) => ({
+        key,
+        code,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+        ...extra,
+      });
+
+      // 1. Composition active (isComposing: true)
+      const res1 = host.dispatchKeydownV2({
+        event: makeEvent("a", "KeyA", { isComposing: true }),
+        workspaceId: "ws-vspace-comp",
+        targetViewId: "editor-view-comp",
+      });
+      expect(res1.kind).toBe("rejected");
+      expect((res1 as any).reason).toBe("composing");
+
+      // 2. Process key (IME in flight)
+      const res2 = host.dispatchKeydownV2({
+        event: makeEvent("Process", "Process"),
+        workspaceId: "ws-vspace-comp",
+        targetViewId: "editor-view-comp",
+      });
+      expect(res2.kind).toBe("rejected");
+      expect((res2 as any).reason).toBe("composing");
+
+      // 3. Dead key
+      const res3 = host.dispatchKeydownV2({
+        event: makeEvent("Dead", "Dead"),
+        workspaceId: "ws-vspace-comp",
+        targetViewId: "editor-view-comp",
+      });
+      expect(res3.kind).toBe("rejected");
+      expect((res3 as any).reason).toBe("dead-key");
+
+      // 4. AltGraph modifier
+      const res4 = host.dispatchKeydownV2({
+        event: makeEvent("@", "Digit2", { getModifierState: (m: string) => m === "AltGraph" }),
+        workspaceId: "ws-vspace-comp",
+        targetViewId: "editor-view-comp",
+      });
+      expect(res4.kind).toBe("rejected");
+      expect((res4 as any).reason).toBe("alt-graph");
+
+      expect(commandRunCount).toBe(0);
     });
   });
 });

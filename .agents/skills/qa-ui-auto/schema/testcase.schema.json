@@ -64,7 +64,9 @@
      "ssh_required",
      "sftp_required",
      "jdtls_required",
-     "workspace_root"
+     "workspace_root",
+     "java_sample_projects",
+     "java25_projects"
     ]
    },
    "uniqueItems": true
@@ -139,6 +141,36 @@
     },
     "send_keys": {
      "$ref": "#/$defs/text_arg"
+    },
+    "compose_text": {
+     "$ref": "#/$defs/compose_text_arg"
+    },
+    "native_ime_keys": {
+     "$ref": "#/$defs/native_ime_keys_arg"
+    },
+    "native_keys": {
+     "$ref": "#/$defs/native_keys_arg"
+    },
+    "assert_native_process_delta": {
+     "$ref": "#/$defs/assert_native_process_delta_arg"
+    },
+    "native_editor_performance": {
+     "$ref": "#/$defs/native_editor_performance_arg"
+    },
+    "native_click": {
+     "$ref": "#/$defs/native_click_arg"
+    },
+    "native_pointer_drag": {
+     "$ref": "#/$defs/native_pointer_drag_arg"
+    },
+    "native_set_writable": {
+     "$ref": "#/$defs/native_set_writable_arg"
+    },
+    "native_clipboard_owner": {
+     "$ref": "#/$defs/native_clipboard_owner_arg"
+    },
+    "assert_system_clipboard": {
+     "$ref": "#/$defs/assert_system_clipboard_arg"
     },
     "press": {
      "$ref": "#/$defs/press_arg"
@@ -274,6 +306,74 @@
       }
      ],
      "description": "Native-only: host-side existence check."
+    },
+    "assert_file_receipt": {
+     "type": "object",
+     "required": [
+      "path",
+      "selector",
+      "encoding",
+      "bom",
+      "eol",
+      "expected_text"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "path": {
+       "type": "string",
+       "minLength": 1
+      },
+      "selector": {
+       "type": "string",
+       "minLength": 1
+      },
+      "encoding": {
+       "enum": ["UTF-8", "UTF-16LE", "UTF-16BE", "ISO-8859-1"]
+      },
+      "bom": {
+       "type": "boolean"
+      },
+      "eol": {
+       "enum": ["lf", "crlf", "cr"]
+      },
+      "expected_text": {
+       "type": "string"
+      },
+      "require_history": {
+       "type": "boolean",
+       "default": true
+      },
+      "timeout_sec": {
+       "type": "number",
+       "minimum": 1,
+       "maximum": 120
+      }
+     },
+     "description": "Native-only: independently hashes host bytes and reconciles encoding, BOM, EOL, length, disk hash, logical hash, and history identity with a production save receipt observation."
+    },
+    "assert_file_sha256": {
+     "type": "object",
+     "required": [
+      "path",
+      "equals"
+     ],
+     "additionalProperties": false,
+     "properties": {
+      "path": {
+       "type": "string",
+       "minLength": 1
+      },
+      "equals": {
+       "type": "string",
+       "pattern": "^[a-f0-9]{64}$"
+      },
+      "timeout_sec": {
+       "type": "number",
+       "minimum": 1,
+       "maximum": 120
+      }
+     },
+     "description": "Native-only: independently hashes host file bytes and compares the digest with an exact expected SHA-256."
     },
     "seed_storage": {
      "type": "object",
@@ -503,6 +603,212 @@
   },
   "type_arg": {
    "type": "string"
+  },
+  "compose_text_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "selector",
+    "text"
+   ],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    },
+    "text": {
+     "type": "string",
+     "minLength": 1
+    },
+    "during_key": {
+     "type": "string",
+     "minLength": 1
+    }
+   }
+  },
+  "native_ime_keys_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "selector",
+    "expected_engine",
+    "keys"
+   ],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    },
+    "expected_engine": {
+     "type": "string",
+     "minLength": 1
+    },
+    "keys": {
+     "type": "array",
+     "minItems": 1,
+     "items": {
+      "type": "string",
+      "minLength": 1
+     }
+    }
+   }
+  },
+  "native_keys_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "selector",
+    "keys"
+   ],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    },
+    "keys": {
+     "type": "array",
+     "minItems": 1,
+     "items": {
+      "type": "string",
+      "minLength": 1
+     }
+    },
+    "focus_prechecked": {
+     "type": "boolean",
+     "description": "Skip the immediate WebDriver focus probe only when the testcase asserted DOM focus immediately before an external fault that makes WebDriver commands unavailable."
+    },
+    "transport": {
+     "enum": ["x11", "webdriver"],
+     "default": "x11",
+     "description": "Native key transport. WebDriver uses packaged-webview W3C key actions; x11 uses XTest."
+    }
+   }
+  },
+  "assert_native_process_delta_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["pattern", "baseline", "max_delta"],
+   "properties": {
+    "pattern": {"type": "string", "minLength": 1},
+    "baseline": {"type": ["integer", "string"]},
+    "max_delta": {"type": "integer", "minimum": 0},
+    "timeout_sec": {"type": "number", "minimum": 0}
+   }
+  },
+  "native_editor_performance_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["selector", "keys", "max_p95_ms"],
+   "properties": {
+    "selector": {"$ref": "#/$defs/selector"},
+    "keys": {
+     "type": "array",
+     "minItems": 5,
+     "items": {"type": "string", "minLength": 1, "maxLength": 1}
+    },
+    "max_p95_ms": {"type": "number", "exclusiveMinimum": 0}
+   }
+  },
+  "native_click_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "selector"
+   ],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    }
+   }
+  },
+  "native_pointer_drag_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["selector", "from", "to"],
+   "properties": {
+    "selector": {
+     "$ref": "#/$defs/selector"
+    },
+    "from": {
+     "$ref": "#/$defs/native_line_column"
+    },
+    "to": {
+     "$ref": "#/$defs/native_line_column"
+    },
+    "modifiers": {
+     "type": "array",
+     "uniqueItems": true,
+     "items": {
+      "enum": ["Alt", "Control", "Meta", "Shift"]
+     }
+    }
+   }
+  },
+  "native_line_column": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["line", "column"],
+   "properties": {
+    "line": {"type": "integer", "minimum": 1},
+    "column": {"type": "integer", "minimum": 0}
+   }
+  },
+  "native_clipboard_owner_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "action"
+   ],
+   "description": "Native-only: external X11 CLIPBOARD selection owner. grant takes the real selection; deny advertises standard text targets but rejects their conversion; suspend stops the owner so every client's read genuinely fails; resume restores the last granted text; release terminates it and records that the host selection was replaced.",
+   "properties": {
+    "action": {
+     "enum": ["grant", "deny", "suspend", "resume", "release"]
+    },
+    "text": {
+     "type": "string",
+     "minLength": 1
+    }
+   }
+  },
+  "assert_system_clipboard_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "oneOf": [
+    {"required": ["equals"]},
+    {"required": ["contains"]},
+    {"required": ["readable"]}
+   ],
+   "description": "Native-only: out-of-process read of the real X11 CLIPBOARD selection. Exactly one of equals/contains/readable.",
+   "properties": {
+    "equals": {
+     "type": "string"
+    },
+    "contains": {
+     "type": "string",
+     "minLength": 1
+    },
+    "readable": {
+     "type": "boolean"
+    },
+    "timeout_sec": {
+     "type": "number",
+     "exclusiveMinimum": 0
+    }
+   }
+  },
+  "native_set_writable_arg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "writable"
+   ],
+   "properties": {
+    "path": {
+     "type": "string",
+     "minLength": 1
+    },
+    "writable": {
+     "type": "boolean"
+    }
+   }
   },
   "press_arg": {
    "oneOf": [
