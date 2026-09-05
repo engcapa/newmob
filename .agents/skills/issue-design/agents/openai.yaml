@@ -1,0 +1,4 @@
+interface:
+  display_name: "Taomni Issue 修复设计"
+  short_description: "为 Taomni 问题修复编写根因分析、修复设计与回归验证方案"
+  default_prompt: "使用 $issue-design 为我的问题编写有根因依据、实施任务和回归方案的修复设计，保存到工程 docs-issue/；代码兼容三端 Tauri 桌面，真机计划覆盖三端，本轮完成当前端验证即可。"
