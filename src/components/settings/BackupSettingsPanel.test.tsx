@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackupSettingsPanel } from "./BackupSettingsPanel";
 import { useBackupStore } from "../../stores/backupStore";
@@ -111,6 +111,17 @@ describe("BackupSettingsPanel", () => {
     expect(screen.getByText("2.00 MB")).toBeDefined();
     expect(screen.getByText("Restore")).toBeDefined();
     expect(screen.getByText("Delete")).toBeDefined();
+  });
+
+  it("renders the restore dialog on an opaque theme surface", () => {
+    render(<BackupSettingsPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+    const dialog = screen.getByTestId("backup-restore-dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveProperty("style.background", "var(--taomni-bg)");
+    expect(dialog).toHaveProperty("style.borderColor", "var(--taomni-card-border)");
   });
 
   it("renders manual backup controls with Backup Now and Export to... buttons without requiring vault password during creation", () => {
