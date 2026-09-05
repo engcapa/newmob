@@ -1,0 +1,37 @@
+id: TC-IDE-C8-06-file-template-settings-browser
+title: "File and Code Template Settings dialog manages templates in browser"
+description: |
+  Browser gate case (ED-TEMPLATE-001). Opens the code workspace, invokes File and Code Template
+  Settings from Search Everywhere Actions, verifies presence of template editor controls,
+  saves templates, and closes modal cleanly.
+covers: [F25.5]
+tags: [code-workspace, ide-c8, file-templates, preferences, browser-gate, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tab"]'
+  - wait: 0.3
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: File and Code Template Settings
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=File and Code Template Settings'
+  - wait_for:
+      selector: '[data-testid="file-template-settings-dialog"]'
+      timeout_sec: 20
+  - wait_for: '[data-testid="file-template-editor-textarea"]'
+  - click: '[data-testid="file-template-save-button"]'
+  - wait: 0.2
+  - click: '[data-testid="file-template-close-button"]'
+  - wait: 0.2
+  - screenshot: tc-ide-c8-06-file-template-settings.png
