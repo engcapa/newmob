@@ -32,6 +32,10 @@ import type { Command, KeyBinding } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
 import type { LspRange } from "../../../lib/editor/lsp";
 import { offsetFromLspPosition } from "./lspPositions";
+import {
+  buildPasteWithImportsChanges,
+  computeImportInsertionOffset,
+} from "./autoImportModel";
 
 export type CommandOutcome = "applied" | "unavailable" | "readOnly" | "noSelection" | "cancelled";
 
@@ -199,6 +203,52 @@ export function pasteEditorClipboardPayload(
     ...(overflow && overflow.size > 0
       ? { effects: setVirtualOverflow.of(new Map()) }
       : {}),
+    userEvent: "input.paste",
+    scrollIntoView: true,
+  });
+  return true;
+}
+
+/**
+ * ED-IMPORT-001 A4: paste text with auto-imported classes in one atomic transaction.
+ * Creates a single transaction with one undo entry that reverts both imports and paste.
+ */
+export function pasteEditorWithAutoImports(
+  view: EditorView,
+  options: {
+    pastedText: string;
+    importStatements?: readonly string[];
+  },
+): boolean {
+  if (view.composing || view.state.readOnly) return false;
+  const currentDoc = view.state.doc.toString();
+  const pasteOffset = view.state.selection.main.head;
+  const importStatements = options.importStatements ?? [];
+
+  if (importStatements.length === 0) {
+    return pasteEditorClipboardPayload(view, {
+      plainText: options.pastedText,
+      sourceEol: detectClipboardSourceEol(options.pastedText),
+      rectangular: false,
+    });
+  }
+
+  const insertionOffset = computeImportInsertionOffset(currentDoc);
+  const { changes } = buildPasteWithImportsChanges({
+    documentText: currentDoc,
+    pasteOffset,
+    pastedText: options.pastedText,
+    importStatements,
+    insertionOffset,
+  });
+
+  const addedImportLen = importStatements.join("").length;
+  const adjustedPasteOffset = insertionOffset <= pasteOffset ? pasteOffset + addedImportLen : pasteOffset;
+  const newHead = adjustedPasteOffset + options.pastedText.length;
+
+  view.dispatch({
+    changes,
+    selection: { anchor: newHead },
     userEvent: "input.paste",
     scrollIntoView: true,
   });

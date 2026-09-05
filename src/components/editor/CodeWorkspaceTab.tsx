@@ -274,6 +274,21 @@ import { CodeStyleSettingsDialog } from "./workspace/CodeStyleSettingsDialog";
 import { WorkspaceTabPolicySettingsDialog } from "./workspace/WorkspaceTabPolicySettingsDialog";
 import { NewJavaClassDialog } from "./workspace/NewJavaClassDialog";
 import { FileTemplateSettingsDialog } from "./workspace/FileTemplateSettingsDialog";
+import { AutoImportSettingsDialog } from "./workspace/AutoImportSettingsDialog";
+import { AutoImportCandidateDialog } from "./workspace/AutoImportCandidateDialog";
+import {
+  loadAutoImportPreferences,
+} from "../../lib/autoImportPreferences";
+import {
+  planAutoImport,
+  planPasteAutoImports,
+  parseProviderImportCandidates,
+  scanPastedTypeTokens,
+  buildPasteWithImportsChanges,
+  computeImportInsertionOffset,
+  type AutoImportCandidate,
+  type AutoImportPlanOutcome,
+} from "./workspace/autoImportModel";
 import type { PlanTemplateCreationResult } from "./workspace/fileTemplateModel";
 import {
   buildFormatPlan,
@@ -9023,6 +9038,12 @@ export function CodeWorkspaceTab({
   } | null>(null);
 
   const [fileTemplateSettingsOpen, setFileTemplateSettingsOpen] = useState(false);
+  const [autoImportSettingsOpen, setAutoImportSettingsOpen] = useState(false);
+  const [autoImportCandidatePrompt, setAutoImportCandidatePrompt] = useState<{
+    candidates: readonly AutoImportCandidate[];
+    onSelect: (candidate: AutoImportCandidate) => void;
+    onClose: () => void;
+  } | null>(null);
 
   const openNewJavaClassDialog = useCallback((target?: { rootId: string; path: string }) => {
     const directory = target ?? selectedRootDirectory;
@@ -10776,6 +10797,276 @@ export function CodeWorkspaceTab({
     setStatusMessage("Imports organized");
   }, [activeFile, requestCodeActions, runCodeAction, setStatusMessage]);
 
+  /**
+   * ED-IMPORT-001: Provider-backed on-the-fly auto-import.
+   * Resolves unresolved symbol diagnostics against provider code actions,
+   * enforces package priorities/exclusions, validates project facts generation (A3),
+   * and auto-applies unambiguous imports or prompts for ambiguous candidates (A1).
+   */
+  const executeAutoImportOnTheFly = useCallback(async (
+    targetFile?: OpenFileState,
+  ): Promise<AutoImportPlanOutcome> => {
+    const file = targetFile ?? activeFile;
+    if (!file || file.loading || Boolean((file as { library?: boolean }).library)) {
+      return { outcome: "none", reason: "disabled" };
+    }
+    const isJava = file.languagePath.endsWith(".java") || lspFilesRef.current[file.key]?.status?.languageId === "java";
+    if (!isJava) {
+      return { outcome: "none", reason: "disabled" };
+    }
+
+    const settings = loadAutoImportPreferences();
+    if (!settings.addUnambiguousImportsOnTheFly) {
+      return { outcome: "none", reason: "disabled" };
+    }
+
+    // Gating against project facts generation (ED-IMPORT-001-A3)
+    const facts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+    if (facts.status !== "ready") {
+      return {
+        outcome: "none",
+        reason: facts.status === "untrusted" ? "untrusted-facts" : "unready-facts",
+      };
+    }
+    const expectedGeneration = facts.generation;
+
+    const diagnostics = lspFilesRef.current[file.key]?.diagnostics ?? [];
+    const unresolvedDiags = diagnostics.filter((diag) => (
+      /cannot find symbol|cannot be resolved to a type|unknown class|cannot resolve symbol/i.test(diag.message)
+    ));
+
+    if (unresolvedDiags.length === 0) {
+      return { outcome: "none", reason: "no-candidates" };
+    }
+
+    let lastOutcome: AutoImportPlanOutcome = { outcome: "none", reason: "no-candidates" };
+
+    for (const diag of unresolvedDiags) {
+      // Re-verify project facts generation before requesting
+      const currentFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+      if (currentFacts.status !== "ready" || currentFacts.generation !== expectedGeneration) {
+        return { outcome: "none", reason: "stale-generation" };
+      }
+
+      const { actions, semanticToken } = await requestCodeActions(file, diag.range, [diag], ["quickfix"]);
+      const candidates = parseProviderImportCandidates(actions);
+      if (candidates.length === 0) continue;
+
+      const plan = planAutoImport({
+        symbolName: candidates[0].symbolName,
+        candidates,
+        documentText: file.text,
+        settings,
+        isPaste: false,
+        projectFactsStatus: currentFacts.status,
+        generation: currentFacts.generation,
+        expectedGeneration,
+      });
+
+      lastOutcome = plan;
+
+      if (plan.outcome === "auto-apply") {
+        // Re-verify project facts generation immediately before applying (A3)
+        const liveFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+        if (liveFacts.status !== "ready" || liveFacts.generation !== expectedGeneration) {
+          return { outcome: "none", reason: "stale-generation" };
+        }
+
+        const actionToRun = actions.find((a) =>
+          a.title.includes(plan.candidate.fullyQualifiedName) ||
+          a.title.includes(plan.candidate.symbolName),
+        ) ?? actions[0];
+
+        await runCodeAction(actionToRun, file, semanticToken);
+        setStatusMessage(`Auto-imported ${plan.candidate.fullyQualifiedName}`);
+        return plan;
+      }
+
+      if (plan.outcome === "ambiguous") {
+        setAutoImportCandidatePrompt({
+          candidates: plan.candidates,
+          onSelect: (chosen) => {
+            setAutoImportCandidatePrompt(null);
+            const liveFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+            if (liveFacts.status !== "ready" || liveFacts.generation !== expectedGeneration) {
+              setStatusMessage("Auto-import cancelled: project facts changed");
+              return;
+            }
+            const matchedAction = actions.find((a) =>
+              a.title.includes(chosen.fullyQualifiedName) ||
+              a.title.includes(chosen.symbolName),
+            ) ?? actions[0];
+            void runCodeAction(matchedAction, file, semanticToken);
+            setStatusMessage(`Imported ${chosen.fullyQualifiedName}`);
+          },
+          onClose: () => setAutoImportCandidatePrompt(null),
+        });
+        return plan;
+      }
+    }
+
+    return lastOutcome;
+  }, [activeFile, projectFactsRoot, requestCodeActions, runCodeAction, setStatusMessage]);
+
+  /**
+   * ED-IMPORT-001: Paste with auto-import resolution.
+   * Scans pasted text for type tokens, resolves candidates via provider/classpath,
+   * enforces independent paste preferences (A2), rejects stale generation (A3),
+   * and executes paste + import statements in a single atomic transaction (A4).
+   */
+  const executePasteWithAutoImport = useCallback(async (
+    textToPaste?: string,
+    candidatesOverride?: readonly AutoImportCandidate[],
+  ) => {
+    const file = activeFile;
+    if (!file || Boolean((file as { library?: boolean }).library)) return false;
+
+    let text = textToPaste;
+    if (text === undefined) {
+      try {
+        text = await readText();
+      } catch {
+        const session = clipboardHandle.historyEntries()[0];
+        text = session?.plainText ?? "";
+      }
+    }
+
+    if (!text) {
+      executeActiveEditorCommand("paste");
+      return false;
+    }
+
+    const isJava = file.languagePath.endsWith(".java") || lspFilesRef.current[file.key]?.status?.languageId === "java";
+    const settings = loadAutoImportPreferences();
+
+    // ED-IMPORT-001-A2: paste mode "none" means plain paste without imports
+    if (!isJava || settings.pasteImportMode === "none") {
+      executeActiveEditorCommand("paste");
+      return true;
+    }
+
+    // Check project facts status and generation (A3)
+    const facts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+    if (facts.status !== "ready") {
+      executeActiveEditorCommand("paste");
+      return true;
+    }
+    const expectedGeneration = facts.generation;
+
+    const tokens = scanPastedTypeTokens(text);
+    if (tokens.length === 0) {
+      executeActiveEditorCommand("paste");
+      return true;
+    }
+
+    const candidates: readonly AutoImportCandidate[] = candidatesOverride ?? [];
+
+    const plan = planPasteAutoImports({
+      pastedText: text,
+      documentText: file.text,
+      candidates,
+      settings,
+      projectFactsStatus: facts.status,
+      generation: facts.generation,
+      expectedGeneration,
+    });
+
+    if (plan.outcome === "auto-apply") {
+      const liveFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+      if (liveFacts.status !== "ready" || liveFacts.generation !== expectedGeneration) {
+        executeActiveEditorCommand("paste");
+        return true;
+      }
+
+      const dispatched = executeActiveEditorCommand("pasteWithAutoImports", {
+        pastePayload: {
+          text,
+          importStatements: plan.importStatements,
+        },
+      });
+
+      if (!dispatched) {
+        const insertionOffset = computeImportInsertionOffset(file.text);
+        const { newDocumentText } = buildPasteWithImportsChanges({
+          documentText: file.text,
+          pasteOffset: file.text.length,
+          pastedText: text,
+          importStatements: plan.importStatements,
+          insertionOffset,
+        });
+        updateFileText(file.key, newDocumentText);
+      }
+      setStatusMessage(`Pasted and auto-imported ${plan.appliedCandidates.map((c) => c.fullyQualifiedName).join(", ")}`);
+      return true;
+    }
+
+    if (plan.outcome === "ambiguous" && plan.requiresPrompt) {
+      setAutoImportCandidatePrompt({
+        candidates: plan.ambiguousCandidates,
+        onSelect: (chosen) => {
+          setAutoImportCandidatePrompt(null);
+          const liveFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+          if (liveFacts.status !== "ready" || liveFacts.generation !== expectedGeneration) {
+            executeActiveEditorCommand("paste");
+            return;
+          }
+          const importStatements = [`import ${chosen.fullyQualifiedName};\n`];
+          const dispatched = executeActiveEditorCommand("pasteWithAutoImports", {
+            pastePayload: {
+              text,
+              importStatements,
+            },
+          });
+          if (!dispatched) {
+            const insertionOffset = computeImportInsertionOffset(file.text);
+            const { newDocumentText } = buildPasteWithImportsChanges({
+              documentText: file.text,
+              pasteOffset: file.text.length,
+              pastedText: text,
+              importStatements,
+              insertionOffset,
+            });
+            updateFileText(file.key, newDocumentText);
+          }
+          setStatusMessage(`Pasted and imported ${chosen.fullyQualifiedName}`);
+        },
+        onClose: () => {
+          setAutoImportCandidatePrompt(null);
+          executeActiveEditorCommand("paste");
+        },
+      });
+      return true;
+    }
+
+    executeActiveEditorCommand("paste");
+    return true;
+  }, [
+    activeFile,
+    clipboardHandle,
+    executeActiveEditorCommand,
+    projectFactsRoot,
+    setStatusMessage,
+    updateFileText,
+  ]);
+
+  // ED-IMPORT-001: Automatic on-the-fly auto-import trigger on diagnostics change
+  useEffect(() => {
+    if (!activeFile) return;
+    const isJava = activeFile.languagePath.endsWith(".java") || lspFilesRef.current[activeFile.key]?.status?.languageId === "java";
+    if (!isJava) return;
+    const settings = loadAutoImportPreferences();
+    if (!settings.addUnambiguousImportsOnTheFly) return;
+    const diags = lspFiles[activeFile.key]?.diagnostics ?? [];
+    const hasUnresolved = diags.some((d) =>
+      /cannot find symbol|cannot be resolved to a type|unknown class|cannot resolve symbol/i.test(d.message)
+    );
+    if (!hasUnresolved) return;
+    const timer = setTimeout(() => {
+      void executeAutoImportOnTheFly(activeFile);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [activeFile, executeAutoImportOnTheFly, lspFiles]);
+
   const [coverageReport, setCoverageReport] = useState<WorkspaceCoverageReport | null>(null);
   const [coverageOverlayEnabled, setCoverageOverlayEnabled] = useState(true);
   const [dapGuideOpen, setDapGuideOpen] = useState(false);
@@ -10927,6 +11218,38 @@ export function CodeWorkspaceTab({
       keywords: ["file templates", "code templates", "java template", "class template"],
       run: () => {
         setFileTemplateSettingsOpen(true);
+        return true;
+      },
+    },
+    {
+      id: "workspace.autoImportSettings",
+      title: "Auto Import Settings",
+      category: "Preferences",
+      keywords: ["auto import", "imports", "on the fly", "paste import"],
+      run: () => {
+        setAutoImportSettingsOpen(true);
+        return true;
+      },
+    },
+    {
+      id: "workspace.autoImportOnTheFly",
+      title: "Auto Import on the Fly",
+      category: "Code",
+      keywords: ["auto import", "import symbol", "resolve imports"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: () => {
+        void executeAutoImportOnTheFly();
+        return true;
+      },
+    },
+    {
+      id: "workspace.pasteWithAutoImport",
+      title: "Paste with Auto Import",
+      category: "Edit",
+      keywords: ["paste", "auto import", "paste with imports"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: () => {
+        void executePasteWithAutoImport();
         return true;
       },
     },
@@ -11099,7 +11422,17 @@ export function CodeWorkspaceTab({
         const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
-      run: (context) => { executeEditorCommand("paste", context); },
+      run: (context) => {
+        const file = activeFile;
+        if (file && (file.languagePath.endsWith(".java") || lspFilesRef.current[file.key]?.status?.languageId === "java")) {
+          const settings = loadAutoImportPreferences();
+          if (settings.pasteImportMode !== "none") {
+            void executePasteWithAutoImport();
+            return;
+          }
+        }
+        executeEditorCommand("paste", context);
+      },
     },
     {
       // §8.19.5 Plain Paste: rectangular/segment metadata is dropped; the
@@ -18141,6 +18474,18 @@ export function CodeWorkspaceTab({
         open={fileTemplateSettingsOpen}
         onClose={() => setFileTemplateSettingsOpen(false)}
       />
+      <AutoImportSettingsDialog
+        open={autoImportSettingsOpen}
+        onClose={() => setAutoImportSettingsOpen(false)}
+      />
+      {autoImportCandidatePrompt && (
+        <AutoImportCandidateDialog
+          open={true}
+          candidates={autoImportCandidatePrompt.candidates}
+          onSelect={autoImportCandidatePrompt.onSelect}
+          onClose={autoImportCandidatePrompt.onClose}
+        />
+      )}
       </div>
     </WorkspaceClipboardSessionContext.Provider>
   );
