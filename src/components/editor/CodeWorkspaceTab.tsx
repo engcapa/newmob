@@ -272,6 +272,9 @@ import {
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
 import { CodeStyleSettingsDialog } from "./workspace/CodeStyleSettingsDialog";
 import { WorkspaceTabPolicySettingsDialog } from "./workspace/WorkspaceTabPolicySettingsDialog";
+import { NewJavaClassDialog } from "./workspace/NewJavaClassDialog";
+import { FileTemplateSettingsDialog } from "./workspace/FileTemplateSettingsDialog";
+import type { PlanTemplateCreationResult } from "./workspace/fileTemplateModel";
 import {
   buildFormatPlan,
   filterFormattingRanges,
@@ -3874,6 +3877,7 @@ export function CodeWorkspaceTab({
           { label: "Open", onClick: run("workspace.tree.open", { selection }) },
           { separator: true, label: "" },
           { label: "New File...", onClick: run("workspace.tree.newFile", { directory: { rootId: ref.rootId, path: dir } }) },
+          { label: "New Java Class...", onClick: run("workspace.tree.newJavaClass", { directory: { rootId: ref.rootId, path: dir } }) },
           { label: "New Directory...", onClick: run("workspace.tree.newDirectory", { directory: { rootId: ref.rootId, path: dir } }) },
           { label: "Rename...", onClick: run("workspace.tree.rename", { selection }) },
           { label: "Delete", danger: true, onClick: run("workspace.tree.delete", { selection }) },
@@ -3894,6 +3898,7 @@ export function CodeWorkspaceTab({
       if (selection.kind === "dir") {
         openTreeContextMenu(event, [
           { label: "New File...", onClick: run("workspace.tree.newFile", { directory: { rootId: selection.rootId, path: selection.path } }) },
+          { label: "New Java Class...", onClick: run("workspace.tree.newJavaClass", { directory: { rootId: selection.rootId, path: selection.path } }) },
           { label: "New Directory...", onClick: run("workspace.tree.newDirectory", { directory: { rootId: selection.rootId, path: selection.path } }) },
           { label: "Rename...", onClick: run("workspace.tree.rename", { selection }) },
           { label: "Delete", danger: true, onClick: run("workspace.tree.delete", { selection }) },
@@ -3921,6 +3926,7 @@ export function CodeWorkspaceTab({
       if (selection.kind === "root") {
         openTreeContextMenu(event, [
           { label: "New File...", onClick: run("workspace.tree.newFile", { directory: { rootId: selection.rootId, path: "" } }) },
+          { label: "New Java Class...", onClick: run("workspace.tree.newJavaClass", { directory: { rootId: selection.rootId, path: "" } }) },
           { label: "New Directory...", onClick: run("workspace.tree.newDirectory", { directory: { rootId: selection.rootId, path: "" } }) },
           { label: "Rename Root...", onClick: run("workspace.tree.rename", { selection }) },
           { separator: true, label: "" },
@@ -9006,6 +9012,124 @@ export function CodeWorkspaceTab({
     };
   }, [applyLspWorkspaceEdit, setStatusMessage, workspaceInstanceId]);
 
+  const [newJavaClassDialogState, setNewJavaClassDialogState] = useState<{
+    open: boolean;
+    targetDirectory: string;
+    root: CodeWorkspaceRootInfo;
+    dirRelPath: string;
+    sourceRoots: readonly string[];
+    existingFiles: readonly string[];
+    projectFactsStatus?: string;
+  } | null>(null);
+
+  const [fileTemplateSettingsOpen, setFileTemplateSettingsOpen] = useState(false);
+
+  const openNewJavaClassDialog = useCallback((target?: { rootId: string; path: string }) => {
+    const directory = target ?? selectedRootDirectory;
+    if (!directory) {
+      setStatusMessage("Add a folder before creating Java classes");
+      return;
+    }
+    const root = findRoot(directory.rootId);
+    if (!root) return;
+
+    const targetDir = directory.path ? `${root.path}/${directory.path}` : root.path;
+    const facts = useProjectFactsStore.getState().getWorkspaceFacts(root.path);
+    const projectFactsStatus = facts?.status;
+    const isFactsReady = facts?.status === "ready";
+    const sourceRoots = isFactsReady && facts?.structure
+      ? facts.structure.modules.flatMap((m) =>
+          m.sourceSets
+            .filter((s) => s.kind === "main" || s.kind === "test")
+            .flatMap((s) => s.roots),
+        )
+      : [];
+
+    const dirKey = `root:${root.id}:${directory.path}`;
+    const dirEntries = directories[dirKey]?.entries ?? [];
+    const existingFiles = dirEntries.map((f) => `${targetDir}/${f.name}`);
+
+    setNewJavaClassDialogState({
+      open: true,
+      targetDirectory: targetDir,
+      root,
+      dirRelPath: directory.path,
+      sourceRoots,
+      existingFiles,
+      projectFactsStatus,
+    });
+  }, [directories, findRoot, selectedRootDirectory, setStatusMessage]);
+
+  const createJavaClassFromPlan = useCallback(async (
+    plan: PlanTemplateCreationResult & { valid: true },
+  ) => {
+    if (!newJavaClassDialogState) return;
+    const { root, dirRelPath } = newJavaClassDialogState;
+
+    const relPath = relativePathWithinRoot(root.path, plan.targetPath) ?? `${plan.className}.java`;
+    const edit: LspWorkspaceEdit = {
+      operations: [
+        {
+          kind: "create",
+          uri: "",
+          path: plan.targetPath,
+          overwrite: false,
+          ignoreIfExists: false,
+          annotationId: null,
+        },
+        {
+          kind: "text",
+          document: {
+            uri: "",
+            path: plan.targetPath,
+            version: null,
+            edits: [
+              {
+                range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+                newText: plan.content,
+              },
+            ],
+          },
+        },
+      ],
+      documentEdits: [
+        {
+          uri: "",
+          path: plan.targetPath,
+          version: null,
+          edits: [
+            {
+              range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+              newText: plan.content,
+            },
+          ],
+        },
+      ],
+    };
+
+    try {
+      await applyLspWorkspaceEdit(edit, {
+        label: `Create ${plan.kind} ${plan.className}`,
+      });
+      await loadDir(root.id, dirRelPath);
+      const ref: CodeWorkspaceFileRef = { kind: "root", rootId: root.id, path: relPath };
+      setSelected({ kind: "file", ref });
+      await openFile(ref);
+      notifyWorkspacePathGitChanged(root.id, relPath);
+      setStatusMessage(`Created ${plan.className}.java in ${plan.packageName || "(default package)"}`);
+    } catch (err) {
+      setStatusMessage(errorMessage(err));
+    }
+  }, [
+    applyLspWorkspaceEdit,
+    loadDir,
+    newJavaClassDialogState,
+    notifyWorkspacePathGitChanged,
+    openFile,
+    setSelected,
+    setStatusMessage,
+  ]);
+
   const requestCodeActions = useCallback(async (
     file: OpenFileState,
     range: LspRange,
@@ -10797,6 +10921,16 @@ export function CodeWorkspaceTab({
       },
     },
     {
+      id: "workspace.fileTemplateSettings",
+      title: "File and Code Template Settings",
+      category: "Preferences",
+      keywords: ["file templates", "code templates", "java template", "class template"],
+      run: () => {
+        setFileTemplateSettingsOpen(true);
+        return true;
+      },
+    },
+    {
       id: "workspace.goToFile",
       title: "Go to File",
       category: "Navigation",
@@ -12244,6 +12378,16 @@ export function CodeWorkspaceTab({
       run: (context) => {
         const payload = context.payload as WorkspaceTreeCommandPayload | undefined;
         void createDir(payload?.directory);
+      },
+    },
+    {
+      id: "workspace.tree.newJavaClass",
+      title: "New Java Class...",
+      category: "File",
+      when: (context) => context.focus !== "tree" || !!selectedRootDirectory,
+      run: (context) => {
+        const payload = context.payload as WorkspaceTreeCommandPayload | undefined;
+        openNewJavaClassDialog(payload?.directory);
       },
     },
     {
@@ -17981,6 +18125,22 @@ export function CodeWorkspaceTab({
           onClose={() => setDapGuideOpen(false)}
         />
       )}
+      {newJavaClassDialogState && (
+        <NewJavaClassDialog
+          open={newJavaClassDialogState.open}
+          targetDirectory={newJavaClassDialogState.targetDirectory}
+          sourceRoots={newJavaClassDialogState.sourceRoots}
+          existingFiles={newJavaClassDialogState.existingFiles}
+          projectFactsStatus={newJavaClassDialogState.projectFactsStatus}
+          onClose={() => setNewJavaClassDialogState(null)}
+          onCreate={createJavaClassFromPlan}
+          onOpenSettings={() => setFileTemplateSettingsOpen(true)}
+        />
+      )}
+      <FileTemplateSettingsDialog
+        open={fileTemplateSettingsOpen}
+        onClose={() => setFileTemplateSettingsOpen(false)}
+      />
       </div>
     </WorkspaceClipboardSessionContext.Provider>
   );

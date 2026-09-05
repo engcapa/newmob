@@ -93,12 +93,51 @@ export function derivePackageName(
   return "";
 }
 
+export const ALLOWED_TEMPLATE_VARIABLES = [
+  "NAME",
+  "PACKAGE_NAME",
+  "DATE",
+  "TIME",
+  "YEAR",
+  "USER",
+  "PROJECT_NAME",
+] as const;
+
+export type AllowedTemplateVariable = (typeof ALLOWED_TEMPLATE_VARIABLES)[number];
+const ALLOWED_VARIABLE_SET = new Set<string>(ALLOWED_TEMPLATE_VARIABLES);
+
+/**
+ * Validates template variables against the allowed list and safe character rules.
+ */
+export function validateTemplateVariables(
+  customVariables?: Record<string, string>,
+): { valid: boolean; error?: string } {
+  if (!customVariables) return { valid: true };
+  for (const [key, value] of Object.entries(customVariables)) {
+    if (!ALLOWED_VARIABLE_SET.has(key)) {
+      return {
+        valid: false,
+        error: `Untrusted template variable '\${${key}}' is not allowed`,
+      };
+    }
+    if (/[\0\x08\x1b]/.test(value)) {
+      return {
+        valid: false,
+        error: `Template variable '\${${key}}' contains unsafe control characters`,
+      };
+    }
+  }
+  return { valid: true };
+}
+
 export interface EvaluateTemplateVariables {
   name: string;
   packageName: string;
   date?: string;
+  time?: string;
   year?: string;
   user?: string;
+  projectName?: string;
   customVariables?: Record<string, string>;
 }
 
@@ -109,13 +148,20 @@ export function renderJavaTemplate(
   templateText: string,
   vars: EvaluateTemplateVariables,
 ): string {
+  const varCheck = validateTemplateVariables(vars.customVariables);
+  if (!varCheck.valid) {
+    throw new Error(varCheck.error);
+  }
+
   const now = new Date();
   const safeVars: Record<string, string> = {
     NAME: vars.name,
     PACKAGE_NAME: vars.packageName,
     DATE: vars.date ?? now.toISOString().split("T")[0],
+    TIME: vars.time ?? now.toTimeString().split(" ")[0] ?? "00:00:00",
     YEAR: vars.year ?? String(now.getFullYear()),
     USER: vars.user ?? "developer",
+    PROJECT_NAME: vars.projectName ?? "Taomni",
     ...(vars.customVariables ?? {}),
   };
 
@@ -143,11 +189,14 @@ export interface PlanTemplateCreationParams {
   existingFiles: readonly string[];
   customTemplate?: string;
   customVariables?: Record<string, string>;
+  projectFactsStatus?: string;
+  requireReadyFacts?: boolean;
 }
 
 export type PlanTemplateCreationResult =
   | {
       valid: true;
+      kind: JavaTemplateKind;
       targetPath: string;
       className: string;
       packageName: string;
@@ -160,7 +209,8 @@ export type PlanTemplateCreationResult =
     };
 
 /**
- * Computes a complete Java file creation plan with conflict check and validation.
+ * Computes a complete Java file creation plan with conflict check, variable allowlisting,
+ * and project-facts status validation.
  */
 export function planJavaTemplateCreation(
   params: PlanTemplateCreationParams,
@@ -168,6 +218,22 @@ export function planJavaTemplateCreation(
   const idCheck = validateJavaIdentifier(params.name);
   if (!idCheck.valid) {
     return { valid: false, error: idCheck.error || "Invalid class name" };
+  }
+
+  // Contract: only ready source-root/package facts
+  if (params.requireReadyFacts && params.projectFactsStatus && params.projectFactsStatus !== "ready") {
+    return {
+      valid: false,
+      error: `Cannot plan file creation: project facts status is '${params.projectFactsStatus}' (ready status required)`,
+    };
+  }
+
+  // Untrusted variable check
+  if (params.customVariables) {
+    const varCheck = validateTemplateVariables(params.customVariables);
+    if (!varCheck.valid) {
+      return { valid: false, error: varCheck.error ?? "Untrusted template variable" };
+    }
   }
 
   const className = params.name.trim();
@@ -184,16 +250,29 @@ export function planJavaTemplateCreation(
     };
   }
 
-  const packageName = derivePackageName(targetDir, params.sourceRoots);
+  // Only derive package from source roots if facts are ready (or not explicitly unready)
+  const isFactsReady = !params.projectFactsStatus || params.projectFactsStatus === "ready";
+  const effectiveSourceRoots = isFactsReady ? params.sourceRoots : [];
+  const packageName = derivePackageName(targetDir, effectiveSourceRoots);
+
   const template = params.customTemplate ?? DEFAULT_JAVA_TEMPLATES[params.kind];
-  const content = renderJavaTemplate(template, {
-    name: className,
-    packageName,
-    customVariables: params.customVariables,
-  });
+  let content: string;
+  try {
+    content = renderJavaTemplate(template, {
+      name: className,
+      packageName,
+      customVariables: params.customVariables,
+    });
+  } catch (err) {
+    return {
+      valid: false,
+      error: err instanceof Error ? err.message : "Failed to render template",
+    };
+  }
 
   return {
     valid: true,
+    kind: params.kind,
     targetPath,
     className,
     packageName,
