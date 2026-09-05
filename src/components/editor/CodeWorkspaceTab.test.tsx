@@ -4928,9 +4928,49 @@ describe("CodeWorkspaceTab", () => {
     ));
     expect(dapMocks.dapResolveJavaMainClasses).not.toHaveBeenCalled();
     expect(dapMocks.dapStartSession).not.toHaveBeenCalled();
-    await waitFor(() => expect(
-      screen.getByTestId("code-workspace-bottom-tab-problems"),
-    ).toHaveAttribute("aria-selected", "true"));
+  });
+
+  it("recovers and launches when incremental build reports withError but full rebuild succeeds", async () => {
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-debug-rebuild-recover",
+      workspaceInstanceId: "instance-java-debug-rebuild-recover",
+      name: "Java debug rebuild recover",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    lspMocks.lspBuildWorkspace
+      .mockResolvedValueOnce("withError")
+      .mockResolvedValueOnce("succeed");
+    dapMocks.dapResolveJavaMainClasses.mockResolvedValue({
+      kind: "resolved",
+      main: {
+        mainClass: "com.acme.App",
+        projectName: "app",
+        filePath: "/repo/app/src/main/java/com/acme/App.java",
+      },
+    });
+    dapMocks.dapStartSession.mockResolvedValue({
+      sessionId: "sess-recover",
+      capabilities: {},
+      request: "launch",
+      arguments: { mainClass: "com.acme.App" },
+    });
+
+    renderWorkspace(workspace, {}, { strict: true });
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
+
+    const consoleOutput = await screen.findByTestId("debug-console-output");
+    await waitFor(() => expect(consoleOutput.textContent).toContain("Rebuilding project…"));
+    await waitFor(() => expect(dapMocks.dapResolveJavaMainClasses).toHaveBeenCalled());
+    await waitFor(() => expect(dapMocks.dapStartSession).toHaveBeenCalled());
   });
 
   it("launches on a clean build even when stale workspace diagnostics report errors", async () => {

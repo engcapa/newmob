@@ -15371,7 +15371,13 @@ export function CodeWorkspaceTab({
       ?? lspDescriptorForPath(root.path, "__taomni_debug_build__.java");
     debug.reportStartupProgress("Building project…");
     try {
-      const status = await lspBuildWorkspace(descriptor, false);
+      let status = await lspBuildWorkspace(descriptor, false);
+      if (status === "withError") {
+        // An incremental build can report stale compiler errors if files or dependencies
+        // changed outside jdtls. Retry once with a clean rebuild before failing.
+        debug.reportStartupProgress("Rebuilding project…");
+        status = await lspBuildWorkspace(descriptor, true).catch(() => "withError" as const);
+      }
       if (status === "failed") {
         // The build itself broke (infrastructure, not a compiler verdict). Say
         // so instead of launching stale bytecode.
