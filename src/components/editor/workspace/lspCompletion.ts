@@ -2203,12 +2203,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     return {
       from,
       options: mapped,
-      // Incomplete lists should re-query on further typing (no sticky validFor).
-      // Complete lists stay open while the user continues the identifier.
-      // Always filter client-side for camelCase/prefix quality on the cap —
-      // incomplete lists still re-query because validFor is unset.
+      // Every LSP item (including resolve data and edit ranges) belongs to
+      // token.documentRevision. Re-query after typing even for complete lists;
+      // reusing them via validFor leaves visible options that cannot be accepted.
       filter: true,
-      validFor: result.isIncomplete ? undefined : /^[\w$@]*$/,
     };
   };
 }

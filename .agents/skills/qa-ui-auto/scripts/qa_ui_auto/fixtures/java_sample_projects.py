@@ -42,4 +42,5 @@ def setup(ctx: Any) -> None:
                 f"java sample project missing: {root / marker} not found; "
                 "the in-repo __fixtures__/jdtls/projects tree must be checked out"
             )
-        values[key] = str(root)
+        # These paths are interpolated into JSON recents and CSS selectors.
+        values[key] = root.as_posix()

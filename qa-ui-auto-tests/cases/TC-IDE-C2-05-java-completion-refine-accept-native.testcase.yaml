@@ -1,0 +1,83 @@
+id: TC-IDE-C2-05-java-completion-refine-accept-native
+title: "Java completion accepts refined candidates by Tab and mouse"
+description: |
+  Opens the real JDT LS sample and edits a member prefix after its automatic
+  completion list appears. Tab and a click on the second candidate must insert
+  the selected method, and one undo must restore the refined prefix. The
+  documentation panel must not cover the candidate list.
+covers: [F25.5]
+tags: [code-workspace, completion, native-gate, p1]
+modes: [native]
+fixtures: [reset_db, java_sample_projects]
+timeout_sec: 600
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-completion-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-completion-refine","name":"maven-single","roots":[{"id":"maven-single","name":"maven-single","path":"${fixture.maven_single_root}","kind":"folder"}],"looseFiles":[],"lastActiveFile":{"kind":"root","rootId":"maven-single","path":"src/main/java/com/example/single/App.java"},"lastOpenedAt":1788566400000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.maven_single_root}"]'
+  - wait_for: '[data-testid="code-workspace-editor"] .cm-content'
+  - assert_text:
+      selector: '[data-testid="code-workspace-lsp-status-pill"]'
+      contains: "Java"
+      timeout_sec: 60
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  # Replace the existing println line in main, leaving the disk fixture intact.
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Control+Home", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "Home", "Shift+End"]
+  - type: "        System.out.p"
+  - wait_for:
+      selector: '.cm-tooltip-autocomplete li.cm-completion-type-method'
+      timeout_sec: 90
+  - type: "rintln"
+  - wait: 1
+  - assert_text:
+      selector: '.cm-tooltip-autocomplete'
+      contains: "println("
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["ArrowDown", "ArrowUp", "ArrowDown"]
+  - wait: 1
+  - wait_for: '.cm-tooltip-autocomplete .cm-completionInfo'
+  - screenshot: java-completion-selected.png
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Tab"]
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "System.out.println("
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Control+z"]
+  - eval_readonly:
+      expression: 'document.querySelector(".cm-content").innerText.includes("System.out.println\n")'
+      expect_truthy: true
+  - click: '[data-testid="code-workspace-editor"] .cm-content'
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Control+Home", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "End"]
+  - press: "Alt+/"
+  - wait_for: '.cm-tooltip-autocomplete li.cm-completion-type-method'
+  - wait: 1
+  - click: '.cm-tooltip-autocomplete li.cm-completion-type-method:nth-child(2)'
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "System.out.println("
+  - native_keys:
+      selector: '[data-testid="code-workspace-editor"] .cm-content'
+      transport: webdriver
+      keys: ["Control+z"]
+  - eval_readonly:
+      expression: 'document.querySelector(".cm-content").innerText.includes("System.out.println\n")'
+      expect_truthy: true
+  - screenshot: java-completion-mouse-undo.png
