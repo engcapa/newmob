@@ -4827,6 +4827,7 @@ describe("CodeWorkspaceTab", () => {
       }),
       false,
     );
+    expect(lspMocks.lspBuildWorkspace).toHaveBeenCalledTimes(1);
     // The panel reports each pre-launch step, so a slow start is never blank.
     const consoleOutput = await screen.findByTestId("debug-console-output");
     expect(consoleOutput.textContent).toContain("Starting debug for App.java");
@@ -4900,8 +4901,7 @@ describe("CodeWorkspaceTab", () => {
   });
 
   it("blocks a Java debug launch when the build compiles with errors and opens Problems", async () => {
-    // `withError` is the compiler's own verdict (jdtls BuildWorkspaceStatus):
-    // surface the real error list in project-scope Problems instead of launching.
+    // Persisting errors after a clean rebuild must still block the launch.
     runtimeState.tauri = true;
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
@@ -4928,9 +4928,109 @@ describe("CodeWorkspaceTab", () => {
     ));
     expect(dapMocks.dapResolveJavaMainClasses).not.toHaveBeenCalled();
     expect(dapMocks.dapStartSession).not.toHaveBeenCalled();
+    expect(lspMocks.lspBuildWorkspace).toHaveBeenCalledTimes(2);
+    expect(lspMocks.lspBuildWorkspace).toHaveBeenLastCalledWith(
+      expect.objectContaining({ filePath: "src/main/java/com/acme/App.java" }),
+      true,
+    );
     await waitFor(() => expect(
       screen.getByTestId("code-workspace-bottom-tab-problems"),
     ).toHaveAttribute("aria-selected", "true"));
+  });
+
+  it("recovers a Java debug launch from stale incremental compiler errors", async () => {
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-debug-rebuild",
+      workspaceInstanceId: "instance-java-debug-rebuild",
+      name: "Java debug rebuild",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    let finishRebuild!: (status: "succeed") => void;
+    lspMocks.lspBuildWorkspace
+      .mockResolvedValueOnce("withError")
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRebuild = resolve; }));
+    dapMocks.dapResolveJavaMainClasses.mockResolvedValue({
+      kind: "resolved",
+      main: {
+        mainClass: "com.acme.App",
+        projectName: "app",
+        filePath: "/repo/app/src/main/java/com/acme/App.java",
+      },
+    });
+    dapMocks.dapStartSession.mockResolvedValue({
+      sessionId: "sess-rebuilt",
+      capabilities: {},
+      request: "launch",
+      arguments: { mainClass: "com.acme.App" },
+    });
+
+    renderWorkspace(workspace, {}, { strict: true });
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
+
+    const consoleOutput = await screen.findByTestId("debug-console-output");
+    await waitFor(() => expect(consoleOutput.textContent).toContain(
+      "Rebuilding project to refresh compiler state",
+    ));
+    expect(lspMocks.lspBuildWorkspace.mock.calls.map((call) => call[1])).toEqual([false, true]);
+    expect(lspMocks.lspBuildWorkspace.mock.calls[1][0]).toEqual(
+      lspMocks.lspBuildWorkspace.mock.calls[0][0],
+    );
+    expect(dapMocks.dapResolveJavaMainClasses).not.toHaveBeenCalled();
+    expect(dapMocks.dapStartSession).not.toHaveBeenCalled();
+
+    await act(async () => finishRebuild("succeed"));
+    await waitFor(() => expect(dapMocks.dapStartSession).toHaveBeenCalledWith(
+      "java",
+      expect.objectContaining({ mainClass: "com.acme.App", projectName: "app" }),
+    ));
+    expect(lspMocks.lspBuildWorkspace).toHaveBeenCalledTimes(2);
+    expect(consoleOutput.textContent).not.toContain("Cannot start debug");
+  });
+
+  it.each([
+    ["failed", "Cannot start debug: the project build failed"],
+    ["cancelled", "Cannot start debug: the project build was cancelled"],
+    ["rejected", "Cannot start debug: failed to rebuild project: compiler disconnected"],
+  ])("blocks Java debug when compiler recovery is %s", async (status, message) => {
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: `ws-java-debug-recovery-${status}`,
+      workspaceInstanceId: `instance-java-debug-recovery-${status}`,
+      name: "Java debug recovery failed",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    lspMocks.lspBuildWorkspace.mockResolvedValueOnce("withError");
+    if (status === "rejected") {
+      lspMocks.lspBuildWorkspace.mockRejectedValueOnce(new Error("compiler disconnected"));
+    } else {
+      lspMocks.lspBuildWorkspace.mockResolvedValueOnce(status);
+    }
+
+    renderWorkspace(workspace, {}, { strict: true });
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
+
+    const consoleOutput = await screen.findByTestId("debug-console-output");
+    await waitFor(() => expect(consoleOutput.textContent).toContain(message));
+    expect(lspMocks.lspBuildWorkspace).toHaveBeenCalledTimes(2);
+    expect(dapMocks.dapResolveJavaMainClasses).not.toHaveBeenCalled();
+    expect(dapMocks.dapStartSession).not.toHaveBeenCalled();
   });
 
   it("launches on a clean build even when stale workspace diagnostics report errors", async () => {

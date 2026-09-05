@@ -15324,8 +15324,8 @@ export function CodeWorkspaceTab({
 
   /**
    * Make-before-launch (Phase 3): save every dirty Java / build file in the
-   * project, wait for the jdtls build barrier, then block the launch when the
-   * compiler itself reports errors (`failed` / `withError`) — so the debuggee
+   * project, wait for the jdtls build barrier, and retry stale incremental
+   * errors with one clean build before blocking the launch — so the debuggee
    * never runs stale bytecode and source lines match the loaded classes.
    * Returns true when it is safe to launch. jdtls / build being unavailable is
    * NOT a block here (the DAP path surfaces those), and a clean build launches
@@ -15365,13 +15365,34 @@ export function CodeWorkspaceTab({
     // file), so in a multi-module build a root-level path keys the aggregator
     // and misses the module session the launch itself uses — the build then
     // reports "no language server session is active" and gets skipped.
-    // Incremental (full = false): jdtls autobuilds on save, so a clean rebuild
-    // would add minutes to every debug start for no benefit.
+    // Keep clean launches incremental. JDT can retain unresolved-type markers
+    // after external builds or missed file changes; retry those with a clean
+    // build so an obsolete marker does not permanently block valid sources.
     const descriptor = launchDescriptor
       ?? lspDescriptorForPath(root.path, "__taomni_debug_build__.java");
     debug.reportStartupProgress("Building project…");
     try {
-      const status = await lspBuildWorkspace(descriptor, false);
+      let status = await lspBuildWorkspace(descriptor, false);
+      if (status === "withError") {
+        if (!mountedRef.current) return false;
+        debug.reportStartupProgress("Rebuilding project to refresh compiler state…");
+        try {
+          status = await lspBuildWorkspace(descriptor, true);
+        } catch (err) {
+          // Once compilation reported errors, a failed recovery cannot use the
+          // unavailable-build fallback below: the bytecode is unverified.
+          const message = `Cannot start debug: failed to rebuild project: ${errorMessage(err)}`;
+          setStatusMessage(message);
+          debug.reportStartupFailure(message);
+          return false;
+        }
+      }
+      if (status === "cancelled") {
+        const message = "Cannot start debug: the project build was cancelled";
+        setStatusMessage(message);
+        debug.reportStartupFailure(message);
+        return false;
+      }
       if (status === "failed") {
         // The build itself broke (infrastructure, not a compiler verdict). Say
         // so instead of launching stale bytecode.
