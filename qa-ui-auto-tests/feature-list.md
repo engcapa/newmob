@@ -5562,7 +5562,7 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, WorkspaceTabPolicySettingsDialog, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog, FileEncodingDialog]
+components: [CodeWorkspaceTab, WorkspaceTabPolicySettingsDialog, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog, FileEncodingDialog, AutoImportSettingsDialog, AutoImportCandidateDialog]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
   - src/components/editor/workspace/FileEncodingDialog.tsx
@@ -5580,6 +5580,8 @@ files:
   - src/components/editor/workspace/EditorCompareDialog.tsx
   - src/components/editor/workspace/LocalHistoryDialog.tsx
   - src/components/editor/workspace/editorCompareModel.ts
+  - src/components/editor/workspace/AutoImportSettingsDialog.tsx
+  - src/components/editor/workspace/AutoImportCandidateDialog.tsx
 controls:
   - id: tree-add-folder
     selector: '[data-testid="code-workspace-tree-add-folder"]'
@@ -6086,6 +6088,38 @@ controls:
   - id: local-history-restore
     selector: '[data-testid="code-workspace-local-history-restore"]'
     kind: interactive
+    optional: true
+  - id: auto-import-settings-dialog
+    selector: '[data-testid="auto-import-settings-dialog"]'
+    kind: display
+    optional: true
+  - id: auto-import-close-button
+    selector: '[data-testid="auto-import-close-button"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-on-the-fly-checkbox
+    selector: '[data-testid="auto-import-on-the-fly-checkbox"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-optimize-on-the-fly-checkbox
+    selector: '[data-testid="auto-import-optimize-on-the-fly-checkbox"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-paste-mode-select
+    selector: '[data-testid="auto-import-paste-mode-select"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-save-button
+    selector: '[data-testid="auto-import-save-button"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-reset-button
+    selector: '[data-testid="auto-import-reset-button"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-candidate-dialog
+    selector: '[data-testid="auto-import-candidate-dialog"]'
+    kind: display
     optional: true
 -->
 

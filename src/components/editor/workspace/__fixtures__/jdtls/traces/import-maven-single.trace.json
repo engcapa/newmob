@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "import-maven-single",
+  "generatedAt": "2026-09-05T05:25:51.571Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21,
+        "version": "21.0.4"
+      }
+    },
+    "jdtls": {
+      "home": "/home/zhyhang/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    }
+  },
+  "capabilities": {
+    "codeActionSupported": true,
+    "codeActionKinds": [
+      "quickfix",
+      "refactor",
+      "refactor.extract",
+      "refactor.inline",
+      "refactor.rewrite",
+      "source",
+      "source.organizeImports"
+    ]
+  },
+  "codeActionQuery": {
+    "file": "src/main/java/com/example/single/QuickFixTarget.java",
+    "symbol": "StringUtils",
+    "diagnosticMessage": "StringUtils cannot be resolved",
+    "offeredTitles": [
+      "Import 'StringUtils' (com.sun.tools.javac.util)",
+      "Import 'StringUtils' (org.apache.commons.lang3)",
+      "Add all missing imports",
+      "Create class 'StringUtils'"
+    ]
+  },
+  "parsedCandidates": [
+    {
+      "symbolName": "StringUtils",
+      "fullyQualifiedName": "com.sun.tools.javac.util.StringUtils",
+      "sourcePackage": "com.sun.tools.javac.util",
+      "origin": "provider",
+      "priority": 0
+    },
+    {
+      "symbolName": "StringUtils",
+      "fullyQualifiedName": "org.apache.commons.lang3.StringUtils",
+      "sourcePackage": "org.apache.commons.lang3",
+      "origin": "provider",
+      "priority": 0
+    }
+  ],
+  "policyExecution": {
+    "defaultExcludedPackages": [
+      "com.sun.*",
+      "sun.*",
+      "jdk.internal.*"
+    ],
+    "unambiguousWithExclusion": {
+      "candidate": "org.apache.commons.lang3.StringUtils",
+      "outcome": "auto-apply",
+      "importStatement": "import org.apache.commons.lang3.StringUtils;\n"
+    },
+    "ambiguousWithoutExclusion": {
+      "candidateCount": 2,
+      "outcome": "ambiguous",
+      "requiresPrompt": true
+    },
+    "independenceOfSettings": {
+      "onTheFlyOnly": {
+        "onTheFly": "auto-apply",
+        "paste": "none"
+      },
+      "pasteOnly": {
+        "onTheFly": "none",
+        "paste": "auto-apply"
+      }
+    },
+    "staleGenerationGating": {
+      "staleGenerationOutcome": "none",
+      "reason": "stale-generation",
+      "editsApplied": 0
+    }
+  },
+  "transactionEvidence": {
+    "originalSha256": "f2de5c8ab98b58cf18ff998ebc47d19c127bb6f4290550d2827a40a37552e70a",
+    "appliedSha256": "465ecbe1b5c71a64cca491844476ec9d841d7892add247ecff4de3ad6507c368",
+    "revertedSha256": "f2de5c8ab98b58cf18ff998ebc47d19c127bb6f4290550d2827a40a37552e70a",
+    "revertedRestoresOriginalHash": true
+  },
+  "failures": []
+}

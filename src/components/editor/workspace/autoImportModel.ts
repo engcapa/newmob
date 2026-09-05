@@ -191,13 +191,19 @@ export function parseProviderImportCandidates(
 
   for (const action of actions) {
     const title = action.title.trim();
-    // Match "Import 'Symbol' (package.Symbol)" or "Import 'package.Symbol'"
-    const match1 = title.match(/import\s+['"]?([A-Za-z0-9_]+)['"]?\s*\((([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+))\)/i);
+    // Match "Import 'Symbol' (package.Symbol)" or "Import 'Symbol' (package)"
+    const match1 = title.match(/import\s+['"]?([A-Za-z0-9_]+)['"]?\s*\((([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*))\)/i);
     if (match1) {
       const symbolName = match1[1];
-      const fullyQualifiedName = match1[2];
-      const lastDot = fullyQualifiedName.lastIndexOf(".");
-      const sourcePackage = lastDot !== -1 ? fullyQualifiedName.slice(0, lastDot) : "";
+      const inParens = match1[2];
+      let fullyQualifiedName = inParens;
+      let sourcePackage = "";
+      if (inParens.endsWith("." + symbolName)) {
+        sourcePackage = inParens.slice(0, -symbolName.length - 1);
+      } else {
+        sourcePackage = inParens;
+        fullyQualifiedName = `${inParens}.${symbolName}`;
+      }
       if (!seen.has(fullyQualifiedName)) {
         seen.add(fullyQualifiedName);
         candidates.push({
