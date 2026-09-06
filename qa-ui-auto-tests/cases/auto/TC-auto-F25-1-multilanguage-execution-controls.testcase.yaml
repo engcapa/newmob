@@ -88,6 +88,7 @@ steps:
   - assert_visible: '[data-testid="analysis-data-flow"]'
   - click: '[data-testid="code-workspace-bottom-tab-debug"]'
   - assert_visible: '[data-testid="debug-panel"]'
+  - click: '[data-testid="debug-subtab-breakpoints"]'
   - assert_visible: '[data-testid="debug-function-breakpoints"]'
   - assert_visible: '[data-testid="debug-data-breakpoints"]'
   - fill: { selector: '[data-testid="debug-function-breakpoint-input"]', value: "Service.run" }

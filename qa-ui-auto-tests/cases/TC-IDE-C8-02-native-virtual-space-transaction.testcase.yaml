@@ -11,7 +11,7 @@ description: |
 covers: [F25.5, F25.3]
 tags: [code-workspace, ide-c8, virtual-space, navigation, caret, native-gate, p0]
 modes: [native]
-fixtures: [reset_db, workspace_root]
+fixtures: [linux_x11_required, reset_db, workspace_root]
 timeout_sec: 300
 steps:
   - open: "${cfg.app.base_url}"

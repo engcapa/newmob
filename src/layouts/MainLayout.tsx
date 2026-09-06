@@ -815,7 +815,18 @@ export function MainLayout() {
   // portals into this slot, which lives inside the ControlBar.
   const [tabActionSlot, setTabActionSlot] = useState<HTMLDivElement | null>(null);
   const [workspaceCommandRegistrations, setWorkspaceCommandRegistrations] = useState<Record<string, WorkspaceCommandRegistration>>({});
+  const workspaceCommandRegistrationsRef = useRef<Record<string, WorkspaceCommandRegistration>>({});
   const handleWorkspaceCommandsChange = useCallback((tabId: string, registration: WorkspaceCommandRegistration | null) => {
+    if (registration) {
+      workspaceCommandRegistrationsRef.current = {
+        ...workspaceCommandRegistrationsRef.current,
+        [tabId]: registration,
+      };
+    } else if (tabId in workspaceCommandRegistrationsRef.current) {
+      const next = { ...workspaceCommandRegistrationsRef.current };
+      delete next[tabId];
+      workspaceCommandRegistrationsRef.current = next;
+    }
     setWorkspaceCommandRegistrations((current) => {
       if (registration) return current[tabId] === registration ? current : { ...current, [tabId]: registration };
       if (!(tabId in current)) return current;
@@ -827,12 +838,6 @@ export function MainLayout() {
   const activeWorkspaceCommandRegistration = activeTabId
     ? workspaceCommandRegistrations[activeTabId] ?? null
     : null;
-  // W0: the window-capture shortcut handler reads claims through a ref so the
-  // listener identity stays stable while claims update per render.
-  const activeWorkspaceCommandRegistrationRef = useRef(activeWorkspaceCommandRegistration);
-  useEffect(() => {
-    activeWorkspaceCommandRegistrationRef.current = activeWorkspaceCommandRegistration;
-  }, [activeWorkspaceCommandRegistration]);
   // On macOS we render a native global menu bar instead of the in-app app menu.
   // The native menu lives at the top of the screen, matching standard macOS
   // apps; the in-bar menu button is hidden there.
@@ -3699,7 +3704,13 @@ export function MainLayout() {
       if (key === "t") {
         // W0 §8.20.1 root routing: the active workspace's reopen claim (via
         // its command registration) outranks the shell's new-terminal owner.
-        const registration = activeWorkspaceCommandRegistrationRef.current;
+        // Read the registration map synchronously because the workspace can
+        // publish a newly available claim during the same interaction in
+        // which the user closes the last editor tab.
+        const currentActiveTabId = useAppStore.getState().activeTabId;
+        const registration = currentActiveTabId
+          ? workspaceCommandRegistrationsRef.current[currentActiveTabId] ?? null
+          : null;
         const route = resolveShellShortcutRoute(registration?.shellShortcutClaims ?? []);
         if (route.state === "dispatch") {
           event.preventDefault();

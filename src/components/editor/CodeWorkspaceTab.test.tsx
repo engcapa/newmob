@@ -13,6 +13,7 @@ import {
 import type { CodeWorkspaceTabInfo } from "../../types";
 import type {
   LspCapabilitySummary,
+  LspDocumentHighlight,
   LspDocumentStatus,
   LspServerStatus,
 } from "../../lib/editor/lsp";
@@ -897,6 +898,30 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.click(screen.getByTestId("project-facts-refresh-btn"));
     expect(projectFactsMock.refresh).toHaveBeenCalledTimes(1);
     expect(descriptorDiscoveryMock.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the analysis panel mounted when an imported baseline is invalid", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "",
+      workspaceId: "ws-invalid-baseline",
+      workspaceInstanceId: "instance-invalid-baseline",
+      name: "Invalid Baseline",
+      roots: [],
+      looseFiles: [],
+    };
+    clipboardMocks.readText.mockResolvedValueOnce("not json");
+
+    renderWorkspace(workspace);
+
+    fireEvent.click(screen.getByTestId("code-workspace-bottom-tab-analysis"));
+    expect(await screen.findByTestId("code-workspace-analysis-panel")).toBeVisible();
+    fireEvent.click(screen.getByTestId("analysis-baseline-import"));
+
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toBe(
+      "Inspection baseline is not valid JSON",
+    ));
+    expect(screen.getByTestId("analysis-inspection-suppressions")).toBeVisible();
+    expect(screen.getByTestId("code-workspace-tab")).toBeVisible();
   });
 
   it("keeps command registration stable across unrelated parent rerenders", async () => {
@@ -2582,7 +2607,10 @@ describe("CodeWorkspaceTab", () => {
       '[data-testid="code-workspace-lightbulb"]',
     )).toBeTruthy());
 
-    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(content).toBeTruthy();
+    fireEvent.keyDown(content!, { key: "Enter", altKey: true });
+    await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalledTimes(1));
     const keyboardCandidate = await screen.findByRole("button", { name: "Use shared candidate" });
     const keyboardCandidateId = keyboardCandidate.getAttribute("data-testid");
     expect(keyboardCandidateId).toMatch(/^code-workspace-intention-intention\.provider\./);
@@ -4146,6 +4174,81 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => expect(lspMocks.lspSelectionRanges).toHaveBeenCalled());
   });
 
+  it("does not restore occurrence highlights when a cleared request returns late", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-occurrence-stale-response",
+      workspaceInstanceId: "instance-occurrence-stale-response",
+      name: "Occurrence stale response",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const capabilities = defaultCapabilities({ documentHighlight: true });
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities,
+    });
+    const highlights: LspDocumentHighlight[] = [
+      { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }, kind: 1 },
+      { range: { start: { line: 1, character: 7 }, end: { line: 1, character: 11 } }, kind: 1 },
+      { range: { start: { line: 2, character: 6 }, end: { line: 2, character: 10 } }, kind: 1 },
+    ];
+    const result = { status, highlights };
+    const pending: Array<(
+      value: { status: LspDocumentStatus; highlights: LspDocumentHighlight[] }
+    ) => void> = [];
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main.ts",
+      "item\nsecond item\nthird item",
+    ));
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspChangeDocument.mockResolvedValue(status);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [] });
+    lspMocks.lspDocumentHighlights.mockImplementation(() => new Promise((resolve) => {
+      pending.push(resolve);
+    }));
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(pending.length).toBeGreaterThan(0));
+
+    // Keep the first cursor-driven request unresolved while invoking the
+    // explicit command through the same registered production action.
+    lspMocks.lspDocumentHighlights.mockClear();
+    let executePromise: Promise<unknown> | undefined;
+    act(() => {
+      executePromise = registrationRef.current?.executeAction("workspace.highlightUsagesInFile");
+    });
+    await waitFor(() => expect(pending.length).toBeGreaterThan(1));
+    const manualResolve = pending[pending.length - 1]!;
+    manualResolve(result);
+    await act(async () => {
+      await executePromise;
+    });
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("Occurrence 1 of 3"));
+    expect(document.querySelectorAll(".cm-lsp-usage-text")).toHaveLength(3);
+
+    act(() => {
+      registrationRef.current?.executeAction("workspace.clearHighlightUsages");
+    });
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toBe("Occurrence highlights cleared"));
+    expect(document.querySelectorAll(".cm-lsp-usage-text")).toHaveLength(0);
+
+    for (const resolve of pending) resolve(result);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.querySelectorAll(".cm-lsp-usage-text")).toHaveLength(0);
+  });
+
   it("syncs edits before idle intelligence work and ignores an older semantic-token response", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
@@ -5250,7 +5353,62 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => expect(
       selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-close-tab")
         .editorGroups.primary.openOrder,
+      ).toHaveLength(0));
+  });
+
+  it("publishes the reopen claim before delayed resource cleanup completes", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-close-reopen-race",
+      workspaceInstanceId: "instance-close-reopen-race",
+      name: "Close Reopen Race",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+    const fileKey = "root:app:src/Program.cs";
+    let resolveClose!: (status: LspDocumentStatus) => void;
+    const closePromise = new Promise<LspDocumentStatus>((resolve) => {
+      resolveClose = resolve;
+    });
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/Program.cs", "class Program {}"));
+    lspMocks.lspDetectServers.mockResolvedValue([csharpStatus({ available: true, active: true })]);
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({ available: true, active: true }));
+    lspMocks.lspCloseDocument.mockReturnValueOnce(closePromise);
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/Program.cs");
+    await waitFor(() => expect(lspMocks.lspOpenDocument).toHaveBeenCalledTimes(1));
+
+    fireEvent.keyDown(window, { key: "F4", ctrlKey: true });
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-close-reopen-race")
+        .editorGroups.primary.openOrder,
     ).toHaveLength(0));
+    await waitFor(() => expect(screen.getByTestId("code-workspace-tab"))
+      .toHaveAttribute("data-reopen-stack-count", "1"));
+    expect(registrationRef.current?.shellShortcutClaims).toHaveLength(1);
+    expect(lspMocks.lspCloseDocument).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await registrationRef.current?.executeAction("workspace.reopenClosedTab");
+    });
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-close-reopen-race")
+        .editorGroups.primary.openOrder,
+    ).toContain(fileKey));
+    expect(screen.getByTestId("code-workspace-tab")).toHaveAttribute("data-reopen-stack-count", "0");
+
+    resolveClose(documentStatus({ available: true, active: true }));
+    await waitFor(() => expect(lspMocks.lspOpenDocument).toHaveBeenCalledTimes(2));
+    expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-close-reopen-race",
+    ).openFiles[fileKey]).toBeDefined();
   });
 
   it("opens the selected tree file in a split with Ctrl+Enter", async () => {

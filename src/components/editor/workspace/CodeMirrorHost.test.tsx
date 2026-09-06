@@ -799,6 +799,28 @@ describe("§8.19.8 semantic editing commands", () => {
 describe("§8.21.3 V2-C virtual space and region provenance in CodeMirrorHost", () => {
   afterEach(() => cleanup());
 
+  it("does not move the editor cursor while composition owns navigation keys", () => {
+    const rendered = renderEditor("first\nsecond");
+    const editor = rendered.container.querySelector<HTMLElement>(".cm-editor");
+    const view = EditorView.findFromDOM(editor!);
+    expect(view).not.toBeNull();
+    view!.dispatch({ selection: EditorSelection.cursor(0) });
+    rendered.content.focus();
+    Object.defineProperty(view, "composing", { value: true, configurable: true });
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      code: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefault = vi.spyOn(event, "preventDefault");
+    rendered.content.dispatchEvent(event);
+
+    expect(view!.state.selection.main.head).toBe(0);
+    expect(preventDefault).toHaveBeenCalledOnce();
+  });
+
   it("consumes appearance.virtualSpace policy in production editor", async () => {
     const actionHost = new WorkspaceActionHost({ workspaceId: "ws-test-vspace" });
     const rendered = renderEditor("first line\nsecond", vi.fn(), {

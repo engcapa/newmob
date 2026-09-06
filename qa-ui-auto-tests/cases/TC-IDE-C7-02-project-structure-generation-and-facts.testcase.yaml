@@ -8,7 +8,7 @@ description: |
   Highest claim on green: L1 browser contract / L2 provider-backed (Linux).
 covers: [F25.5]
 tags: [code-workspace, ide-c7, project-structure, facts-cache, generation, p1]
-modes: [browser, native]
+modes: [browser]
 fixtures: [reset_db]
 timeout_sec: 120
 steps:

@@ -375,6 +375,26 @@ vi.mock("../lib/ipc", () => ({
   clearWelcomeRunSnapshot: vi.fn(async () => undefined),
   recordLocalDirectoryUse: vi.fn(async () => ({ changed: true })),
   listenWelcomeDirectoriesChanged: vi.fn(async () => vi.fn()),
+  lanchatGetProfile: vi.fn(async () => ({
+    peerId: "test-peer",
+    displayName: "Test Peer",
+    avatarBase64: null,
+    signature: "",
+    status: "online",
+  })),
+  lanchatListConversations: vi.fn(async () => []),
+  lanchatListGroups: vi.fn(async () => []),
+  lanchatListPeers: vi.fn(async () => []),
+  lanchatGetRetention: vi.fn(async () => null),
+  lanchatGetServiceState: vi.fn(async () => ({ running: false, startOnLaunch: false })),
+  listenLanChatRoster: vi.fn(async () => vi.fn()),
+  listenLanChatMessage: vi.fn(async () => vi.fn()),
+  listenLanChatConversation: vi.fn(async () => vi.fn()),
+  listenLanChatGroup: vi.fn(async () => vi.fn()),
+  listenLanChatTransfer: vi.fn(async () => vi.fn()),
+  listenLanChatFileOffer: vi.fn(async () => vi.fn()),
+  listenLanChatSecurity: vi.fn(async () => vi.fn()),
+  listenLanChatService: vi.fn(async () => vi.fn()),
   listSessionGroups: vi.fn(async () => []),
   listSessions: vi.fn(async () => []),
   listCommonLocalDirectories: vi.fn(async () => []),
@@ -1726,7 +1746,20 @@ function setNavigatorPlatform(platform: string): () => void {
 }
 
 describe("MainLayout run-snapshot collector (V-06)", () => {
+  let originalPlatform: string;
+  let originalUserAgent: string;
+
   beforeEach(() => {
+    originalPlatform = window.navigator.platform;
+    originalUserAgent = window.navigator.userAgent;
+    Object.defineProperty(window.navigator, "platform", {
+      configurable: true,
+      value: "Linux x86_64",
+    });
+    Object.defineProperty(window.navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    });
     window.localStorage.clear();
     useSessionStore.setState({
       sessions: [],
@@ -1750,6 +1783,14 @@ describe("MainLayout run-snapshot collector (V-06)", () => {
 
   afterEach(() => {
     cleanup();
+    Object.defineProperty(window.navigator, "platform", {
+      configurable: true,
+      value: originalPlatform,
+    });
+    Object.defineProperty(window.navigator, "userAgent", {
+      configurable: true,
+      value: originalUserAgent,
+    });
     vi.clearAllMocks();
   });
 

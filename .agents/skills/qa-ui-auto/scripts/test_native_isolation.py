@@ -188,6 +188,7 @@ class NativeIsolationTest(unittest.TestCase):
             self.assertEqual((outside / "taomni.db").read_bytes(), b"production")
             self.assertTrue((Path(env["XDG_DATA_HOME"]) / native_build.QA_APP_ID).is_dir())
 
+    @unittest.skipUnless(os.name == "posix", "X11 activation test")
     def test_x11_activation_uses_exact_qa_executable_despite_product_name(self):
         qa_binary = Path("/test/qa/taomni")
         real_resolve = Path.resolve

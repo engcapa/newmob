@@ -9,20 +9,26 @@ description: |
 covers: [F25.5]
 tags: [code-workspace, ide-c6, rename, provider-fixture, p1]
 modes: [native]
-fixtures: [reset_db, jdtls_required]
+fixtures: [reset_db, java_sample_projects, jdtls_required]
 timeout_sec: 600
 steps:
   - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
   - wait_for: '[data-testid="welcome-panel"]'
-  - click: '[data-testid="side-tab-tools"]'
-  - wait_for: '[data-testid="sidebar-tools-panel"]'
-  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  # Enter the real sample project through persisted recents; WebDriver cannot
+  # operate the native folder picker opened by Add Folder to Workspace.
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-c6-04","name":"maven-single","roots":[{"id":"maven-single","name":"maven-single","path":"${fixture.maven_single_root}","kind":"folder"}],"looseFiles":[],"lastActiveFile":{"kind":"root","rootId":"maven-single","path":"src/main/java/com/example/single/App.java"},"lastOpenedAt":1756100000000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.maven_single_root}"]'
   - wait_for: '[data-testid="code-workspace-tab"]'
-  - click: '[data-testid="code-workspace-tree-add-folder"]'
-  - wait_for: '[data-testid="text-input-dialog"]'
-  - click: '[data-testid="text-input-dialog-confirm"]'
-  - click: '[data-testid="code-workspace-tree-file"]'
   - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - assert_text:
+      selector: '[data-testid="code-workspace-editor"]'
+      contains: "public static void main"
+      timeout_sec: 60
   - click: '[data-testid="code-workspace-editor"] .cm-content'
   - press: Shift+F6
   - screenshot: tc-ide-c6b-preview.png

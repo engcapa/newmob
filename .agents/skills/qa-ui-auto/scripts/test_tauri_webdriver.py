@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import stat
 from tempfile import TemporaryDirectory
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 from unittest.mock import Mock, call, patch
 
 from qa_ui_auto import native_steps
@@ -156,15 +156,28 @@ class NativeSessionPressComboTest(TestCase):
         session.session_id = "session-1"
         session.request = Mock(return_value=None)
 
-        self.assertEqual(session.press_combo("Control+v"), "pressed Control+v")
+        self.assertEqual(session.press_combo("Control+v"), "pressed 1 combo(s)")
 
         payload = session.request.call_args_list[0].args[2]
         actions = payload["actions"][0]["actions"]
         self.assertEqual(actions[0], {"type": "keyDown", "value": "\ue009"})
-        self.assertEqual(actions[-1], {"type": "keyUp", "value": "\ue009"})
+        self.assertEqual(actions[-2], {"type": "keyUp", "value": "\ue009"})
+        self.assertEqual(actions[-1], {"type": "pause", "duration": 30})
         self.assertEqual(session.request.call_args_list[1].args[:2], (
             "DELETE", session.endpoint("/actions"),
         ))
+
+    def test_press_combo_maps_named_space_to_one_webdriver_code_point(self) -> None:
+        session = NativeSession("http://driver.invalid", Path("/tmp/taomni"))
+        session.session_id = "session-1"
+        session.request = Mock(return_value=None)
+
+        session.press_combo("Control+Space")
+
+        actions = session.request.call_args_list[0].args[2]["actions"][0]["actions"]
+        self.assertEqual(actions[0], {"type": "keyDown", "value": "\ue009"})
+        self.assertEqual(actions[1], {"type": "keyDown", "value": "\ue00d"})
+        self.assertEqual(actions[3], {"type": "keyUp", "value": "\ue00d"})
 
 
 class NativeKeysVerbTest(TestCase):
@@ -209,6 +222,7 @@ class NativeKeysVerbTest(TestCase):
     def test_native_keys_accepts_explicit_focus_precondition_during_driver_fault(self) -> None:
         session = Mock()
         session.application = Path("/tmp/taomni")
+        session.execute.return_value = []
 
         with TemporaryDirectory() as directory:
             case_dir = Path(directory)
@@ -232,12 +246,45 @@ class NativeKeysVerbTest(TestCase):
                     },
                 )
 
-            session.execute.assert_not_called()
+            self.assertEqual(session.execute.call_count, 2)
+            self.assertFalse(any(
+                "document.querySelector" in call_args.args[0]
+                for call_args in session.execute.call_args_list
+            ))
             inject.assert_called_once_with(["Control+v"])
             artifact = json.loads(
                 (case_dir / "native-key-observation.json").read_text(encoding="utf-8")
             )
             self.assertEqual(artifact["focus_verification"], "testcase precondition")
+
+    def test_windows_native_keys_defaults_to_packaged_webview2_actions(self) -> None:
+        session = Mock()
+        session.application = Path(r"C:\qa\taomni.exe")
+        session.execute.side_effect = [True, None, []]
+
+        with TemporaryDirectory() as directory:
+            case_dir = Path(directory)
+            ctx = native_steps.NativeStepContext(session, case_dir, {})
+            with (
+                patch.object(native_steps.platform, "system", return_value="Windows"),
+                patch.object(native_steps.time, "sleep"),
+            ):
+                result = native_steps.VERBS["native_keys"](
+                    ctx,
+                    {"selector": ".cm-content", "keys": ["Control+z"]},
+                )
+
+            self.assertEqual(result, "injected 1 WebDriver keys into focused native control")
+            session.press_combos.assert_called_once_with(["Control+z"])
+            artifact = json.loads(
+                (case_dir / "native-key-observation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                artifact["transport"],
+                "W3C WebDriver key actions -> packaged WebView2",
+            )
+            self.assertIsNone(artifact["active_window"])
+
 
 
 class NativeClickVerbTest(TestCase):
@@ -290,6 +337,49 @@ class NativeClickVerbTest(TestCase):
             )
             self.assertEqual(artifact["postcondition"]["checked"], True)
             self.assertNotIn("text", artifact)
+
+    def test_windows_native_click_uses_packaged_webview2_actions(self) -> None:
+        session = Mock()
+        session.application = Path(r"C:\qa\taomni.exe")
+        session.execute.side_effect = [
+            {
+                "x": 100,
+                "y": 50,
+                "width": 20,
+                "height": 10,
+                "innerWidth": 600,
+                "innerHeight": 400,
+                "disabled": False,
+            },
+            {"activeTestId": "search-query", "checked": None},
+        ]
+        session.pointer_click.return_value = {"x": 110, "y": 55}
+
+        with TemporaryDirectory() as directory:
+            case_dir = Path(directory)
+            ctx = native_steps.NativeStepContext(session, case_dir, {})
+            with (
+                patch.object(native_steps.platform, "system", return_value="Windows"),
+                patch.object(native_steps.time, "sleep"),
+            ):
+                result = native_steps.VERBS["native_click"](
+                    ctx,
+                    {"selector": '[aria-label="Search query"]'},
+                )
+
+            self.assertEqual(
+                result,
+                'injected Windows WebView2 pointer click into [aria-label="Search query"]',
+            )
+            session.pointer_click.assert_called_once_with('[aria-label="Search query"]')
+            artifact = json.loads(
+                (case_dir / "native-pointer-observation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                artifact["transport"],
+                "W3C pointer actions -> packaged WebView2 session",
+            )
+            self.assertIsNone(artifact["active_window"])
 
 
 class NativePointerDragVerbTest(TestCase):
@@ -350,6 +440,7 @@ class NativePointerDragVerbTest(TestCase):
 
 
 class NativeFilesystemFaultTest(TestCase):
+    @skipUnless(os.name == "posix", "POSIX chmod fault injection test")
     def test_native_set_writable_is_report_scoped_and_records_modes(self) -> None:
         with TemporaryDirectory() as directory:
             report_root = Path(directory)
@@ -386,6 +477,42 @@ class NativeFilesystemFaultTest(TestCase):
                 [row["ownerWritable"] for row in observations],
                 [False, False, True],
             )
+
+    @skipUnless(os.name == "nt", "Windows ACL fault injection test")
+    def test_windows_set_writable_uses_a_report_scoped_deny_ace(self) -> None:
+        with TemporaryDirectory() as directory:
+            report_root = Path(directory)
+            case_dir = report_root / "TC-NATIVE"
+            case_dir.mkdir()
+            target = report_root / "native-workspaces" / "fixture"
+            target.mkdir(parents=True)
+            ctx = native_steps.NativeStepContext(Mock(), case_dir, {})
+            try:
+                with patch.object(native_steps.platform, "system", return_value="Windows"):
+                    blocked = native_steps.VERBS["native_set_writable"](
+                        ctx,
+                        {"path": str(target), "writable": False},
+                    )
+                    self.assertIn("writable=False", blocked)
+                    self.assertEqual(ctx._windows_denied_paths, {target.resolve()})
+
+                    restored = native_steps.VERBS["native_set_writable"](
+                        ctx,
+                        {"path": str(target), "writable": True},
+                    )
+                    self.assertIn("writable=True", restored)
+                ctx.restore_host_permissions()
+            finally:
+                ctx.restore_host_permissions()
+
+            observations = json.loads(
+                (case_dir / "native-permission-observations.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [row["ownerWritable"] for row in observations],
+                [False, True],
+            )
+            self.assertTrue(all(row["transport"] == "Windows icacls ACL" for row in observations))
 
     def test_assert_file_sha256_reads_real_host_bytes(self) -> None:
         with TemporaryDirectory() as directory:

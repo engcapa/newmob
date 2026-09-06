@@ -32,6 +32,7 @@ import os
 import platform
 import re
 import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -51,6 +52,7 @@ class NativeStepContext:
         self.case_dir = case_dir
         self.cfg = cfg
         self._permission_restores: dict[Path, int] = {}
+        self._windows_denied_paths: set[Path] = set()
         # External X11 CLIPBOARD owner started by native_clipboard_owner, plus
         # the host selection value captured before the case touched it.
         self._clipboard_owner: subprocess.Popen[str] | None = None
@@ -69,10 +71,15 @@ class NativeStepContext:
         """
         for path, mode in reversed(list(self._permission_restores.items())):
             try:
-                path.chmod(mode)
-            except OSError:
+                if platform.system() == "Windows":
+                    if path in self._windows_denied_paths:
+                        _set_windows_directory_writable(path, True)
+                else:
+                    path.chmod(mode)
+            except (OSError, StepError):
                 pass
         self._permission_restores.clear()
+        self._windows_denied_paths.clear()
         self._release_clipboard_owner()
         self._restore_host_clipboard()
 
@@ -502,15 +509,89 @@ def _assert_file_sha256(ctx: NativeStepContext, args: Any) -> str:
     )
 
 
+def _windows_account() -> str:
+    domain = os.environ.get("USERDOMAIN")
+    username = os.environ.get("USERNAME")
+    if domain and username:
+        return f"{domain}\\{username}"
+    result = subprocess.run(
+        ["whoami"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    account = result.stdout.strip()
+    if result.returncode != 0 or not account:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise StepError(f"native_set_writable: cannot resolve Windows account: {detail}")
+    return account
+
+
+def _run_icacls(arguments: list[str]) -> str:
+    executable = shutil.which("icacls")
+    if not executable:
+        raise StepError("native_set_writable: icacls is required for Windows ACL fault injection")
+    result = subprocess.run(
+        [executable, *arguments],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    if result.returncode != 0:
+        raise StepError(
+            f"native_set_writable: icacls {' '.join(arguments)} failed: "
+            f"{output or f'exit {result.returncode}'}"
+        )
+    return output
+
+
+def _set_windows_directory_writable(path: Path, writable: bool) -> None:
+    """Add/remove only this runner user's create/write/delete deny ACE."""
+    account = _windows_account()
+    if writable:
+        listing = _run_icacls([str(path), "/remove:d", account])
+        if "(DENY)(WD,AD,DC)" in listing.upper():
+            raise StepError(
+                f"native_set_writable: Windows write-deny ACE remains on {path}"
+            )
+        return
+    # Generic W also denies read access on Windows. The save path only needs
+    # to be unable to create/write/delete its temporary replacement; keeping
+    # read access lets the native assertion verify the unchanged old bytes.
+    _run_icacls([str(path), "/deny", f"{account}:(OI)(CI)(WD,AD,DC)"])
+    listing = _run_icacls([str(path)])
+    if "(DENY)(WD,AD,DC)" not in listing.upper():
+        raise StepError(
+            f"native_set_writable: Windows write-deny ACE was not observed on {path}"
+        )
+
+
 def _native_set_writable(ctx: NativeStepContext, args: Any) -> str:
-    """Toggle owner-write only inside this run's retained report directory."""
-    if platform.system() != "Linux":
-        raise StepError("native_set_writable: requires Linux permission semantics")
+    """Toggle write access only inside this run's retained report directory."""
+    system = platform.system()
+    if system not in {"Linux", "Windows"}:
+        raise StepError("native_set_writable: requires Linux or Windows permission semantics")
     if not isinstance(args, dict) or not {"path", "writable"} <= set(args):
         raise StepError("native_set_writable: expected {path, writable}")
     requested = Path(str(args["path"])).expanduser()
     try:
         target = requested.resolve(strict=True)
+    except PermissionError as exc:
+        # A denied fixture directory cannot be canonicalized again on
+        # Windows. Reuse the exact canonical path authorized by the first
+        # toggle; never relax the report-root check for an unknown path.
+        candidate = requested.absolute()
+        target = next(
+            (known for known in ctx._permission_restores if known == candidate),
+            None,
+        )
+        if target is None:
+            raise StepError(f"native_set_writable: cannot resolve {requested}: {exc}") from exc
     except OSError as exc:
         raise StepError(f"native_set_writable: cannot resolve {requested}: {exc}") from exc
     report_root = ctx.case_dir.parent.resolve()
@@ -519,15 +600,25 @@ def _native_set_writable(ctx: NativeStepContext, args: Any) -> str:
             f"native_set_writable: target must stay inside report root {report_root}"
         )
     writable = bool(args["writable"])
-    before = stat.S_IMODE(target.stat().st_mode)
+    before = ctx._permission_restores.get(target)
+    if before is None:
+        before = stat.S_IMODE(target.stat().st_mode)
     ctx._permission_restores.setdefault(target, before)
-    after = before | stat.S_IWUSR if writable else before & ~stat.S_IWUSR
-    target.chmod(after)
-    observed = stat.S_IMODE(target.stat().st_mode)
-    if bool(observed & stat.S_IWUSR) != writable:
-        raise StepError(
-            f"native_set_writable: owner-write postcondition failed for {target}"
-        )
+    if system == "Windows":
+        _set_windows_directory_writable(target, writable)
+        if writable:
+            ctx._windows_denied_paths.discard(target)
+        else:
+            ctx._windows_denied_paths.add(target)
+        observed = stat.S_IMODE(target.stat().st_mode)
+    else:
+        after = before | stat.S_IWUSR if writable else before & ~stat.S_IWUSR
+        target.chmod(after)
+        observed = stat.S_IMODE(target.stat().st_mode)
+        if bool(observed & stat.S_IWUSR) != writable:
+            raise StepError(
+                f"native_set_writable: owner-write postcondition failed for {target}"
+            )
 
     artifact = ctx.case_dir / "native-permission-observations.json"
     observations: list[dict[str, Any]] = []
@@ -544,6 +635,7 @@ def _native_set_writable(ctx: NativeStepContext, args: Any) -> str:
         "ownerWritable": writable,
         "beforeMode": f"{before:04o}",
         "afterMode": f"{observed:04o}",
+        "transport": "Windows icacls ACL" if system == "Windows" else "POSIX chmod",
         "verifiedAtUnixMs": int(time.time() * 1000),
     })
     artifact.write_text(json.dumps(observations, indent=2, sort_keys=True), encoding="utf-8")
@@ -1261,7 +1353,12 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
         raise StepError("native_keys: expected {selector, keys}")
     selector = args.get("selector")
     keys = args.get("keys")
-    transport = str(args.get("transport", "x11"))
+    requested_transport = args.get("transport")
+    transport = str(
+        requested_transport
+        if requested_transport is not None
+        else ("x11" if platform.system() == "Linux" else "webdriver")
+    )
     if not isinstance(selector, str) or not selector:
         raise StepError("native_keys: selector must be a non-empty string")
     if not isinstance(keys, list) or not keys or not all(isinstance(key, str) for key in keys):
@@ -1305,6 +1402,11 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
         "window.removeEventListener('keyup',window.__QA_NATIVE_KEY_LISTENER__,true);"
         "return events;"
     )
+    webdriver_transport = (
+        "W3C WebDriver key actions -> packaged WebView2"
+        if platform.system() == "Windows"
+        else "W3C WebDriver key actions -> GTK/WebKitGTK"
+    )
     artifact = {
         "platform": platform.platform(),
         "display": os.environ.get("DISPLAY"),
@@ -1315,7 +1417,7 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
         "keys": keys,
         "observed_events": observed_events,
         "transport": (
-            "W3C WebDriver key actions -> GTK/WebKitGTK"
+            webdriver_transport
             if transport == "webdriver"
             else "X11 XTest -> GTK/WebKitGTK"
         ),
@@ -1325,7 +1427,8 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
         json.dumps(artifact, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    return f"injected {len(keys)} {transport} keys into focused native control"
+    transport_label = "X11" if transport == "x11" else "WebDriver"
+    return f"injected {len(keys)} {transport_label} keys into focused native control"
 
 
 @_verb("assert_native_process_delta")
@@ -1340,9 +1443,12 @@ def _do_native_editor_performance(ctx: NativeStepContext, args: Any) -> str:
 
 @_verb("native_click")
 def _do_native_click(ctx: NativeStepContext, args: Any) -> str:
-    """Click a visible control through X11 in the exact test application."""
-    if platform.system() != "Linux" or not os.environ.get("DISPLAY"):
+    """Click a visible control through the packaged native WebView."""
+    system = platform.system()
+    if system == "Linux" and not os.environ.get("DISPLAY"):
         raise StepError("native_click: requires a Linux X11 display")
+    if system not in {"Linux", "Windows"}:
+        raise StepError("native_click: requires Linux X11 or Windows WebView2")
     if not isinstance(args, dict) or not isinstance(args.get("selector"), str):
         raise StepError("native_click: expected {selector}")
     selector = args["selector"]
@@ -1364,7 +1470,10 @@ def _do_native_click(ctx: NativeStepContext, args: Any) -> str:
     if geometry["width"] <= 0 or geometry["height"] <= 0:
         raise StepError(f"native_click: target has no visible area: {selector}")
 
-    window_id, window_identity = _activate_x11_application(ctx.session.application)
+    window_id = None
+    window_identity = None
+    if system == "Linux":
+        window_id, window_identity = _activate_x11_application(ctx.session.application)
     coordinates = ctx.session.pointer_click(selector)
     time.sleep(0.5)
 
@@ -1381,7 +1490,11 @@ def _do_native_click(ctx: NativeStepContext, args: Any) -> str:
         "selector": selector,
         "css_geometry": geometry,
         "viewport_coordinates": coordinates,
-        "transport": "W3C pointer actions -> packaged WebKitGTK session",
+        "transport": (
+            "W3C pointer actions -> packaged WebKitGTK session"
+            if system == "Linux"
+            else "W3C pointer actions -> packaged WebView2 session"
+        ),
         "result": "pointer-click-injected; testcase DOM postcondition is authoritative",
         "postcondition": postcondition,
     }
@@ -1389,7 +1502,7 @@ def _do_native_click(ctx: NativeStepContext, args: Any) -> str:
         json.dumps(artifact, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    return f"injected X11 pointer click into {selector}"
+    return f"injected {('X11' if system == 'Linux' else 'Windows WebView2')} pointer click into {selector}"
 
 
 @_verb("native_pointer_drag")

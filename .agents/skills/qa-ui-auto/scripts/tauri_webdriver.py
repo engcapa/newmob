@@ -454,6 +454,7 @@ class NativeSession:
         "Enter": "\ue007",
         "Tab": "\ue004",
         "Escape": "\ue00c",
+        "Space": "\ue00d",
         "Backspace": "\ue003",
         "Delete": "\ue017",
         "ArrowUp": "\ue013",

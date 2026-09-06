@@ -64,6 +64,7 @@
      "ssh_required",
      "sftp_required",
      "jdtls_required",
+     "linux_x11_required",
      "workspace_root",
      "java_sample_projects",
      "java25_projects",
