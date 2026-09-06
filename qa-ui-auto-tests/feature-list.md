@@ -6526,6 +6526,16 @@ controls:
     selector: '[data-testid="git-diff-next"]'
     kind: interactive
     aliases: ['.git-log-view [data-testid="git-diff-next"]']
+  - id: git-log-list-resize-handle
+    selector: '[data-testid="git-log-list-resize-handle"]'
+    kind: interactive
+    optional: true
+    aliases: ['.git-log-view [data-testid="git-log-list-resize-handle"]']
+  - id: git-log-files-resize-handle
+    selector: '[data-testid="git-log-files-resize-handle"]'
+    kind: interactive
+    optional: true
+    aliases: ['.git-log-view [data-testid="git-log-files-resize-handle"]']
 -->
 
 - Git Log、聚合 Workspace Git Log 和 Compare 复用 `DiffViewer` 展示文本差异；Split 模式支持拖动/键盘调整左右正文宽度，并在新视图与差异导航时从行首开始显示。
