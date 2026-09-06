@@ -361,10 +361,6 @@ export function WelcomePanel({
           </div>
         </div>
 
-        {restore ? (
-          <RestoreLastSessionRow restore={restore} translate={t} />
-        ) : null}
-
         <div
           className="grid gap-4 items-stretch"
           style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))" }}
@@ -425,6 +421,9 @@ export function WelcomePanel({
             />
           ) : null}
         </div>
+        {restore ? (
+          <RestoreLastSessionRow restore={restore} translate={t} />
+        ) : null}
 
         <WelcomeHistoryPanel
           translate={t}
@@ -617,7 +616,7 @@ function RestoreLastSessionRow({
   return (
     <div
       data-testid="welcome-restore-row"
-      className="mb-4 flex min-w-0 flex-wrap items-center gap-2 rounded-md border px-3 py-2"
+      className="mt-4 flex min-w-0 flex-wrap items-center gap-2 rounded-md border px-3 py-2"
       style={{ borderColor: "var(--taomni-card-border)", background: "var(--taomni-card-bg)" }}
     >
       <button
