@@ -208,7 +208,11 @@ fn normalize_windows_path_key(text: &str) -> Option<String> {
         (format!(r"\\?\UNC\{}\{}", server, share), tail.unwrap_or(""))
     } else if let Some(rest) = text.strip_prefix(r"\\?\") {
         let bytes = rest.as_bytes();
-        if bytes.len() < 3 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() || (bytes[2] != b'\\' && bytes[2] != b'/') {
+        if bytes.len() < 3
+            || bytes[1] != b':'
+            || !bytes[0].is_ascii_alphabetic()
+            || (bytes[2] != b'\\' && bytes[2] != b'/')
+        {
             return None;
         }
         let drive = (bytes[0] as char).to_ascii_uppercase();
@@ -224,7 +228,11 @@ fn normalize_windows_path_key(text: &str) -> Option<String> {
         (format!(r"\\{}\{}", server, share), tail.unwrap_or(""))
     } else {
         let bytes = text.as_bytes();
-        if bytes.len() < 3 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() || (bytes[2] != b'\\' && bytes[2] != b'/') {
+        if bytes.len() < 3
+            || bytes[1] != b':'
+            || !bytes[0].is_ascii_alphabetic()
+            || (bytes[2] != b'\\' && bytes[2] != b'/')
+        {
             return None;
         }
         let drive = (bytes[0] as char).to_ascii_uppercase();
@@ -307,7 +315,10 @@ pub struct IdentityProbe {
     pub compare_candidates: Vec<(String, String)>,
 }
 
-pub fn begin_identity_probe(conn: &Connection, path: &Path) -> Result<Option<IdentityProbe>, String> {
+pub fn begin_identity_probe(
+    conn: &Connection,
+    path: &Path,
+) -> Result<Option<IdentityProbe>, String> {
     let Some(lexical_key) = normalize_path_key(path) else {
         return Ok(None);
     };
@@ -361,7 +372,10 @@ pub fn begin_identity_probe(conn: &Connection, path: &Path) -> Result<Option<Ide
 
 /// Phase B: filesystem checks without any DB lock held. `path` is the
 /// original (openable) path; the lexical key alone may not open on Windows.
-pub fn finish_identity_probe(probe: &IdentityProbe, path: &Path) -> Result<ResolvedIdentity, String> {
+pub fn finish_identity_probe(
+    probe: &IdentityProbe,
+    path: &Path,
+) -> Result<ResolvedIdentity, String> {
     if let Some(id) = probe.alias_direct_hit.clone() {
         return Ok(ResolvedIdentity {
             directory_id: id,
@@ -435,10 +449,7 @@ pub fn record_directory_use(
     // Phase A: probe identity (DB reads only).
     let probe = begin_identity_probe(conn, path)?;
     let Some(probe) = probe else {
-        return Err(format!(
-            "invalid local directory path: {}",
-            path.display()
-        ));
+        return Err(format!("invalid local directory path: {}", path.display()));
     };
 
     // Phase B: filesystem confirmation with no DB lock held.
@@ -529,7 +540,11 @@ pub fn record_directory_use(
         changed = true;
     }
 
-    let revision = if changed { metadata_increment(&tx, METADATA_DIRECTORY_REVISION).map_err(|e| e.to_string())? } else { directory_revision(&tx) };
+    let revision = if changed {
+        metadata_increment(&tx, METADATA_DIRECTORY_REVISION).map_err(|e| e.to_string())?
+    } else {
+        directory_revision(&tx)
+    };
     tx.commit().map_err(|e| e.to_string())?;
     Ok((changed, revision))
 }
@@ -545,7 +560,9 @@ pub fn record_directory_use(
 /// transaction (interruption rolls everything back and retries next run).
 pub fn migrate_legacy_history(conn: &mut Connection) -> rusqlite::Result<()> {
     init_tables(conn)?;
-    if metadata_get(conn, METADATA_MIGRATION_COMPLETE)?.as_deref() == Some(METADATA_MIGRATION_COMPLETE_VALUE) {
+    if metadata_get(conn, METADATA_MIGRATION_COMPLETE)?.as_deref()
+        == Some(METADATA_MIGRATION_COMPLETE_VALUE)
+    {
         return Ok(());
     }
     let tx = conn.transaction()?;
@@ -568,7 +585,11 @@ pub fn migrate_legacy_history(conn: &mut Connection) -> rusqlite::Result<()> {
              LIMIT 300",
         )?;
         let mapped = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in mapped {
             rows.push(row?);
@@ -579,16 +600,20 @@ pub fn migrate_legacy_history(conn: &mut Connection) -> rusqlite::Result<()> {
     // explicit directory commands exist (new installs / PowerShell gaps).
     let mut parsed_count = 0usize;
     let mut seen_paths: HashMap<String, ()> = HashMap::new();
-    let mut legacy_entries: Vec<(String /*directory_id*/, Option<i64> /*observed*/, i64 /*rank*/)> = Vec::new();
+    let mut legacy_entries: Vec<(
+        String,      /*directory_id*/
+        Option<i64>, /*observed*/
+        i64,         /*rank*/
+    )> = Vec::new();
     let mut rank: i64 = 0;
 
     let home = dirs::home_dir();
     let import_command = |command: &str,
-                              last_used_at: i64,
-                              rank: &mut i64,
-                              seen: &mut HashMap<String, ()>,
-                              legacy: &mut Vec<(String, Option<i64>, i64)>,
-                              parsed: &mut usize|
+                          last_used_at: i64,
+                          rank: &mut i64,
+                          seen: &mut HashMap<String, ()>,
+                          legacy: &mut Vec<(String, Option<i64>, i64)>,
+                          parsed: &mut usize|
      -> rusqlite::Result<()> {
         let Some(path) = pty::directory_from_history_command(command, home.as_deref()) else {
             return Ok(());
@@ -614,7 +639,14 @@ pub fn migrate_legacy_history(conn: &mut Connection) -> rusqlite::Result<()> {
     };
 
     for (id, command, last_used_at) in &rows {
-        import_command(command, *last_used_at, &mut rank, &mut seen_paths, &mut legacy_entries, &mut parsed_count)?;
+        import_command(
+            command,
+            *last_used_at,
+            &mut rank,
+            &mut seen_paths,
+            &mut legacy_entries,
+            &mut parsed_count,
+        )?;
         let _ = id;
     }
     if parsed_count < MAX_DISPLAYED_NON_DEFAULT {
@@ -629,7 +661,14 @@ pub fn migrate_legacy_history(conn: &mut Connection) -> rusqlite::Result<()> {
         })?;
         for row in mapped {
             let (command, last_used_at) = row?;
-            import_command(&command, last_used_at, &mut rank, &mut seen_paths, &mut legacy_entries, &mut parsed_count)?;
+            import_command(
+                &command,
+                last_used_at,
+                &mut rank,
+                &mut seen_paths,
+                &mut legacy_entries,
+                &mut parsed_count,
+            )?;
         }
     }
 
@@ -643,7 +682,11 @@ pub fn migrate_legacy_history(conn: &mut Connection) -> rusqlite::Result<()> {
         )?;
     }
 
-    metadata_set(&tx, METADATA_MIGRATION_COMPLETE, METADATA_MIGRATION_COMPLETE_VALUE)?;
+    metadata_set(
+        &tx,
+        METADATA_MIGRATION_COMPLETE,
+        METADATA_MIGRATION_COMPLETE_VALUE,
+    )?;
     tx.commit()
 }
 
@@ -723,7 +766,12 @@ pub fn default_candidates(home: Option<&Path>) -> Vec<(String, u32, String, Path
     .enumerate()
     {
         let label = name.to_string();
-        push(name.to_ascii_lowercase().as_str(), 7 + index as u32, label.as_str(), home.join(name));
+        push(
+            name.to_ascii_lowercase().as_str(),
+            7 + index as u32,
+            label.as_str(),
+            home.join(name),
+        );
     }
     out
 }
@@ -732,15 +780,15 @@ pub fn default_candidates(home: Option<&Path>) -> Vec<(String, u32, String, Path
 // Listing
 // ---------------------------------------------------------------------------
 
-struct PersistedRow {
-    directory_id: String,
-    display_path: String,
-    label: String,
-    kind: String,
-    last_used_at_ms: Option<i64>,
-    last_use_source: Option<String>,
-    legacy_rank: Option<i64>,
-    identity_key: String,
+pub(crate) struct PersistedRow {
+    pub(crate) directory_id: String,
+    pub(crate) display_path: String,
+    pub(crate) label: String,
+    pub(crate) kind: String,
+    pub(crate) last_used_at_ms: Option<i64>,
+    pub(crate) last_use_source: Option<String>,
+    pub(crate) legacy_rank: Option<i64>,
+    pub(crate) identity_key: String,
 }
 
 fn load_persisted_rows(conn: &Connection) -> Result<Vec<PersistedRow>, String> {
@@ -768,8 +816,14 @@ fn load_persisted_rows(conn: &Connection) -> Result<Vec<PersistedRow>, String> {
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (directory_id, display_path, last_used_at_ms, last_use_source, legacy_rank, identity_key) =
-            row.map_err(|e| e.to_string())?;
+        let (
+            directory_id,
+            display_path,
+            last_used_at_ms,
+            last_use_source,
+            legacy_rank,
+            identity_key,
+        ) = row.map_err(|e| e.to_string())?;
         let Some(identity_key) = identity_key else {
             continue; // orphan usage row without alias: skip defensively
         };
@@ -798,7 +852,7 @@ fn path_display_label(path: &Path, fallback: &str) -> String {
 /// Merge persisted rows and default candidates by directory identity, then
 /// sort with the fixed comparison tuple. Pure function (except key lookups
 /// against `aliases`), fully covered by V-01 tests.
-pub fn merge_directory_candidates(
+pub(crate) fn merge_directory_candidates(
     persisted: Vec<PersistedRow>,
     defaults: &[(String, u32, String, PathBuf)],
 ) -> Vec<DirectoryRow> {
@@ -948,7 +1002,8 @@ pub fn compare_directories(a: &DirectoryRow, b: &DirectoryRow) -> Ordering {
 /// and never poison the next refresh.
 /// In-flight probe worker guard so repeated refreshes never accumulate
 /// unbounded blocked threads (design §4.1.4).
-static PROBE_WORKERS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PROBE_WORKERS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 pub fn probe_availability(paths: &[String]) -> Vec<Availability> {
     let mut results = vec![Availability::Unknown; paths.len()];
@@ -1100,7 +1155,10 @@ mod tests {
             rows.into_iter().map(|r| r.directory_id).collect::<Vec<_>>()
         };
         let first = build();
-        assert_eq!(first, expected_ids, "shuffled input must still sort the same");
+        assert_eq!(
+            first, expected_ids,
+            "shuffled input must still sort the same"
+        );
         let second = build();
         assert_eq!(first, second, "re-sorting must be stable");
     }
@@ -1109,10 +1167,7 @@ mod tests {
     /// the default name/kind wins; confirmed time survives the merge.
     #[test]
     fn default_and_history_paths_merge_without_losing_time() {
-        let home = std::env::temp_dir().join(format!(
-            "taomni-ldt-merge-{}",
-            std::process::id()
-        ));
+        let home = std::env::temp_dir().join(format!("taomni-ldt-merge-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let downloads = home.join("Downloads");
         std::fs::create_dir_all(&downloads).unwrap();
@@ -1192,11 +1247,15 @@ mod tests {
         // Recording the real path must merge into the same directory id.
         record_directory_use(&mut conn, &real, SOURCE_LOCAL_CWD, 2000).expect("record real use");
         let usage_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM welcome_directory_usage", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM welcome_directory_usage", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(usage_count, 1, "symlink and target are one directory");
         let alias_rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM welcome_directory_alias", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM welcome_directory_alias", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(alias_rows >= 2, "both spellings registered as aliases");
         std::fs::remove_dir_all(&base).ok();
@@ -1212,9 +1271,11 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let mut writable = conn;
 
-        let (changed, _) = record_directory_use(&mut writable, &tmp, SOURCE_LOCAL_CWD, 1000).unwrap();
+        let (changed, _) =
+            record_directory_use(&mut writable, &tmp, SOURCE_LOCAL_CWD, 1000).unwrap();
         assert!(changed);
-        let (changed, _) = record_directory_use(&mut writable, &tmp, SOURCE_LOCAL_START, 1000).unwrap();
+        let (changed, _) =
+            record_directory_use(&mut writable, &tmp, SOURCE_LOCAL_START, 1000).unwrap();
         assert!(changed, "same-time source upgrade counts as a change");
         let source: String = writable
             .query_row(
@@ -1225,7 +1286,8 @@ mod tests {
             .unwrap();
         assert_eq!(source, SOURCE_LOCAL_START);
 
-        let (changed, _) = record_directory_use(&mut writable, &tmp, SOURCE_LOCAL_CWD, 900).unwrap();
+        let (changed, _) =
+            record_directory_use(&mut writable, &tmp, SOURCE_LOCAL_CWD, 900).unwrap();
         assert!(!changed, "older events never regress the confirmed time");
         let time: i64 = writable
             .query_row(
@@ -1260,7 +1322,10 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         let inserts = [
             (format!("cd {}", work.display()), 1_700_000_000i64),
-            ("cd /definitely/not/a/real/path-xyz".to_string(), 1_699_999_999),
+            (
+                "cd /definitely/not/a/real/path-xyz".to_string(),
+                1_699_999_999,
+            ),
             ("cd projects".to_string(), 1_699_999_998), // relative: skipped
             ("cd ~/taomni-legacy-work".to_string(), -5), // bad timestamp
         ];
@@ -1278,7 +1343,9 @@ mod tests {
         migrate_legacy_history(&mut writable).unwrap();
 
         let usage_count: i64 = writable
-            .query_row("SELECT COUNT(*) FROM welcome_directory_usage", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM welcome_directory_usage", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         // Three unique resolvable paths: <tmp>/work, /definitely/not/a/real,
         // <home>/taomni-legacy-work. The relative `cd projects` is skipped.
@@ -1295,9 +1362,20 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(legacy_ms, Some(1_700_000_000_000), "observation time preserved in ms");
-        assert_eq!(legacy_rank, Some(0), "most recent legacy command gets rank 0");
-        assert_eq!(confirmed, None, "legacy observation never becomes confirmed use");
+        assert_eq!(
+            legacy_ms,
+            Some(1_700_000_000_000),
+            "observation time preserved in ms"
+        );
+        assert_eq!(
+            legacy_rank,
+            Some(0),
+            "most recent legacy command gets rank 0"
+        );
+        assert_eq!(
+            confirmed, None,
+            "legacy observation never becomes confirmed use"
+        );
 
         let marker: String = writable
             .query_row(
@@ -1313,7 +1391,8 @@ mod tests {
         let envelope = list_directory_shortcuts(&writable).unwrap();
         assert!(envelope.directories.iter().any(|d| d.legacy_rank.is_some()));
         let (changed, _) =
-            record_directory_use(&mut writable, &work, SOURCE_LOCAL_START, 2_000_000_000_000).unwrap();
+            record_directory_use(&mut writable, &work, SOURCE_LOCAL_START, 2_000_000_000_000)
+                .unwrap();
         assert!(changed);
         let envelope = list_directory_shortcuts(&writable).unwrap();
         let used = envelope
@@ -1343,7 +1422,9 @@ mod tests {
         let persisted = Vec::new();
         let merged = merge_directory_candidates(persisted, &candidates);
         assert!(
-            merged.iter().all(|r| r.display_path != home.join("src").to_string_lossy()),
+            merged
+                .iter()
+                .all(|r| r.display_path != home.join("src").to_string_lossy()),
             "non-existent guesses must not create rows"
         );
         std::fs::remove_dir_all(&home).ok();
@@ -1365,10 +1446,19 @@ mod tests {
                 identity_key: format!("/opt/dir{i}"),
             });
         }
-        let defaults = vec![("home".to_string(), 0u32, "Home".to_string(), PathBuf::from("/home/x"))];
+        let defaults = vec![(
+            "home".to_string(),
+            0u32,
+            "Home".to_string(),
+            PathBuf::from("/home/x"),
+        )];
         let merged = merge_directory_candidates(persisted, &defaults);
         let non_default = merged.iter().filter(|r| r.default_rank.is_none()).count();
         assert_eq!(non_default, MAX_DISPLAYED_NON_DEFAULT);
-        assert!(merged.iter().any(|r| r.default_id.as_deref() == Some("home")));
+        assert!(
+            merged
+                .iter()
+                .any(|r| r.default_id.as_deref() == Some("home"))
+        );
     }
 }
