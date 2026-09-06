@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 const LOCK_DIR: &str = "module-locks";
 
@@ -28,9 +28,7 @@ impl ModuleLock {
         resource: &str,
         label: &str,
     ) -> Result<Self, String> {
-        let app_data = app
-            .path()
-            .app_data_dir()
+        let app_data = crate::resolved_app_data_dir(app)
             .map_err(|error| format!("resolve app data directory for {label}: {error}"))?;
         Self::try_acquire(&app_data, scope, resource, label)
     }

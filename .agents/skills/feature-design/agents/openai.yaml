@@ -1,0 +1,4 @@
+interface:
+  display_name: "Taomni 新功能设计"
+  short_description: "为 Taomni 新功能编写三端兼容的详细设计、开发任务与测试方案"
+  default_prompt: "使用 $feature-design 为我的新功能编写可指导其他 agent 实现和测试的详细设计，保存到工程 docs-feature/；代码兼容三端 Tauri 桌面，真机计划覆盖三端，本轮完成当前端验证即可。"

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 const MAX_VERSIONS_PER_FILE: i64 = 50;
 const MAX_AGE_SECS: i64 = 7 * 24 * 60 * 60;
@@ -336,10 +336,7 @@ pub fn history_prune(state: State<'_, LocalHistoryState>) -> Result<u32, String>
 }
 
 pub fn init_local_history(app: &AppHandle) -> Result<LocalHistoryState, String> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("resolve app data dir: {e}"))?;
+    let app_data = crate::resolved_app_data_dir(app)?;
     fs::create_dir_all(&app_data).map_err(|e| format!("create app data dir: {e}"))?;
     LocalHistoryState::open(&app_data)
 }

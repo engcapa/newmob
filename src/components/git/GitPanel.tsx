@@ -675,6 +675,7 @@ export function GitPanel({
           <button
             key={item}
             type="button"
+            data-testid={item === "log" ? "git-log-tab" : undefined}
             className={`h-7 px-3 rounded text-[12px] capitalize ${view === item ? "bg-[var(--taomni-accent)] text-white" : "hover:bg-[var(--taomni-hover)]"}`}
             onClick={() => switchView(item)}
           >
@@ -785,7 +786,7 @@ export function GitPanel({
           </div>
         )}
         {mountedViews.has("log") && (
-          <div className="h-full min-h-0" style={{ display: view === "log" ? "block" : "none" }}>
+          <div className="h-full min-h-0 git-log-view" style={{ display: view === "log" ? "block" : "none" }}>
             {workspaceLogView ?? (
               <CommitLog
                 repoRoot={repoRoot}

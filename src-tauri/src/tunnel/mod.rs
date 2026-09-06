@@ -142,10 +142,7 @@ impl TunnelRegistry {
 /* ---------------------------- persistence --------------------------- */
 
 fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {}", e))?;
+    let dir = crate::resolved_app_data_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create app dir: {}", e))?;
     Ok(dir.join("tunnels.json"))
 }

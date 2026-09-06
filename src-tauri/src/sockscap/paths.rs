@@ -272,10 +272,7 @@ pub fn windivert_missing_hint(app: &AppHandle) -> String {
 /// Per-version directory the privileged binaries are actually run from.
 fn staging_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let version = app.package_info().version.to_string();
-    Ok(app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?
+    Ok(crate::resolved_app_data_dir(app)?
         .join("sockscap")
         .join("bin")
         .join(version))

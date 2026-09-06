@@ -144,6 +144,8 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
     () => entries.find((entry) => entryKey(entry) === selectedKey) ?? null,
     [entries, selectedKey],
   );
+  const selectedRepoRoot = selected?.repoRoot ?? null;
+  const selectedCommitOid = selected?.oid ?? null;
   const graphRows = useMemo(() => workspaceGraphRows(entries, roots), [entries, roots]);
   const maxGraphWidth = useMemo(
     () => [...graphRows.values()].reduce((max, row) => Math.max(max, row.width), 1),
@@ -152,7 +154,7 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
 
   useEffect(() => {
     let cancelled = false;
-    if (!selected) {
+    if (!selectedRepoRoot || !selectedCommitOid) {
       setFiles([]);
       setFilePath(null);
       setPair(null);
@@ -163,7 +165,7 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
     setFilePath(null);
     setPair(null);
     setPairLoading(false);
-    gitCommitFiles(selected.repoRoot, selected.oid)
+    gitCommitFiles(selectedRepoRoot, selectedCommitOid)
       .then((list) => {
         if (cancelled) return;
         setFiles(list);
@@ -175,18 +177,18 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selectedRepoRoot, selectedCommitOid]);
 
   useEffect(() => {
     let cancelled = false;
     const file = files.find((entry) => entry.path === filePath) ?? null;
-    if (!selected || !file) {
+    if (!selectedRepoRoot || !selectedCommitOid || !file) {
       setPair(null);
       setPairLoading(false);
       return;
     }
     setPairLoading(true);
-    gitBlobPair(selected.repoRoot, file.path, `${selected.oid}^`, selected.oid, file.oldPath)
+    gitBlobPair(selectedRepoRoot, file.path, `${selectedCommitOid}^`, selectedCommitOid, file.oldPath)
       .then((next) => {
         if (!cancelled) setPair(next);
       })
@@ -199,7 +201,7 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
     return () => {
       cancelled = true;
     };
-  }, [selected, filePath, files]);
+  }, [selectedRepoRoot, selectedCommitOid, filePath, files]);
 
   const diffEmptyLabel =
     files.length > AUTO_PREVIEW_FILE_LIMIT && !filePath
@@ -259,6 +261,8 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
                 <div
                   role="button"
                   tabIndex={0}
+                  data-testid="git-log-commit"
+                  data-oid={entry.oid}
                   style={{ height: ROW_H }}
                   className="w-full flex items-start gap-2 overflow-hidden"
                   onClick={() => setSelectedKey(entryKey(entry))}
@@ -333,6 +337,9 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
                   <button
                     key={file.path}
                     type="button"
+                    data-testid="git-log-file"
+                    data-path={file.path}
+                    aria-pressed={filePath === file.path}
                     className={`w-full px-3 py-1 flex items-center gap-2 text-left border-b border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] ${
                       filePath === file.path ? "bg-[var(--taomni-hover)]" : ""
                     }`}

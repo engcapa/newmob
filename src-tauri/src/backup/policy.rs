@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 pub const DEFAULT_MAX_COPIES: u32 = 7;
 pub const DEFAULT_FREQUENCY: &str = "weekly";
@@ -62,10 +62,7 @@ impl Default for BackupPolicy {
 
 /// Returns the system default backup directory under `app_data/backups`.
 pub fn default_backup_dir(app: &AppHandle) -> PathBuf {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let app_data = crate::resolved_app_data_dir(app).unwrap_or_else(|_| PathBuf::from("."));
     app_data.join("backups")
 }
 
@@ -113,7 +110,7 @@ pub fn resolve_backup_dir(app: &AppHandle, policy: &BackupPolicy) -> PathBuf {
 
 /// Load the backup policy from disk, or return default if not present or corrupt.
 pub fn load_policy(app: &AppHandle) -> BackupPolicy {
-    let app_data = match app.path().app_data_dir() {
+    let app_data = match crate::resolved_app_data_dir(app) {
         Ok(d) => d,
         Err(_) => return BackupPolicy::default(),
     };
@@ -129,10 +126,7 @@ pub fn load_policy(app: &AppHandle) -> BackupPolicy {
 
 /// Persist the backup policy to disk.
 pub fn save_policy(app: &AppHandle, policy: &BackupPolicy) -> Result<(), String> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("resolve app data dir: {e}"))?;
+    let app_data = crate::resolved_app_data_dir(app)?;
     std::fs::create_dir_all(&app_data).map_err(|e| format!("create app data dir: {e}"))?;
     let file_path = app_data.join(POLICY_FILE_NAME);
     let json = serde_json::to_string_pretty(policy)

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -80,10 +80,7 @@ pub fn create_backup(
     target_path: Option<String>,
     password: Option<String>,
 ) -> Result<BackupResult, String> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("resolve app data dir: {e}"))?;
+    let app_data = crate::resolved_app_data_dir(app)?;
 
     let policy = load_policy(app);
     let resolved_target_dir = resolve_backup_dir(app, &policy);

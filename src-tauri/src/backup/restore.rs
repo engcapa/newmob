@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use zip::ZipArchive;
 
 pub const RESTORE_INTENT_FILE: &str = "restore_intent.json";
@@ -70,10 +70,7 @@ pub fn stage_restore(
     archive_path: &Path,
     password: Option<&str>,
 ) -> Result<StageRestoreResult, String> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("resolve app data dir: {e}"))?;
+    let app_data = crate::resolved_app_data_dir(app)?;
     stage_restore_to_dir(&app_data, archive_path, password)
 }
 

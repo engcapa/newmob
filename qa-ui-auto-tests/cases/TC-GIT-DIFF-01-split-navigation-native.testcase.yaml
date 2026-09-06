@@ -1,0 +1,74 @@
+id: TC-GIT-DIFF-01
+title: "Native Git diff split resize and line-start navigation"
+description: |
+  Native-gate coverage for the Git Log diff viewport. The git_diff_repo fixture
+  creates a real two-commit repository with three 2,000-column changed lines,
+  then leaves staged and unstaged worktree changes for later manual Changes
+  verification. This case proves the native Git Log path, stable splitter
+  controls, keyboard resize, split/unified lifecycle, and line-start scroll
+  origins. Pixel geometry, pointer cancellation, and worktree save are covered
+  by the component viewport suite and the platform manual run.
+covers: [F26.1]
+tags: [git, diff, native-gate, smoke, p1]
+modes: [native]
+fixtures: [reset_db, git_diff_repo]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-git-diff","name":"qa-git-diff","roots":[{"id":"qa-git-root","name":"qa-git-diff","path":"${fixture.git_diff_repo}","kind":"git"}],"looseFiles":[],"lastOpenedAt":1756100000000,"lastActiveFile":{"kind":"root","rootId":"qa-git-root","path":"long-lines.txt"},"isGitRepo":true}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.git_diff_repo}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - wait_for: '[data-testid="code-workspace-git-panel-toggle"]'
+  - click: '[data-testid="code-workspace-git-panel-toggle"]'
+  - wait_for: '[data-testid="git-panel"]'
+  - click: '[data-testid="git-log-tab"]'
+  - wait_for: '[data-testid="git-log-commit"][data-oid="${fixture.git_diff_commit_b}"]'
+  - click: '[data-testid="git-log-commit"][data-oid="${fixture.git_diff_commit_b}"]'
+  - wait_for: '[data-testid="git-log-file"][data-path="long-lines.txt"]'
+  - click: '[data-testid="git-log-file"][data-path="long-lines.txt"]'
+  - wait_for: '[data-testid="git-log-file"][data-path="long-lines.txt"][aria-pressed="true"]'
+  - wait_for: '.git-log-view [data-testid="git-diff-viewer"][data-path="long-lines.txt"]'
+  - click: '.git-log-view [data-testid="git-diff-render-anyway"]'
+  - click: '.git-log-view [data-testid="git-diff-mode-split"]'
+  - wait_for: '.git-log-view [data-testid="git-diff-splitter"]'
+  - wait_for: '.git-log-view [data-testid="git-diff-left-scroll"]'
+  - wait_for: '.git-log-view [data-testid="git-diff-right-scroll"]'
+  - eval_readonly:
+      expression: 'Math.abs(document.querySelector(".git-log-view")?.querySelector("[data-testid" + String.fromCharCode(61) + "\"git-diff-left-scroll\"]")?.scrollLeft ?? 0) <= 1 && Math.abs(document.querySelector(".git-log-view")?.querySelector("[data-testid" + String.fromCharCode(61) + "\"git-diff-right-scroll\"]")?.scrollLeft ?? 0) <= 1'
+      expect_truthy: true
+  - click: '.git-log-view [data-testid="git-diff-splitter"]'
+  - press: ArrowRight
+  - assert_attribute:
+      selector: '.git-log-view [data-testid="git-diff-splitter"]'
+      name: aria-valuenow
+      equals: "52"
+  - press: Enter
+  - assert_attribute:
+      selector: '.git-log-view [data-testid="git-diff-splitter"]'
+      name: aria-valuenow
+      equals: "50"
+  - click: '.git-log-view [data-testid="git-diff-sync-scroll"]'
+  - click: '.git-log-view [data-testid="git-diff-sync-scroll"]'
+  - click: '.git-log-view [data-testid="git-diff-next"]'
+  - eval_readonly:
+      expression: 'Math.abs(document.querySelector(".git-log-view")?.querySelector("[data-testid" + String.fromCharCode(61) + "\"git-diff-left-scroll\"]")?.scrollLeft ?? 0) <= 1 && Math.abs(document.querySelector(".git-log-view")?.querySelector("[data-testid" + String.fromCharCode(61) + "\"git-diff-right-scroll\"]")?.scrollLeft ?? 0) <= 1'
+      expect_truthy: true
+  - screenshot: tc-git-diff-native-after-next.png
+  - eval_readonly:
+      expression: 'document.querySelector(".git-log-view")?.querySelector("[data-testid" + String.fromCharCode(61) + "\"git-diff-right-scroll\"]")?.textContent'
+      contains: "LINE020:"
+  - click: '.git-log-view [data-testid="git-diff-prev"]'
+  - eval_readonly:
+      expression: 'Math.abs(document.querySelector(".git-log-view")?.querySelector("[data-testid" + String.fromCharCode(61) + "\"git-diff-left-scroll\"]")?.scrollLeft ?? 0) <= 1 && Math.abs(document.querySelector(".git-log-view")?.querySelector("[data-testid" + String.fromCharCode(61) + "\"git-diff-right-scroll\"]")?.scrollLeft ?? 0) <= 1'
+      expect_truthy: true
+  - click: '.git-log-view [data-testid="git-diff-mode-unified"]'
+  - assert_not_visible: '.git-log-view [data-testid="git-diff-splitter"]'
+  - click: '.git-log-view [data-testid="git-diff-mode-split"]'
+  - wait_for: '.git-log-view [data-testid="git-diff-splitter"]'
+  - screenshot: tc-git-diff-native-split-navigation.png

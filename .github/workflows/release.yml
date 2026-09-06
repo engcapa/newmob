@@ -669,42 +669,56 @@ jobs:
 
           arch_of() { case "$(echo "$1" | tr 'A-Z' 'a-z')" in *aarch64*|*arm64*) echo aarch64;; *) echo x86_64;; esac; }
 
-          record() {
-            # key, sig file, bundle file, release asset name
-            local key="$1" sig="$2" bundle="$3" asset="$4"
-            [ -f "$bundle" ] || { echo "::warning::missing bundle $bundle for $key"; return; }
-            cp -f "$bundle" "/tmp/$asset"
-            gh release upload "$TAG" "/tmp/$asset" --clobber
-            local sig_content; sig_content="$(cat "$sig")"
+          record_entry() {
+            local key="$1" sig="$2" asset="$3"
+            local sig_content; sig_content="$(cat "$sig" | tr -d '\r')"
             platforms="$(jq -n --argjson p "$platforms" --arg k "$key" \
               --arg url "${BASE_URL}/${asset}" --arg sig "$sig_content" \
               '$p + {($k): {signature:$sig, url:$url}}')"
           }
 
-          # Pass 1: macOS, Linux, and Windows NSIS (NSIS is preferred over MSI).
           while IFS= read -r sig; do
-            bundle="${sig%.sig}"; a="$(arch_of "$sig")"
-            case "$bundle" in
+            bundle="${sig%.sig}"
+            [ -f "$bundle" ] || { echo "::warning::missing bundle $bundle for $sig"; continue; }
+            asset="$(basename "$bundle")"
+            a="$(arch_of "$sig")"
+
+            # Upload bundle under its original filename with --clobber (avoids creating duplicate assets)
+            gh release upload "$TAG" "$bundle" --clobber
+
+            case "$asset" in
               *.app.tar.gz)
-                [ "$a" = aarch64 ] && asset="Taomni_${VERSION}_aarch64.app.tar.gz" || asset="Taomni_${VERSION}_x64.app.tar.gz"
-                record "darwin-${a}" "$sig" "$bundle" "$asset" ;;
-              *.AppImage.tar.gz)
-                [ "$a" = aarch64 ] && asset="Taomni_${VERSION}_aarch64.AppImage.tar.gz" || asset="Taomni_${VERSION}_amd64.AppImage.tar.gz"
-                record "linux-${a}" "$sig" "$bundle" "$asset" ;;
-              *-setup.nsis.zip)
-                [ "$a" = aarch64 ] && asset="Taomni_${VERSION}_arm64-setup.nsis.zip" || asset="Taomni_${VERSION}_x64-setup.nsis.zip"
-                record "windows-${a}" "$sig" "$bundle" "$asset" ;;
+                record_entry "darwin-${a}" "$sig" "$asset"
+                record_entry "darwin-${a}-app" "$sig" "$asset"
+                ;;
+              *.AppImage|*.AppImage.tar.gz)
+                record_entry "linux-${a}-appimage" "$sig" "$asset"
+                record_entry "linux-${a}" "$sig" "$asset"
+                ;;
+              *.deb)
+                record_entry "linux-${a}-deb" "$sig" "$asset"
+                ;;
+              *.rpm)
+                record_entry "linux-${a}-rpm" "$sig" "$asset"
+                ;;
+              *-setup.exe|*-setup.nsis.zip)
+                record_entry "windows-${a}-nsis" "$sig" "$asset"
+                record_entry "windows-${a}" "$sig" "$asset"
+                ;;
+              *.msi|*.msi.zip)
+                record_entry "windows-${a}-msi" "$sig" "$asset"
+                # Fallback to MSI only if NSIS did not provide windows-${a}
+                if ! echo "$platforms" | jq -e --arg k "windows-${a}" 'has($k)' >/dev/null; then
+                  record_entry "windows-${a}" "$sig" "$asset"
+                fi
+                ;;
+              *)
+                echo "::notice::ignoring unsupported signature artifact: $asset"
+                ;;
             esac
           done < <(find artifacts -type f -name '*.sig' | sort)
 
-          # Pass 2: MSI fills only the Windows entries NSIS didn't provide.
-          while IFS= read -r sig; do
-            bundle="${sig%.sig}"; a="$(arch_of "$sig")"; key="windows-${a}"
-            if ! echo "$platforms" | jq -e --arg k "$key" 'has($k)' >/dev/null; then
-              [ "$a" = aarch64 ] && asset="Taomni_${VERSION}_arm64_en-US.msi.zip" || asset="Taomni_${VERSION}_x64_en-US.msi.zip"
-              record "$key" "$sig" "$bundle" "$asset"
-            fi
-          done < <(find artifacts -type f -name '*.msi.zip.sig' | sort)
+          [ -n "$NOTES" ] || NOTES="Desktop bundles for Taomni ${TAG}."
 
           jq -n --arg v "$VERSION" --arg n "$NOTES" --arg d "$PUB_DATE" --argjson p "$platforms" \
             '{version:$v, notes:$n, pub_date:$d, platforms:$p}' > latest.json
@@ -712,5 +726,10 @@ jobs:
           echo "Composed latest.json:"; cat latest.json
           count="$(jq '.platforms | length' latest.json)"
           echo "Platform entries: $count"
-          [ "$count" -gt 0 ] || { echo "::error::latest.json has no platforms"; exit 1; }
+
+          # Safety checks: ensure all supported OS families exist in latest.json
+          echo "$platforms" | jq -e 'has("darwin-aarch64") and has("darwin-x86_64")' >/dev/null || { echo "::error::missing macOS platforms in latest.json"; exit 1; }
+          echo "$platforms" | jq -e 'has("windows-x86_64") or has("windows-x86_64-nsis")' >/dev/null || { echo "::error::missing Windows platforms in latest.json"; exit 1; }
+          echo "$platforms" | jq -e 'has("linux-x86_64") or has("linux-x86_64-appimage")' >/dev/null || { echo "::error::missing Linux platforms in latest.json"; exit 1; }
+
           gh release upload "$TAG" latest.json --clobber

@@ -44,7 +44,7 @@ use russh_sftp::protocol::{
 use std::io::{Read, Write as _};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use tauri::{AppHandle, Manager as _};
+use tauri::AppHandle;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -1570,11 +1570,7 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
 
 /// Load or generate a persistent Ed25519 host key under app-data.
 fn load_or_create_host_key(app: &AppHandle) -> Result<(PrivateKey, String), String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("resolve app data dir: {e}"))?
-        .join("ssh-server");
+    let dir = crate::resolved_app_data_dir(app)?.join("ssh-server");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("create ssh-server dir {}: {e}", dir.display()))?;
     let path = dir.join("host_ed25519");
