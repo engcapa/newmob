@@ -74,6 +74,7 @@ const MAX_WORKSPACE_SYMBOL_RESOLUTION_BATCHES: usize = 8;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 3;
 const EXIT_TIMEOUT_SECS: u64 = 2;
 const COMMAND_AVAILABILITY_TTL: Duration = Duration::from_secs(30);
+const RUSTUP_SHIM_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKSPACE_APPLY_EDIT_TIMEOUT_SECS: u64 = 30;
 const SHOW_MESSAGE_REQUEST_TIMEOUT_SECS: u64 = 300;
 const WORKSPACE_DIAGNOSTIC_TIMEOUT_SECS: u64 = 30;
@@ -9048,8 +9049,20 @@ fn is_rustup_shim(resolved: &Path) -> bool {
 
 /// Spawn `<binary> --version` to confirm the tool actually starts. Only used for
 /// shims, so this costs one short-lived process per [`COMMAND_AVAILABILITY_TTL`]
-/// window rather than on every availability query.
+/// window rather than on every availability query. Broken shims can block while
+/// spawning or resolving their toolchain, so bound the probe and reap it.
 fn binary_runs(binary: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let mut header = [0_u8; 2];
+        let valid_pe = std::fs::File::open(binary)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .is_ok()
+            && header == [b'M', b'Z'];
+        if !valid_pe {
+            return false;
+        }
+    }
     let mut cmd = std::process::Command::new(binary);
     cmd.arg("--version");
     cmd.stdin(Stdio::null());
@@ -9061,7 +9074,23 @@ fn binary_runs(binary: &Path) -> bool {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.status().is_ok_and(|status| status.success())
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + RUSTUP_SHIM_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn command_availability_cache() -> &'static StdMutex<HashMap<String, CachedCommandAvailability>> {

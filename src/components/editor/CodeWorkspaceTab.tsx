@@ -1354,8 +1354,9 @@ export function CodeWorkspaceTab({
   const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
   const setLayoutNodeRatios = useCodeWorkspaceStore((s) => s.setLayoutNodeRatios);
   const seedTreeExpandIfEmpty = useCodeWorkspaceStore((s) => s.seedTreeExpandIfEmpty);
-  // Ensure before first read so the selector always hits a real map entry.
-  ensureWorkspaceUi(workspaceInstanceId);
+  // The effect below initializes a missing instance after commit. Keeping the
+  // render path read-only avoids notifying external-store subscribers during
+  // render when a workspace is mounted for the first time.
   const workspaceUi = useCodeWorkspaceStore((s) => selectCodeWorkspaceUi(s, workspaceInstanceId));
 
   useEffect(() => {

@@ -598,12 +598,12 @@ impl ModelBuilder {
         let artifact_ids = if kind == "build" {
             let artifact_id = stable_id("artifact", &[&id, &project.module_id, label]);
             let root = Path::new(&project.root);
-            let (path, resolution, diagnostic) = if command.error.is_some() {
-                (None, "blocked".to_string(), command.error.clone())
-            } else if let Some(resolved) =
+            let (path, resolution, diagnostic) = if let Some(resolved) =
                 resolve_existing_artifact_path(root, &project.provider, label)
             {
                 (Some(path_string(&resolved)), "resolved".to_string(), None)
+            } else if command.error.is_some() {
+                (None, "blocked".to_string(), command.error.clone())
             } else {
                 (
                     None,

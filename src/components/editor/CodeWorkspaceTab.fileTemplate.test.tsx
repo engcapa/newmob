@@ -159,9 +159,11 @@ vi.mock("../../lib/appDialogs", () => ({
 
 describe("ED-TEMPLATE-001: File and Code Templates production flow in CodeWorkspaceTab", () => {
   const workspaceRoot = "/workspace/demo-app";
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    consoleErrorSpy = vi.spyOn(console, "error");
     localStorage.clear();
     resetJavaTemplatePreferences();
 
@@ -288,6 +290,12 @@ describe("ED-TEMPLATE-001: File and Code Templates production flow in CodeWorksp
 
   afterEach(() => {
     cleanup();
+    const reactRenderPhaseWarning = consoleErrorSpy?.mock.calls.some((call: unknown[]) => {
+      const message = call[0];
+      return typeof message === "string" && message.includes("Cannot update a component");
+    });
+    expect(reactRenderPhaseWarning).toBe(false);
+    consoleErrorSpy?.mockRestore();
     localStorage.clear();
   });
 

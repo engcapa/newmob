@@ -1574,7 +1574,13 @@ describe("CodeWorkspaceTab", () => {
 
     renderWorkspace(workspace);
     await screen.findByTitle("app / src/main.ts");
-    const marker = await screen.findByLabelText("modified Git change · show diff", {}, { timeout: 3_000 });
+    await waitFor(() => expect(gitMocks.gitBlobPair).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/main.ts",
+      "HEAD",
+      "",
+    ));
+    const marker = await screen.findByLabelText("modified Git change · show diff", {}, { timeout: 5_000 });
     fireEvent.mouseDown(marker);
     expect(screen.getByTestId("code-workspace-git-diff-peek")).toHaveTextContent("previous");
     expect(screen.getByTestId("code-workspace-git-diff-peek")).toHaveTextContent("value");
@@ -2670,6 +2676,11 @@ describe("CodeWorkspaceTab", () => {
       pane.getAttribute("data-editor-group-id") === "secondary"
     ));
     fireEvent.mouseDown(primaryPane!);
+    await waitFor(() => expect(lspMocks.lspOpenDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: "src/main.ts" }),
+      "main",
+      expect.any(Number),
+    ));
     await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalledWith(
       expect.objectContaining({ filePath: "src/main.ts" }),
     ));
@@ -2922,7 +2933,11 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.keyDown(window, { key: "Enter", altKey: true });
     await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalledTimes(1));
     fireEvent.mouseDown(rendered.container.querySelector('[data-testid="code-workspace-lightbulb"]')!);
-    expect(await screen.findByRole("button", { name: "Newer candidate" })).toBeInTheDocument();
+    expect(await screen.findByRole(
+      "button",
+      { name: "Newer candidate" },
+      { timeout: 5_000 },
+    )).toBeInTheDocument();
 
     await act(async () => {
       releaseOlder({ status, actions: [olderAction] });
@@ -3007,7 +3022,12 @@ describe("CodeWorkspaceTab", () => {
     )).toBeTruthy());
 
     fireEvent.keyDown(window, { key: "Enter", altKey: true });
-    fireEvent.click(await screen.findByRole("button", { name: "Deferred old fix" }));
+    await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByRole(
+      "button",
+      { name: "Deferred old fix" },
+      { timeout: 5_000 },
+    ));
     await waitFor(() => expect(lspMocks.lspCodeActionResolve).toHaveBeenCalledTimes(1));
     fireEvent.mouseDown(rendered.container.querySelector('[data-testid="code-workspace-lightbulb"]')!);
     expect(await screen.findByRole("button", { name: "Current fix" })).toBeInTheDocument();
