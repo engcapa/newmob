@@ -21,6 +21,7 @@ import {
   moveStatementDown,
   normalizeEditorSelections,
   pasteEditorClipboardPayload,
+  pasteEditorWithAutoImports,
   plainTextClipboardPayload,
   createRegionFoldService,
   regionFoldAvailableForPath,
@@ -107,6 +108,40 @@ describe("workspace editor commands", () => {
     expect(undoDepth(view.state)).toBe(1);
     expect(undo(view)).toBe(true);
     expect(view.state.doc.toString()).toBe("one two");
+    view.destroy();
+  });
+
+  it("ED-IMPORT-001 A4: paste with auto-imports executes in one transaction and undoes in one step", () => {
+    const initialDoc = "package com.example;\n\npublic class App {\n  void test() {\n    \n  }\n}\n";
+    const cursorOffset = initialDoc.indexOf("    \n") + 4;
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: initialDoc,
+        selection: EditorSelection.cursor(cursorOffset),
+        extensions: [history()],
+      }),
+    });
+
+    const pasteText = "List<String> list = new ArrayList<>();";
+    const importStatements = ["import java.util.List;\n", "import java.util.ArrayList;\n"];
+
+    const ok = pasteEditorWithAutoImports(view, {
+      pastedText: pasteText,
+      importStatements,
+    });
+    expect(ok).toBe(true);
+
+    const updated = view.state.doc.toString();
+    expect(updated).toContain("import java.util.List;\nimport java.util.ArrayList;\n");
+    expect(updated).toContain("List<String> list = new ArrayList<>();");
+    // One transaction => undoDepth is 1
+    expect(undoDepth(view.state)).toBe(1);
+
+    // One undo reverts BOTH imports and pasted text
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(initialDoc);
+    expect(undoDepth(view.state)).toBe(0);
+
     view.destroy();
   });
 

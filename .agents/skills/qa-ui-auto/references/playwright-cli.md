@@ -1,52 +1,31 @@
-# playwright-cli cheatsheet (for qa-ui-auto)
+# Browser Exploration Fallback
 
-`playwright-cli` is a thin CLI wrapper around Playwright. The runner relies on
-the subset listed below. Install with:
+The YAML runner uses the Playwright Python API; it does not require
+`playwright-cli`. Prefer native testing as described in SKILL.md. For interactive
+browser exploration, use available Playwright tools or the installed CLI.
 
+CLI commands and flags vary by version. Start with `playwright-cli --help` and
+`playwright-cli --help open`; use a dedicated named session and a disposable
+profile. Never attach to a personal browser profile or use `close-all`/`kill-all`
+to manage one test session.
+
+Typical current CLI sequence:
+
+```bash
+playwright-cli -s=taomni-qa open http://localhost:5000
+playwright-cli -s=taomni-qa snapshot
+# Act on a fresh snapshot's element ref, for example:
+playwright-cli -s=taomni-qa click e12
+playwright-cli -s=taomni-qa snapshot
+playwright-cli -s=taomni-qa console error
+playwright-cli -s=taomni-qa requests
+playwright-cli -s=taomni-qa screenshot
+playwright-cli -s=taomni-qa close
 ```
-npm install -g @playwright/cli@latest
-playwright-cli install chromium
-```
 
-State is shared across invocations via `--user-data-dir <path>`. The runner
-gives each test case its own profile dir under `qa-ui-auto-report/<TC>/profile`,
-so multiple cases never collide.
-
-## Navigation
-- `playwright-cli open <url> --user-data-dir DIR [--headed]`
-  Open a URL in a persistent browser context. Subsequent commands act on the
-  same context.
-
-## Interaction
-- `playwright-cli click <selector>` — left click.
-- `playwright-cli dblclick <selector>` — double click.
-- `playwright-cli type <text>` — type into the focused element.
-- `playwright-cli fill <selector> <value>` — focus + clear + type.
-- `playwright-cli press <key>` — e.g. `Enter`, `Tab`, `Control+L`.
-- `playwright-cli select <selector> <value>` — pick an `<option>`.
-
-## Waiting & assertions
-- `playwright-cli wait-for <selector>` — wait until selector exists & visible.
-- `playwright-cli expect visible <selector>`
-- `playwright-cli expect text <selector> <substring>`
-- `playwright-cli expect url <substring>`
-
-## Capture
-- `playwright-cli screenshot --path <file>`
-- `playwright-cli eval "<js>"` — run JS in page context, prints the result.
-
-## Selector syntax (Playwright)
-- CSS: `button.primary`
-- Role:  `role=button[name="Save"]`
-- Text:  `text="Connected"`
-- Test id: `[data-testid="settings-panel"]` or `data-testid=settings-panel`
-- nth:   `role=button[name="Save"] >> nth=0`
-
-## Headed vs headless
-The runner runs headless by default. Pass `--headed` via the `eval` escape
-hatch only when manually debugging — CI and Replit have no display unless
-the VNC workflow is running.
-
-## Versioning
-`playwright-cli` is pre-1.0; flags occasionally change. If a verb stops
-working, check `playwright-cli --help` and `playwright-cli <verb> --help`.
+Check postconditions after each meaningful action and collect relevant error/
+request details. Use `eval` only for read-only observations; UI automation must
+perform the actual action. Keep screenshot/report paths from tool output. Do not
+invent `expect` or `wait-for` subcommands if the installed CLI does not list them.
+For repeatable cases use the YAML verbs and runner; `--headed` is a runner flag,
+not JavaScript to pass through an eval escape hatch.

@@ -607,6 +607,10 @@
   ↳ `.git-log-view [data-testid="git-diff-prev"]` — alias
 - `[data-testid="git-diff-next"]` — interactive — F26.1.diff-next
   ↳ `.git-log-view [data-testid="git-diff-next"]` — alias
+- `[data-testid="git-log-list-resize-handle"]` — interactive [optional] — F26.1.git-log-list-resize-handle
+  ↳ `.git-log-view [data-testid="git-log-list-resize-handle"]` — alias
+- `[data-testid="git-log-files-resize-handle"]` — interactive [optional] — F26.1.git-log-files-resize-handle
+  ↳ `.git-log-view [data-testid="git-log-files-resize-handle"]` — alias
 
 ## mail/compose (F-MAIL-1)
 

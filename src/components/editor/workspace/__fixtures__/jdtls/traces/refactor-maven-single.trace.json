@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "refactor-maven-single",
+  "generatedAt": "2026-09-05T04:44:32.829Z",
+  "sanitized": true,
+  "toolchain": {
+    "java": {
+      "path": "/data/dev/jdk-21/bin/java",
+      "version": "21.0.4",
+      "info": {
+        "line": "openjdk version \"21.0.4\" 2024-07-16 LTS",
+        "major": 21,
+        "version": "21.0.4"
+      }
+    },
+    "jdtls": {
+      "home": "~/.local/share/jdtls",
+      "version": "1.61.0.202607102111.jar"
+    }
+  },
+  "renameCapability": {
+    "advertised": true,
+    "prepareSupport": true
+  },
+  "prepareRename": {
+    "position": {
+      "line": 39,
+      "character": 11
+    },
+    "targetSymbol": "signatureTargets",
+    "result": {
+      "start": {
+        "line": 39,
+        "character": 9
+      },
+      "end": {
+        "line": 39,
+        "character": 25
+      }
+    },
+    "latencyMs": 228
+  },
+  "rename": {
+    "targetSymbol": "signatureTargets",
+    "newName": "executeWorkflow",
+    "latencyMs": 1433,
+    "affectedFilesCount": 2,
+    "files": [
+      {
+        "path": "src/main/java/com/example/single/App.java",
+        "isDeclaration": true,
+        "editCount": 1,
+        "preSha256": "c1d3ce8ee8ae91dd8e0b339059f1582781a4af6445fd0c2483f64b6d7ee92b6f",
+        "postSha256": "94bc04d9c7de82c190dde77dfe9007528746b99b7b66bf0d10364f11c3f23f13",
+        "edits": [
+          {
+            "range": {
+              "start": {
+                "line": 39,
+                "character": 9
+              },
+              "end": {
+                "line": 46,
+                "character": 38
+              }
+            },
+            "newText": "executeWorkflow() {\n        if (false) {\n            StringBuilder sb = new StringBuilder();\n            sb.append(\"alpha\");\n            sb.append(\"ab\", 0, 1);\n            String nested = String.valueOf(Integer.parseInt(\"42\"));\n            java.util.Collections.singletonList(\"x\");\n            new App().executeWorkflow"
+          }
+        ]
+      },
+      {
+        "path": "src/test/java/com/example/single/AppTest.java",
+        "isDeclaration": false,
+        "editCount": 1,
+        "preSha256": "8d338b5f49eb69fafccb52559d22f4d9dd03819ae5542898d6005ba0ee8fac57",
+        "postSha256": "265437d02d1aa0b0636742bba49ecda0bd079cad8fb1c03062d1d1fcb9ad673a",
+        "edits": [
+          {
+            "range": {
+              "start": {
+                "line": 9,
+                "character": 18
+              },
+              "end": {
+                "line": 9,
+                "character": 34
+              }
+            },
+            "newText": "executeWorkflow"
+          }
+        ]
+      }
+    ]
+  },
+  "postConditions": {
+    "appContainsNewMethod": true,
+    "testContainsNewMethodCall": true,
+    "multiFileConfirmed": true
+  },
+  "importProgressTitles": [],
+  "failures": []
+}

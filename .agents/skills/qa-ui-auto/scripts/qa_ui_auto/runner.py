@@ -1,6 +1,6 @@
 """Single-process Playwright Python runner with parallel workers.
 
-Browser mode is the primary path: each worker owns a Chromium context.
+Browser mode gives each worker a Chromium context.
 Native mode delegates to .agents/skills/qa-ui-auto/scripts/tauri_webdriver.py
 (legacy harness) and only runs cases tagged `modes: [native]`.
 
@@ -276,9 +276,8 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
 
     R9 §8.19.10 native gate harness. Sequential single session per case;
     fixtures run before steps; `${fixture.*}` template values resolve
-    strictly after their fixture produced them. App-data isolation is set up
-    by `_prepare_native_env` in main() so the launched binary never touches
-    the developer profile.
+    strictly after their fixture produced them. NativeHarness verifies the QA
+    build and establishes storage isolation before fixtures or sessions start.
     """
     from types import SimpleNamespace
 
@@ -425,43 +424,6 @@ def _capture_native_failure(harness: Any, case: tc_mod.TestCase,
     result["failure"]["artifacts"] = artifacts  # type: ignore[index]
 
 
-def _prepare_native_env(report_root: Path) -> dict[str, str]:
-    """Redirect the launched app's persistent state into the run directory.
-
-    The WebDriver-spawned binary inherits this process's environment. On
-    Linux Tauri resolves app-data under $XDG_DATA_HOME/<bundle-id>; on
-    Windows under %APPDATA%\\<bundle-id>. The legacy NEWMOB_DATA_DIR var is
-    also exported because reset_db wipes it when set. Returns the overrides
-    applied so reports can record exactly how isolation was achieved.
-    """
-    data_root = (report_root / "native-appdata").resolve()
-    config_root = (report_root / "native-appconfig").resolve()
-    data_root.mkdir(parents=True, exist_ok=True)
-    config_root.mkdir(parents=True, exist_ok=True)
-    # XDG spec: relative XDG_DATA_HOME values are IGNORED by conforming
-    # readers (the app then silently falls back to the real profile), so
-    # these must be absolute.
-    overrides: dict[str, str] = {}
-    system = platform.system()
-    if system == "Linux":
-        overrides["XDG_DATA_HOME"] = str(data_root)
-        overrides["XDG_CONFIG_HOME"] = str(config_root)
-    elif system == "Windows":
-        overrides["APPDATA"] = str(data_root)
-        overrides["LOCALAPPDATA"] = str(data_root)
-    elif system == "Darwin":
-        # macOS: Tauri uses ~/Library/Application Support; HOME redirect is
-        # invasive (breaks keychain/system services), so it is opt-in via
-        # QA_NATIVE_HOME_OVERRIDE and otherwise recorded as a known gap.
-        custom = os.environ.get("QA_NATIVE_HOME_OVERRIDE")
-        if custom:
-            overrides["HOME"] = custom
-    overrides["NEWMOB_DATA_DIR"] = str(data_root)
-    for k, v in overrides.items():
-        os.environ[k] = v
-    return overrides
-
-
 def _rotate_runs(report_dir: Path, keep: int) -> None:
     runs = sorted(
         [p for p in report_dir.glob("run-*") if p.is_dir()],
@@ -503,7 +465,11 @@ def main(argv: list[str] | None = None) -> int:
     if mode == "native":
         workers = 1
 
-    cases = tc_mod.discover(Path(args.cases))
+    try:
+        cases = tc_mod.discover(Path(args.cases))
+    except (OSError, ValueError) as exc:
+        print(f"qa-ui-auto: testcase error: {exc}", file=sys.stderr)
+        return 2
     if not cases:
         print(f"qa-ui-auto: no testcases found under {args.cases}", file=sys.stderr)
         return 2
@@ -538,9 +504,12 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[dict] = []
     if mode == "native":
-        overrides = _prepare_native_env(report_root)
-        print(f"qa-ui-auto: native app-data isolation overrides: {overrides or 'none (record as gap)'}")
-        results = _native_run(selected, cfg, env, report_root, args.dry_run)
+        from tauri_webdriver import WebDriverError
+        try:
+            results = _native_run(selected, cfg, env, report_root, args.dry_run)
+        except (OSError, ValueError, WebDriverError) as exc:
+            print(f"qa-ui-auto: native setup error: {exc}", file=sys.stderr)
+            return 2
     else:
         payloads = []
         for i, c in enumerate(selected):
@@ -572,6 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         "finished_at": reporter.now_iso(),
         "duration_sec": duration,
         "mode": mode,
+        "platform": platform.system(),
         "workers": workers,
         "totals": {
             "total": len(results),

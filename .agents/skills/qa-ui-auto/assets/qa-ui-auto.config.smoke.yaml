@@ -3,12 +3,14 @@
 
 app:
   base_url: http://localhost:5000
-  mode: browser
-  # native_binary: ./src-tauri/target/debug/taomni
+  mode: native
+  # Build first: python .agents/skills/qa-ui-auto/scripts/native_build.py
+  # native_binary: ./src-tauri/target/qa-ui-auto/debug/taomni
 
 webdriver:
   host: 127.0.0.1
   port: 4444
+  native_port: 4445
   tauri_driver: tauri-driver
   # native_driver: C:/path/to/msedgedriver.exe
   startup_timeout: 20

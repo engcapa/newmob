@@ -314,4 +314,131 @@ describe("DiffViewer split viewport behavior", () => {
     rerender(<DiffViewer pair={{ ...pair("", ""), oversize: true }} />);
     expect(screen.queryByTestId("git-diff-splitter")).not.toBeInTheDocument();
   });
+
+  it("handles window fallback and captures drag when setPointerCapture throws", async () => {
+    const { container } = await renderReady(pair("before\n", "after\n"));
+    const { editorDom, splitter } = prepareDimensions(container, 1000);
+    const beforeViews = Array.from(container.querySelectorAll<HTMLElement>(".cm-editor")).map((dom) => EditorView.findFromDOM(dom));
+
+    splitter.setPointerCapture = vi.fn().mockImplementation(() => {
+      throw new Error("Pointer capture unavailable");
+    });
+
+    fireEvent.pointerDown(splitter, { button: 0, pointerId: 10, clientX: 500, pointerType: "mouse", buttons: 1, isPrimary: true });
+    expect(document.body.style.cursor).toBe("col-resize");
+
+    fireEvent.pointerMove(window, { pointerId: 10, clientX: 620, pointerType: "mouse", buttons: 1, isPrimary: true });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    fireEvent.pointerUp(window, { pointerId: 10, clientX: 620, pointerType: "mouse", buttons: 0, isPrimary: true });
+
+    const widths = wrapperWidths(editorDom);
+    expect(widths[0]).toBeCloseTo(602, 1);
+    expect(widths[1]).toBeCloseTo(362, 1);
+    expect(widths[0] + widths[1]).toBeCloseTo(964, 4);
+    expect(document.body.style.cursor).toBe("");
+    expect(Array.from(container.querySelectorAll<HTMLElement>(".cm-editor")).map((dom) => EditorView.findFromDOM(dom))).toEqual(beforeViews);
+  });
+
+  it("terminates and reverts drag when mouse pointermove has buttons === 0", async () => {
+    const { container } = await renderReady(pair("before\n", "after\n"));
+    const { editorDom, splitter } = prepareDimensions(container, 1000);
+    const initial = wrapperWidths(editorDom);
+
+    fireEvent.pointerDown(splitter, { button: 0, pointerId: 11, clientX: 500, pointerType: "mouse", buttons: 1, isPrimary: true });
+    fireEvent.pointerMove(splitter, { pointerId: 11, clientX: 620, pointerType: "mouse", buttons: 1, isPrimary: true });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    // Lost release: mouse pointermove arrives with buttons === 0
+    fireEvent.pointerMove(window, { pointerId: 11, clientX: 650, pointerType: "mouse", buttons: 0, isPrimary: true });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    const reverted = wrapperWidths(editorDom);
+    expect(reverted[0]).toBeCloseTo(initial[0], 4);
+    expect(reverted[1]).toBeCloseTo(initial[1], 4);
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
+
+    // Further pointermove does not change widths
+    fireEvent.pointerMove(window, { pointerId: 11, clientX: 700, pointerType: "mouse", buttons: 1, isPrimary: true });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    expect(wrapperWidths(editorDom)[0]).toBeCloseTo(initial[0], 4);
+  });
+
+  it("cancels drag on lostpointercapture and restores initial ratio idempotently", async () => {
+    const { container } = await renderReady(pair("before\n", "after\n"));
+    const { editorDom, splitter } = prepareDimensions(container, 1000);
+    const initial = wrapperWidths(editorDom);
+
+    fireEvent.pointerDown(splitter, { button: 0, pointerId: 12, clientX: 500, pointerType: "mouse", buttons: 1, isPrimary: true });
+    fireEvent.pointerMove(splitter, { pointerId: 12, clientX: 620, pointerType: "mouse", buttons: 1, isPrimary: true });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    fireEvent(splitter, new Event("lostpointercapture"));
+
+    const reverted = wrapperWidths(editorDom);
+    expect(reverted[0]).toBeCloseTo(initial[0], 4);
+    expect(reverted[1]).toBeCloseTo(initial[1], 4);
+    expect(document.body.style.cursor).toBe("");
+
+    // Multiple lostpointercapture or up events are no-ops
+    fireEvent(splitter, new Event("lostpointercapture"));
+    fireEvent.pointerUp(splitter, { pointerId: 12, clientX: 620, pointerType: "mouse", buttons: 0, isPrimary: true });
+    expect(wrapperWidths(editorDom)[0]).toBeCloseTo(initial[0], 4);
+  });
+
+  it("ignores pointer events from non-current pointer IDs during drag", async () => {
+    const { container } = await renderReady(pair("before\n", "after\n"));
+    const { editorDom, splitter } = prepareDimensions(container, 1000);
+
+    fireEvent.pointerDown(splitter, { button: 0, pointerId: 20, clientX: 500, pointerType: "mouse", buttons: 1, isPrimary: true });
+
+    // Non-current pointer move should be ignored
+    fireEvent.pointerMove(window, { pointerId: 99, clientX: 700, pointerType: "mouse", buttons: 1, isPrimary: true });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    expect(wrapperWidths(editorDom)[0]).toBeCloseTo(482, 1);
+
+    // Non-current pointer up should not cancel or commit the drag
+    fireEvent.pointerUp(window, { pointerId: 99, clientX: 700, pointerType: "mouse", buttons: 0, isPrimary: true });
+    expect(document.body.style.cursor).toBe("col-resize");
+
+    // Primary pointer finishes
+    fireEvent.pointerMove(window, { pointerId: 20, clientX: 620, pointerType: "mouse", buttons: 1, isPrimary: true });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    fireEvent.pointerUp(window, { pointerId: 20, clientX: 620, pointerType: "mouse", buttons: 0, isPrimary: true });
+
+    expect(wrapperWidths(editorDom)[0]).toBeCloseTo(602, 1);
+  });
+
+  it("cancels active drag when container width changes during drag", async () => {
+    const { container } = await renderReady(pair("before\n", "after\n"));
+    const { editorDom, splitter } = prepareDimensions(container, 1000);
+
+    fireEvent.pointerDown(splitter, { button: 0, pointerId: 30, clientX: 500, pointerType: "mouse", buttons: 1, isPrimary: true });
+    fireEvent.pointerMove(splitter, { pointerId: 30, clientX: 620, pointerType: "mouse", buttons: 1, isPrimary: true });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    // Container width shifts during drag
+    setWidth(editorDom, 800);
+    fireEvent(window, new Event("resize"));
+
+    expect(document.body.style.cursor).toBe("");
+    // Widths now conform to 800px with initial 50:50 ratio
+    const widths = wrapperWidths(editorDom);
+    expect(widths[0]).toBeCloseTo((800 - 36) / 2, 1);
+    expect(widths[1]).toBeCloseTo((800 - 36) / 2, 1);
+  });
+
+  it("cleans up pending animation frame and document styles when unmounted during drag", async () => {
+    const { container, unmount } = await renderReady(pair("before\n", "after\n"));
+    const { splitter } = prepareDimensions(container, 1000);
+
+    fireEvent.pointerDown(splitter, { button: 0, pointerId: 40, clientX: 500, pointerType: "mouse", buttons: 1, isPrimary: true });
+    fireEvent.pointerMove(splitter, { pointerId: 40, clientX: 620, pointerType: "mouse", buttons: 1, isPrimary: true });
+    expect(document.body.style.cursor).toBe("col-resize");
+
+    unmount();
+
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
+  });
 });

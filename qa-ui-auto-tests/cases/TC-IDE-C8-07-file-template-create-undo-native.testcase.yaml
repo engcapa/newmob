@@ -1,0 +1,81 @@
+id: TC-IDE-C8-07-file-template-create-undo-native
+title: "Java file template creates a real source file and undoes it"
+description: |
+  Native gate case for ED-TEMPLATE-001 A1/A3. Opens the real Maven sample,
+  waits for trusted project facts, creates a Java class from the source package
+  through the production tree command, verifies the host file and generated
+  package/content, then uses the workspace undo command and verifies the UI no
+  longer exposes the resource. The host-side absence check runs after the
+  runner because the native harness exposes creation/content assertions only.
+  Highest claim on green: L1 packaged native disk boundary.
+covers: [F25.5]
+tags: [code-workspace, ide-c8, file-templates, native-gate, p1]
+modes: [native]
+fixtures: [reset_db, java_sample_projects]
+timeout_sec: 300
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-template-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - seed_storage:
+      key: taomni.recentWorkspaces.v1
+      value: '[{"id":"qa-template","name":"maven-single","roots":[{"id":"maven-single","name":"maven-single","path":"${fixture.maven_single_root}","kind":"folder"}],"looseFiles":[],"lastOpenedAt":1788566400000,"isGitRepo":false}]'
+  - reload_window: null
+  - click: '[data-testid="welcome-history-tab-workspaces"]'
+  - click: '[data-testid="welcome-recent-workspace-row"][data-workspace-path="${fixture.maven_single_root}"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - wait_for:
+      selector: '[data-testid="project-facts-status-badge"]'
+      timeout_sec: 90
+  - assert_text:
+      selector: '[data-testid="project-facts-status-badge"]'
+      contains: "Ready"
+      timeout_sec: 30
+  - wait_for:
+      selector: '[data-testid="code-workspace-tree-dir"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-view-tree"]'
+  - click: '[data-testid="code-workspace-tree-dir"][data-path="src"]'
+  - wait_for: '[data-testid="code-workspace-tree-dir"][data-path="src/main"]'
+  - click: '[data-testid="code-workspace-tree-dir"][data-path="src/main"]'
+  - wait_for: '[data-testid="code-workspace-tree-dir"][data-path="src/main/java"]'
+  - click: '[data-testid="code-workspace-tree-dir"][data-path="src/main/java"]'
+  - wait_for: '[data-testid="code-workspace-tree-dir"][data-path="src/main/java/com"]'
+  - click: '[data-testid="code-workspace-tree-dir"][data-path="src/main/java/com"]'
+  - wait_for: '[data-testid="code-workspace-tree-dir"][data-path="src/main/java/com/example"]'
+  - click: '[data-testid="code-workspace-tree-dir"][data-path="src/main/java/com/example"]'
+  - wait_for: '[data-testid="code-workspace-tree-dir"][data-path="src/main/java/com/example/single"]'
+  - click: '[data-testid="code-workspace-tree-dir"][data-path="src/main/java/com/example/single"]'
+  - wait_for:
+      selector: '[data-testid="code-workspace-tree-file"][data-path="src/main/java/com/example/single/App.java"]'
+      timeout_sec: 60
+  - click: '[data-testid="code-workspace-tree-file"][data-path="src/main/java/com/example/single/App.java"]'
+  - press: Control+Shift+N
+  - wait_for: '[data-testid="code-workspace-search-everywhere"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] button[role="tab"]:nth-child(5)'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: New Java Class...
+  - press: Enter
+  - wait_for: '[data-testid="new-java-class-dialog"]'
+  - assert_text:
+      selector: '[data-testid="new-java-class-package"]'
+      contains: "com.example.single"
+  - fill:
+      selector: '[data-testid="new-java-class-name-input"]'
+      value: "QaTemplateSmoke"
+  - click: '[data-testid="new-java-class-submit"]'
+  - assert_file_exists:
+      path: "${fixture.maven_single_root}/src/main/java/com/example/single/QaTemplateSmoke.java"
+      timeout_sec: 30
+  - assert_file_contains:
+      path: "${fixture.maven_single_root}/src/main/java/com/example/single/QaTemplateSmoke.java"
+      contains: "package com.example.single;"
+      timeout_sec: 30
+  - assert_file_contains:
+      path: "${fixture.maven_single_root}/src/main/java/com/example/single/QaTemplateSmoke.java"
+      contains: "public class QaTemplateSmoke"
+      timeout_sec: 30
+  - wait_for: '[data-testid="code-workspace-editor-pane"]'
+  - press: Control+z
+  - assert_not_visible: '[data-testid="code-workspace-tree-file"][data-path="src/main/java/com/example/single/QaTemplateSmoke.java"]'
+  - screenshot: tc-ide-c8-07-file-template-create-undo.png
