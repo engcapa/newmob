@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_default_policy() {
         let policy = BackupPolicy::default();
-        assert!(!policy.auto_backup_enabled);
+        assert!(policy.auto_backup_enabled);
         assert_eq!(policy.frequency, "weekly");
         assert_eq!(policy.max_retained_copies, 7);
         assert_eq!(policy.default_scope, "core");

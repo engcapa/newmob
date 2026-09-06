@@ -33,18 +33,110 @@ export interface LocalShellOption {
   canElevate: boolean;
 }
 
-export interface LocalDirectoryShortcut {
-  label: string;
-  path: string;
-  kind: "system" | "personal";
-}
-
 export async function listLocalShells(): Promise<LocalShellOption[]> {
   return invoke<LocalShellOption[]>("list_local_shells", {});
 }
 
-export async function listCommonLocalDirectories(): Promise<LocalDirectoryShortcut[]> {
-  return invoke<LocalDirectoryShortcut[]>("list_common_local_directories", {});
+export type DirectoryAvailability =
+  | "unknown"
+  | "available"
+  | "missing"
+  | "permission-denied"
+  | "unavailable";
+
+export type DirectoryTimeSource = "local-start" | "local-cwd";
+
+export interface LocalDirectoryShortcut {
+  label: string;
+  path: string;
+  kind: "system" | "personal";
+  directoryId: string;
+  lastUsedAtMs: number | null;
+  timeSource: DirectoryTimeSource | null;
+  legacyRank: number | null;
+  defaultId: string | null;
+  availability: DirectoryAvailability;
+}
+
+export interface DirectoryListEnvelope {
+  revision: number;
+  directories: LocalDirectoryShortcut[];
+}
+
+function normalizeDirectoryShortcut(raw: unknown): LocalDirectoryShortcut | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const path = typeof item.path === "string" ? item.path : "";
+  if (!path) return null;
+  const kind = item.kind === "system" ? "system" : "personal";
+  const timeSource: DirectoryTimeSource | null =
+    item.timeSource === "local-start" || item.timeSource === "local-cwd"
+      ? item.timeSource
+      : null;
+  return {
+    label: typeof item.label === "string" ? item.label : path,
+    path,
+    kind,
+    directoryId: typeof item.directoryId === "string" ? item.directoryId : "",
+    lastUsedAtMs:
+      typeof item.lastUsedAtMs === "number" && Number.isFinite(item.lastUsedAtMs)
+        ? item.lastUsedAtMs
+        : null,
+    timeSource,
+    legacyRank:
+      typeof item.legacyRank === "number" && Number.isFinite(item.legacyRank)
+        ? item.legacyRank
+        : null,
+    defaultId: typeof item.defaultId === "string" ? item.defaultId : null,
+    availability: (["unknown", "available", "missing", "permission-denied", "unavailable"] as const).includes(
+      item.availability as DirectoryAvailability,
+    )
+      ? (item.availability as DirectoryAvailability)
+      : "unknown",
+  };
+}
+
+/**
+ * Reads the sorted directory listing. Accepts both the new envelope
+ * `{revision, directories}` and the legacy bare array (older browser
+ * fixtures), so stale consumers never misread an envelope as an empty list.
+ */
+export async function listCommonLocalDirectories(): Promise<{
+  directories: LocalDirectoryShortcut[];
+  revision: number;
+}> {
+  const raw = await invoke<unknown>("list_common_local_directories", {});
+  if (Array.isArray(raw)) {
+    return { directories: raw.map(normalizeDirectoryShortcut).filter((d): d is LocalDirectoryShortcut => d !== null), revision: 0 };
+  }
+  const envelope = raw as Partial<DirectoryListEnvelope> | null;
+  const directories = Array.isArray(envelope?.directories) ? envelope!.directories : [];
+  return {
+    directories: directories
+      .map(normalizeDirectoryShortcut)
+      .filter((d): d is LocalDirectoryShortcut => d !== null),
+    revision: typeof envelope?.revision === "number" ? envelope.revision : 0,
+  };
+}
+
+/** Report a confirmed cwd change from a live native-local terminal. */
+export async function recordLocalDirectoryUse(input: {
+  backendSessionId: string;
+  path: string;
+}): Promise<{ changed: boolean }> {
+  return invoke<{ changed: boolean }>("record_local_directory_use", {
+    backendSessionId: input.backendSessionId,
+    path: input.path,
+  });
+}
+
+/** Emitted by the backend after a successful directory-usage transaction. */
+export async function listenWelcomeDirectoriesChanged(
+  callback: (revision: number) => void,
+): Promise<UnlistenFn> {
+  return listen<{ revision: number }>("welcome-directories-changed", (event) => {
+    callback(typeof event.payload?.revision === "number" ? event.payload.revision : 0);
+  });
 }
 
 export async function openLocalShellAsAdministrator(shell?: string): Promise<void> {
@@ -78,6 +170,11 @@ export interface LocalTerminalCreated {
   sessionId: string;
   /** `LocalShellOption.id` of the shell the backend actually launched. */
   shellId: string;
+  /**
+   * Present when the terminal started but the local-directory usage record
+   * could not be saved. Never turns a successful launch into a failure.
+   */
+  directoryUseWarning?: string | null;
 }
 
 export async function createLocalTerminal(
@@ -414,6 +511,72 @@ export function encodeBase64(str: string): string {
 }
 
 // --- Session CRUD ---
+
+// ---------------------------------------------------------------------------
+// Welcome run snapshot (design §4.2, scheme B). Types mirror
+// session/resume.rs; the richer contract lives in welcomeSessionResume.ts.
+// ---------------------------------------------------------------------------
+
+export interface IpcSnapshotEntrySavedSession {
+  kind: "saved-session";
+  identity: string;
+  savedSessionId: string;
+  savedSessionType: string;
+  displayName: string;
+}
+
+export interface IpcSnapshotEntryLocalTerminal {
+  kind: "local-terminal";
+  identity: string;
+  displayName: string;
+  shellId: string;
+  shellArgs: string[];
+  confirmedCwd: string;
+}
+
+export type IpcSnapshotEntry = IpcSnapshotEntrySavedSession | IpcSnapshotEntryLocalTerminal;
+
+export interface IpcRunSnapshotRecord {
+  schemaVersion: number;
+  revision: number;
+  runSequence: number;
+  batchId: string;
+  committedAtMs: number;
+  entries: IpcSnapshotEntry[];
+  activeIdentity: string | null;
+}
+
+export interface IpcGetRunSnapshotResponse {
+  record: IpcRunSnapshotRecord | null;
+  legacyCandidate: IpcSnapshotEntry | null;
+  issue: { code: string; message: string } | null;
+}
+
+export async function getWelcomeRunSnapshot(): Promise<IpcGetRunSnapshotResponse> {
+  return invoke<IpcGetRunSnapshotResponse>("get_welcome_run_snapshot", {});
+}
+
+export async function commitWelcomeRunSnapshot(input: {
+  batchId: string;
+  entries: IpcSnapshotEntry[];
+  activeIdentity: string | null;
+  expectedRevision: number | null;
+  restored: boolean;
+}): Promise<{ record: IpcRunSnapshotRecord | null; applied: boolean }> {
+  return invoke("commit_welcome_run_snapshot", input);
+}
+
+export async function clearWelcomeRunSnapshot(input: {
+  expectedRevision: number | null;
+}): Promise<void> {
+  return invoke("clear_welcome_run_snapshot", {
+    expectedRevision: input.expectedRevision,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
 
 export interface SessionConfig {
   id: string;

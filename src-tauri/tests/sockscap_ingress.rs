@@ -24,10 +24,13 @@ use tokio::sync::RwLock;
 /// needs no upstream proxy and still exercises the whole ingress → policy →
 /// egress → bridge chain.
 fn direct_context(config: SocksCapConfig) -> Arc<RwLock<RelayContext>> {
+    let engine = RelayContext::build_engine(&config, None);
     Arc::new(RwLock::new(RelayContext {
         config,
         rules: None,
+        engine,
         helper: Arc::new(HelperRegistry::new()),
+        helper_client: None,
         stats: Arc::new(StatsCounters::default()),
         upstream_host: String::new(),
         upstream_port: 0,
@@ -35,6 +38,7 @@ fn direct_context(config: SocksCapConfig) -> Arc<RwLock<RelayContext>> {
         upstream_pass: String::new(),
         self_pid: std::process::id(),
         ssh_pool: None,
+        xray_port: None,
         profile_upstreams: std::collections::HashMap::new(),
         dns_map: Arc::new(std::sync::Mutex::new(DnsMap::new(
             64,

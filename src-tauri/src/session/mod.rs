@@ -2,6 +2,7 @@ pub mod db;
 pub mod import;
 pub mod import_secrets;
 pub mod models;
+pub mod resume;
 
 use crate::state::AppState;
 use models::{SessionConfig, SessionGroup};

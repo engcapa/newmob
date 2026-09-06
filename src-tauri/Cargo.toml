@@ -46,6 +46,7 @@ serde_json = "1"
 toml = "0.9"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
+same-file = "1.0.6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 log = "0.4"

@@ -81,6 +81,7 @@ import {
   createCommandTerminal,
   createLocalTerminal,
   createSshTerminal,
+  recordLocalDirectoryUse,
   listenSshAuthPrompt,
   submitSshAuthResponse,
   type SshAuthPromptPayload,
@@ -228,6 +229,12 @@ interface TerminalPanelProps {
   cwdRequestToken?: number;
   /** Called once the backend terminal session ID is known (after connect). */
   onSessionReady?: (sessionId: string) => void;
+  /**
+   * Structured launch failure notification (design §4.1.5): called from
+   * `handleConnectFailure` so the parent can complete a pending local-launch
+   * request. Existing in-panel failure handling is unchanged.
+   */
+  onSessionLaunchFailed?: (error: unknown) => void;
   /** Called whenever the terminal receives output (for new-output badge). */
   onOutput?: () => void;
   /** Workspace task terminals report their shell exit marker through OSC 633. */
@@ -331,6 +338,7 @@ export function TerminalPanel({
   onCwdChange,
   cwdRequestToken = 0,
   onSessionReady,
+  onSessionLaunchFailed,
   onOutput,
   onTaskExit,
   onUploadLocalPaths,
@@ -347,6 +355,7 @@ export function TerminalPanel({
   const { confirm: confirmTerminalDefaults, render: terminalDefaultsConfirmDialog } = useConfirmDialog();
   const cwdCallbackRef = useRef<typeof onCwdChange>(onCwdChange);
   const onSessionReadyRef = useRef<typeof onSessionReady>(onSessionReady);
+  const onSessionLaunchFailedRef = useRef<typeof onSessionLaunchFailed>(onSessionLaunchFailed);
   const onOutputRef = useRef<typeof onOutput>(onOutput);
   const onTaskExitRef = useRef<typeof onTaskExit>(onTaskExit);
   const onUploadLocalPathsRef = useRef<typeof onUploadLocalPaths>(onUploadLocalPaths);
@@ -360,6 +369,7 @@ export function TerminalPanel({
   useEffect(() => {
     cwdCallbackRef.current = onCwdChange;
     onSessionReadyRef.current = onSessionReady;
+    onSessionLaunchFailedRef.current = onSessionLaunchFailed;
     onOutputRef.current = onOutput;
     onTaskExitRef.current = onTaskExit;
     onUploadLocalPathsRef.current = onUploadLocalPaths;
@@ -2485,6 +2495,18 @@ export function TerminalPanel({
             ) {
               lastRecordedLocalDirRef.current = normalized;
               historyRef.current.commit(formatHistoryCdCommand(normalized));
+              // Structured confirmed-use report (design §4.1.5): the backend
+              // validates the live native-local runtime and dedups per
+              // runtime; remote/WSL cwd never reaches this call because
+              // normalizeLocalStartCwd returned null for it.
+              const backendSessionId = sessionIdRef.current;
+              if (backendSessionId) {
+                recordLocalDirectoryUse({ backendSessionId, path: normalized }).catch(
+                  (error) => {
+                    console.warn("Local directory use record failed:", error);
+                  },
+                );
+              }
             }
           }
         }
@@ -2739,7 +2761,11 @@ export function TerminalPanel({
     const handleRawOutput = (raw: Uint8Array) => zmodem.consume(raw);
 
     type ConnectMode = "initial" | "reconnect";
-    type ConnectResult = { sessionId: string; shellId: string | null };
+    type ConnectResult = {
+      sessionId: string;
+      shellId: string | null;
+      directoryUseWarning?: string | null;
+    };
 
     const cancelPendingMfa = () => {
       if (pendingMfaRequestIdRef.current) {
@@ -2824,7 +2850,10 @@ export function TerminalPanel({
       }
     };
 
-    const handleConnected = async ({ sessionId: connectedSid, shellId }: ConnectResult, mode: ConnectMode) => {
+    const handleConnected = async (
+      { sessionId: connectedSid, shellId, directoryUseWarning }: ConnectResult,
+      mode: ConnectMode,
+    ) => {
       if (destroyed) {
         const detachPending = tabId ? consumeTerminalDetachPending(tabId) : false;
         // Adopted panels never own the backend session — don't close it on
@@ -2854,6 +2883,10 @@ export function TerminalPanel({
       pendingMfaRequestIdRef.current = null;
       setMfaPrompt(null);
       onSessionReadyRef.current?.(connectedSid);
+      if (directoryUseWarning) {
+        appendEvent("error", directoryUseWarning);
+        setStatusMessage(directoryUseWarning);
+      }
       onDetachedStateChangeRef.current?.({ terminalSessionId: connectedSid });
       appendEvent(
         "connection",
@@ -2981,6 +3014,7 @@ export function TerminalPanel({
     const handleConnectFailure = (err: unknown, mode: ConnectMode) => {
       if (destroyed) return;
       console.error("Failed to create terminal:", err);
+      onSessionLaunchFailedRef.current?.(err);
       cancelPendingMfa();
       connectionStateRef.current = ssh ? "disconnected" : "idle";
       sessionIdRef.current = null;
@@ -3167,7 +3201,9 @@ export function TerminalPanel({
         handleRawOutput,
         workspaceRootRef.current,
       )
-        .then(({ sessionId, shellId }) => handleConnected({ sessionId, shellId }, "initial"))
+        .then(({ sessionId, shellId, directoryUseWarning }) =>
+          handleConnected({ sessionId, shellId, directoryUseWarning }, "initial"),
+        )
         .catch((err) => handleConnectFailure(err, "initial"));
     }
 

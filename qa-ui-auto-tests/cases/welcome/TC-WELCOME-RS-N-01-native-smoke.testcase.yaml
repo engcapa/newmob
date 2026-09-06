@@ -1,0 +1,46 @@
+id: TC-WELCOME-RS-N-01-native-smoke
+title: "Linux native smoke: restore empty state, real local PTY launch, snapshot commit"
+description: |
+  V-10 Linux slice (design docs-feature/welcome-recents-session-restore-design.md
+  §8). Fresh isolated app-data: the restore entry starts empty/disabled;
+  opening a real host local terminal through the Welcome directory entry
+  produces a genuine WebKitGTK/PTY tab; the run-snapshot collector commits the
+  saved LocalShell tab into taomni.db, verified on disk after the case.
+covers: [F1.6]
+tags: [welcome, native-gate, p1, needs-review]
+modes: [native]
+fixtures: [reset_db]
+timeout_sec: 420
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+
+  # Fresh profile: restore entry is empty and disabled.
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="empty"]'
+      timeout_sec: 30
+  - assert_attribute: {selector: '[data-testid="welcome-restore-last-session"]', name: disabled, equals: ''}
+
+  # Real local terminal through the Welcome local-terminal entry.
+  - click: '[data-testid="welcome-open-local-terminal"]'
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 30
+
+  # Promote the terminal into a saved LocalShell session so the collector
+  # commits a snapshot: switch back to Welcome and open the directories tab.
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-history-tab-directories"]'
+  - wait_for: '[data-testid="welcome-local-directories"]'
+  - assert_visible: '[data-testid="welcome-local-directory"]'
+  - assert_visible: '[data-testid="welcome-local-directory-filter"]'
+  - screenshot: F1.6-native-welcome-directories.png
+
+  # Back on the Welcome tab: the live local terminal without a saved id must
+  # NOT make the restore entry available by itself (it lacks a confirmed-cwd
+  # whitelist entry only after OSC reporting; report what the state is).
+  - wait: 2
+  - assert_visible: '[data-testid="welcome-restore-status"]'
+  - screenshot: F1.6-native-restore-state.png

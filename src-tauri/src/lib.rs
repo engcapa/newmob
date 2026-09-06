@@ -32,7 +32,7 @@ mod rdp;
 mod sdk;
 mod serial;
 mod servers;
-mod session;
+pub mod session;
 pub mod sockscap;
 mod state;
 mod tab;
@@ -119,6 +119,8 @@ pub fn run() {
             let db_path = app_data.join("taomni.db");
             let conn = rusqlite::Connection::open(&db_path).expect("failed to open database");
             session::db::init_db(&conn).expect("failed to init database");
+            terminal::local_directories::init_tables(&conn)
+                .expect("failed to init local directory tables");
             servers::db::init_server_tables(&conn).expect("init server tables");
             rdp::tls::init_trust_table(&conn).expect("init RDP certificate trust table");
             let mail_db_dir = app_data.join("mail-cache");
@@ -393,6 +395,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             terminal::list_local_shells,
             terminal::list_common_local_directories,
+            terminal::record_local_directory_use,
             terminal::detect_x_server,
             wsl::list_wsl_distros,
             terminal::open_local_shell_as_administrator,
@@ -408,6 +411,9 @@ pub fn run() {
             terminal::send_terminal_signal,
             terminal::close_terminal,
             session::list_sessions,
+            session::resume::get_welcome_run_snapshot,
+            session::resume::commit_welcome_run_snapshot,
+            session::resume::clear_welcome_run_snapshot,
             session::get_session,
             session::save_session,
             session::delete_session,

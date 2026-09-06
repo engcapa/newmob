@@ -6,7 +6,7 @@ import { emit } from "@tauri-apps/api/event";
 import { MainLayout } from "./MainLayout";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
-import { exitApp, listSessions, markSessionConnected, writeTerminal, type SessionConfig } from "../lib/ipc";
+import { commitWelcomeRunSnapshot, exitApp, listSessions, markSessionConnected, writeTerminal, type SessionConfig } from "../lib/ipc";
 import { DEFAULT_TERMINAL_PROFILE, type TerminalProfile } from "../lib/terminalProfile";
 
 const terminalLifecycle = vi.hoisted(() => ({
@@ -20,6 +20,7 @@ const terminalPanelMock = vi.hoisted(() => ({
     terminalProfile?: TerminalProfile;
     onTerminalProfileChange?: (profile: TerminalProfile) => void;
     onUploadLocalPaths?: (request: { paths: string[]; cwd: string | null }) => Promise<void>;
+    onCwdChange?: (cwd: string) => void;
   }>,
 }));
 
@@ -204,6 +205,7 @@ vi.mock("../components/terminal/TerminalPanel", () => ({
     inputLocked,
     onSessionReady,
     onUploadLocalPaths,
+    onCwdChange,
   }: {
     tabId?: string;
     commandTerminal?: {
@@ -222,8 +224,9 @@ vi.mock("../components/terminal/TerminalPanel", () => ({
     onSessionReady?: (sessionId: string) => void;
     onTerminalProfileChange?: (profile: TerminalProfile) => void;
     onUploadLocalPaths?: (request: { paths: string[]; cwd: string | null }) => Promise<void>;
+    onCwdChange?: (cwd: string) => void;
   }) => {
-    terminalPanelMock.props.push({ tabId, terminalProfile, onTerminalProfileChange, onUploadLocalPaths });
+    terminalPanelMock.props.push({ tabId, terminalProfile, onTerminalProfileChange, onUploadLocalPaths, onCwdChange });
     useEffect(() => {
       terminalLifecycle.mounted();
       onSessionReady?.(`session-${tabId ?? "terminal"}`);
@@ -352,6 +355,26 @@ vi.mock("../components/database/HBaseShellTab", () => ({
 vi.mock("../lib/ipc", () => ({
   encodeBase64: (value: string) => btoa(value),
   exitApp: vi.fn(async () => undefined),
+  getSession: vi.fn(async (id: string) => ({
+    id,
+    name: `session-${id}`,
+    session_type: "SSH",
+    group_path: null,
+    host: "example.test",
+    port: 22,
+    username: "root",
+    auth_method: "Password",
+    options_json: "{}",
+    created_at: 0,
+    updated_at: 0,
+    last_connected_at: null,
+    sort_order: 0,
+  })),
+  getWelcomeRunSnapshot: vi.fn(async () => ({ record: null, legacyCandidate: null, issue: null })),
+  commitWelcomeRunSnapshot: vi.fn(async () => ({ record: null, applied: true })),
+  clearWelcomeRunSnapshot: vi.fn(async () => undefined),
+  recordLocalDirectoryUse: vi.fn(async () => ({ changed: true })),
+  listenWelcomeDirectoriesChanged: vi.fn(async () => vi.fn()),
   listSessionGroups: vi.fn(async () => []),
   listSessions: vi.fn(async () => []),
   listCommonLocalDirectories: vi.fn(async () => []),
@@ -1701,3 +1724,126 @@ function setNavigatorPlatform(platform: string): () => void {
     });
   };
 }
+
+describe("MainLayout run-snapshot collector (V-06)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    useSessionStore.setState({
+      sessions: [],
+      groups: [],
+      loading: false,
+      selectedSessionId: null,
+      selectedSessionIds: [],
+      searchQuery: "",
+    });
+    useAppStore.setState({
+      tabs: [{ id: "welcome", type: "welcome", title: "Welcome", closable: false }],
+      activeTabId: "welcome",
+    });
+    (commitWelcomeRunSnapshot as ReturnType<typeof vi.fn>).mockClear();
+    (commitWelcomeRunSnapshot as ReturnType<typeof vi.fn>).mockResolvedValue({
+      record: { schemaVersion: 1, revision: 1, runSequence: 1, batchId: "b", committedAtMs: 1, entries: [], activeIdentity: null },
+      applied: true,
+    });
+    render(<MainLayout />);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  const sshSession: SessionConfig = {
+    id: "sess-1",
+    name: "prod",
+    session_type: "SSH",
+    group_path: null,
+    host: "example.test",
+    port: 22,
+    username: "root",
+    auth_method: "Password",
+    options_json: "{}",
+    created_at: 0,
+    updated_at: 0,
+    last_connected_at: null,
+    sort_order: 0,
+  };
+
+  it("commits an ordered snapshot for eligible saved-session tabs", async () => {
+    useSessionStore.setState({ sessions: [sshSession] });
+    await act(async () => {
+      useAppStore.setState({
+        tabs: [
+          { id: "welcome", type: "welcome", title: "Welcome", closable: false },
+          {
+            id: "ssh-tab-1",
+            type: "terminal",
+            title: "prod",
+            sessionId: "sess-1",
+            closable: true,
+          },
+        ],
+        activeTabId: "ssh-tab-1",
+      });
+    });
+
+    await waitFor(
+      () => expect(commitWelcomeRunSnapshot).toHaveBeenCalled(),
+      { timeout: 4000 },
+    );
+    const payload = (commitWelcomeRunSnapshot as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(payload.entries).toHaveLength(1);
+    expect(payload.entries[0]).toMatchObject({
+      kind: "saved-session",
+      savedSessionId: "sess-1",
+      savedSessionType: "SSH",
+    });
+    expect(payload.activeIdentity).toBe("saved:sess-1");
+  });
+
+  it("never writes an empty snapshot when only Welcome is open", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(commitWelcomeRunSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("keeps whitelist local terminals with a confirmed cwd in the snapshot", async () => {
+    await act(async () => {
+      useAppStore.setState({
+        tabs: [
+          { id: "welcome", type: "welcome", title: "Welcome", closable: false },
+          {
+            id: "local-1",
+            type: "terminal",
+            title: "bash",
+            closable: true,
+            localShell: { id: "/bin/bash", name: "bash" },
+          },
+        ],
+        activeTabId: "local-1",
+      });
+    });
+    // The confirmed cwd arrives through the terminal's OSC reporting.
+    await waitFor(() => {
+      const props = terminalPanelMock.props.find((candidate) => candidate.tabId === "local-1");
+      expect(props?.onCwdChange).toBeTruthy();
+    });
+    await act(async () => {
+      terminalPanelMock.props
+        .filter((candidate) => candidate.tabId === "local-1")
+        .at(-1)
+        ?.onCwdChange?.("/work/repo");
+    });
+    await waitFor(
+      () => expect(commitWelcomeRunSnapshot).toHaveBeenCalled(),
+      { timeout: 4000 },
+    );
+    const payload = (commitWelcomeRunSnapshot as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    const local = payload.entries.find(
+      (entry: { kind: string }) => entry.kind === "local-terminal",
+    );
+    expect(local).toMatchObject({
+      shellId: "/bin/bash",
+      confirmedCwd: "/work/repo",
+    });
+  });
+});

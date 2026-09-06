@@ -1,0 +1,53 @@
+id: TC-WELCOME-RS-04-empty-and-clear
+title: Empty restore entry is disabled, builds a candidate through real use, and clear removes it
+description: |
+  No seed: the restore entry starts disabled/empty. Creating and opening an
+  embedded-File session through the UI produces a real snapshot candidate;
+  clearing it through the confirm dialog leaves the entry empty and the
+  legacy recent list does not resurrect it.
+covers: [F1.6]
+tags: [auto-generated, p1, welcome, needs-review]
+modes: [browser]
+fixtures: [reset_db, welcome_recents]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="empty"]'
+      timeout_sec: 15
+  - assert_count: {selector: '[data-testid="welcome-restore-last-session"]:disabled', equal: 1}
+
+  # Create a saved File session over the readable VFS home through the UI.
+  - click: text="New session…"
+  - wait_for: '[data-testid="session-editor"]'
+  - click: '[data-testid="session-proto-file"]'
+  - click: '[data-testid="session-section-bookmark"]'
+  - wait_for: '[data-testid="bookmark-settings"]'
+  - fill: {selector: '[data-testid="session-name"]', value: qa-welcome-rs04-file}
+  - fill: {selector: '[data-testid="session-file-target"]', value: /preview}
+  - click: '[data-testid="session-save"]'
+  # Ensure the sidebar sessions tree is expanded before looking for the row.
+  - click: '[data-testid="side-tab-sessions"]'
+  - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-welcome-rs04-file"]'
+
+  # Open it once so the run snapshot collector sees the live tab.
+  - open_session: {name: qa-welcome-rs04-file, double_click: true}
+  - wait_for:
+      selector: '[data-testid="tab-item"][data-tab-type="file-browser"]'
+      timeout_sec: 15
+
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="available"]'
+      timeout_sec: 20
+
+  # Clear through the confirm dialog.
+  - click: '[data-testid="welcome-restore-clear"]'
+  - wait_for: '[data-testid="confirm-dialog"]'
+  - click: '[data-testid="confirm-dialog-confirm"]'
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="empty"]'
+      timeout_sec: 15
+  - assert_count: {selector: '[data-testid="welcome-restore-last-session"]:disabled', equal: 1}
+  - screenshot: F1.6-welcome-restore-clear.png

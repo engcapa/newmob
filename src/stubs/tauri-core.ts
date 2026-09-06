@@ -1,4 +1,4 @@
-import type { SessionConfig, SessionGroup, LocalShellOption, LocalDirectoryShortcut } from "../lib/ipc";
+import type { SessionConfig, SessionGroup, LocalShellOption, LocalDirectoryShortcut, IpcRunSnapshotRecord, IpcSnapshotEntry } from "../lib/ipc";
 import {
   isSshSession,
   sshClose,
@@ -57,6 +57,52 @@ const NOTE_PREFS_STORAGE_KEY = "taomni.stub.notePrefs.v1";
 const NOTE_ALERT_ACK_STORAGE_KEY = "taomni.stub.noteAlertAcks.v1";
 const MAIL_DRAFTS_STORAGE_KEY = "taomni.stub.mailDrafts.v1";
 const SDK_REGISTRY_STORAGE_KEY = "taomni.stub.sdkRegistry.v1";
+const DIRECTORY_USAGE_STORAGE_KEY = "taomni.welcome.directoryUsage.v1";
+const SESSION_RESUME_STORAGE_KEY = "taomni.welcome.sessionResume.v1";
+const SESSION_RESUME_REVISION_KEY = "taomni.welcome.sessionResumeRevision.v1";
+const SESSION_RESUME_SEQUENCE_KEY = "taomni.welcome.sessionResumeSequence.v1";
+const SESSION_RESUME_CLEARED_KEY = "taomni.welcome.sessionResumeCleared.v1";
+
+function existingRevision(): number | null {
+  const raw = window.localStorage.getItem(SESSION_RESUME_REVISION_KEY);
+  return raw ? Number.parseInt(raw, 10) : null;
+}
+
+function existingRunSequence(): number | null {
+  const raw = window.localStorage.getItem(SESSION_RESUME_SEQUENCE_KEY);
+  return raw ? Number.parseInt(raw, 10) : null;
+}
+
+interface StubDirectoryUsageEntry {
+  directoryId: string;
+  lastUsedAtMs: number | null;
+  timeSource: "local-start" | "local-cwd" | null;
+  legacyRank: number | null;
+  availability: "unknown" | "available" | "missing" | "permission-denied" | "unavailable";
+}
+
+interface StubDirectoryUsage {
+  revision: number;
+  entries: Record<string, StubDirectoryUsageEntry>;
+  fixtureDirectories?: Array<Partial<LocalDirectoryShortcut>>;
+}
+
+function loadDirectoryUsage(): StubDirectoryUsage {
+  try {
+    const raw = window.localStorage.getItem(DIRECTORY_USAGE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as StubDirectoryUsage;
+      if (parsed && typeof parsed === "object" && parsed.entries) return parsed;
+    }
+  } catch {
+    // fall through to a fresh store
+  }
+  return { revision: 0, entries: {} };
+}
+
+function saveDirectoryUsage(usage: StubDirectoryUsage): void {
+  window.localStorage.setItem(DIRECTORY_USAGE_STORAGE_KEY, JSON.stringify(usage));
+}
 
 interface StubSdkRegistry {
   schemaVersion: number;
@@ -1554,6 +1600,108 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       saveGroups(groups.filter((g) => g.id !== (args?.id as string)));
       return undefined as T;
     }
+    case "get_welcome_run_snapshot": {
+      const cleared = window.localStorage.getItem(SESSION_RESUME_CLEARED_KEY) === "true";
+      const raw = window.localStorage.getItem(SESSION_RESUME_STORAGE_KEY);
+      if (raw) {
+        const record = JSON.parse(raw) as IpcRunSnapshotRecord & { __schemaVersion?: number };
+        const schemaVersion = record.__schemaVersion ?? 1;
+        if (schemaVersion > 1) {
+          return {
+            record: null,
+            legacyCandidate: null,
+            issue: {
+              code: "unsupported",
+              message: `snapshot schema version ${schemaVersion} is not supported`,
+            },
+          } as T;
+        }
+        return { record, legacyCandidate: null, issue: null } as T;
+      }
+      if (cleared) {
+        return { record: null, legacyCandidate: null, issue: null } as T;
+      }
+      // Legacy candidate: most recently opened recoverable saved session.
+      const sessions = loadSessions() as SessionConfig[];
+      const candidates = [...sessions]
+        .filter((s) => (s.last_connected_at ?? 0) > 0)
+        .sort((a, b) => (b.last_connected_at ?? 0) - (a.last_connected_at ?? 0) || a.id.localeCompare(b.id));
+      const eligible = candidates.find((s) =>
+        [
+          "LocalShell", "SSH", "SFTP", "RDP", "VNC", "MySQL", "PostgreSQL",
+          "PanWeiDB", "Oracle", "SQLServer", "StarRocks", "ClickHouse", "Presto",
+          "Redis", "HBaseShell", "Proxy", "S3", "AzureBlob", "File", "Mail",
+          "FTP", "Telnet", "Rlogin", "Mosh", "Serial",
+        ].includes(s.session_type),
+      );
+      return {
+        record: null,
+        legacyCandidate: eligible
+          ? {
+              kind: "saved-session",
+              identity: `saved:${eligible.id}`,
+              savedSessionId: eligible.id,
+              savedSessionType: eligible.session_type,
+              displayName: eligible.name || eligible.host || eligible.session_type,
+            }
+          : null,
+        issue: null,
+      } as T;
+    }
+    case "commit_welcome_run_snapshot": {
+      const entries = (args?.entries as IpcSnapshotEntry[] | undefined) ?? [];
+      if (entries.length === 0) {
+        throw new Error("snapshot entries must not be empty");
+      }
+      const expectedRevision = args?.expectedRevision as number | null;
+      const raw = window.localStorage.getItem(SESSION_RESUME_STORAGE_KEY);
+      if (raw) {
+        const existing = JSON.parse(raw) as IpcRunSnapshotRecord & { __schemaVersion?: number };
+        const schemaVersion = existing.__schemaVersion ?? 1;
+        if (schemaVersion > 1) {
+          throw new Error(
+            `snapshot schema version ${schemaVersion} is not supported; refusing to overwrite`,
+          );
+        }
+        if (expectedRevision != null && expectedRevision !== existing.revision) {
+          return { record: existing, applied: false } as T;
+        }
+      }
+      const now = Date.now();
+      const record: IpcRunSnapshotRecord = {
+        schemaVersion: 1,
+        revision: (existingRevision() ?? 0) + 1,
+        runSequence: (existingRunSequence() ?? 0) + 1,
+        batchId: (args?.batchId as string) || `stub-${now}`,
+        committedAtMs: now,
+        entries,
+        activeIdentity: (args?.activeIdentity as string | null) ?? null,
+      };
+      window.localStorage.setItem(
+        SESSION_RESUME_STORAGE_KEY,
+        JSON.stringify({ ...record, __schemaVersion: 1 }),
+      );
+      window.localStorage.setItem(SESSION_RESUME_REVISION_KEY, String(record.revision));
+      window.localStorage.setItem(SESSION_RESUME_SEQUENCE_KEY, String(record.runSequence));
+      if (args?.restored) {
+        window.localStorage.removeItem(SESSION_RESUME_CLEARED_KEY);
+      }
+      return { record, applied: true } as T;
+    }
+    case "clear_welcome_run_snapshot": {
+      const raw = window.localStorage.getItem(SESSION_RESUME_STORAGE_KEY);
+      const currentRevision = raw ? ((JSON.parse(raw) as IpcRunSnapshotRecord).revision ?? 0) : 0;
+      const expectedRevision = args?.expectedRevision as number | null;
+      if (expectedRevision != null && expectedRevision !== currentRevision) {
+        throw new Error(
+          `snapshot revision mismatch: expected ${expectedRevision}, current ${currentRevision}`,
+        );
+      }
+      window.localStorage.removeItem(SESSION_RESUME_STORAGE_KEY);
+      window.localStorage.setItem(SESSION_RESUME_CLEARED_KEY, "true");
+      window.localStorage.setItem(SESSION_RESUME_REVISION_KEY, String(currentRevision + 1));
+      return undefined as T;
+    }
     case "detect_x_server": {
       // Web preview has no system X server; report unavailable so the UI shows
       // honest "no display" status rather than a misleading green pill.
@@ -1581,11 +1729,79 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     }
     case "list_common_local_directories": {
       const home = await vfsHome();
-      const dirs: LocalDirectoryShortcut[] = [
-        { label: "Home", path: home, kind: "system" },
-        { label: "Workspace", path: VFS_ROOT, kind: "personal" },
+      const usage = loadDirectoryUsage();
+      const revision = usage.revision;
+      const base: Array<Pick<LocalDirectoryShortcut, "label" | "path" | "kind" | "defaultId">> = [
+        { label: "Home", path: home, kind: "system", defaultId: "home" },
+        { label: "Workspace", path: VFS_ROOT, kind: "personal", defaultId: "workspace" },
       ];
-      return dirs as T;
+      // Fixture-provided extra rows (qa-ui-auto welcome_recents fixture) so
+      // browser cases can assert real backend-style ordering without local
+      // PTY support.
+      const fixtureRows = (usage.fixtureDirectories ?? []) as Array<Partial<LocalDirectoryShortcut>>;
+      const dirs: LocalDirectoryShortcut[] = [...base, ...fixtureRows]
+        .filter((d) => typeof d.path === "string" && d.path)
+        .map((d) => {
+          const used = usage.entries[d.path as string] ?? null;
+          const shortcut: LocalDirectoryShortcut = {
+            label: d.label ?? String(d.path),
+            path: d.path as string,
+            kind: d.kind === "system" ? "system" : "personal",
+            directoryId: used?.directoryId ?? `stub:${d.defaultId ?? d.path}`,
+            lastUsedAtMs: used?.lastUsedAtMs ?? null,
+            timeSource: used?.timeSource ?? null,
+            legacyRank: used?.legacyRank ?? null,
+            defaultId: d.defaultId ?? null,
+            availability: used?.availability ?? "available",
+          };
+          return shortcut;
+        });
+      // Mirror the Rust sort contract (design §4.1.3): confirmed times first
+      // (newest first, ties by path), then legacy observations, then the rest.
+      const deduped = new Map<string, LocalDirectoryShortcut>();
+      for (const dir of dirs) {
+        const existing = deduped.get(dir.path);
+        if (!existing || (existing.lastUsedAtMs ?? -1) < (dir.lastUsedAtMs ?? -1)) {
+          deduped.set(dir.path, dir);
+        }
+      }
+      const sorted = [...deduped.values()].sort((a, b) => {
+        if (a.lastUsedAtMs != null && b.lastUsedAtMs != null) {
+          return b.lastUsedAtMs - a.lastUsedAtMs || a.path.localeCompare(b.path);
+        }
+        if (a.lastUsedAtMs != null) return -1;
+        if (b.lastUsedAtMs != null) return 1;
+        if (a.legacyRank != null && b.legacyRank != null) {
+          return a.legacyRank - b.legacyRank || a.path.localeCompare(b.path);
+        }
+        if (a.legacyRank != null) return -1;
+        if (b.legacyRank != null) return 1;
+        return a.path.localeCompare(b.path);
+      });
+      return { revision, directories: sorted } as T;
+    }
+    case "record_local_directory_use": {
+      const backendSessionId = args?.backendSessionId as string | undefined;
+      const path = args?.path as string | undefined;
+      if (!backendSessionId || !path) {
+        throw new Error("record_local_directory_use requires backendSessionId and path");
+      }
+      const usage = loadDirectoryUsage();
+      const existing = usage.entries[path] ?? null;
+      const now = Date.now();
+      const nextMs = existing?.lastUsedAtMs != null ? Math.max(existing.lastUsedAtMs, now) : now;
+      const changed = existing?.lastUsedAtMs !== nextMs || existing?.directoryId == null;
+      usage.entries[path] = {
+        directoryId: existing?.directoryId ?? `stub:${path}`,
+        lastUsedAtMs: nextMs,
+        timeSource: "local-cwd",
+        legacyRank: existing?.legacyRank ?? null,
+        availability: existing?.availability ?? "available",
+      };
+      usage.revision = changed ? usage.revision + 1 : usage.revision;
+      saveDirectoryUsage(usage);
+      void emit("welcome-directories-changed", { revision: usage.revision });
+      return { changed } as T;
     }
     case "list_system_fonts": {
       return [] as T;
