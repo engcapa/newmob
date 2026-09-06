@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import multiprocessing as mp
 import os
@@ -36,6 +37,63 @@ from . import reporter
 from . import testcase as tc_mod
 from .fixtures import FixtureSkip, REGISTRY as FIXTURE_REGISTRY, get as get_fixture
 from .steps import REGISTRY as STEP_REGISTRY, StepContext, StepError
+from .deadline import BudgetedPage, Deadline, using_deadline
+from .provenance import input_digest, execution_identity, conditions_identity
+
+_browser = None
+_playwright = None
+
+
+def _close_browser() -> None:
+    global _browser, _playwright
+    if _browser is not None:
+        with suppress(Exception):
+            _browser.close()
+    if _playwright is not None:
+        with suppress(Exception):
+            _playwright.stop()
+    _browser = _playwright = None
+
+
+def _browser_context(headless: bool):
+    global _browser, _playwright
+    if _browser is None or not _browser.is_connected():
+        from playwright.sync_api import sync_playwright
+        _close_browser()
+        _playwright = sync_playwright().start()
+        _browser = _playwright.chromium.launch(headless=headless)
+    return _browser.new_context(viewport={"width": 1440, "height": 900})
+
+
+atexit.register(_close_browser)
+
+
+def _init_browser_worker() -> None:
+    from multiprocessing.util import Finalize
+    Finalize(None, _close_browser, exitpriority=10)
+
+
+def _timed_step(result: dict, index: int, verb: str, action, deadline=None) -> None:
+    started = time.monotonic()
+    try:
+        with using_deadline(deadline):
+            action()
+    finally:
+        result.setdefault("step_timings", []).append({
+            "index": index, "verb": verb, "duration_sec": time.monotonic() - started,
+        })
+
+
+def _run_browser_case(payload: dict) -> dict:
+    started = time.monotonic()
+    try:
+        return _run_browser_case_inner(payload)
+    except Exception as exc:
+        case = payload["case"]
+        return {"id": case["id"], "title": case["title"], "tags": case["tags"],
+                "covers": case["covers"], "modes": case["modes"], "status": "failed",
+                "duration_sec": time.monotonic() - started, "step_count": len(case["steps"]),
+                "failure": {"step_index": 0, "verb": "<setup>", "message": str(exc), "artifacts": {}}}
 
 
 # ─── per-case worker (browser) ──────────────────────────────────────────────
@@ -45,8 +103,8 @@ def _slugify_path_part(s: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in s)
 
 
-def _run_browser_case(payload: dict) -> dict:
-    """Worker entry. Spins up a fresh Chromium context for one test case."""
+def _run_browser_case_inner(payload: dict) -> dict:
+    """Fresh storage context per case, one browser process per worker."""
     case_dict = payload["case"]
     cfg = payload["cfg"]
     env = payload["env"]
@@ -78,8 +136,8 @@ def _run_browser_case(payload: dict) -> dict:
 
     started = time.time()
     base_url = cfg["app"]["base_url"]
-    user_data_dir = report_root / "_workdirs" / f"w{worker_id}-{case_dict['id']}"
-    user_data_dir.mkdir(parents=True, exist_ok=True)
+    deadline = Deadline(case_dict.get("timeout_sec", 90))
+    result["timings"] = {}
 
     if dry_run:
         # Validate verbs, args, and selector strings without launching the browser.
@@ -105,8 +163,6 @@ def _run_browser_case(payload: dict) -> dict:
             result["duration_sec"] = time.time() - started
             return result
 
-    from playwright.sync_api import sync_playwright  # local import to keep startup fast
-
     headless = bool(payload.get("headless", True))
     failure: dict[str, Any] | None = None
     last_step_index = 0
@@ -114,12 +170,10 @@ def _run_browser_case(payload: dict) -> dict:
     last_args: Any = None
     captured_console: list[dict[str, Any]] = []
 
-    with sync_playwright() as pw:
-        browser_ctx = pw.chromium.launch_persistent_context(
-            user_data_dir=str(user_data_dir),
-            headless=headless,
-            viewport={"width": 1440, "height": 900},
-        )
+    context_started = time.monotonic()
+    browser_ctx = _browser_context(headless)
+    result["timings"]["context_setup_sec"] = time.monotonic() - context_started
+    if browser_ctx:
         page = browser_ctx.pages[0] if browser_ctx.pages else browser_ctx.new_page()
         page.on("console", lambda msg: captured_console.append(  # noqa: SLF001
             {"level": msg.type, "text": msg.text}
@@ -135,25 +189,29 @@ def _run_browser_case(payload: dict) -> dict:
             pass
 
         ctx = StepContext(
-            page=page, case_id=case_dict["id"], case_dir=case_dir,
+            page=BudgetedPage(page, deadline), case_id=case_dict["id"], case_dir=case_dir,
             cfg=cfg, env=env, dry_run=False,
         )
 
         try:
+            fixture_started = time.monotonic()
             # Run fixtures (setup); a FixtureSkip turns into "skipped" status.
             for fname in case_dict.get("fixtures", []):
                 fix = get_fixture(fname)
                 try:
+                    deadline.remaining()
                     fix.setup(ctx)
+                    deadline.remaining()
                 except FixtureSkip as fs:
                     result["status"] = "skipped"
                     result["fixtures_skipped"] = f"{fname}: {fs}"
                     raise
+            result["timings"]["fixtures_sec"] = time.monotonic() - fixture_started
 
             # Auto-open base_url at step 0 if the first step isn't `open`.
             first_verb, _ = tc_mod.step_verb_and_args(case_dict["steps"][0])
             if first_verb not in ("open", "goto"):
-                page.goto(base_url, wait_until="domcontentloaded")
+                ctx.page.goto(base_url, wait_until="domcontentloaded", timeout=deadline.remaining() * 1000)
 
             for i, step in enumerate(case_dict["steps"], start=1):
                 ctx.step_index = i
@@ -164,7 +222,10 @@ def _run_browser_case(payload: dict) -> dict:
                 last_args = args
                 if verb not in STEP_REGISTRY:
                     raise StepError(f"unknown verb: {verb}")
-                STEP_REGISTRY[verb](ctx, args)
+                page.set_default_timeout(min(30000, deadline.remaining() * 1000))
+                page.set_default_navigation_timeout(min(30000, deadline.remaining() * 1000))
+                _timed_step(result, i, verb, lambda: STEP_REGISTRY[verb](ctx, args), deadline)
+                deadline.remaining()
 
         except FixtureSkip:
             pass  # handled above
@@ -184,9 +245,10 @@ def _run_browser_case(payload: dict) -> dict:
             result["status"] = "failed"
             result["failure"] = failure
         finally:
+            cleanup_started = time.monotonic()
             try:
                 trace_path = case_dir / "trace.zip"
-                browser_ctx.tracing.stop(path=str(trace_path))
+                browser_ctx.tracing.stop(**({"path": str(trace_path)} if failure is not None else {}))
                 if failure is not None:
                     failure.setdefault("artifacts", {})["trace"] = str(
                         trace_path.relative_to(report_root)
@@ -195,6 +257,7 @@ def _run_browser_case(payload: dict) -> dict:
                 pass
             with suppress(Exception):
                 browser_ctx.close()
+            result["timings"]["cleanup_sec"] = time.monotonic() - cleanup_started
 
     result["duration_sec"] = time.time() - started
     return result
@@ -216,7 +279,7 @@ def _capture_failure(
 
     try:
         png = case_dir / f"{base}.png"
-        page.screenshot(path=str(png), full_page=False)
+        page.screenshot(path=str(png), full_page=False, timeout=3000)
         artifacts["screenshot"] = png.name
     except Exception:  # noqa: BLE001
         pass
@@ -324,6 +387,13 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                 "duration_sec": 0.0, "step_count": len(c.steps),
                 "worker_id": 0, "failure": None, "fixtures_skipped": None,
             }
+            r["timings"] = {}
+            deadline = Deadline(c.timeout_sec)
+            if c.skip:
+                r.update(status="skipped", fixtures_skipped=c.skip)
+                results.append(r)
+                continue
+            failure_artifacts: dict = {}
             fixture_values: dict[str, str] = {}
             last_step, last_verb, last_args = 0, "<setup>", None
             ctx_ns = SimpleNamespace(
@@ -332,17 +402,24 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                 values=fixture_values, step_index=0,
             )
             try:
+                fixture_started = time.monotonic()
                 # Fixtures first — a FixtureSkip turns into "skipped".
                 for fname in c.fixtures:
                     fix = get_fixture(fname)
                     try:
+                        deadline.remaining()
                         fix.setup(ctx_ns)
+                        deadline.remaining()
                     except FixtureSkip as fs:
                         r["status"] = "skipped"
                         r["fixtures_skipped"] = f"{fname}: {fs}"
                         break
                 else:
+                    r["timings"]["fixtures_sec"] = time.monotonic() - fixture_started
+                    session_started = time.monotonic()
+                    harness.deadline = deadline
                     session = harness.create_session()
+                    r["timings"]["session_setup_sec"] = time.monotonic() - session_started
                     nctx: NativeStepContext | None = None
                     try:
                         nctx = NativeStepContext(session, case_dir, cfg)
@@ -355,8 +432,18 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                                 raw_args, cfg=cfg, env=env, fixture=fixture_values
                             )
                             nctx.case_dir.mkdir(parents=True, exist_ok=True)
-                            run_native_step(nctx, verb, args)
+                            deadline.remaining()
+                            _timed_step(r, i, verb, lambda: run_native_step(nctx, verb, args), deadline)
+                            deadline.remaining()
+                    except Exception:
+                        session.deadline = Deadline(5)
+                        capture_started = time.monotonic()
+                        failure_artifacts = _capture_native_failure(session, case_dir)
+                        r["timings"]["failure_capture_sec"] = time.monotonic() - capture_started
+                        raise
                     finally:
+                        cleanup_started = time.monotonic()
+                        session.deadline = Deadline(5)
                         if nctx is not None:
                             nctx.restore_host_permissions()
                         console = []
@@ -368,6 +455,7 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                         )
                         with suppress(Exception):
                             session.close()
+                        r["timings"]["cleanup_sec"] = time.monotonic() - cleanup_started
             except WebDriverError as e:
                 r["status"] = "failed"
                 r["failure"] = {
@@ -394,37 +482,35 @@ def _native_run(cases: list[tc_mod.TestCase], cfg: dict, env: dict, report_root:
                     "artifacts": {},
                 }
             if r["status"] == "failed":
-                _capture_native_failure(harness, c, case_dir, r)
+                r["failure"]["artifacts"] = failure_artifacts
             r["duration_sec"] = time.time() - started
             results.append(r)
     return results
 
 
-def _capture_native_failure(harness: Any, case: tc_mod.TestCase,
-                            case_dir: Path, result: dict) -> None:
-    """Best-effort failure artifacts: fresh-session screenshot of the app."""
+def _capture_native_failure(session: Any, case_dir: Path) -> dict:
+    """Capture the failing session before cleanup changes its state."""
     artifacts: dict[str, str] = {}
     try:
-        session = harness.create_session()
-        try:
-            shot = case_dir / "failure-native.png"
-            session.screenshot(shot)
-            artifacts["screenshot"] = str(shot)
-            entries = session.console_entries()
-            (case_dir / "console-failure.json").write_text(
-                json.dumps(entries[-300:], ensure_ascii=False, indent=1),
-                encoding="utf-8",
-            )
-            artifacts["console"] = str(case_dir / "console-failure.json")
-        finally:
-            with suppress(Exception):
-                session.close()
+        shot = case_dir / "failure-native.png"
+        session.screenshot(shot)
+        artifacts["screenshot"] = str(shot)
     except Exception:  # noqa: BLE001
         pass
-    result["failure"]["artifacts"] = artifacts  # type: ignore[index]
+    with suppress(Exception):
+        html = case_dir / "failure-native.html"
+        html.write_text(str(session.execute("return document.documentElement.outerHTML")), encoding="utf-8")
+        artifacts["html"] = str(html)
+    with suppress(Exception):
+        log = case_dir / "console-failure.json"
+        log.write_text(json.dumps(session.console_entries()[-300:], ensure_ascii=False), encoding="utf-8")
+        artifacts["console"] = str(log)
+    return artifacts
 
 
 def _rotate_runs(report_dir: Path, keep: int) -> None:
+    if keep <= 0:
+        return
     runs = sorted(
         [p for p in report_dir.glob("run-*") if p.is_dir()],
         key=lambda p: p.name,
@@ -451,6 +537,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="validate verbs/selectors without launching browser")
     ap.add_argument("--headed", action="store_true",
                     help="show the browser (default headless)")
+    ap.add_argument("--report-dir", help="isolated output directory")
+    ap.add_argument("--keep-runs", type=int, help="retained runs in output directory; 0 disables rotation")
+    ap.add_argument("--require-pass", action="store_true", help="fail if any selected case skips")
     args = ap.parse_args(argv)
 
     try:
@@ -487,15 +576,29 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if mode == "native":
+        from .verification import host_platform, native_support
+        unsupported = {c.id: reason for c in selected if (reason := native_support(c, host_platform()))}
+        if unsupported:
+            print(f"qa-ui-auto: unsupported native scope: {unsupported}", file=sys.stderr)
+            return 2
 
-    report_dir = Path(cfg.get("report", {}).get("dir", "qa-ui-auto-report"))
-    run_id = time.strftime("run-%Y%m%d-%H%M%S")
+    requested_ids = set(args.filter.split(",")) if args.filter else set()
+    missing_ids = requested_ids - {c.id for c in selected}
+    if missing_ids:
+        print(f"qa-ui-auto: requested cases unavailable in {mode}: {sorted(missing_ids)}", file=sys.stderr)
+        return 2
+
+    report_dir = Path(args.report_dir or cfg.get("report", {}).get("dir", "qa-ui-auto-report"))
+    run_id = time.strftime("run-%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1000000000:09d}"
     report_root = report_dir / run_id
     report_root.mkdir(parents=True, exist_ok=True)
 
     started_iso = reporter.now_iso()
     started = time.time()
     env = dict(os.environ)
+    identity = execution_identity(Path.cwd())
+    case_digests = {c.id: input_digest(c.source_path) for c in selected if c.source_path}
 
     print(
         f"qa-ui-auto: mode={mode} workers={workers} cases={len(selected)} "
@@ -526,15 +629,24 @@ def main(argv: list[str] | None = None) -> int:
             for p in payloads:
                 results.append(_run_browser_case(p))
                 _print_case_line(results[-1])
+            _close_browser()
         else:
             ctx = mp.get_context("spawn")
-            with ctx.Pool(workers) as pool:
+            with ctx.Pool(workers, initializer=_init_browser_worker) as pool:
                 for r in pool.imap_unordered(_run_browser_case, payloads):
                     results.append(r)
                     _print_case_line(r)
+                pool.close()
+                pool.join()
 
     duration = time.time() - started
     results.sort(key=lambda r: r["id"])
+    for result in results:
+        result["case_sha256"] = case_digests.get(result["id"])
+    identity_stable = identity == execution_identity(Path.cwd())
+    identity_stable = identity_stable and all(
+        c.source_path and c.source_path.exists() and input_digest(c.source_path) == case_digests[c.id]
+        for c in selected)
 
     summary = {
         "started_at": started_iso,
@@ -543,6 +655,13 @@ def main(argv: list[str] | None = None) -> int:
         "mode": mode,
         "platform": platform.system(),
         "workers": workers,
+        "dry_run": args.dry_run,
+        "identity": identity,
+        "identity_stable": identity_stable,
+        "conditions_sha256": conditions_identity(cfg, mode, env),
+        "config_path": Path(args.config).as_posix(),
+        "selection": {"requested": sorted(requested_ids), "selected": [c.id for c in selected],
+                      "not_selected": [c.id for c in cases if c not in selected]},
         "totals": {
             "total": len(results),
             "passed": sum(1 for r in results if r["status"] == "passed"),
@@ -551,6 +670,13 @@ def main(argv: list[str] | None = None) -> int:
         },
         "cases": results,
     }
+    if mode == "native":
+        isolation_path = report_root / "native-isolation.json"
+        if isolation_path.exists():
+            summary["native_identity"] = json.loads(isolation_path.read_text(encoding="utf-8"))
+    exit_code = 1 if (summary["totals"]["failed"] or not identity_stable
+                      or (args.require_pass and summary["totals"]["skipped"])) else 0
+    summary["exit_code"] = exit_code
     reporter.write_summary(report_root, summary)
     md = reporter.write_markdown(report_root, summary)
     reporter.write_junit(report_root, summary)
@@ -559,6 +685,9 @@ def main(argv: list[str] | None = None) -> int:
     # ED-REL-001: emit runner-owned execution receipt
     from .runner_receipt import emit_runner_receipt
     try:
+        if args.dry_run:
+            print("qa-ui-auto: dry-run has no execution receipt")
+            return exit_code
         receipt_path = emit_runner_receipt(
             report_root=report_root,
             mode=mode,
@@ -566,16 +695,16 @@ def main(argv: list[str] | None = None) -> int:
             started_at=started_iso,
             finished_at=reporter.now_iso(),
             duration_sec=duration,
-            exit_code=0 if summary["totals"]["failed"] == 0 else 1,
+            exit_code=exit_code,
         )
         print(f"qa-ui-auto: runner receipt emitted: {receipt_path.name}")
     except Exception as e:
         print(f"qa-ui-auto: warning: failed to emit runner receipt: {e}", file=sys.stderr)
 
-    keep = int(cfg.get("report", {}).get("keep_runs", 5))
+    keep = args.keep_runs if args.keep_runs is not None else int(cfg.get("report", {}).get("keep_runs", 5))
     _rotate_runs(report_dir, keep)
 
-    return 0 if summary["totals"]["failed"] == 0 else 1
+    return exit_code
 
 
 def _print_case_line(r: dict) -> None:

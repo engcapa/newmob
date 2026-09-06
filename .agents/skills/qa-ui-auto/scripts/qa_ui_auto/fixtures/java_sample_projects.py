@@ -16,6 +16,7 @@ Exposes:
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any
 
 SAMPLES = {
@@ -42,5 +43,9 @@ def setup(ctx: Any) -> None:
                 f"java sample project missing: {root / marker} not found; "
                 "the in-repo __fixtures__/jdtls/projects tree must be checked out"
             )
-        # These paths are interpolated into JSON recents and CSS selectors.
-        values[key] = root.as_posix()
+        # Native create/rename/undo tests must not mutate the checkout's samples.
+        destination = Path(ctx.case_dir) / "fixture-workspaces" / key
+        if any(path.is_symlink() for path in root.rglob("*")):
+            raise FixtureSkip(f"sample contains symlinks; cannot isolate workspace: {root}")
+        shutil.copytree(root, destination, ignore=shutil.ignore_patterns("target", "build", ".gradle", ".git"))
+        values[key] = destination.resolve().as_posix()

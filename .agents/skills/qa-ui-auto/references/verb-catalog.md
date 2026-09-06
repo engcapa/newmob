@@ -47,7 +47,7 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `type` | string | Types into the focused element. Prefer `fill` for inputs. |
 | `send_keys` | string | Same as `type`; semantic for terminal-pane interaction. |
 | `compose_text` | `{selector, text, during_key?}` | Browser-only composition lifecycle; optionally dispatches one composing key before committing text. Never substitutes for native IME evidence. |
-| `native_keys` | `{selector, keys, focus_prechecked?}` | Native Linux/X11 only. Requires the selector to own focus, injects physical XTest keys or chords such as `Control+v` through GTK/WebKitGTK, and records transport metadata. `focus_prechecked: true` is limited to a testcase that asserted DOM focus immediately before an external fault made WebDriver commands unavailable; the verb still activates and identifies the Taomni X11 window. Testcase assertions own the postcondition. |
+| `native_keys` | `{selector, keys, transport?, focus_prechecked?}` | Requires the selector to own focus. Default `transport: x11` injects XTest keys through Linux/X11 and identifies the Taomni window. `transport: webdriver` uses W3C actions in the platform WebView (Windows/Linux), not OS-level input. Records transport and observed events. `focus_prechecked: true` is limited to a testcase that asserted focus immediately before a driver fault; it omits WebDriver probes/event collection and records that limitation. Testcase assertions own the postcondition. |
 | `native_ime_keys` | `{selector, expected_engine, keys}` | Native Linux/X11 only. Injects physical XTest keys through the named configured fcitx5 engine and records an observation artifact; testcase assertions must verify the committed result. |
 | `native_editor_performance` | `{selector, keys, max_p95_ms}` | Native packaged app only. Injects at least five ASCII keys through W3C WebDriver actions and records keydown-to-CodeMirror-DOM-mutation latency. The artifact also records the next animation frame as a diagnostic, but does not gate on it because a frame requested from CodeMirror's mutation observer is one frame later than the paint containing that mutation. Writes `native-editor-performance.json` and fails when p95 exceeds the supplied budget. |
 | `press` | key string **or** `{key, selector?}` | E.g. `Enter`, `Control+Shift+F`. |
@@ -61,7 +61,7 @@ Placeholders: `${cfg.x.y}` resolves from `qa-ui-auto.config.yaml`; `${env.X}` fr
 | `assert_visible` | selector | Up to 15s wait. |
 | `assert_not_visible` | selector | Up to 15s wait for hidden. |
 | `assert_text` | `{selector, contains, timeout_sec?}` | Polls `text_content` and `data-terminal-text` (xterm canvas fallback). |
-| `assert_pattern` | `{selector, regex, timeout_sec?}` | Python regex. |
+| `assert_pattern` | `{selector, regex, timeout_sec?}` | Browser and native; polls Python regex against element text (terminal buffer fallback for `terminal-pane`). Use anchored output assertions to distinguish shell output from command echo, and await shell readiness before typing. |
 | `assert_count` | `{selector, min?/max?/equal?}` | Pick at least one bound. |
 | `assert_url` | URL substring | |
 | `assert_menu_items` | `[label, label, ...]` | After `right_click`; checks each label visible inside `[data-testid="context-menu"]`. |

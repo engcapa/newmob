@@ -1,0 +1,26 @@
+id: TC-NATIVE-CORE-001
+title: Native QA startup opens a local PTY and receives shell output
+covers: [F1.6, F2.1, F2.2]
+tags: [smoke, p0, native-boundary, terminal]
+modes: [native]
+native_platforms: [Linux, Windows]
+fixtures: [reset_db]
+timeout_sec: 60
+steps:
+  - open: ${cfg.app.base_url}
+  - vault_first_run: qa-native-smoke-password
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-open-local-terminal"]'
+  - wait_for: '[data-testid="terminal-pane"]'
+  - assert_pattern:
+      selector: '[data-testid="terminal-pane"]'
+      regex: '(?m)[$#>]\s*$'
+      timeout_sec: 20
+  - click: '[data-testid="terminal-pane"]'
+  - type: echo QA_NATIVE_SHELL_READY
+  - press: Enter
+  - assert_pattern:
+      selector: '[data-testid="terminal-pane"]'
+      regex: '(?m)^QA_NATIVE_SHELL_READY\s*$'
+      timeout_sec: 15
+  - screenshot: native-shell-ready.png

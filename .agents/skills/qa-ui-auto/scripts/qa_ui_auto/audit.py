@@ -310,7 +310,7 @@ def _diff_section(
 # ---------------------------------------------------------------------------
 
 def _gate(
-    *, features_path: Path, cases_dir: Path, baseline_path: Path,
+    *, features_path: Path, cases_dir: Path, baseline_path: Path, release_evidence: bool = False,
 ) -> dict[str, Any]:
     """Compare current snapshot against baseline. Returns dict with regs/imps."""
     if not baseline_path.exists():
@@ -330,6 +330,12 @@ def _gate(
     snap = _build_snapshot(results, orphans)
     regressions, improvements = _render_gate_diff(baseline, snap)
     control_ok = not regressions
+    if not release_evidence:
+        return {"ok": control_ok, "control_ok": control_ok,
+                "evidence_gate": {"required": False, "reason": "use --release-evidence for release validation"},
+                "baseline_path": str(baseline_path), "baseline": baseline.get("totals", {}),
+                "current": snap.get("totals", {}), "regressions": regressions,
+                "improvements": improvements}
 
     evidence_gate: dict[str, Any] = {"ok": False, "reason": "not checked"}
     try:
@@ -467,6 +473,7 @@ def build_audit(
     baseline_path: Path | None = None,
     focus_feature: str | None = None,
     diff_base: str | None | object = None,   # None = skip; True/str = run
+    release_evidence: bool = False,
 ) -> AuditReport:
     rep = AuditReport()
     rep.health = _check_health(
@@ -493,6 +500,7 @@ def build_audit(
             features_path=features_path,
             cases_dir=cases_dir,
             baseline_path=baseline_path,
+            release_evidence=release_evidence,
         )
     return rep
 
@@ -640,7 +648,9 @@ def _render_gate(g: dict[str, Any]) -> list[str]:
         lines.append("  control-coverage-gate: OK — no regressions vs baseline")
 
     ev = g.get("evidence_gate", {})
-    if ev.get("ok"):
+    if ev.get("required") is False:
+        lines.append("  release-evidence-gate: not requested (use --release-evidence)")
+    elif ev.get("ok"):
         lines.append(f"  release-evidence-gate: OK — {ev.get('reason', 'valid current evidence')}")
     else:
         lines.append(f"  release-evidence-gate: FAILED — {ev.get('reason', 'evidence gate failed')}")
@@ -685,15 +695,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="compare against a coverage baseline; exit 1 on "
                          "regression. Omit value to use default baseline path.")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--release-evidence", action="store_true", help="also require the existing release evidence manifest")
     args = ap.parse_args(argv)
 
     rep = build_audit(
         features_path=Path(args.features),
         cases_dir=Path(args.cases),
         catalog_path=Path(args.catalog),
-        baseline_path=Path(args.gate) if args.gate else None,
+        baseline_path=Path(args.gate or DEFAULT_BASELINE) if args.gate or args.release_evidence else None,
         focus_feature=args.feature,
         diff_base=args.diff,
+        release_evidence=args.release_evidence,
     )
 
     if args.json:
