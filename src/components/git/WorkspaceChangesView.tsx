@@ -185,7 +185,7 @@ export function WorkspaceChangesView({
 
   return (
     <PanelGroup orientation="horizontal" id="workspace-git-changes-layout">
-      <Panel id="workspace-changes-list" defaultSize={38} minSize={26} className="min-w-0 min-h-0 flex flex-col border-r border-[var(--taomni-divider)]">
+      <Panel id="workspace-changes-list" defaultSize="38%" minSize="26%" className="min-w-0 min-h-0 flex flex-col border-r border-[var(--taomni-divider)]">
         <div className="h-8 shrink-0 flex items-center gap-2 px-2 border-b border-[var(--taomni-divider)] bg-[var(--taomni-quick-bg)]">
           <GitBranch className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-accent)]" />
           <span className="font-semibold text-[12px]">{t("git.workspaceChanges.title")}</span>
@@ -273,7 +273,7 @@ export function WorkspaceChangesView({
 
       <PanelResizeHandle className="w-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] cursor-col-resize" />
 
-      <Panel id="workspace-changes-diff" defaultSize={62} minSize={35} className="min-w-0 min-h-0 flex flex-col">
+      <Panel id="workspace-changes-diff" defaultSize="62%" minSize="35%" className="min-w-0 min-h-0 flex flex-col">
         <DiffPane
           title={active ? `${active.root.name} / ${active.change.path}` : t("git.workspaceChanges.diffTitle")}
           busy={busy}

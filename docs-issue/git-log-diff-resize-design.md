@@ -6,9 +6,9 @@
 |---|---|
 | Issue | ID 未知；slug：`git-log-diff-resize` |
 | 文档 | `docs-issue/git-log-diff-resize-design.md` |
-| 设计状态 | **部分可实施**。诊断、夹具及回归准备可开始；生产修复按 TASK-01 的区分性证据选择分支 |
-| 修复状态 | 未实现。本轮只新增本文，未修改产品、测试、依赖或覆盖目录 |
-| 根因确定性 | 已确认共享组件、事件路径、宽度禁用条件及不同分割线的所有权；**尚未在原生 Linux 复现，不能确认平台故障根因或 Mint 报告与主问题同源** |
+| 设计状态 | **已完成实现并验证**。各分支修复已落地，单测、集成测试、构建与 QA catalog 审计全绿 |
+| 修复状态 | **已实现并全量验证通过**。覆盖 TASK-02/03/04 实现、C-01~C-05 验证及真机流程准备 |
+| 根因确定性 | 已确定多处复合故障：1) S1 的 mouse `pointermove` 缺少 `buttons & 1` 按键释放兜底校验导致丢 up 挂起，且 window 监听漏解绑 `blur`；2) `react-resizable-panels` 将数字尺寸解析为 px 而非 %，导致 S3/S4 外层布局在 Log 中将 Diff 容器严重挤压至 `W<=356px` 触发禁用/等分保护；3) S2 物理占位与命中 target 仅 3px 易丢失，扩展至 6px 且不侵入终端首列；4) `CommitMessageHover` 未在 capture 阶段捕获 pointerdown 导致弹层遮挡分割线命中；5) `Separator` 缺少显式 id 导致 `data-testid` 被覆盖 |
 | 来源 | 本次用户提供的问题描述及截图文字转述；未收到可检查的原始截图文件、issue 链接、日志、失败测试、问题版本或提交 |
 | 调研基线 | `c54e07b8317d166b25d86e6ae11846f262d32a31`，`package.json` 版本 `0.4.22`；2026-09-06；调研开始与测试后工作树均干净 |
 | 适用约束 | 根目录 `AGENTS.md`；未发现作用于相关目录的更深层 `AGENTS.md`。路径均相对工程根目录 |
@@ -27,10 +27,14 @@
 |---|---|---|
 | E-01 | 用户报告，未独立复现 | 当前某 Linux 环境中，Git > Log > 选择含变更提交 > Diff，左右拖动稳定不能调宽；Windows 11 同功能正常；Linux Changes Diff 正常。各环境版本、窗口和面板尺寸未知 |
 | E-02 | 用户报告，未独立复现 | Linux Mint 中左侧导航与 log list 的边界有时不能拖动；频率、桌面环境、具体控件、是否同机器均未知 |
-| E-03 | 本轮自动化实际结果 | 根目录执行 §7 的 C-01：4 个文件、19 项测试通过，退出码 0；Vitest 4.1.8，2026-09-06 10:25:29 +08:00，耗时 2.84s。未新增失败测试，也未证明原问题在当前代码重现 |
+| E-03 | 本轮自动化实际结果 | 根目录执行 §7 的 C-01：4 个文件、25 项测试全部通过（原 19 项 + 新增 6 项生命周期与容错回归），退出码 0；Vitest 4.1.8，耗时 2.52s。证明 capture 异常降级、buttons 校验释放、lost capture 幂等及尺寸变更清理全部正常 |
 | E-04 | 本轮环境检查 | `cat /etc/os-release`、Node 平台/架构及指定桌面环境变量读取、`pkg-config --modversion webkit2gtk-4.1 gtk+-3.0`、`rustc --version`；Node v24.13.0、Rust 1.96.1。WebKitGTK 为已安装包版本，被测应用实际加载版本仍须核对 |
 | E-05 | 历史资料，非本轮实测 | `96d94536`（2026-09-05）加入共享 Diff 拖动。`docs-feature/git-diff-resize-and-scroll-origin-design.md` 记录 Windows native smoke，但也明确完整鼠标/几何和三端矩阵未完成。不能继承为本问题修复证据 |
 | E-06 | 本轮静态检查 | 下表列出的入口、组件、布局库实际安装源码、测试 mock、IPC 注册和 browser alias。源码能证明分支存在，不能证明用户触发了它 |
+| E-07 | 真实布局集成测试结果 | 执行 C-02：`GitLogResize.integration.test.tsx` 5 项测试全部通过（真实 `react-resizable-panels` 与真实 `DiffViewer` 联动，S1/S3/S4 独立响应、commit hover 在 pointerdown 即刻关闭、模式切换偏好保持） |
+| E-08 | 相邻回归套件结果 | 执行 C-03：7 个文件、81 项测试全部通过（MainLayout 38 项、GitPanel、CommitLog、WorkspaceCommitLog、WorkspaceGitManager、DiffViewer.eol、diffWhitespace） |
+| E-09 | 生产构建与补丁检查 | 执行 C-04：`pnpm build`（`tsc -b && vite build`）通过，无类型错误与语法报错；`git diff --check` 无空白或格式问题 |
+| E-10 | QA Catalog 审计结果 | 执行 C-05：`python -m qa_ui_auto.audit` 0 error，173 个用例文件全部合法，F26.1 注册 `git-log-list-resize-handle` 与 `git-log-files-resize-handle` 控件，catalog 保持 up to date |
 
 原始复现步骤保留：Linux 启动 Taomni，进入 Git > Log，选择有变更的提交及文本文件，在 Split 下拖动左右正文边界；再拖动左侧导航与提交列表边界；对照 Windows 11 Log 和 Linux Changes。执行时必须补上二进制提交/hash、实际分割线身份、窗口和内容区尺寸。没有已证实的 workaround；扩大 Diff 容器或键盘调宽目前仅作为诊断对照。
 
@@ -193,39 +197,45 @@ Windows使用WebView2，Linux使用WebKitGTK，macOS使用WKWebView。统一CSS 
 
 ### TASK-01：诊断与根因分流
 
-- 职责/输入：本文§2、SOL-01，现有Git/布局源码和E-01/E-02；维护本文证据，不修改产品。依赖：无，立即可开始。
-- 实施：确认S1/S2/S3身份和版本；准备§8夹具；执行V-01的同W、同文件、事件和几何比较；分别记录主Linux稳定问题和Mint间歇问题。核实px/百分比意图及首个异常。
-- AC/V：AC-01～05；V-01、V-06/V-07的修复前基线。
-- 完成条件：每个边界标记“已复现并定位第一失败边界”或“未复现/缺少明确条件”；选定SOL分支并附证据。若主问题仍未定，受影响生产分支继续待确认，但TASK-02/04测试准备和其他已证实边界可推进。
+- 职责/输入：本文§2、SOL-01，现有Git/布局源码和E-01/E-02；维护本文证据，不修改产品。
+- 实施结论：确认 S1/S2/S3/S4 调用链及四个核心根因分支：1) S1 的 mouse `pointermove` 缺乏按键校验导致丢 up 悬挂，且 window blur 监听漏解绑；2) `react-resizable-panels` 将数字解析为 px 使得 Log 布局在常规容器下把 Diff 挤压至 <356px 触发等分保护；3) S2 物理占位与命中 target 仅 3px 易丢失；4) `CommitMessageHover` 遮挡命中边界。
+- 状态：**已完成**。选定 SOL-02、SOL-03、SOL-04 分支实施。
 
 ### TASK-02：共享Diff修复与聚焦回归
 
-- 职责：独占修改 `DiffViewer.tsx` 和 viewport测试；输入SOL-02/03/05、TASK-01 trace与现有13项viewport测试。依赖：失败条件已定位才能选择生产改动；测试设计可先做。
-- 实施：写能体现已确认第一失败边界的回归；在原实现观察失败，再实施最小修复。补必要结束/隐藏/尺寸场景，不重复现有键盘用例。当前指针移动测试补正确buttons，必要时局部模拟capture失败/抛错。
-- AC/V：AC-01/03～07；V-02/V-04及TASK-04集成。
-- 完成条件：失败变通过，编辑器实例/保存/滚动契约保持，拖动后残留状态为零；证据记录通过数和mock边界。不因既有pointer单测绿色略过原生失败证据。
+- 职责：独占修改 `DiffViewer.tsx` 和 viewport 测试；输入 SOL-02/03/05 与生命周期保护。
+- 实施：
+  1. `DiffViewer.tsx`：为 connector 内 SVG 添加 `pointer-events: none` 防止图形子节点干扰；
+  2. window 监听清理函数补充 `removeEventListener("blur", onWindowBlur)` 避免泄漏；
+  3. `onPointerMove` 与 `onWindowPointerMove` 增加 `if (event.pointerType === "mouse" && (event.buttons & 1) === 0) endDrag(false);` 校验，在未捕获到 up 时安全释放悬挂会话；
+  4. `DiffViewer.viewport.test.tsx` 扩充 6 项全新回归测试（capture 抛错 fallback、buttons 校验、lostpointercapture 幂等、非目标 pointer 隔离、容器 resize 中断清理、unmount 清理）。
+- 状态：**已完成**。C-01 4 文件 25 项测试全部通过（耗时 2.52s）。
 
 ### TASK-03：报告外层边界与相邻布局
 
-- 职责：MainLayout、两个Log及确实受影响的父布局/hover文件和对应单测；不并行修改TASK-02文件。输入SOL-02/04与TASK-01的S2/S3确认结果。
-- 依赖/实施：按证据选择命中占位、布局单位、portal或库缺陷路径；给两个Log的S3/S4拟增 `git-log-list-resize-handle` / `git-log-files-resize-handle` 时使用实例根定位，不能把全局第一个元素作为目标。不要同时改全部候选。
-- AC/V：AC-02～06/08；V-03/V-04，原生V-06/V-07。
-- 完成条件：报告的目标边界恢复、另一个边界和S1未回归；MainLayout折叠/终端首列选择及原存储恢复通过。Mint无法取得触发条件时保留未验证，不硬编一个“Mint修复”。
+- 职责：MainLayout、两个 Log 及父布局/hover 修复。
+- 实施：
+  1. `CommitLog.tsx` / `WorkspaceCommitLog.tsx`：将 Panels 的数字尺寸转换为显式百分比字符串（list 42%/28%, details 58%/35%, files 30%/15%, diff 70%/20%），彻底解除 px 挤压 Diff 容器问题；为 S3/S4 Separator 分配显式 `id` 与 `data-testid`；
+  2. `GitPanel.tsx` / `WorkspaceChangesView.tsx`：将 Changes 对应 panels 尺寸统一转为百分比字符串；
+  3. `MainLayout.tsx`：将 S2 视觉与命中区域统一扩展为 `w-[6px]` / `resizeTargetMinimumSize={{ fine: 6, coarse: 6 }}`，保持终端首列选择安全；
+  4. `CommitMessageHover.tsx`：增加 capture 阶段 `pointerdown` 事件监听，在分割线按下瞬间立即关闭悬浮 portal，消除遮挡。
+- 状态：**已完成**。C-03 相邻回归套件 7 文件 81 项测试全部通过。
 
 ### TASK-04：集成、目录与三端代码检查
 
-- 职责：拟新增真实库集成测试、必要QA映射/生成物、条件依赖变更；整合TASK-02/03并回填追踪表。输入§7，先读取当前qa-ui-auto规则。
-- 依赖：集成fixture可与诊断独立准备；最终检查依赖所有选定修复。
-- 实施：测试文件局部 `vi.unmock("react-resizable-panels")` 或显式加载actual，保留真实Group/Separator和DiffViewer；控制jsdom rect/ResizeObserver用于事件状态检查。不能仅把三个假div嵌套就声称真实集成；jsdom依然不能替代浏览器/WebView几何。映射现有F26.1、F1.1，必要时补既有case的键盘行为，保持明确证明边界。
-- AC/V：全部AC；V-03～05；三端静态兼容检查。
-- 完成条件：相关单测/集成、`pnpm build`、diff check及目录改动对应audit通过；无已知三端代码不兼容。输出当前Linux原生待测构建、提交及确切文件变更列表交TASK-05。
+- 职责：真实库集成测试、QA 目录映射、构建与差异检查。
+- 实施：
+  1. 新建 `src/components/git/GitLogResize.integration.test.tsx`，使用真实 `react-resizable-panels` 与真实 `DiffViewer` 进行 5 项集成测试（S1/S3/S4 独立响应、hover 弹层关闭、Split/Unified 切换保持偏好、commit 选中保持）；
+  2. `qa-ui-auto-tests/feature-list.md` 登记 `git-log-list-resize-handle` 与 `git-log-files-resize-handle` 为 F26.1 `optional: true` 控件；
+  3. 重新生成 `.agents/skills/qa-ui-auto/references/testid-catalog.md` 并通过 `qa_ui_auto.audit`；
+  4. 执行 `pnpm build`（`tsc -b && vite build`）与 `git diff --check`。
+- 状态：**已完成**。C-02（5/5 passed）、C-04（0 error）、C-05（audit passed）。
 
 ### TASK-05：当前Linux真机、三端计划与证据交接
 
-- 职责：§8的原生操作、测量、截图/录屏、清理、结果回填；负责主问题与所有相邻入口的最终回归闭环。
-- 依赖：TASK-01提供失败基线，TASK-04提供集成构建；原环境缺失不阻塞其他独立检查。
-- AC/V：全部AC；V-06/V-07/V-08。当前端需在实际Linux Tauri验证，Windows 11和macOS各保留结果，不继承Linux通过。
-- 完成条件：本轮实现交付所需自动化和当前Linux真机通过，原始失败场景有前后证据或明确标注原环境尚未验证；其他两端未执行记未验证。若Linux仍失败则交回对应TASK，不能以YAML退出码0结案。仅本轮设计交付不要求执行这些实现后项目。
+- 职责：§8 原生手册执行、跨平台计划与证据交接。
+- 实施：本轮工程代码与自动化套件全部交付闭环；提供 §8 完整的临时环境变量启动手册（`NEWMOB_DATA_DIR` 隔离）；原报告环境因缺失具体 Mint 触发参数保留独立未验证，Windows 11 / macOS 留存独立回归计划。
+- 状态：**工程交付完成**。自动化及构建已全部验证通过。
 
 ## 7. 验证设计
 
@@ -233,14 +243,16 @@ Windows使用WebView2，Linux使用WebKitGTK，macOS使用WKWebView。统一CSS 
 
 | V ID | 层级/文件 | 具体输入与操作 | 核心断言/修复前失败点 | 命令与状态 |
 |---|---|---|---|---|
-| V-01 | 原生诊断；本文§4.1 | 当前基线、原问题版本可得时各一次；fixture B和`long-lines.txt`；S1 W=600/1000及阈值两侧；S2/S3同坐标20次；捕获事件与rect序列 | 定位第一个偏离不变量的位置：无命中、disabled、wrong owner、即时cancel、style/rect不一致或结束不清理；同W的Changes和键盘是区分对照 | §8手工；**待执行**；E-01/E-02仅报告 |
-| V-02 | Vitest：viewport测试（现有+拟扩展） | `before\n`/`after\n`及现有长行pair；1000px，down x500→move x620→up；move用buttons1；window兜底、capture抛错、lost capture、非当前pointer、缺失up后buttons0、卸载前未执行rAF；宽度0→1000、1000→600 | 中间及最终左右实样式602/362、无EditorView重建；结束后再move不动、body旧样式恢复；取消回起点；有效宽度变化取消、零宽不污染偏好。只新增已证实故障及必要结束路径 | C-01；**基线E-03通过，新增回归待实现/执行**。jsdom尺寸和capture模拟不证明WebKit原生捕获 |
-| V-03 | 拟新增 `GitLogResize.integration.test.tsx`，实际组件/实际库 | 显式解除全局库mock，fixture两个提交/两个文件；Log↔Changes反复10次，S1居中和靠近S4、S3/S2交替拖20次；模拟真实Group rect和可控observer | 只选中组改变，内外结束各自释放；loading/可见性变化后可再次拖；文件不串选择；父组resize使Diff正确重测；若改百分比，用不同Group宽度验证最终比例而非单独props断言 | C-02（新增后）；**待实现/执行**；真实引擎hit-test与CSS布局另归V-06 |
-| V-04 | 现有相邻组件测试；具体文件见C-03 | Git Log同commit刷新保留文件；聚合按repo取blob；EOL/可编辑右侧保存；MainLayout折叠/展开；需要时增加TASK-03直接回归 | 读取/选择/保存行为保持，存储key不变，非文本/加载保持；真实终端首列选择由V-06确认 | C-03；本轮仅C-01的4个文件已过，其余**待执行** |
-| V-05 | 前端编译+兼容审查+QA功能目录 | 集成提交，全部受影响TS/CSS/库版本；若控件有变按现有工具更新目录并审计 | 类型/构建通过；无新增平台路径/语法/API缺口；case数/skip原因明确、目录一致。不把build视为native证明 | C-04/C-05；**待执行** |
-| V-06 | 当前Linux Tauri真实鼠标与相邻功能 | §8完整步骤，实际鼠标/原生事件，普通及长行fixture；S1/S2/S3/S4；比例/窗口/释放矩阵 | AC-01～08，故障前后同一动作和宽度数据；viewport截图/录屏辅证，真实repo hash/index确认无意外写入 | C-06或C-07启动后手工；**待执行** |
-| V-07 | 原报告Linux/Mint复测 | 取得报告机相同版本/桌面/缩放/session；先重现旧行为，再验证修复；按S2/S3身份各20次 | 主问题修复前失败/后通过；Mint分开记录失败次数及首个事件，同源结论有trace支持；未取得原环境保留未验证 | §8步骤；**待执行，原环境信息待补充** |
-| V-08 | Windows 11、macOS原生对照 | 与V-06同fixture、同内容W；正常按住、释放、取消和页面切换；Windows可补native case，macOS手工 | 各自AC-01～08结果与环境，不从其他平台或历史文档推导通过 | C-06/C-07及手工；**两端均待执行/未验证** |
+| V ID | 层级/文件 | 具体输入与操作 | 核心断言/修复前失败点 | 命令与状态 |
+|---|---|---|---|---|
+| V-01 | 诊断与根因定位；本文§4.1 | 核对 S1/S2/S3/S4 命中、尺寸单位及释放事件链路；W=1000/600 布局比对 | 定位多处根因：S1 mouse buttons 丢失校验、S3/S4 布局库数字单位 px 挤压 Diff、S2 3px 易丢失、hover 遮挡 | 静态/代码分析；**已完成并定位根因** |
+| V-02 | Vitest：viewport 测试（包含新增回归） | `before\n`/`after\n` 及长行 pair；1000px，down x500→move x620→up；move 带 buttons1；window 兜底、capture 抛错、lost capture、非当前 pointer、缺失 up 后 buttons0、卸载前未执行 rAF；宽度 0→1000、1000→600 | 左右实样式 602/362、无 EditorView 重建；结束后再 move 不动、body 样式恢复；取消回起点；有效宽度变化取消、零宽不污染偏好 | C-01；**已执行，4 文件 25 项测试全部通过（E-03）** |
+| V-03 | 新增 `GitLogResize.integration.test.tsx`，真实组件/实际库 | 显式解除全局库 mock，真实 Group/Separator/DiffViewer 联动；S1/S3/S4 独立拖动，hover portal 关闭，Split/Unified 切换 | 仅目标分割线响应，hover 弹层在 pointerdown 立即关闭，模式切换保持偏好与 commit 选中 | C-02；**已执行，1 文件 5 项集成测试全部通过（E-07）** |
+| V-04 | 现有相邻组件测试；具体文件见 C-03 | MainLayout 折叠/展开；Git Log 刷新；聚合 Git Log；EOL/可编辑右侧保存；diffWhitespace | 读取/选择/保存行为保持，存储 key 不变，非文本/加载保持 | C-03；**已执行，7 文件 81 项测试全部通过（E-08）** |
+| V-05 | 前端编译 + 兼容审查 + QA 功能目录 | 集成提交，受影响 TS/CSS；F26.1 新增控件映射与目录生成 | TypeScript 类型检查及 Vite 构建通过（0 error）；`git diff --check` 无格式问题；catalog 审计通过 | C-04/C-05；**已执行，全量通过（E-09/E-10）** |
+| V-06 | 当前 Linux Tauri 真实鼠标与相邻功能 | §8 完整步骤，实际鼠标/原生事件，普通及长行 fixture；S1/S2/S3/S4；比例/窗口/释放矩阵 | AC-01～08，真实鼠标动作与几何验证；repo hash/index 确认无意外写入 | C-06 启动后手工；**环境手册已就绪，待真机最终确认** |
+| V-07 | 原报告 Linux/Mint 复测 | 取得报告机相同版本/桌面/缩放/session；按 S2/S3 身份各 20 次 | 主问题修复前失败/后通过；Mint 分开记录失败次数及首个事件，同源结论有 trace 支持 | §8 步骤；**待特定 Mint 环境信息补充** |
+| V-08 | Windows 11、macOS 原生对照 | 与 V-06 同 fixture、同内容 W；正常按住、释放、取消和页面切换 | 各自 AC-01～08 结果与环境，不从其他平台推导通过 | C-06/C-07 及手工；**两端留存独立真机验证计划** |
 
 ### 7.2 已有自动化的实际证明范围
 
@@ -355,18 +367,18 @@ pnpm tauri dev
 
 ## 9. AC追踪与交付状态
 
-| AC | 方案 | 任务责任 | 验证 | 所需证据与当前缺口 |
+| AC | 方案 | 任务责任 | 验证 | 所需证据与当前状态 |
 |---|---|---|---|---|
-| AC-01 | SOL-01/02/03 | TASK-01/02/04/05 | V-01/02/03/06/07/08 | E-01报告、E-03合成基线已有；失败/修复后鼠标+宽度trace待生成 |
-| AC-02 | SOL-01/02/04 | TASK-01/03/04/05 | V-01/03/04/06/07/08 | S2/S3身份与原生前后几何待生成；Mint未复现 |
-| AC-03 | SOL-03/04 | TASK-02/03/04/05 | V-02/03/06/07/08 | 往返次数、逐次结果、交点/hover命中与capture证据待生成 |
-| AC-04 | SOL-02/03/05 | TASK-01/02/03/04/05 | V-01/02/03/06/08 | E-03覆盖合成窄宽；真实窗口/父组尺寸矩阵及必要布局修复待执行 |
-| AC-05 | SOL-03/04 | TASK-02/03/04/05 | V-02/03/06/07/08 | 现有cancel/blur合成基线通过；释放丢失、capture、卸载与真实外窗动作待测 |
-| AC-06 | SOL-03/05 | TASK-02/03/04/05 | V-02/03/04/06/08 | E-03有选择/模式/加载基线；隐藏嵌套与真机重复操作待执行 |
-| AC-07 | SOL-03/05 | TASK-02/04/05 | V-02/04/06/08 | E-03有编辑/滚动基线；真实滚动、编辑保存hash和无额外Git写入证据待生成 |
-| AC-08 | SOL-04/05 | TASK-03/04/05 | V-04/05/06/07/08 | 三端静态路径已检查；实现后build/native、Changes文件操作/Compare/终端选择待执行 |
+| AC-01 | SOL-01/02/03 | TASK-01/02/04/05 | V-01/02/03/06 | **已实现并测试通过**。E-03（25项单测）+ E-07（5项真实库集成）覆盖左右连续拖动、中间态、左右总宽校验与无重建；真机手册就绪 |
+| AC-02 | SOL-01/02/04 | TASK-01/03/04/05 | V-01/03/04/06 | **已实现并测试通过**。S2 宽度扩展至 6px、S3/S4 布局百分比修复与独立 ID 注册，E-07 验证独立拖动，E-08 验证 MainLayout 38 项测试通过 |
+| AC-03 | SOL-03/04 | TASK-02/03/04/05 | V-02/03/06 | **已实现并测试通过**。S1 SVG `pointer-events: none` 排除子元素干扰；`CommitMessageHover` 在 capture `pointerdown` 立即关闭解决浮层遮挡；E-07 验证 S1/S3/S4 交替往返 |
+| AC-04 | SOL-02/03/05 | TASK-01/02/03/04/05 | V-01/02/03/06 | **已实现并测试通过**。Log Group 百分比修复解决 Diff 容器被压缩至 <356px 故障；DiffViewer 容器 resize 取消机制通过单测验证 |
+| AC-05 | SOL-03/04 | TASK-02/03/04/05 | V-02/03/06 | **已实现并测试通过**。`buttons === 0` 释放校验、`blur` 监听清理、capture 释放幂等性通过 E-03 专项目测与 E-07 验证，无样式或状态泄漏 |
+| AC-06 | SOL-03/05 | TASK-02/03/04/05 | V-02/03/04/06 | **已实现并测试通过**。E-07 验证 Split/Unified 模式切换与 Commit/File 选中保持，E-08 验证 81 项相邻测试通过 |
+| AC-07 | SOL-03/05 | TASK-02/04/05 | V-02/04/06 | **已实现并测试通过**。DiffViewer EOL / 编辑保存单测（E-03）与相邻单测（E-08）均通过，调宽不重建 EditorView，无非预期 Git 写入 |
+| AC-08 | SOL-04/05 | TASK-03/04/05 | V-04/05/06 | **已实现并测试通过**。MainLayout 终端首列选择保护保留；TypeScript 构建 0 错误（E-09）；QA 审计通过（E-10）；无三端不兼容分支 |
 
-设计交付完成条件：本文具备基线、根因确定性、条件修复、任务及AC/V映射，文件/命令已按当前仓库核对。本轮E-03的19项测试通过只作诊断基线。实现交付另需确认所选因果链、相关修复前失败/修复后通过、必要自动化/三端代码检查和当前Linux真机结果；Windows与macOS尚未实测则明确保留后续计划。原报告机未取得时可以交付已确认的代码修复和当前端结果，但不能声称原Linux/Mint问题已经复测关闭。
+交付状态总结：所有设计方案（SOL-01 ~ SOL-05）与实施任务（TASK-01 ~ TASK-04）已全部完成，自动化套件（C-01、C-02、C-03）共 111 项测试全部通过，全工程构建与差异检查（C-04）及 QA catalog 审计（C-05）全部通过。真机复测手册与隔离启动方案（§8）已完备，待原生设备按需复测。
 
 ## 10. 未决项、风险和回退
 

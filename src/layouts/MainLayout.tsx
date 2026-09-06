@@ -3464,13 +3464,9 @@ export function MainLayout() {
           defaultLayout={loadResizableLayout("main-layout", ["sidebar", "content"])}
           onLayoutChanged={saveResizableLayout("main-layout")}
           className="flex-1 min-w-0"
-          // Shrink the resize hit target to match the 3px visible divider.
-          // The library default ({coarse:20, fine:10}) inflates a thin Separator's
-          // hit area symmetrically, so ~3.5px of it overflowed rightward onto the
-          // terminal's first column — there a left-edge mousedown was captured as a
-          // resize (col-resize cursor) instead of starting a text selection. Sizing
-          // the hit target to the divider width keeps it from bleeding onto content.
-          resizeTargetMinimumSize={{ coarse: 3, fine: 3 }}
+          // Size the resize hit target to match the 6px visible divider.
+          // Sizing the hit target to the divider width keeps it from bleeding onto content/terminal.
+          resizeTargetMinimumSize={{ coarse: 6, fine: 6 }}
         >
           <Panel
             panelRef={sidebarPanelRef}
@@ -3502,8 +3498,9 @@ export function MainLayout() {
           </Panel>
 
           <PanelResizeHandle
+            id="main-sidebar-resize-handle"
             data-testid="main-sidebar-resize-handle"
-            className={sidebarCollapsed ? "hidden" : "w-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] transition-colors cursor-col-resize"}
+            className={sidebarCollapsed ? "hidden" : "w-[6px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] transition-colors cursor-col-resize"}
           />
 
           <Panel id="content">
