@@ -15,7 +15,7 @@ export interface NewJavaClassDialogProps {
   existingFiles: readonly string[];
   projectFactsStatus?: string;
   onClose: () => void;
-  onCreate: (plan: PlanTemplateCreationResult & { valid: true }) => Promise<void> | void;
+  onCreate: (plan: PlanTemplateCreationResult & { valid: true }) => Promise<boolean | void> | boolean | void;
   onOpenSettings?: () => void;
 }
 
@@ -74,6 +74,7 @@ export function NewJavaClassDialog({
       existingFiles,
       customTemplate: prefs.templates[kind],
       projectFactsStatus,
+      requireReadyFacts: true,
     });
   }, [name, kind, targetDirectory, effectiveSourceRoots, existingFiles, projectFactsStatus]);
 
@@ -83,7 +84,11 @@ export function NewJavaClassDialog({
     if (!plan || !plan.valid || submitting) return;
     setSubmitting(true);
     try {
-      await onCreate(plan);
+      const created = await onCreate(plan);
+      if (created === false) {
+        setSubmitting(false);
+        return;
+      }
       onClose();
     } catch {
       setSubmitting(false);

@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCodeWorkspaceStore } from "../../stores/codeWorkspaceStore";
 import { useProjectFactsStore } from "../../stores/projectFactsStore";
+import { useAppStore } from "../../stores/appStore";
 import { CodeWorkspaceTab } from "./CodeWorkspaceTab";
 import { loadJavaTemplatePreferences, resetJavaTemplatePreferences } from "../../lib/fileTemplatePreferences";
 
@@ -233,6 +234,16 @@ describe("ED-TEMPLATE-001: File and Code Templates production flow in CodeWorksp
       tools: [],
     });
     workspaceMocks.workspaceJavaRunTargets.mockResolvedValue([]);
+    workspaceMocks.workspaceJavaRunTarget.mockResolvedValue({
+      id: "java-main:fixture",
+      label: "Fixture",
+      mainClass: "Fixture",
+      filePath: `${workspaceRoot}/Fixture.java`,
+      command: "java Fixture",
+      cwd: workspaceRoot,
+      buildSystem: "source-file",
+      modulePath: ".",
+    });
     workspaceMocks.workspaceTaskTree.mockResolvedValue([]);
 
     // Setup ready project facts with a Java source root
@@ -395,6 +406,134 @@ describe("ED-TEMPLATE-001: File and Code Templates production flow in CodeWorksp
     expect(screen.getByTestId("new-java-class-error")).toHaveTextContent("reserved Java keyword");
 
     expect(workspaceMocks.workspaceApplyResourceOperation).not.toHaveBeenCalled();
+  });
+
+  it("blocks file creation while project facts are not ready (ED-TEMPLATE-001-A2)", async () => {
+    useProjectFactsStore.setState((state) => ({
+      workspaces: {
+        ...state.workspaces,
+        [workspaceRoot]: {
+          ...state.workspaces[workspaceRoot]!,
+          status: "loading",
+          reason: "Loading project build facts...",
+          structure: null,
+        },
+      },
+    }));
+
+    const { registrationRef, onCommandsChange } = captureCommands();
+    render(
+      <CodeWorkspaceTab
+        tabId="tab-code"
+        workspace={workspaceInfo}
+        visible={true}
+        onCommandsChange={onCommandsChange}
+      />,
+    );
+    await waitFor(() => expect(registrationRef.current).not.toBeNull());
+
+    await act(async () => {
+      await registrationRef.current!.executeAction("workspace.tree.newJavaClass", {
+        directory: { rootId: "root-1", path: "src/main/java/com/example/service" },
+      });
+    });
+
+    fireEvent.change(await screen.findByTestId("new-java-class-name-input"), {
+      target: { value: "UnavailableService" },
+    });
+
+    expect(screen.getByTestId("new-java-class-submit")).toBeDisabled();
+    expect(screen.getByTestId("new-java-class-error")).toHaveTextContent("ready status required");
+    expect(workspaceMocks.workspaceApplyResourceOperation).not.toHaveBeenCalled();
+  });
+
+  it("rejects a plan when project facts become stale before creation (ED-TEMPLATE-001-A2)", async () => {
+    const { registrationRef, onCommandsChange } = captureCommands();
+    render(
+      <CodeWorkspaceTab
+        tabId="tab-code"
+        workspace={workspaceInfo}
+        visible={true}
+        onCommandsChange={onCommandsChange}
+      />,
+    );
+    await waitFor(() => expect(registrationRef.current).not.toBeNull());
+
+    await act(async () => {
+      await registrationRef.current!.executeAction("workspace.tree.newJavaClass", {
+        directory: { rootId: "root-1", path: "src/main/java/com/example/service" },
+      });
+    });
+
+    fireEvent.change(await screen.findByTestId("new-java-class-name-input"), {
+      target: { value: "StaleService" },
+    });
+    useProjectFactsStore.setState((state) => ({
+      workspaces: {
+        ...state.workspaces,
+        [workspaceRoot]: {
+          ...state.workspaces[workspaceRoot]!,
+          generation: 2,
+          isStale: true,
+          reason: "Project configuration modified",
+        },
+      },
+    }));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("new-java-class-submit"));
+    });
+
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("project facts changed"));
+    expect(workspaceMocks.workspaceApplyResourceOperation).not.toHaveBeenCalled();
+  });
+
+  it("reports resource write failure without false success and keeps one undo recovery (ED-TEMPLATE-001-A2/A3)", async () => {
+    workspaceMocks.workspaceWriteFileEncoded.mockRejectedValue(new Error("disk is read-only"));
+    workspaceMocks.workspaceWriteLooseFileEncoded.mockRejectedValue(new Error("disk is read-only"));
+
+    const { registrationRef, onCommandsChange } = captureCommands();
+    render(
+      <CodeWorkspaceTab
+        tabId="tab-code"
+        workspace={workspaceInfo}
+        visible={true}
+        onCommandsChange={onCommandsChange}
+      />,
+    );
+    await waitFor(() => expect(registrationRef.current).not.toBeNull());
+
+    await act(async () => {
+      await registrationRef.current!.executeAction("workspace.tree.newJavaClass", {
+        directory: { rootId: "root-1", path: "src/main/java/com/example/service" },
+      });
+    });
+
+    fireEvent.change(await screen.findByTestId("new-java-class-name-input"), {
+      target: { value: "FailedService" },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("new-java-class-submit"));
+    });
+
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain("Could not create FailedService.java"));
+    expect(screen.getByTestId("new-java-class-dialog")).toBeInTheDocument();
+    expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalled();
+
+    await act(async () => {
+      await registrationRef.current!.executeAction("workspace.undoWorkspaceEdit");
+    });
+
+    await waitFor(() => {
+      expect(workspaceMocks.workspaceApplyResourceOperation).toHaveBeenCalledWith(
+        workspaceRoot,
+        expect.objectContaining({
+          kind: "delete",
+          path: "src/main/java/com/example/service/FailedService.java",
+        }),
+      );
+    });
   });
 
   it("supports undo to remove created Java file (ED-TEMPLATE-001-A3)", async () => {

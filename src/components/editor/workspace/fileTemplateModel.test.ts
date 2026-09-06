@@ -137,6 +137,22 @@ describe("ED-TEMPLATE-001: fileTemplateModel Java templates", () => {
       }
     });
 
+    it("rejects unknown variables embedded in a custom template (ED-TEMPLATE-001-A2)", () => {
+      const result = planJavaTemplateCreation({
+        kind: "class",
+        name: "SafeService",
+        targetDirectory: "/workspace/src/main/java/com/example/order",
+        sourceRoots,
+        existingFiles: [],
+        customTemplate: "public class ${NAME} { ${UNTRUSTED_SHELL} }",
+      });
+
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("Untrusted template variable '${UNTRUSTED_SHELL}' is not allowed");
+      }
+    });
+
     it("rejects creation when template variable contains unsafe control characters", () => {
       const result = planJavaTemplateCreation({
         kind: "class",

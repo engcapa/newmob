@@ -8783,6 +8783,7 @@ export function CodeWorkspaceTab({
       },
     });
     let outcomes = await applyWorkspaceEdit(edit, buildHooks(true));
+    let allOutcomes = [...outcomes];
     // §8.19.1: per-operation effect ledger with an explicit resume boundary.
     // A partial run stops at the failed operation; the user may re-run the
     // unapplied suffix, and every remaining text operation re-validates its
@@ -8802,7 +8803,7 @@ export function CodeWorkspaceTab({
         : undefined,
     });
     {
-      const applyResult = buildApplyResult(outcomes);
+      let applyResult = buildApplyResult(outcomes);
       if (
         applyResult.disposition === "partial"
         && applyResult.nextOperationIndex !== null
@@ -8820,23 +8821,24 @@ export function CodeWorkspaceTab({
           if (!resume) break;
           resolvedEdit = sliceWorkspaceEditForResume(resolvedEdit, applyResult.nextOperationIndex);
           outcomes = await applyWorkspaceEdit(resolvedEdit, buildHooks(false));
-          const nextResult = buildApplyResult(outcomes);
-          if (nextResult.disposition !== "partial" || nextResult.nextOperationIndex === null) break;
+          allOutcomes = [...allOutcomes, ...outcomes];
+          applyResult = buildApplyResult(outcomes);
+          if (applyResult.disposition !== "partial" || applyResult.nextOperationIndex === null) break;
         }
       }
     }
-    if (outcomes.some((outcome) => (
+    if (allOutcomes.some((outcome) => (
       outcome.status === "applied-create"
       || outcome.status === "applied-rename"
       || outcome.status === "applied-delete"
     ))) {
       refreshTree();
     }
-    const mutated = outcomes.some((outcome) => outcome.status.startsWith("applied"));
+    const mutated = allOutcomes.some((outcome) => outcome.status.startsWith("applied"));
     if (mutated) {
       semanticIndex.invalidate(
         "workspace-edit",
-        outcomes.flatMap((outcome) => outcome.status.startsWith("applied") ? [outcome.path] : []),
+        allOutcomes.flatMap((outcome) => outcome.status.startsWith("applied") ? [outcome.path] : []),
       );
     }
     let historyUnavailable = options.recordHistory !== false
@@ -9062,7 +9064,9 @@ export function CodeWorkspaceTab({
     dirRelPath: string;
     sourceRoots: readonly string[];
     existingFiles: readonly string[];
-    projectFactsStatus?: string;
+    projectFactsStatus: string;
+    projectFactsGeneration: number;
+    projectFactsFingerprint: string | null;
   } | null>(null);
 
   const [fileTemplateSettingsOpen, setFileTemplateSettingsOpen] = useState(false);
@@ -9106,14 +9110,39 @@ export function CodeWorkspaceTab({
       sourceRoots,
       existingFiles,
       projectFactsStatus,
+      projectFactsGeneration: facts.generation,
+      projectFactsFingerprint: facts.fingerprint,
     });
   }, [directories, findRoot, selectedRootDirectory, setStatusMessage]);
 
   const createJavaClassFromPlan = useCallback(async (
     plan: PlanTemplateCreationResult & { valid: true },
   ) => {
-    if (!newJavaClassDialogState) return;
-    const { root, dirRelPath } = newJavaClassDialogState;
+    if (!newJavaClassDialogState) return false;
+    const {
+      root,
+      dirRelPath,
+      projectFactsGeneration,
+      projectFactsFingerprint,
+    } = newJavaClassDialogState;
+
+    const assertCurrentProjectFacts = () => {
+      const currentFacts = useProjectFactsStore.getState().getWorkspaceFacts(root.path);
+      const isCurrent = currentFacts.status === "ready"
+        && !currentFacts.isStale
+        && currentFacts.structure !== null
+        && currentFacts.generation === projectFactsGeneration
+        && currentFacts.fingerprint === projectFactsFingerprint;
+      if (isCurrent) return;
+
+      const reason = currentFacts.status === "ready"
+        && !currentFacts.isStale
+        && currentFacts.generation === projectFactsGeneration
+        && currentFacts.fingerprint === projectFactsFingerprint
+        ? "project facts are no longer ready"
+        : "project facts changed";
+      throw new Error(`Cannot create ${plan.className}.java: ${reason}`);
+    };
 
     const relPath = relativePathWithinRoot(root.path, plan.targetPath) ?? `${plan.className}.java`;
     const edit: LspWorkspaceEdit = {
@@ -9157,17 +9186,28 @@ export function CodeWorkspaceTab({
     };
 
     try {
-      await applyLspWorkspaceEdit(edit, {
+      assertCurrentProjectFacts();
+      const outcomes = await applyLspWorkspaceEdit(edit, {
         label: `Create ${plan.kind} ${plan.className}`,
+        preflightMutation: assertCurrentProjectFacts,
       });
+      const response = workspaceEditApplyResponse(outcomes);
+      if (!response.applied) {
+        setStatusMessage(
+          `Could not create ${plan.className}.java: ${response.failureReason ?? "workspace edit was not applied"}`,
+        );
+        return false;
+      }
       await loadDir(root.id, dirRelPath);
       const ref: CodeWorkspaceFileRef = { kind: "root", rootId: root.id, path: relPath };
       setSelected({ kind: "file", ref });
       await openFile(ref);
       notifyWorkspacePathGitChanged(root.id, relPath);
       setStatusMessage(`Created ${plan.className}.java in ${plan.packageName || "(default package)"}`);
+      return true;
     } catch (err) {
       setStatusMessage(errorMessage(err));
+      return false;
     }
   }, [
     applyLspWorkspaceEdit,

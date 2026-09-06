@@ -106,6 +106,22 @@ export const ALLOWED_TEMPLATE_VARIABLES = [
 export type AllowedTemplateVariable = (typeof ALLOWED_TEMPLATE_VARIABLES)[number];
 const ALLOWED_VARIABLE_SET = new Set<string>(ALLOWED_TEMPLATE_VARIABLES);
 
+/** Reject every placeholder in editable template text that is not allowlisted. */
+export function validateTemplateTextVariables(
+  templateText: string,
+): { valid: boolean; error?: string } {
+  for (const match of templateText.matchAll(/\$\{([^{}]*)\}/g)) {
+    const key = match[1] ?? "";
+    if (!ALLOWED_VARIABLE_SET.has(key)) {
+      return {
+        valid: false,
+        error: `Untrusted template variable '\${${key}}' is not allowed`,
+      };
+    }
+  }
+  return { valid: true };
+}
+
 /**
  * Validates template variables against the allowed list and safe character rules.
  */
@@ -148,6 +164,11 @@ export function renderJavaTemplate(
   templateText: string,
   vars: EvaluateTemplateVariables,
 ): string {
+  const templateCheck = validateTemplateTextVariables(templateText);
+  if (!templateCheck.valid) {
+    throw new Error(templateCheck.error);
+  }
+
   const varCheck = validateTemplateVariables(vars.customVariables);
   if (!varCheck.valid) {
     throw new Error(varCheck.error);
@@ -221,10 +242,10 @@ export function planJavaTemplateCreation(
   }
 
   // Contract: only ready source-root/package facts
-  if (params.requireReadyFacts && params.projectFactsStatus && params.projectFactsStatus !== "ready") {
+  if (params.requireReadyFacts && params.projectFactsStatus !== "ready") {
     return {
       valid: false,
-      error: `Cannot plan file creation: project facts status is '${params.projectFactsStatus}' (ready status required)`,
+      error: `Cannot plan file creation: project facts status is '${params.projectFactsStatus ?? "unknown"}' (ready status required)`,
     };
   }
 
