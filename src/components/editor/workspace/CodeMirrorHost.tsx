@@ -161,6 +161,7 @@ import {
   moveStatementUp,
   occurrenceSessionField,
   pasteEditorClipboardPayload,
+  pasteEditorWithAutoImports,
   plainTextClipboardPayload,
   createRegionFoldService,
   detectLineFoldProvenance,
@@ -849,6 +850,7 @@ export type EditorCommandId =
   | "paste"
   | "pasteAsPlainText"
   | "pasteFromHistory"
+  | "pasteWithAutoImports"
   | "selectAllOccurrences"
   | "selectNextOccurrence"
   | "surroundWith"
@@ -861,6 +863,11 @@ export interface EditorCommandOptions {
   historyIndex?: number;
   /** Applied once the surround transaction dispatches, with its provenance. */
   onSemanticEditApplied?: (result: { applied: boolean; provenance: SemanticEditSource | null }) => void;
+  /** ED-IMPORT-001 A4: atomic paste + import payload. */
+  pastePayload?: {
+    text: string;
+    importStatements?: readonly string[];
+  };
 }
 
 export interface EditorCommandState {
@@ -1008,6 +1015,13 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
           });
           view.focus();
           return true;
+        }
+        case "pasteWithAutoImports": {
+          if (!options?.pastePayload) return false;
+          return pasteEditorWithAutoImports(view, {
+            pastedText: options.pastePayload.text,
+            importStatements: options.pastePayload.importStatements,
+          });
         }
         case "selectAllOccurrences": return selectAllEditorOccurrences(view);
         case "selectNextOccurrence": return selectNextEditorOccurrence(view);

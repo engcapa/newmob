@@ -118,5 +118,92 @@ describe("ED-TEMPLATE-001: fileTemplateModel Java templates", () => {
         expect(result.conflictPath).toBe("/workspace/src/main/java/com/example/order/Order.java");
       }
     });
+
+    it("rejects creation when untrusted template variables are supplied (ED-TEMPLATE-001-A2)", () => {
+      const result = planJavaTemplateCreation({
+        kind: "class",
+        name: "SafeService",
+        targetDirectory: "/workspace/src/main/java/com/example/order",
+        sourceRoots,
+        existingFiles: [],
+        customVariables: {
+          UNTRUSTED_SHELL: "rm -rf /",
+        },
+      });
+
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("Untrusted template variable '${UNTRUSTED_SHELL}' is not allowed");
+      }
+    });
+
+    it("rejects unknown variables embedded in a custom template (ED-TEMPLATE-001-A2)", () => {
+      const result = planJavaTemplateCreation({
+        kind: "class",
+        name: "SafeService",
+        targetDirectory: "/workspace/src/main/java/com/example/order",
+        sourceRoots,
+        existingFiles: [],
+        customTemplate: "public class ${NAME} { ${UNTRUSTED_SHELL} }",
+      });
+
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("Untrusted template variable '${UNTRUSTED_SHELL}' is not allowed");
+      }
+    });
+
+    it("rejects creation when template variable contains unsafe control characters", () => {
+      const result = planJavaTemplateCreation({
+        kind: "class",
+        name: "SafeService",
+        targetDirectory: "/workspace/src/main/java/com/example/order",
+        sourceRoots,
+        existingFiles: [],
+        customVariables: {
+          USER: "dev\0null",
+        },
+      });
+
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("unsafe control characters");
+      }
+    });
+
+    it("respects project facts status contract: unready facts derive empty package", () => {
+      const result = planJavaTemplateCreation({
+        kind: "class",
+        name: "DegradedService",
+        targetDirectory: "/workspace/src/main/java/com/example/order",
+        sourceRoots,
+        existingFiles: [],
+        projectFactsStatus: "degraded",
+      });
+
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        // Without ready facts, source roots are not trusted to deduce package
+        expect(result.packageName).toBe("");
+        expect(result.content).not.toContain("package com.example.order;");
+      }
+    });
+
+    it("fails closed when requireReadyFacts is true and facts are not ready", () => {
+      const result = planJavaTemplateCreation({
+        kind: "class",
+        name: "StrictService",
+        targetDirectory: "/workspace/src/main/java/com/example/order",
+        sourceRoots,
+        existingFiles: [],
+        projectFactsStatus: "loading",
+        requireReadyFacts: true,
+      });
+
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("ready status required");
+      }
+    });
   });
 });

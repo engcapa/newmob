@@ -7,8 +7,16 @@ import {
   refactorApplyGate,
   verifyExclusionSafety,
   evaluateDestructiveRefactorAvailability,
+  verifyRefactorPostHashes,
+  buildRefactorRecoveryJournalEntry,
+  recordRefactorRecoveryJournal,
+  getRefactorRecoveryJournal,
+  listRefactorRecoveryJournals,
+  clearRefactorRecoveryJournal,
+  replayRefactorRecoveryJournal,
   type RefactorPlanV4,
 } from "./refactorPlan";
+import { sha256Hex } from "./projectAnalysisModel";
 
 const dummyLocation: LspLocation = {
   uri: "file:///workspace/src/A.java",
@@ -436,6 +444,241 @@ describe("buildRefactorPlan & verifyExclusionSafety §8.20.6 & §8.21.2", () => 
       const gate = refactorApplyGate(plan);
       expect(gate.allowed).toBe(false);
       expect(gate.reason).toContain("read-only library resource");
+    });
+
+    it("automatically detects dirty open buffer without manual conflict passing (ED-REF-001-A2)", () => {
+      const edit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            uri: "file:///workspace/src/DirtyFile.java",
+            path: "/workspace/src/DirtyFile.java",
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 4 } }, newText: "Test" }],
+          },
+        ],
+      };
+
+      const plan = buildRefactorPlan({
+        actionId: "rename-dirty",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit,
+        roots: [{ path: "/workspace" }],
+        openFiles: {
+          "/workspace/src/DirtyFile.java": {
+            dirty: true,
+            revision: 1,
+            documentRevision: 1,
+          },
+        },
+      });
+
+      const gate = refactorApplyGate(plan);
+      expect(gate.allowed).toBe(false);
+      expect(gate.reason).toContain("unsaved buffer edits");
+      expect(plan.conflicts[0].source).toBe("client-observed-bounded");
+    });
+
+    it("automatically blocks read-only file and external resources (ED-REF-001-A2)", () => {
+      const edit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            uri: "file:///workspace/src/ReadOnly.java",
+            path: "/workspace/src/ReadOnly.java",
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 4 } }, newText: "Test" }],
+          },
+        ],
+      };
+
+      const readOnlyPlan = buildRefactorPlan({
+        actionId: "rename-readonly",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit,
+        roots: [{ path: "/workspace" }],
+        openFiles: {
+          "/workspace/src/ReadOnly.java": {
+            readOnly: true,
+          },
+        },
+      });
+
+      const readOnlyGate = refactorApplyGate(readOnlyPlan);
+      expect(readOnlyGate.allowed).toBe(false);
+      expect(readOnlyGate.reason).toContain("Cannot modify read-only file");
+
+      const externalEdit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            uri: "file:///etc/hosts",
+            path: "/etc/hosts",
+            edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 4 } }, newText: "Test" }],
+          },
+        ],
+      };
+
+      const externalPlan = buildRefactorPlan({
+        actionId: "rename-external",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit: externalEdit,
+        roots: [{ path: "/workspace" }],
+      });
+
+      const externalGate = refactorApplyGate(externalPlan);
+      expect(externalGate.allowed).toBe(false);
+      expect(externalGate.reason).toContain("Cannot modify read-only external resource");
+    });
+
+    it("computes and verifies post-hashes for multi-file refactoring (ED-REF-001-A3)", () => {
+      const fileAText = "package com.example;\npublic class App {\n    void oldMethod() {}\n}\n";
+      const fileBText = "package com.example;\npublic class Client {\n    void call() { new App().oldMethod(); }\n}\n";
+
+      const multiEdit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            uri: "file:///workspace/App.java",
+            path: "/workspace/App.java",
+            edits: [{ range: { start: { line: 2, character: 9 }, end: { line: 2, character: 18 } }, newText: "newMethod" }],
+          },
+          {
+            uri: "file:///workspace/Client.java",
+            path: "/workspace/Client.java",
+            edits: [{ range: { start: { line: 2, character: 28 }, end: { line: 2, character: 37 } }, newText: "newMethod" }],
+          },
+        ],
+      };
+
+      const plan = buildRefactorPlan({
+        actionId: "rename-hashes",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit: multiEdit,
+        roots: [{ path: "/workspace" }],
+        currentTexts: {
+          "/workspace/App.java": fileAText,
+          "/workspace/Client.java": fileBText,
+        },
+      });
+
+      expect(plan.documents).toHaveLength(2);
+      expect(plan.documents[0].preTextSha256).toBe(sha256Hex(fileAText));
+      expect(plan.documents[1].preTextSha256).toBe(sha256Hex(fileBText));
+      expect(plan.documents[0].expectedPostHash).not.toBeNull();
+      expect(plan.documents[1].expectedPostHash).not.toBeNull();
+
+      const expectedPostA = "package com.example;\npublic class App {\n    void newMethod() {}\n}\n";
+      const expectedPostB = "package com.example;\npublic class Client {\n    void call() { new App().newMethod(); }\n}\n";
+      expect(plan.documents[0].expectedPostHash).toBe(sha256Hex(expectedPostA));
+      expect(plan.documents[1].expectedPostHash).toBe(sha256Hex(expectedPostB));
+
+      // 1. Post-hash verification with correct text matches
+      const passResult = verifyRefactorPostHashes(plan, {
+        "/workspace/App.java": expectedPostA,
+        "/workspace/Client.java": expectedPostB,
+      });
+      expect(passResult.allMatched).toBe(true);
+      expect(passResult.mismatches).toHaveLength(0);
+      expect(passResult.verifiedDocuments).toBe(2);
+
+      // 2. Post-hash verification detects mismatch
+      const failResult = verifyRefactorPostHashes(plan, {
+        "/workspace/App.java": expectedPostA,
+        "/workspace/Client.java": "corrupted text",
+      });
+      expect(failResult.allMatched).toBe(false);
+      expect(failResult.mismatches).toHaveLength(1);
+      expect(failResult.mismatches[0].uri).toBe("file:///workspace/Client.java");
+    });
+
+    it("restores pre-images and hashes in one undo and enables restart recovery replay (ED-REF-001-A4)", async () => {
+      const fileAText = "int alpha = 1;";
+      const fileBText = "int beta = 2;";
+
+      const edit: LspWorkspaceEdit = {
+        documentEdits: [
+          {
+            uri: "file:///workspace/A.java",
+            path: "/workspace/A.java",
+            edits: [{ range: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }, newText: "nextAlpha" }],
+          },
+          {
+            uri: "file:///workspace/B.java",
+            path: "/workspace/B.java",
+            edits: [{ range: { start: { line: 0, character: 4 }, end: { line: 0, character: 8 } }, newText: "nextBeta" }],
+          },
+        ],
+      };
+
+      const plan = buildRefactorPlan({
+        actionId: "rename-recovery",
+        kind: "rename",
+        evidence: dummyEvidence,
+        edit,
+        roots: [{ path: "/workspace" }],
+        currentTexts: {
+          "/workspace/A.java": fileAText,
+          "/workspace/B.java": fileBText,
+        },
+      });
+
+      // Build recovery journal entry
+      const journalEntry = buildRefactorRecoveryJournalEntry(
+        plan,
+        {
+          "/workspace/A.java": fileAText,
+          "/workspace/B.java": fileBText,
+        },
+        "/workspace",
+      );
+      expect(journalEntry).not.toBeNull();
+      expect(journalEntry?.documents).toHaveLength(2);
+      expect(journalEntry?.documents[0].preHash).toBe(sha256Hex(fileAText));
+      expect(journalEntry?.documents[1].preHash).toBe(sha256Hex(fileBText));
+
+      // Storage persistence & retrieval
+      const mockStorage = (() => {
+        const store = new Map<string, string>();
+        return {
+          getItem: (k: string) => store.get(k) ?? null,
+          setItem: (k: string, v: string) => { store.set(k, v); },
+          removeItem: (k: string) => { store.delete(k); },
+          key: (i: number) => Array.from(store.keys())[i] ?? null,
+          get length() { return store.size; },
+          clear: () => store.clear(),
+        } as unknown as Storage;
+      })();
+
+      recordRefactorRecoveryJournal(journalEntry!, mockStorage);
+      const retrieved = getRefactorRecoveryJournal(journalEntry!.recoveryId, mockStorage);
+      expect(retrieved?.actionId).toBe("rename-recovery");
+      expect(retrieved?.documents).toHaveLength(2);
+
+      const allJournals = listRefactorRecoveryJournals("/workspace", mockStorage);
+      expect(allJournals).toHaveLength(1);
+
+      // Mutate mock filesystem state
+      const liveFiles = new Map<string, string>([
+        ["/workspace/A.java", "int nextAlpha = 1;"],
+        ["/workspace/B.java", "int nextBeta = 2;"],
+      ]);
+
+      // Replay recovery to restore original pre-images
+      const replayResult = await replayRefactorRecoveryJournal(retrieved!, (target, text) => {
+        liveFiles.set(target, text);
+      });
+
+      expect(replayResult.restoredUris).toHaveLength(2);
+      expect(replayResult.preHashesRestored).toBe(true);
+
+      // Verify restored content matches pre-images and pre-hashes in one step
+      expect(liveFiles.get("/workspace/A.java")).toBe(fileAText);
+      expect(liveFiles.get("/workspace/B.java")).toBe(fileBText);
+      expect(sha256Hex(liveFiles.get("/workspace/A.java")!)).toBe(journalEntry!.documents[0].preHash);
+      expect(sha256Hex(liveFiles.get("/workspace/B.java")!)).toBe(journalEntry!.documents[1].preHash);
+
+      // Clean journal
+      clearRefactorRecoveryJournal(journalEntry!.recoveryId, mockStorage);
+      expect(getRefactorRecoveryJournal(journalEntry!.recoveryId, mockStorage)).toBeNull();
     });
   });
 });

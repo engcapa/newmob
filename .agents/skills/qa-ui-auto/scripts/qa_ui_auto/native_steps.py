@@ -582,9 +582,7 @@ def _activate_x11_application(application: Path) -> tuple[str, str]:
             ])
         except StepError:
             continue
-        first_line = identity.splitlines()[0].lower() if identity else ""
-        if '"taomni"' not in first_line:
-            continue
+        # QA builds have a distinct product name; match the executable via PID.
         pid_match = re.search(r"_NET_WM_PID\(CARDINAL\) = (\d+)", identity)
         if not pid_match:
             continue

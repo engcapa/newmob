@@ -4,21 +4,19 @@ Browser mode: clear localStorage keys (taomni.sessions.v1, taomni.groups.v1,
 taomni.tunnels.v1, taomni.appTheme.v1, taomni.terminalProfile.v1, taomni.compactMode,
 taomni.sftp.*).
 
-Native mode: delete the SQLite DB at <app_data_dir>/taomni.db. The path is
-computed from the bundle identifier 'com.taomni.app' which is stable in
-src-tauri/tauri.conf.json. Each worker uses XDG_DATA_HOME=<run>/data-w<N>
-so per-worker isolation is automatic.
+Native mode: clear only the QA application's state under the current run's
+verified data/config/cache roots. Never resolve or clear the production profile.
 """
 
 from __future__ import annotations
 
 import os
-import platform
 import shutil
 from pathlib import Path
 from typing import Any
 
-BUNDLE_ID = "com.taomni.app"
+from native_build import QA_APP_ID
+from tauri_webdriver import native_isolation_env
 
 LOCAL_STORAGE_KEYS = [
     "taomni.sessions.v1",
@@ -34,19 +32,6 @@ LOCAL_STORAGE_PREFIXES = [
     "taomni.tab.",
     "taomni.recent.",
 ]
-
-
-def _native_app_data_dir() -> Path:
-    system = platform.system()
-    if system == "Windows":
-        base = os.environ.get("APPDATA")
-        if base:
-            return Path(base) / BUNDLE_ID
-        return Path.home() / "AppData" / "Roaming" / BUNDLE_ID
-    if system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / BUNDLE_ID
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / BUNDLE_ID
 
 
 def setup(ctx: Any) -> None:
@@ -99,18 +84,16 @@ def _reset_browser(ctx: Any) -> None:
 
 
 def _reset_native(ctx: Any) -> None:
-    data_dir = _native_app_data_dir()
-    db = data_dir / "taomni.db"
-    for path in (db, data_dir / "taomni.db-wal", data_dir / "taomni.db-shm", data_dir / "sdk.json"):
-        try:
-            if path.exists():
-                path.unlink()
-        except OSError:
-            pass
-    # If the worker uses a private data dir, prefer wiping the whole tree.
-    custom = os.environ.get("NEWMOB_DATA_DIR")
-    if custom:
-        try:
-            shutil.rmtree(custom, ignore_errors=True)
-        except OSError:
-            pass
+    report_root = getattr(ctx, "report_root", None)
+    if report_root is None:
+        raise RuntimeError("reset_db requires a native run directory; refusing profile cleanup")
+    expected = native_isolation_env(Path(report_root))
+    if any(os.environ.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("reset_db requires the current run's native isolation environment")
+    targets = [Path(value) / QA_APP_ID for value in set(expected.values())]
+    # Validate every target before deleting any; rmtree does not follow child symlinks.
+    if any(target.resolve() != target for target in targets):
+        raise RuntimeError("reset_db refuses symlinked QA profile paths")
+    for target in targets:
+        if target.exists():
+            shutil.rmtree(target)

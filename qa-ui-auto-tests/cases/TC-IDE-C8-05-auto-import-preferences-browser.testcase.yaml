@@ -1,0 +1,39 @@
+id: TC-IDE-C8-05-auto-import-preferences-browser
+title: "Auto Import Settings dialog manages independent on-the-fly and paste preferences in browser"
+description: |
+  Browser gate case (ED-IMPORT-001). Opens the code workspace, invokes Auto Import Settings
+  from Search Everywhere Actions, verifies presence of independent on-the-fly and paste
+  preference controls, toggles preferences, saves, and closes the modal cleanly.
+covers: [F25.5]
+tags: [code-workspace, ide-c8, auto-import, preferences, browser-gate, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 180
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="side-tab-tools"]'
+  - wait_for: '[data-testid="sidebar-tools-panel"]'
+  - click: '[data-testid="sidebar-tool-code-workspace"]'
+  - wait_for: '[data-testid="code-workspace-tab"]'
+  - click: '[data-testid="code-workspace-tab"]'
+  - wait: 0.3
+  - press: Control+Shift+N
+  - wait_for:
+      selector: '[data-testid="code-workspace-search-everywhere"]'
+      timeout_sec: 30
+  - click: '[data-testid="code-workspace-search-everywhere"] >> role=tab[name="Actions"]'
+  - click: '[data-testid="code-workspace-search-everywhere"] input[aria-label="Search actions"]'
+  - type: Auto Import Settings
+  - click: '[data-testid="code-workspace-search-everywhere"] >> text=Auto Import Settings'
+  - wait_for:
+      selector: '[data-testid="auto-import-settings-dialog"]'
+      timeout_sec: 20
+  - wait_for: '[data-testid="auto-import-on-the-fly-checkbox"]'
+  - wait_for: '[data-testid="auto-import-paste-mode-select"]'
+  - click: '[data-testid="auto-import-on-the-fly-checkbox"]'
+  - click: '[data-testid="auto-import-save-button"]'
+  - wait: 0.2
+  - click: '[data-testid="auto-import-close-button"]'
+  - wait: 0.2
+  - screenshot: tc-ide-c8-05-auto-import-settings.png

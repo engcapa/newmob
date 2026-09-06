@@ -5566,7 +5566,7 @@ controls:
 id: F25.5
 status: partial
 area: code-workspace/editor-shell
-components: [CodeWorkspaceTab, WorkspaceTabPolicySettingsDialog, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog, FileEncodingDialog]
+components: [CodeWorkspaceTab, WorkspaceTabPolicySettingsDialog, EditorGroup, HighlightingWidget, FileTreePane, TabSwitcher, Breadcrumbs, KeymapSettingsDialog, ClipboardHistoryPopup, ProjectFactsStatusBadge, TodosBookmarksPanel, EditorCompareDialog, LocalHistoryDialog, FileEncodingDialog, AutoImportSettingsDialog, AutoImportCandidateDialog, FileTemplateSettingsDialog, NewJavaClassDialog]
 files:
   - src/components/editor/CodeWorkspaceTab.tsx
   - src/components/editor/workspace/FileEncodingDialog.tsx
@@ -5584,6 +5584,10 @@ files:
   - src/components/editor/workspace/EditorCompareDialog.tsx
   - src/components/editor/workspace/LocalHistoryDialog.tsx
   - src/components/editor/workspace/editorCompareModel.ts
+  - src/components/editor/workspace/AutoImportSettingsDialog.tsx
+  - src/components/editor/workspace/AutoImportCandidateDialog.tsx
+  - src/components/editor/workspace/FileTemplateSettingsDialog.tsx
+  - src/components/editor/workspace/NewJavaClassDialog.tsx
 controls:
   - id: tree-add-folder
     selector: '[data-testid="code-workspace-tree-add-folder"]'
@@ -6089,6 +6093,78 @@ controls:
     optional: true
   - id: local-history-restore
     selector: '[data-testid="code-workspace-local-history-restore"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-settings-dialog
+    selector: '[data-testid="auto-import-settings-dialog"]'
+    kind: display
+    optional: true
+  - id: auto-import-close-button
+    selector: '[data-testid="auto-import-close-button"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-on-the-fly-checkbox
+    selector: '[data-testid="auto-import-on-the-fly-checkbox"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-optimize-on-the-fly-checkbox
+    selector: '[data-testid="auto-import-optimize-on-the-fly-checkbox"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-paste-mode-select
+    selector: '[data-testid="auto-import-paste-mode-select"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-save-button
+    selector: '[data-testid="auto-import-save-button"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-reset-button
+    selector: '[data-testid="auto-import-reset-button"]'
+    kind: interactive
+    optional: true
+  - id: auto-import-candidate-dialog
+    selector: '[data-testid="auto-import-candidate-dialog"]'
+    kind: display
+    optional: true
+  - id: file-template-settings-dialog
+    selector: '[data-testid="file-template-settings-dialog"]'
+    kind: display
+    optional: true
+  - id: file-template-close-button
+    selector: '[data-testid="file-template-close-button"]'
+    kind: interactive
+    optional: true
+  - id: file-template-editor-textarea
+    selector: '[data-testid="file-template-editor-textarea"]'
+    kind: interactive
+    optional: true
+  - id: file-template-save-button
+    selector: '[data-testid="file-template-save-button"]'
+    kind: interactive
+    optional: true
+  - id: file-template-reset-button
+    selector: '[data-testid="file-template-reset-button"]'
+    kind: interactive
+    optional: true
+  - id: new-java-class-dialog
+    selector: '[data-testid="new-java-class-dialog"]'
+    kind: display
+    optional: true
+  - id: new-java-class-name-input
+    selector: '[data-testid="new-java-class-name-input"]'
+    kind: interactive
+    optional: true
+  - id: new-java-class-kind-select
+    selector: '[data-testid="new-java-class-kind-select"]'
+    kind: interactive
+    optional: true
+  - id: new-java-class-confirm
+    selector: '[data-testid="new-java-class-confirm"]'
+    kind: interactive
+    optional: true
+  - id: new-java-class-cancel
+    selector: '[data-testid="new-java-class-cancel"]'
     kind: interactive
     optional: true
 -->

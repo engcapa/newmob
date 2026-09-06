@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from tauri_webdriver import native_binary, native_tool_issues  # noqa: E402
+from native_build import verify_identity  # noqa: E402
 
 ROOT = Path.cwd()
 DEV_PROXY_ALLOW_PRIVATE = "DEV_PROXY_ALLOW_PRIVATE"
@@ -83,14 +84,12 @@ def probe_dev_server(cfg: dict) -> list[str]:
 def probe_native(cfg: dict) -> list[str]:
     binary = native_binary(cfg)
     hints: list[str] = []
-    if not binary.exists():
-        hints += [
-            f"✗ Tauri debug binary not found at {binary}.",
-            "  Build it first:",
-            "    pnpm tauri build --debug --no-bundle",
-            "  or:",
-            "    cargo tauri build --debug --no-bundle",
-        ]
+    try:
+        verify_identity(binary)
+    except ValueError as exc:
+        hints.append(str(exc))
+    if platform.system() == "Darwin":
+        return hints + ["Tauri WebDriver is unsupported on macOS; use native OS automation/manual QA-app testing."]
     hints += native_tool_issues(cfg)
     if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
         hints += [

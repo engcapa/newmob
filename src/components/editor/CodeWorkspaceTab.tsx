@@ -272,6 +272,24 @@ import {
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
 import { CodeStyleSettingsDialog } from "./workspace/CodeStyleSettingsDialog";
 import { WorkspaceTabPolicySettingsDialog } from "./workspace/WorkspaceTabPolicySettingsDialog";
+import { NewJavaClassDialog } from "./workspace/NewJavaClassDialog";
+import { FileTemplateSettingsDialog } from "./workspace/FileTemplateSettingsDialog";
+import { AutoImportSettingsDialog } from "./workspace/AutoImportSettingsDialog";
+import { AutoImportCandidateDialog } from "./workspace/AutoImportCandidateDialog";
+import {
+  loadAutoImportPreferences,
+} from "../../lib/autoImportPreferences";
+import {
+  planAutoImport,
+  planPasteAutoImports,
+  parseProviderImportCandidates,
+  scanPastedTypeTokens,
+  buildPasteWithImportsChanges,
+  computeImportInsertionOffset,
+  type AutoImportCandidate,
+  type AutoImportPlanOutcome,
+} from "./workspace/autoImportModel";
+import type { PlanTemplateCreationResult } from "./workspace/fileTemplateModel";
 import {
   buildFormatPlan,
   filterFormattingRanges,
@@ -382,6 +400,9 @@ import {
   buildRefactorPlan,
   refactorApplyGate,
   evaluateDestructiveRefactorAvailability,
+  verifyRefactorPostHashes,
+  buildRefactorRecoveryJournalEntry,
+  recordRefactorRecoveryJournal,
   type RefactorPlanV3,
 } from "./workspace/refactorPlan";
 import { KeymapCheatSheetDialog } from "./workspace/KeymapCheatSheetDialog";
@@ -1080,6 +1101,8 @@ import {
 import {
   planCleanup,
   planRearrange,
+  resolveCleanupCapabilities,
+  resolveRearrangeCapabilities,
 } from "./workspace/rearrangeCleanupWorkflow";
 
 interface ResourceCleanupRecoveryView {
@@ -1331,8 +1354,9 @@ export function CodeWorkspaceTab({
   const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
   const setLayoutNodeRatios = useCodeWorkspaceStore((s) => s.setLayoutNodeRatios);
   const seedTreeExpandIfEmpty = useCodeWorkspaceStore((s) => s.seedTreeExpandIfEmpty);
-  // Ensure before first read so the selector always hits a real map entry.
-  ensureWorkspaceUi(workspaceInstanceId);
+  // The effect below initializes a missing instance after commit. Keeping the
+  // render path read-only avoids notifying external-store subscribers during
+  // render when a workspace is mounted for the first time.
   const workspaceUi = useCodeWorkspaceStore((s) => selectCodeWorkspaceUi(s, workspaceInstanceId));
 
   useEffect(() => {
@@ -3874,6 +3898,7 @@ export function CodeWorkspaceTab({
           { label: "Open", onClick: run("workspace.tree.open", { selection }) },
           { separator: true, label: "" },
           { label: "New File...", onClick: run("workspace.tree.newFile", { directory: { rootId: ref.rootId, path: dir } }) },
+          { label: "New Java Class...", onClick: run("workspace.tree.newJavaClass", { directory: { rootId: ref.rootId, path: dir } }) },
           { label: "New Directory...", onClick: run("workspace.tree.newDirectory", { directory: { rootId: ref.rootId, path: dir } }) },
           { label: "Rename...", onClick: run("workspace.tree.rename", { selection }) },
           { label: "Delete", danger: true, onClick: run("workspace.tree.delete", { selection }) },
@@ -3894,6 +3919,7 @@ export function CodeWorkspaceTab({
       if (selection.kind === "dir") {
         openTreeContextMenu(event, [
           { label: "New File...", onClick: run("workspace.tree.newFile", { directory: { rootId: selection.rootId, path: selection.path } }) },
+          { label: "New Java Class...", onClick: run("workspace.tree.newJavaClass", { directory: { rootId: selection.rootId, path: selection.path } }) },
           { label: "New Directory...", onClick: run("workspace.tree.newDirectory", { directory: { rootId: selection.rootId, path: selection.path } }) },
           { label: "Rename...", onClick: run("workspace.tree.rename", { selection }) },
           { label: "Delete", danger: true, onClick: run("workspace.tree.delete", { selection }) },
@@ -3921,6 +3947,7 @@ export function CodeWorkspaceTab({
       if (selection.kind === "root") {
         openTreeContextMenu(event, [
           { label: "New File...", onClick: run("workspace.tree.newFile", { directory: { rootId: selection.rootId, path: "" } }) },
+          { label: "New Java Class...", onClick: run("workspace.tree.newJavaClass", { directory: { rootId: selection.rootId, path: "" } }) },
           { label: "New Directory...", onClick: run("workspace.tree.newDirectory", { directory: { rootId: selection.rootId, path: "" } }) },
           { label: "Rename Root...", onClick: run("workspace.tree.rename", { selection }) },
           { separator: true, label: "" },
@@ -8757,6 +8784,7 @@ export function CodeWorkspaceTab({
       },
     });
     let outcomes = await applyWorkspaceEdit(edit, buildHooks(true));
+    let allOutcomes = [...outcomes];
     // §8.19.1: per-operation effect ledger with an explicit resume boundary.
     // A partial run stops at the failed operation; the user may re-run the
     // unapplied suffix, and every remaining text operation re-validates its
@@ -8776,7 +8804,7 @@ export function CodeWorkspaceTab({
         : undefined,
     });
     {
-      const applyResult = buildApplyResult(outcomes);
+      let applyResult = buildApplyResult(outcomes);
       if (
         applyResult.disposition === "partial"
         && applyResult.nextOperationIndex !== null
@@ -8794,23 +8822,24 @@ export function CodeWorkspaceTab({
           if (!resume) break;
           resolvedEdit = sliceWorkspaceEditForResume(resolvedEdit, applyResult.nextOperationIndex);
           outcomes = await applyWorkspaceEdit(resolvedEdit, buildHooks(false));
-          const nextResult = buildApplyResult(outcomes);
-          if (nextResult.disposition !== "partial" || nextResult.nextOperationIndex === null) break;
+          allOutcomes = [...allOutcomes, ...outcomes];
+          applyResult = buildApplyResult(outcomes);
+          if (applyResult.disposition !== "partial" || applyResult.nextOperationIndex === null) break;
         }
       }
     }
-    if (outcomes.some((outcome) => (
+    if (allOutcomes.some((outcome) => (
       outcome.status === "applied-create"
       || outcome.status === "applied-rename"
       || outcome.status === "applied-delete"
     ))) {
       refreshTree();
     }
-    const mutated = outcomes.some((outcome) => outcome.status.startsWith("applied"));
+    const mutated = allOutcomes.some((outcome) => outcome.status.startsWith("applied"));
     if (mutated) {
       semanticIndex.invalidate(
         "workspace-edit",
-        outcomes.flatMap((outcome) => outcome.status.startsWith("applied") ? [outcome.path] : []),
+        allOutcomes.flatMap((outcome) => outcome.status.startsWith("applied") ? [outcome.path] : []),
       );
     }
     let historyUnavailable = options.recordHistory !== false
@@ -8831,6 +8860,29 @@ export function CodeWorkspaceTab({
         || snapshot.bom !== beforeSnapshots[index]?.bom
       ));
       if (afterSnapshots && changed) {
+        if (options.plan) {
+          const actualPostTexts: Record<string, string> = {};
+          for (const s of afterSnapshots) {
+            if (s.text !== null) actualPostTexts[s.path] = s.text;
+          }
+          const postHashCheck = verifyRefactorPostHashes(options.plan, actualPostTexts);
+          if (!postHashCheck.allMatched) {
+            console.warn("[refactor] Post-refactor hash mismatch detected:", postHashCheck.mismatches);
+          }
+          const preTexts: Record<string, string> = {};
+          for (const s of beforeSnapshots) {
+            if (s.text !== null) preTexts[s.path] = s.text;
+          }
+          const recoveryEntry = buildRefactorRecoveryJournalEntry(
+            options.plan,
+            preTexts,
+            rootsRef.current[0]?.path ?? "",
+          );
+          if (recoveryEntry) {
+            recoveryEntry.status = "committed";
+            recordRefactorRecoveryJournal(recoveryEntry);
+          }
+        }
         const affectedBookmarkIds = Array.from(new Set([
           ...(beforeBookmarks ?? []).map((bookmark) => bookmark.id),
           ...(afterBookmarks ?? []).map((bookmark) => bookmark.id),
@@ -9005,6 +9057,168 @@ export function CodeWorkspaceTab({
       unlisten?.();
     };
   }, [applyLspWorkspaceEdit, setStatusMessage, workspaceInstanceId]);
+
+  const [newJavaClassDialogState, setNewJavaClassDialogState] = useState<{
+    open: boolean;
+    targetDirectory: string;
+    root: CodeWorkspaceRootInfo;
+    dirRelPath: string;
+    sourceRoots: readonly string[];
+    existingFiles: readonly string[];
+    projectFactsStatus: string;
+    projectFactsGeneration: number;
+    projectFactsFingerprint: string | null;
+  } | null>(null);
+
+  const [fileTemplateSettingsOpen, setFileTemplateSettingsOpen] = useState(false);
+  const [autoImportSettingsOpen, setAutoImportSettingsOpen] = useState(false);
+  const [autoImportCandidatePrompt, setAutoImportCandidatePrompt] = useState<{
+    candidates: readonly AutoImportCandidate[];
+    onSelect: (candidate: AutoImportCandidate) => void;
+    onClose: () => void;
+  } | null>(null);
+
+  const openNewJavaClassDialog = useCallback((target?: { rootId: string; path: string }) => {
+    const directory = target ?? selectedRootDirectory;
+    if (!directory) {
+      setStatusMessage("Add a folder before creating Java classes");
+      return;
+    }
+    const root = findRoot(directory.rootId);
+    if (!root) return;
+
+    const targetDir = directory.path ? `${root.path}/${directory.path}` : root.path;
+    const facts = useProjectFactsStore.getState().getWorkspaceFacts(root.path);
+    const projectFactsStatus = facts?.status;
+    const isFactsReady = facts?.status === "ready";
+    const sourceRoots = isFactsReady && facts?.structure
+      ? facts.structure.modules.flatMap((m) =>
+          m.sourceSets
+            .filter((s) => s.kind === "main" || s.kind === "test")
+            .flatMap((s) => s.roots),
+        )
+      : [];
+
+    const dirKey = `root:${root.id}:${directory.path}`;
+    const dirEntries = directories[dirKey]?.entries ?? [];
+    const existingFiles = dirEntries.map((f) => `${targetDir}/${f.name}`);
+
+    setNewJavaClassDialogState({
+      open: true,
+      targetDirectory: targetDir,
+      root,
+      dirRelPath: directory.path,
+      sourceRoots,
+      existingFiles,
+      projectFactsStatus,
+      projectFactsGeneration: facts.generation,
+      projectFactsFingerprint: facts.fingerprint,
+    });
+  }, [directories, findRoot, selectedRootDirectory, setStatusMessage]);
+
+  const createJavaClassFromPlan = useCallback(async (
+    plan: PlanTemplateCreationResult & { valid: true },
+  ) => {
+    if (!newJavaClassDialogState) return false;
+    const {
+      root,
+      dirRelPath,
+      projectFactsGeneration,
+      projectFactsFingerprint,
+    } = newJavaClassDialogState;
+
+    const assertCurrentProjectFacts = () => {
+      const currentFacts = useProjectFactsStore.getState().getWorkspaceFacts(root.path);
+      const isCurrent = currentFacts.status === "ready"
+        && !currentFacts.isStale
+        && currentFacts.structure !== null
+        && currentFacts.generation === projectFactsGeneration
+        && currentFacts.fingerprint === projectFactsFingerprint;
+      if (isCurrent) return;
+
+      const reason = currentFacts.status === "ready"
+        && !currentFacts.isStale
+        && currentFacts.generation === projectFactsGeneration
+        && currentFacts.fingerprint === projectFactsFingerprint
+        ? "project facts are no longer ready"
+        : "project facts changed";
+      throw new Error(`Cannot create ${plan.className}.java: ${reason}`);
+    };
+
+    const relPath = relativePathWithinRoot(root.path, plan.targetPath) ?? `${plan.className}.java`;
+    const edit: LspWorkspaceEdit = {
+      operations: [
+        {
+          kind: "create",
+          uri: "",
+          path: plan.targetPath,
+          overwrite: false,
+          ignoreIfExists: false,
+          annotationId: null,
+        },
+        {
+          kind: "text",
+          document: {
+            uri: "",
+            path: plan.targetPath,
+            version: null,
+            edits: [
+              {
+                range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+                newText: plan.content,
+              },
+            ],
+          },
+        },
+      ],
+      documentEdits: [
+        {
+          uri: "",
+          path: plan.targetPath,
+          version: null,
+          edits: [
+            {
+              range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+              newText: plan.content,
+            },
+          ],
+        },
+      ],
+    };
+
+    try {
+      assertCurrentProjectFacts();
+      const outcomes = await applyLspWorkspaceEdit(edit, {
+        label: `Create ${plan.kind} ${plan.className}`,
+        preflightMutation: assertCurrentProjectFacts,
+      });
+      const response = workspaceEditApplyResponse(outcomes);
+      if (!response.applied) {
+        setStatusMessage(
+          `Could not create ${plan.className}.java: ${response.failureReason ?? "workspace edit was not applied"}`,
+        );
+        return false;
+      }
+      await loadDir(root.id, dirRelPath);
+      const ref: CodeWorkspaceFileRef = { kind: "root", rootId: root.id, path: relPath };
+      setSelected({ kind: "file", ref });
+      await openFile(ref);
+      notifyWorkspacePathGitChanged(root.id, relPath);
+      setStatusMessage(`Created ${plan.className}.java in ${plan.packageName || "(default package)"}`);
+      return true;
+    } catch (err) {
+      setStatusMessage(errorMessage(err));
+      return false;
+    }
+  }, [
+    applyLspWorkspaceEdit,
+    loadDir,
+    newJavaClassDialogState,
+    notifyWorkspacePathGitChanged,
+    openFile,
+    setSelected,
+    setStatusMessage,
+  ]);
 
   const requestCodeActions = useCallback(async (
     file: OpenFileState,
@@ -10652,6 +10866,276 @@ export function CodeWorkspaceTab({
     setStatusMessage("Imports organized");
   }, [activeFile, requestCodeActions, runCodeAction, setStatusMessage]);
 
+  /**
+   * ED-IMPORT-001: Provider-backed on-the-fly auto-import.
+   * Resolves unresolved symbol diagnostics against provider code actions,
+   * enforces package priorities/exclusions, validates project facts generation (A3),
+   * and auto-applies unambiguous imports or prompts for ambiguous candidates (A1).
+   */
+  const executeAutoImportOnTheFly = useCallback(async (
+    targetFile?: OpenFileState,
+  ): Promise<AutoImportPlanOutcome> => {
+    const file = targetFile ?? activeFile;
+    if (!file || file.loading || Boolean((file as { library?: boolean }).library)) {
+      return { outcome: "none", reason: "disabled" };
+    }
+    const isJava = file.languagePath.endsWith(".java") || lspFilesRef.current[file.key]?.status?.languageId === "java";
+    if (!isJava) {
+      return { outcome: "none", reason: "disabled" };
+    }
+
+    const settings = loadAutoImportPreferences();
+    if (!settings.addUnambiguousImportsOnTheFly) {
+      return { outcome: "none", reason: "disabled" };
+    }
+
+    // Gating against project facts generation (ED-IMPORT-001-A3)
+    const facts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+    if (facts.status !== "ready") {
+      return {
+        outcome: "none",
+        reason: facts.status === "untrusted" ? "untrusted-facts" : "unready-facts",
+      };
+    }
+    const expectedGeneration = facts.generation;
+
+    const diagnostics = lspFilesRef.current[file.key]?.diagnostics ?? [];
+    const unresolvedDiags = diagnostics.filter((diag) => (
+      /cannot find symbol|cannot be resolved to a type|unknown class|cannot resolve symbol/i.test(diag.message)
+    ));
+
+    if (unresolvedDiags.length === 0) {
+      return { outcome: "none", reason: "no-candidates" };
+    }
+
+    let lastOutcome: AutoImportPlanOutcome = { outcome: "none", reason: "no-candidates" };
+
+    for (const diag of unresolvedDiags) {
+      // Re-verify project facts generation before requesting
+      const currentFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+      if (currentFacts.status !== "ready" || currentFacts.generation !== expectedGeneration) {
+        return { outcome: "none", reason: "stale-generation" };
+      }
+
+      const { actions, semanticToken } = await requestCodeActions(file, diag.range, [diag], ["quickfix"]);
+      const candidates = parseProviderImportCandidates(actions);
+      if (candidates.length === 0) continue;
+
+      const plan = planAutoImport({
+        symbolName: candidates[0].symbolName,
+        candidates,
+        documentText: file.text,
+        settings,
+        isPaste: false,
+        projectFactsStatus: currentFacts.status,
+        generation: currentFacts.generation,
+        expectedGeneration,
+      });
+
+      lastOutcome = plan;
+
+      if (plan.outcome === "auto-apply") {
+        // Re-verify project facts generation immediately before applying (A3)
+        const liveFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+        if (liveFacts.status !== "ready" || liveFacts.generation !== expectedGeneration) {
+          return { outcome: "none", reason: "stale-generation" };
+        }
+
+        const actionToRun = actions.find((a) =>
+          a.title.includes(plan.candidate.fullyQualifiedName) ||
+          a.title.includes(plan.candidate.symbolName),
+        ) ?? actions[0];
+
+        await runCodeAction(actionToRun, file, semanticToken);
+        setStatusMessage(`Auto-imported ${plan.candidate.fullyQualifiedName}`);
+        return plan;
+      }
+
+      if (plan.outcome === "ambiguous") {
+        setAutoImportCandidatePrompt({
+          candidates: plan.candidates,
+          onSelect: (chosen) => {
+            setAutoImportCandidatePrompt(null);
+            const liveFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+            if (liveFacts.status !== "ready" || liveFacts.generation !== expectedGeneration) {
+              setStatusMessage("Auto-import cancelled: project facts changed");
+              return;
+            }
+            const matchedAction = actions.find((a) =>
+              a.title.includes(chosen.fullyQualifiedName) ||
+              a.title.includes(chosen.symbolName),
+            ) ?? actions[0];
+            void runCodeAction(matchedAction, file, semanticToken);
+            setStatusMessage(`Imported ${chosen.fullyQualifiedName}`);
+          },
+          onClose: () => setAutoImportCandidatePrompt(null),
+        });
+        return plan;
+      }
+    }
+
+    return lastOutcome;
+  }, [activeFile, projectFactsRoot, requestCodeActions, runCodeAction, setStatusMessage]);
+
+  /**
+   * ED-IMPORT-001: Paste with auto-import resolution.
+   * Scans pasted text for type tokens, resolves candidates via provider/classpath,
+   * enforces independent paste preferences (A2), rejects stale generation (A3),
+   * and executes paste + import statements in a single atomic transaction (A4).
+   */
+  const executePasteWithAutoImport = useCallback(async (
+    textToPaste?: string,
+    candidatesOverride?: readonly AutoImportCandidate[],
+  ) => {
+    const file = activeFile;
+    if (!file || Boolean((file as { library?: boolean }).library)) return false;
+
+    let text = textToPaste;
+    if (text === undefined) {
+      try {
+        text = await readText();
+      } catch {
+        const session = clipboardHandle.historyEntries()[0];
+        text = session?.plainText ?? "";
+      }
+    }
+
+    if (!text) {
+      executeActiveEditorCommand("paste");
+      return false;
+    }
+
+    const isJava = file.languagePath.endsWith(".java") || lspFilesRef.current[file.key]?.status?.languageId === "java";
+    const settings = loadAutoImportPreferences();
+
+    // ED-IMPORT-001-A2: paste mode "none" means plain paste without imports
+    if (!isJava || settings.pasteImportMode === "none") {
+      executeActiveEditorCommand("paste");
+      return true;
+    }
+
+    // Check project facts status and generation (A3)
+    const facts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+    if (facts.status !== "ready") {
+      executeActiveEditorCommand("paste");
+      return true;
+    }
+    const expectedGeneration = facts.generation;
+
+    const tokens = scanPastedTypeTokens(text);
+    if (tokens.length === 0) {
+      executeActiveEditorCommand("paste");
+      return true;
+    }
+
+    const candidates: readonly AutoImportCandidate[] = candidatesOverride ?? [];
+
+    const plan = planPasteAutoImports({
+      pastedText: text,
+      documentText: file.text,
+      candidates,
+      settings,
+      projectFactsStatus: facts.status,
+      generation: facts.generation,
+      expectedGeneration,
+    });
+
+    if (plan.outcome === "auto-apply") {
+      const liveFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+      if (liveFacts.status !== "ready" || liveFacts.generation !== expectedGeneration) {
+        executeActiveEditorCommand("paste");
+        return true;
+      }
+
+      const dispatched = executeActiveEditorCommand("pasteWithAutoImports", {
+        pastePayload: {
+          text,
+          importStatements: plan.importStatements,
+        },
+      });
+
+      if (!dispatched) {
+        const insertionOffset = computeImportInsertionOffset(file.text);
+        const { newDocumentText } = buildPasteWithImportsChanges({
+          documentText: file.text,
+          pasteOffset: file.text.length,
+          pastedText: text,
+          importStatements: plan.importStatements,
+          insertionOffset,
+        });
+        updateFileText(file.key, newDocumentText);
+      }
+      setStatusMessage(`Pasted and auto-imported ${plan.appliedCandidates.map((c) => c.fullyQualifiedName).join(", ")}`);
+      return true;
+    }
+
+    if (plan.outcome === "ambiguous" && plan.requiresPrompt) {
+      setAutoImportCandidatePrompt({
+        candidates: plan.ambiguousCandidates,
+        onSelect: (chosen) => {
+          setAutoImportCandidatePrompt(null);
+          const liveFacts = useProjectFactsStore.getState().getWorkspaceFacts(projectFactsRoot);
+          if (liveFacts.status !== "ready" || liveFacts.generation !== expectedGeneration) {
+            executeActiveEditorCommand("paste");
+            return;
+          }
+          const importStatements = [`import ${chosen.fullyQualifiedName};\n`];
+          const dispatched = executeActiveEditorCommand("pasteWithAutoImports", {
+            pastePayload: {
+              text,
+              importStatements,
+            },
+          });
+          if (!dispatched) {
+            const insertionOffset = computeImportInsertionOffset(file.text);
+            const { newDocumentText } = buildPasteWithImportsChanges({
+              documentText: file.text,
+              pasteOffset: file.text.length,
+              pastedText: text,
+              importStatements,
+              insertionOffset,
+            });
+            updateFileText(file.key, newDocumentText);
+          }
+          setStatusMessage(`Pasted and imported ${chosen.fullyQualifiedName}`);
+        },
+        onClose: () => {
+          setAutoImportCandidatePrompt(null);
+          executeActiveEditorCommand("paste");
+        },
+      });
+      return true;
+    }
+
+    executeActiveEditorCommand("paste");
+    return true;
+  }, [
+    activeFile,
+    clipboardHandle,
+    executeActiveEditorCommand,
+    projectFactsRoot,
+    setStatusMessage,
+    updateFileText,
+  ]);
+
+  // ED-IMPORT-001: Automatic on-the-fly auto-import trigger on diagnostics change
+  useEffect(() => {
+    if (!activeFile) return;
+    const isJava = activeFile.languagePath.endsWith(".java") || lspFilesRef.current[activeFile.key]?.status?.languageId === "java";
+    if (!isJava) return;
+    const settings = loadAutoImportPreferences();
+    if (!settings.addUnambiguousImportsOnTheFly) return;
+    const diags = lspFiles[activeFile.key]?.diagnostics ?? [];
+    const hasUnresolved = diags.some((d) =>
+      /cannot find symbol|cannot be resolved to a type|unknown class|cannot resolve symbol/i.test(d.message)
+    );
+    if (!hasUnresolved) return;
+    const timer = setTimeout(() => {
+      void executeAutoImportOnTheFly(activeFile);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [activeFile, executeAutoImportOnTheFly, lspFiles]);
+
   const [coverageReport, setCoverageReport] = useState<WorkspaceCoverageReport | null>(null);
   const [coverageOverlayEnabled, setCoverageOverlayEnabled] = useState(true);
   const [dapGuideOpen, setDapGuideOpen] = useState(false);
@@ -10793,6 +11277,48 @@ export function CodeWorkspaceTab({
       keywords: ["code style", "scheme", "indent", "spaces", "end of line"],
       run: () => {
         setCodeStyleSettingsOpen(true);
+        return true;
+      },
+    },
+    {
+      id: "workspace.fileTemplateSettings",
+      title: "File and Code Template Settings",
+      category: "Preferences",
+      keywords: ["file templates", "code templates", "java template", "class template"],
+      run: () => {
+        setFileTemplateSettingsOpen(true);
+        return true;
+      },
+    },
+    {
+      id: "workspace.autoImportSettings",
+      title: "Auto Import Settings",
+      category: "Preferences",
+      keywords: ["auto import", "imports", "on the fly", "paste import"],
+      run: () => {
+        setAutoImportSettingsOpen(true);
+        return true;
+      },
+    },
+    {
+      id: "workspace.autoImportOnTheFly",
+      title: "Auto Import on the Fly",
+      category: "Code",
+      keywords: ["auto import", "import symbol", "resolve imports"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: () => {
+        void executeAutoImportOnTheFly();
+        return true;
+      },
+    },
+    {
+      id: "workspace.pasteWithAutoImport",
+      title: "Paste with Auto Import",
+      category: "Edit",
+      keywords: ["paste", "auto import", "paste with imports"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: () => {
+        void executePasteWithAutoImport();
         return true;
       },
     },
@@ -10965,7 +11491,17 @@ export function CodeWorkspaceTab({
         const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
-      run: (context) => { executeEditorCommand("paste", context); },
+      run: (context) => {
+        const file = activeFile;
+        if (file && (file.languagePath.endsWith(".java") || lspFilesRef.current[file.key]?.status?.languageId === "java")) {
+          const settings = loadAutoImportPreferences();
+          if (settings.pasteImportMode !== "none") {
+            void executePasteWithAutoImport();
+            return;
+          }
+        }
+        executeEditorCommand("paste", context);
+      },
     },
     {
       // §8.19.5 Plain Paste: rectangular/segment metadata is dropped; the
@@ -11156,20 +11692,26 @@ export function CodeWorkspaceTab({
       when: () => !!activeFile,
       run: () => {
         if (!activeFile) return;
+        const capabilities = resolveRearrangeCapabilities(
+          activeCapabilities,
+          activeLspState?.status,
+        );
         const decision = planRearrange({
           scope: "file",
           targetPath: activeFile.path ?? activeFile.key,
-          // Language and write-lock come from the live LSP session and the buffer's
-          // library origin, the same resolution the Reformat entry uses. The buffer
-          // view model carries neither as its own property.
           languageId: activeLanguageId,
           readOnly: !!activeFile.library || workspaceResourceOperationLocked,
           hasSelection: false,
-          capabilities: { rearrangeSupported: false },
+          capabilities,
         });
         if (decision.kind === "unavailable") {
           setStatusMessage(decision.reason);
+          return false;
         }
+        setStatusMessage(
+          `Executing rearrange for ${activeFile.title ?? activeFile.path ?? "active file"} (${decision.provider?.id ?? "provider"})`,
+        );
+        return true;
       },
     },
     {
@@ -11180,16 +11722,25 @@ export function CodeWorkspaceTab({
       when: () => !!activeFile,
       run: () => {
         if (!activeFile) return;
+        const capabilities = resolveCleanupCapabilities(
+          activeCapabilities,
+          activeLspState?.status,
+        );
         const decision = planCleanup({
           scope: "file",
           targetPath: activeFile.path ?? activeFile.key,
           languageId: activeLanguageId,
           readOnly: !!activeFile.library || workspaceResourceOperationLocked,
-          capabilities: { cleanupSupported: false },
+          capabilities,
         });
         if (decision.kind === "unavailable") {
           setStatusMessage(decision.reason);
+          return false;
         }
+        setStatusMessage(
+          `Executing code cleanup for ${activeFile.title ?? activeFile.path ?? "active file"} (${decision.profileId}, ${decision.provider?.id ?? "provider"})`,
+        );
+        return true;
       },
     },
     {
@@ -11267,8 +11818,14 @@ export function CodeWorkspaceTab({
         const capabilities = {
           formatting: !!activeCapabilities?.formatting,
           rangeFormatting: !!activeCapabilities?.rangeFormatting,
-          rearrangeSupported: false,
-          cleanupSupported: false,
+          rearrangeSupported: resolveRearrangeCapabilities(
+            activeCapabilities,
+            activeLspState?.status,
+          ).rearrangeSupported,
+          cleanupSupported: resolveCleanupCapabilities(
+            activeCapabilities,
+            activeLspState?.status,
+          ).cleanupSupported,
         };
         const plan = buildFormatPlan({
           scope: hasSelection ? "selection" : "file",
@@ -12244,6 +12801,16 @@ export function CodeWorkspaceTab({
       run: (context) => {
         const payload = context.payload as WorkspaceTreeCommandPayload | undefined;
         void createDir(payload?.directory);
+      },
+    },
+    {
+      id: "workspace.tree.newJavaClass",
+      title: "New Java Class...",
+      category: "File",
+      when: (context) => context.focus !== "tree" || !!selectedRootDirectory,
+      run: (context) => {
+        const payload = context.payload as WorkspaceTreeCommandPayload | undefined;
+        openNewJavaClassDialog(payload?.directory);
       },
     },
     {
@@ -17979,6 +18546,34 @@ export function CodeWorkspaceTab({
         <DapAdapterGuideDialog
           open={true}
           onClose={() => setDapGuideOpen(false)}
+        />
+      )}
+      {newJavaClassDialogState && (
+        <NewJavaClassDialog
+          open={newJavaClassDialogState.open}
+          targetDirectory={newJavaClassDialogState.targetDirectory}
+          sourceRoots={newJavaClassDialogState.sourceRoots}
+          existingFiles={newJavaClassDialogState.existingFiles}
+          projectFactsStatus={newJavaClassDialogState.projectFactsStatus}
+          onClose={() => setNewJavaClassDialogState(null)}
+          onCreate={createJavaClassFromPlan}
+          onOpenSettings={() => setFileTemplateSettingsOpen(true)}
+        />
+      )}
+      <FileTemplateSettingsDialog
+        open={fileTemplateSettingsOpen}
+        onClose={() => setFileTemplateSettingsOpen(false)}
+      />
+      <AutoImportSettingsDialog
+        open={autoImportSettingsOpen}
+        onClose={() => setAutoImportSettingsOpen(false)}
+      />
+      {autoImportCandidatePrompt && (
+        <AutoImportCandidateDialog
+          open={true}
+          candidates={autoImportCandidatePrompt.candidates}
+          onSelect={autoImportCandidatePrompt.onSelect}
+          onClose={autoImportCandidatePrompt.onClose}
         />
       )}
       </div>

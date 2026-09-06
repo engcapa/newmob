@@ -19,6 +19,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from native_build import QA_APP_ID, verify_identity
+
 
 ROOT = Path.cwd()
 
@@ -28,7 +30,22 @@ def native_binary(cfg: dict) -> Path:
     if explicit:
         return Path(explicit).expanduser()
     name = "taomni.exe" if platform.system() == "Windows" else "taomni"
-    return ROOT / "src-tauri" / "target" / "debug" / name
+    return ROOT / "src-tauri" / "target" / "qa-ui-auto" / "debug" / name
+
+
+def native_isolation_env(report_root: Path) -> dict[str, str]:
+    """Resolve only run-owned roots; never fall back to a user's profile."""
+    root = report_root.resolve()
+    paths = {key: root / f"native-app{key}" for key in ("data", "config", "cache")}
+    checked = [path for root_path in paths.values() for path in (root_path, root_path / QA_APP_ID)]
+    if any(path.resolve() != path for path in checked):
+        raise WebDriverError("Native isolation directories must not be symlinks")
+    system = platform.system()
+    if system == "Linux":
+        return {f"XDG_{key.upper()}_HOME": str(path) for key, path in paths.items()}
+    if system == "Windows":
+        return {"APPDATA": str(paths["data"]), "LOCALAPPDATA": str(paths["cache"])}
+    raise WebDriverError("Tauri WebDriver is unsupported on this OS; use an isolated QA app with OS automation/manual testing")
 
 
 def _tcp_ok(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -102,29 +119,27 @@ class TauriDriverProcess:
         self.port = int(webdriver.get("port", 4444))
         self.url = f"http://{self.host}:{self.port}"
         self.proc: subprocess.Popen[str] | None = None
-        self.external = False
         self.report_root = report_root
         self.command = str(webdriver.get("tauri_driver", "tauri-driver"))
         self.native_driver = webdriver.get("native_driver")
+        self.native_port = int(webdriver.get("native_port", 4445))
         self.startup_timeout = float(webdriver.get("startup_timeout", 20))
 
     def start(self) -> None:
+        if self.host not in ("127.0.0.1", "localhost"):
+            raise WebDriverError("Native isolation requires a local driver started by this run")
         if _tcp_ok(self.host, self.port):
-            self.external = True
-            return
-        cmd = [self.command]
+            raise WebDriverError(f"Driver port {self.port} is occupied; choose a free port so the driver inherits QA isolation")
+        if self.native_port == self.port or _tcp_ok(self.host, self.native_port):
+            raise WebDriverError(f"Native driver port {self.native_port} must be free and distinct from the driver port")
+        cmd = [self.command, "--port", str(self.port), "--native-port", str(self.native_port)]
         if self.native_driver:
             cmd += ["--native-driver", str(self.native_driver)]
         out = self.report_root / "tauri-driver.out.log"
         err = self.report_root / "tauri-driver.err.log"
         out.parent.mkdir(parents=True, exist_ok=True)
-        self.proc = subprocess.Popen(
-            cmd,
-            cwd=ROOT,
-            stdout=out.open("w", encoding="utf-8"),
-            stderr=err.open("w", encoding="utf-8"),
-            text=True,
-        )
+        with out.open("w", encoding="utf-8") as stdout, err.open("w", encoding="utf-8") as stderr:
+            self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=stdout, stderr=stderr, text=True)
         deadline = time.time() + self.startup_timeout
         while time.time() < deadline:
             if self.proc.poll() is not None:
@@ -138,13 +153,14 @@ class TauriDriverProcess:
         raise WebDriverError(f"tauri-driver did not listen on {self.url}")
 
     def stop(self) -> None:
-        if self.external or not self.proc:
+        if not self.proc:
             return
         self.proc.terminate()
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+            self.proc.wait(timeout=5)
 
 
 class NativeSession:
@@ -623,13 +639,41 @@ class NativeHarness:
         self.report_root = report_root
         self.application = native_binary(cfg)
         self.driver = TauriDriverProcess(cfg, report_root)
+        self._previous_env: dict[str, str | None] = {}
 
     def __enter__(self) -> "NativeHarness":
-        self.driver.start()
+        try:
+            identity = verify_identity(self.application)
+        except ValueError as exc:
+            raise WebDriverError(str(exc)) from exc
+        overrides = native_isolation_env(self.report_root)
+        self._previous_env = {key: os.environ.get(key) for key in overrides}
+        try:
+            for value in overrides.values():
+                Path(value).mkdir(parents=True, exist_ok=True)
+            os.environ.update(overrides)
+            self.report_root.mkdir(parents=True, exist_ok=True)
+            (self.report_root / "native-isolation.json").write_text(
+                json.dumps({"identifier": QA_APP_ID, "binary": str(self.application.resolve()),
+                            "binary_sha256": identity["binary_sha256"], "environment": overrides}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self.driver.start()
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.driver.stop()
+        try:
+            self.driver.stop()
+        finally:
+            for key, previous in self._previous_env.items():
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
+            self._previous_env.clear()
 
     def create_session(self) -> NativeSession:
         session = NativeSession(self.driver.url, self.application)
@@ -643,7 +687,7 @@ def native_tool_issues(cfg: dict) -> list[str]:
         issues += [
             "✗ tauri-driver not found on PATH.",
             "  Install: cargo install tauri-driver --locked",
-            "  The agent may run this after explicit user approval.",
+            "  Install when needed within the authorized local test setup.",
         ]
     if platform.system() == "Windows" and not (
         (cfg.get("webdriver") or {}).get("native_driver") or shutil.which("msedgedriver")
