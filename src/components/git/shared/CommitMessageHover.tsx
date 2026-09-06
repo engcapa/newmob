@@ -92,7 +92,7 @@ export function CommitMessageHover({
         setOpen(false);
       }
     };
-    const onPointerDown = (event: MouseEvent) => {
+    const onPointerDown = (event: MouseEvent | PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (triggerRef.current?.contains(target) || popupRef.current?.contains(target)) return;
@@ -100,9 +100,11 @@ export function CommitMessageHover({
       setOpen(false);
     };
     document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("mousedown", onPointerDown, true);
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("mousedown", onPointerDown, true);
     };
   }, [open, clearTimers]);

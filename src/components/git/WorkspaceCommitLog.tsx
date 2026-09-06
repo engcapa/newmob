@@ -211,7 +211,7 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
   return (
     <div className="h-full min-h-0 flex flex-col">
       <PanelGroup orientation="horizontal" id="workspace-git-log-layout">
-        <Panel id="workspace-log-list" defaultSize={42} minSize={28} className="min-w-0 min-h-0 flex flex-col border-r border-[var(--taomni-divider)]">
+        <Panel id="workspace-log-list" defaultSize="42%" minSize="28%" className="min-w-0 min-h-0 flex flex-col border-r border-[var(--taomni-divider)]">
           <div className="h-9 shrink-0 flex items-center gap-2 px-2 border-b border-[var(--taomni-divider)]">
             <div className="relative flex-1 min-w-0">
               <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-[var(--taomni-text-muted)]" />
@@ -314,10 +314,14 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
             )}
           </div>
         </Panel>
-        <PanelResizeHandle className="w-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] cursor-col-resize" />
-        <Panel id="workspace-log-details" defaultSize={58} minSize={35} className="min-w-0 min-h-0">
+        <PanelResizeHandle
+          id="git-log-list-resize-handle"
+          data-testid="git-log-list-resize-handle"
+          className="w-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] cursor-col-resize"
+        />
+        <Panel id="workspace-log-details" defaultSize="58%" minSize="35%" className="min-w-0 min-h-0">
           <PanelGroup orientation="vertical" id="workspace-git-log-detail-layout">
-            <Panel id="workspace-log-files" defaultSize={30} minSize={15} className="min-h-0 flex flex-col border-b border-[var(--taomni-divider)]">
+            <Panel id="workspace-log-files" defaultSize="30%" minSize="15%" className="min-h-0 flex flex-col border-b border-[var(--taomni-divider)]">
               <div className="h-8 shrink-0 flex items-center gap-2 px-3 border-b border-[var(--taomni-divider)] text-[12px] font-semibold">
                 {selected ? (
                   <>
@@ -353,8 +357,12 @@ export function WorkspaceCommitLog({ roots, snapshots, busy }: WorkspaceCommitLo
                 ))}
               </div>
             </Panel>
-            <PanelResizeHandle className="h-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] cursor-row-resize" />
-            <Panel id="workspace-log-diff" defaultSize={70} minSize={20} className="min-h-0 flex flex-col">
+            <PanelResizeHandle
+              id="git-log-files-resize-handle"
+              data-testid="git-log-files-resize-handle"
+              className="h-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] cursor-row-resize"
+            />
+            <Panel id="workspace-log-diff" defaultSize="70%" minSize="20%" className="min-h-0 flex flex-col">
               <DiffViewer pair={pair} loading={pairLoading} emptyLabel={diffEmptyLabel} />
             </Panel>
           </PanelGroup>

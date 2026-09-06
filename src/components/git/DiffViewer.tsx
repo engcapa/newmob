@@ -302,6 +302,7 @@ if (typeof document !== "undefined" && !document.getElementById(STYLE_ID)) {
   width: 100%;
   height: 100%;
   display: block;
+  pointer-events: none;
 }
 
 .taomni-diff-host .taomni-diff-connector-path {
@@ -678,6 +679,7 @@ function setupSplitDiffInteractions(mv: MergeView, options: SplitInteractionOpti
     window.removeEventListener("pointermove", onWindowPointerMove);
     window.removeEventListener("pointerup", onWindowPointerUp);
     window.removeEventListener("pointercancel", onWindowPointerCancel);
+    window.removeEventListener("blur", onWindowBlur);
   };
 
   const endDrag = (commit: boolean) => {
@@ -747,6 +749,10 @@ function setupSplitDiffInteractions(mv: MergeView, options: SplitInteractionOpti
 
   function onWindowPointerMove(event: PointerEvent) {
     if (!drag || event.pointerId !== drag.pointerId) return;
+    if (event.pointerType === "mouse" && (event.buttons & 1) === 0) {
+      endDrag(false);
+      return;
+    }
     event.preventDefault();
     queueDragAt(event.clientX);
   }
@@ -810,6 +816,10 @@ function setupSplitDiffInteractions(mv: MergeView, options: SplitInteractionOpti
 
   const onPointerMove = (event: PointerEvent) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
+    if (event.pointerType === "mouse" && (event.buttons & 1) === 0) {
+      endDrag(false);
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     queueDragAt(event.clientX);
