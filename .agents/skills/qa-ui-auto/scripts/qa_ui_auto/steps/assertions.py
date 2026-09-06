@@ -31,7 +31,7 @@ def _wait_for_match(ctx: StepContext, predicate, timeout: float, fail: str) -> N
         "() => true", timeout=100,
     ) if False else None  # noqa: F841 (keep import surface aligned)
     # Use polling expect via a manual loop; keeps logic explicit.
-    import time
+    from ..deadline import budget_time as time
     deadline = time.time() + timeout
     last_err: Exception | None = None
     while time.time() < deadline:
@@ -118,8 +118,15 @@ def step_assert_pattern(ctx: StepContext, args: Any) -> None:
         try:
             text = loc.text_content() or ""
         except Exception:
+            text = ""
+        if pattern.search(text):
+            return True
+        # xterm.js renders to canvas; the app mirrors its buffer here for QA reads.
+        try:
+            attr = loc.get_attribute("data-terminal-text") or ""
+            return bool(pattern.search(attr))
+        except Exception:
             return False
-        return bool(pattern.search(text))
 
     _wait_for_match(ctx, _check, timeout, fail=f"{selector} text does not match {args['regex']!r}")
 

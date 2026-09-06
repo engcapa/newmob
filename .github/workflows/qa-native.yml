@@ -1,0 +1,82 @@
+name: Native QA Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 18 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      PYTHONPATH: .agents/skills/qa-ui-auto/scripts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target/qa-ui-auto
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev webkit2gtk-driver libappindicator3-dev librsvg2-dev patchelf libkrb5-dev libasound2-dev libv4l-dev libpipewire-0.3-dev libclang-dev libdbus-1-dev libudev-dev nasm xvfb
+      - name: Windows Perl and WebView2 driver
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path 'C:\Strawberry\perl\bin') { 'C:\Strawberry\perl\bin' >> $env:GITHUB_PATH }
+          $runtimeRoot = "${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application"
+          $runtime = Get-ChildItem -LiteralPath $runtimeRoot -Directory | Where-Object Name -Match '^\d+\.\d+\.\d+\.\d+$' | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $runtime) { throw 'WebView2 runtime is unavailable' }
+          $driverZip = Join-Path $env:RUNNER_TEMP 'qa-edgedriver.zip'
+          $driverDir = Join-Path $env:RUNNER_TEMP 'qa-edgedriver'
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$($runtime.Name)/edgedriver_win64.zip" -OutFile $driverZip
+          Expand-Archive -LiteralPath $driverZip -DestinationPath $driverDir -Force
+          $driverDir >> $env:GITHUB_PATH
+      - run: pnpm install --frozen-lockfile
+      - run: pip install pyyaml jsonschema
+      - run: cargo install tauri-driver --locked
+      - name: Build isolated QA app
+        run: python .agents/skills/qa-ui-auto/scripts/native_build.py
+      - name: Run Linux native smoke
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m qa_ui_auto run --mode native --filter TC-NATIVE-CORE-001 --require-pass --config .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml
+      - name: Run Windows native smoke
+        if: runner.os == 'Windows'
+        run: python -m qa_ui_auto run --mode native --filter TC-NATIVE-CORE-001 --require-pass --config .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml
+      - name: Report execution coverage
+        if: always()
+        run: python -m qa_ui_auto status --json --output qa-ui-auto-report/status.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-qa-${{ runner.os }}
+          path: qa-ui-auto-report/
+          retention-days: 30

@@ -17,7 +17,7 @@ qa-ui-auto-tests/
 │                              #     -->
 │                              # Parsed by qa_ui_auto.feature_catalog.
 └── cases/
-    ├── TC-XXX-<slug>.testcase.yaml  # 131 typed YAML testcases (hand-authored + migrated)
+    ├── TC-XXX-<slug>.testcase.yaml  # Typed YAML testcases (hand-authored + migrated)
     └── auto/                        # gen-coverage's drafts land here
         └── TC-auto-F4.X-...yaml     # tags: [auto-generated, smoke, needs-review]
 ```
@@ -31,13 +31,13 @@ Browser mode (default):
 DEV_PROXY_ALLOW_PRIVATE=1 ALLOW_PRIVATE_TARGETS=1 pnpm dev
 export QA_SSH_PASSWORD=...
 
-# audit + dry-run
+# Optional static audit; not a prerequisite to every selected execution
 PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.audit --gate
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.runner --dry-run
 
 # real run
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.runner --tag smoke --workers 4
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.runner --workers 4
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto run --mode browser --tag smoke --workers 4
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto plan --diff HEAD
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto status --json
 ```
 
 Reports land in `qa-ui-auto-report/run-<timestamp>/`.
@@ -49,6 +49,8 @@ The `qa-ui-auto` skill in Claude Code wraps these tools with playbooks:
 | Command | Writes to | Purpose |
 |---|---|---|
 | `audit` | (read-only) | Lint cases, report coverage gaps and diff impact, and enforce the baseline gate |
+| `plan` | (read-only) | Select affected cases, explicit modes and native platform gaps |
+| `status` | optional `--output` | Written/reviewed/current execution coverage by feature and platform |
 | `fix` | feature catalog, cases, or generated catalog | Produce a focused playbook for one coverage, control, diff, or catalog gap |
 | `run` | `qa-ui-auto-report/` | Execute existing browser or native testcases |
 | `explore` | `qa-ui-auto-report/` | Drive a bounded exploratory browser session and write a report |
@@ -62,6 +64,10 @@ The Python step library lives at `.agents/skills/qa-ui-auto/scripts/qa_ui_auto/s
 
 ## Coverage status
 
-100% of features in `feature-list.md` have at least one testcase referencing them via `covers`.
-Cases tagged `needs-review` were auto-migrated or drafted and still require hardened assertions.
-Track them and current control gaps with `python -m qa_ui_auto.audit`.
+Use `python -m qa_ui_auto status` for written, reviewed and observed execution
+coverage. Cases tagged `needs-review` or `legacy-imported` still require assertion
+review. `audit --gate` checks static coverage; `status --gate --tag p0 --platform
+Windows,Linux` checks current passing execution in that explicit scope.
+`audit --release-evidence` additionally validates the existing release manifest.
+See [.agents/skills/qa-ui-auto/references/verification.md](../.agents/skills/qa-ui-auto/references/verification.md)
+for freshness, retained artifacts, performance and macOS manual evidence limits.

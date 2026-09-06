@@ -35,7 +35,7 @@ import signal
 import stat
 import subprocess
 import sys
-import time
+from .deadline import budget_time as time, remaining_timeout
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable
@@ -551,7 +551,7 @@ def _native_set_writable(ctx: NativeStepContext, args: Any) -> str:
 
 
 def _command_output(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=remaining_timeout(30))
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
         raise StepError(f"native_ime_keys: {' '.join(command)} failed: {detail}")
@@ -1209,6 +1209,21 @@ def _do_assert_text(ctx: NativeStepContext, args: Any) -> str:
     return _assert_text(ctx, args)
 
 
+@_verb("assert_pattern")
+def _do_assert_pattern(ctx: NativeStepContext, args: Any) -> str:
+    if not isinstance(args, dict) or "selector" not in args or "regex" not in args:
+        raise StepError("assert_pattern: expected {selector, regex, timeout_sec?}")
+    pattern = re.compile(args["regex"])
+    timeout = min(float(args.get("timeout_sec", 10)), remaining_timeout(float(args.get("timeout_sec", 10))))
+    expires = time.monotonic() + timeout
+    while time.monotonic() < expires:
+        text = ctx.session.text(args["selector"])
+        if pattern.search(text):
+            return f"pattern matched: {args['selector']}"
+        time.sleep(0.25)
+    raise StepError(f"assert_pattern failed: {args['selector']} did not match {args['regex']!r}")
+
+
 @_verb("eval_readonly")
 def _do_eval_readonly(ctx: NativeStepContext, args: Any) -> str:
     return _eval_readonly(ctx, args)
@@ -1277,15 +1292,16 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
             raise StepError(
                 f"native_keys: target must already have DOM focus before native injection: {selector}"
             )
-    ctx.session.execute(
-        "window.__QA_NATIVE_KEY_EVENTS__=[];"
-        "window.__QA_NATIVE_KEY_LISTENER__=(event)=>window.__QA_NATIVE_KEY_EVENTS__.push({"
-        "type:event.type,key:event.key,code:event.code,ctrlKey:event.ctrlKey,"
-        "altKey:event.altKey,shiftKey:event.shiftKey,metaKey:event.metaKey,"
-        "defaultPrevented:event.defaultPrevented});"
-        "window.addEventListener('keydown',window.__QA_NATIVE_KEY_LISTENER__,true);"
-        "window.addEventListener('keyup',window.__QA_NATIVE_KEY_LISTENER__,true);"
-    )
+    if not focus_prechecked:
+        ctx.session.execute(
+            "window.__QA_NATIVE_KEY_EVENTS__=[];"
+            "window.__QA_NATIVE_KEY_LISTENER__=(event)=>window.__QA_NATIVE_KEY_EVENTS__.push({"
+            "type:event.type,key:event.key,code:event.code,ctrlKey:event.ctrlKey,"
+            "altKey:event.altKey,shiftKey:event.shiftKey,metaKey:event.metaKey,"
+            "defaultPrevented:event.defaultPrevented});"
+            "window.addEventListener('keydown',window.__QA_NATIVE_KEY_LISTENER__,true);"
+            "window.addEventListener('keyup',window.__QA_NATIVE_KEY_LISTENER__,true);"
+        )
     time.sleep(0.25)
     window_id = None
     window_identity = None
@@ -1299,7 +1315,7 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
     else:
         raise StepError(f"native_keys: unsupported transport {transport!r}")
     time.sleep(0.5)
-    observed_events = ctx.session.execute(
+    observed_events = None if focus_prechecked else ctx.session.execute(
         "const events=window.__QA_NATIVE_KEY_EVENTS__ ?? [];"
         "window.removeEventListener('keydown',window.__QA_NATIVE_KEY_LISTENER__,true);"
         "window.removeEventListener('keyup',window.__QA_NATIVE_KEY_LISTENER__,true);"
@@ -1315,7 +1331,7 @@ def _do_native_keys(ctx: NativeStepContext, args: Any) -> str:
         "keys": keys,
         "observed_events": observed_events,
         "transport": (
-            "W3C WebDriver key actions -> GTK/WebKitGTK"
+            "W3C WebDriver key actions -> platform WebView"
             if transport == "webdriver"
             else "X11 XTest -> GTK/WebKitGTK"
         ),

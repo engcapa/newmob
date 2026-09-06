@@ -73,6 +73,13 @@
    },
    "uniqueItems": true
   },
+  "native_platforms": {
+   "type": "array",
+   "items": {"enum": ["Linux", "Windows", "macOS"]},
+   "uniqueItems": true,
+   "minItems": 1,
+   "description": "Optional native platform restriction. Does not certify that a platform was tested."
+  },
   "timeout_sec": {
    "type": "integer",
    "minimum": 5,

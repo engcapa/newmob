@@ -10,16 +10,17 @@ information is missing. Apply requested changes directly and summarize the diff.
   Set `covers: [F.x]` and `fixtures` explicitly. Use `reset_db` for persistent
   mutations, plus required network/workspace/provider fixtures.
 - Assert the user's result after acting, including relevant failure/recovery
-  paths. Control touches alone do not prove workflows work. Prefer real native
-  boundaries over repeating store/unit assertions through JavaScript.
-- Set `modes` explicitly. Prefer `[native]` for supported real-app workflows;
+  paths. Control touches alone do not prove workflows work. Use browser for
+  renderer behavior and selected native cases for real OS/IPC boundaries.
+- Set `modes` explicitly. Use `[native]` for real-app boundary workflows;
   use `[browser, native]` when both implementations/fixtures support the assertions.
   Browser-specific stubs/verbs stay `[browser]`. Missing modes still default to
   browser for compatibility. Never mass-add native without checking verbs/fixtures.
 - Native is a mode, not an OS guarantee. Some verbs are Linux/X11-only; check
   [verb-catalog.md](verb-catalog.md) and `scripts/qa_ui_auto/native_steps.py`.
   Use platform runbooks for OS differences and disclose unsupported paths.
-  Do not invent YAML platform fields or substitute mocks for OS evidence.
+  `native_platforms: [Linux, Windows]` optionally restricts native execution;
+  it does not certify those platforms. Do not substitute mocks for OS evidence.
 - Each step is a single-key map using a schema-supported verb. `eval_readonly`
   is the only raw-JS escape hatch; never mutate state or bypass the real action.
 - Prefer exact `[data-testid="..."]` selectors from feature controls or

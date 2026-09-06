@@ -17,6 +17,7 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'src-tauri/**'
       - 'tests/**'
       - 'qa-ui-auto-tests/**'
       - '.agents/skills/qa-ui-auto/**'
@@ -89,7 +90,11 @@ jobs:
       - name: Run smoke
         run: |
           PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
-            python -m qa_ui_auto.runner --tag smoke --workers 4
+            python -m qa_ui_auto.runner --mode browser --tag smoke --workers 4
+      - name: Execution coverage
+        if: always()
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto status --tag smoke --json --output qa-ui-auto-report/status.json
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,11 +157,15 @@ jobs:
           TAG="${{ github.event.inputs.tag }}"
           if [ -n "$TAG" ]; then
             PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
-              python -m qa_ui_auto.runner --tag "$TAG" --workers 4
+              python -m qa_ui_auto.runner --mode browser --tag "$TAG" --workers 4
           else
             PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
-              python -m qa_ui_auto.runner --workers 4
+              python -m qa_ui_auto.runner --mode browser --workers 4
           fi
+      - name: Execution coverage
+        if: always()
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto status --json --output qa-ui-auto-report/status.json
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
@@ -208,7 +217,11 @@ jobs:
           TAG="${{ github.event.inputs.tag }}"
           if [ -z "$TAG" ]; then TAG="smoke"; fi
           PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
-            python -m qa_ui_auto.runner --tag "$TAG" --workers 2
+            python -m qa_ui_auto.runner --mode browser --tag "$TAG" --workers 2
+      - name: Execution coverage
+        if: always()
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto status --tag smoke --json --output qa-ui-auto-report/status.json
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4

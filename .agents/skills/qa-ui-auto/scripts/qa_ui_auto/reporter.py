@@ -62,6 +62,10 @@ def write_markdown(report_root: Path, data: dict[str, Any]) -> Path:
     lines: list[str] = []
     lines.append(f"# qa-ui-auto run — {data.get('started_at', '?')}")
     lines.append("")
+    lines.append(f"Mode: {data.get('mode', '?')}; platform: {data.get('platform', '?')}; "
+                 f"execution: {'dry-run only' if data.get('dry_run') else 'actual run'}; "
+                 f"source stable: {data.get('identity_stable', 'unverified')}")
+    lines.append("")
     lines.append(
         f"**{totals.get('passed', 0)} passed, "
         f"{totals.get('failed', 0)} failed, "
@@ -82,6 +86,15 @@ def write_markdown(report_root: Path, data: dict[str, Any]) -> Path:
             f"| {c.get('duration_sec', 0):.1f}s | {notes} |"
         )
     failures = [c for c in cases if c["status"] == "failed"]
+    slow_steps = sorted(
+        [(c['id'], step) for c in cases for step in c.get('step_timings', [])],
+        key=lambda item: item[1]['duration_sec'], reverse=True,
+    )[:10]
+    if slow_steps:
+        lines.extend(["", "## Slowest Steps", "", "| Case | Step | Verb | Seconds |", "|---|---:|---|---:|"])
+        for case_id, step in slow_steps:
+            lines.append(f"| {case_id} | {step['index']} | {step['verb']} | {step['duration_sec']:.3f} |")
+        lines.extend(["", "These are automation timings, not application latency measurements."])
     if failures:
         lines.append("")
         lines.append("## Failures")

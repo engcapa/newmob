@@ -5,7 +5,7 @@
 
 app:
   base_url: http://localhost:5000   # Vite dev server in browser mode
-  mode: native                      # native preferred; browser for explicit fallback
+  mode: browser                     # daily renderer checks; select native for real OS/IPC boundaries
   # Build first: python .agents/skills/qa-ui-auto/scripts/native_build.py
   # native_binary: ./src-tauri/target/qa-ui-auto/debug/taomni.exe  # Windows; omit .exe on Linux
 

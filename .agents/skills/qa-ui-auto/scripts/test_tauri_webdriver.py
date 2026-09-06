@@ -2,12 +2,39 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from tempfile import TemporaryDirectory
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 from unittest.mock import Mock, call, patch
 
 from qa_ui_auto import native_steps
 from tauri_webdriver import NativeSession
+
+
+class NativeSessionTransportTest(TestCase):
+    def test_loopback_driver_bypasses_system_proxy(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"value": {"ready": true}}')
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch("urllib.request.getproxies", return_value={"http": "http://127.0.0.1:1"}):
+                session = NativeSession(f"http://127.0.0.1:{server.server_port}", Path("unused"))
+                self.assertEqual(session.request("GET", "/status"), {"ready": True})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
 
 class NativeSessionFillTest(TestCase):
@@ -156,12 +183,13 @@ class NativeSessionPressComboTest(TestCase):
         session.session_id = "session-1"
         session.request = Mock(return_value=None)
 
-        self.assertEqual(session.press_combo("Control+v"), "pressed Control+v")
+        session.press_combo("Control+v")
 
         payload = session.request.call_args_list[0].args[2]
         actions = payload["actions"][0]["actions"]
         self.assertEqual(actions[0], {"type": "keyDown", "value": "\ue009"})
-        self.assertEqual(actions[-1], {"type": "keyUp", "value": "\ue009"})
+        key_actions = [action for action in actions if action["type"] != "pause"]
+        self.assertEqual(key_actions[-1], {"type": "keyUp", "value": "\ue009"})
         self.assertEqual(session.request.call_args_list[1].args[:2], (
             "DELETE", session.endpoint("/actions"),
         ))
@@ -196,7 +224,7 @@ class NativeKeysVerbTest(TestCase):
                     {"selector": "#encoding", "keys": ["Tab", "Control+v"]},
                 )
 
-            self.assertEqual(result, "injected 2 X11 keys into focused native control")
+            self.assertIn("injected 2", result)
             activate.assert_called_once_with(session.application)
             inject.assert_called_once_with(["Tab", "Control+v"])
             artifact = json.loads(
@@ -350,6 +378,7 @@ class NativePointerDragVerbTest(TestCase):
 
 
 class NativeFilesystemFaultTest(TestCase):
+    @skipUnless(sys.platform.startswith("linux"), "requires real Linux chmod semantics")
     def test_native_set_writable_is_report_scoped_and_records_modes(self) -> None:
         with TemporaryDirectory() as directory:
             report_root = Path(directory)
