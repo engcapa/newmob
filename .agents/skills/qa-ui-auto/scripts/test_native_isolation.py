@@ -49,6 +49,7 @@ class NativeBuildTest(unittest.TestCase):
 
                 with (
                     patch.object(native_build, "ROOT", root),
+                    patch.object(native_build, "build_inputs", return_value={"source_sha256": "test-source"}),
                     patch.object(native_build.platform, "system", return_value=system),
                     patch.object(native_build.shutil, "which", return_value="pnpm"),
                     patch.object(native_build.subprocess, "run", side_effect=compile_binary),
@@ -68,6 +69,7 @@ class NativeBuildTest(unittest.TestCase):
             binary = recorded_binary(output)
             with (
                 patch.object(native_build, "ROOT", root),
+                patch.object(native_build, "build_inputs", return_value={"source_sha256": "test-source"}),
                 patch.object(native_build.platform, "system", return_value="Linux"),
                 patch.object(native_build.shutil, "which", return_value="pnpm"),
                 patch.object(native_build.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "pnpm")),
@@ -194,10 +196,10 @@ class NativeIsolationTest(unittest.TestCase):
         real_resolve = Path.resolve
 
         def resolve(path, *args, **kwargs):
-            if str(path) == "/proc/101/exe":
-                return qa_binary
-            if str(path) == "/proc/102/exe":
-                return Path("/test/production/taomni")
+            if path.as_posix() == "/proc/101/exe":
+                return real_resolve(qa_binary)
+            if path.as_posix() == "/proc/102/exe":
+                return real_resolve(Path("/test/production/taomni"))
             return real_resolve(path, *args, **kwargs)
 
         outputs = [
@@ -238,9 +240,10 @@ class NativeIsolationTest(unittest.TestCase):
 
 
 class RoutineEntryTest(unittest.TestCase):
-    def test_run_prefers_native_and_forwards_explicit_browser(self):
+    def test_run_defaults_browser_and_forwards_explicit_modes(self):
         for flags, expected in [
-            (["--filter", "TC-001"], ["--filter", "TC-001", "--mode", "native"]),
+            (["--filter", "TC-001"], ["--filter", "TC-001", "--mode", "browser"]),
+            (["--mode", "native"], ["--mode", "native"]),
             (["--mode=browser"], ["--mode=browser"]),
             (["--mode", "browser"], ["--mode", "browser"]),
         ]:
@@ -268,7 +271,7 @@ class RoutineEntryTest(unittest.TestCase):
                                           "report": {"dir": str(root / "reports")}}), encoding="utf-8")
             before = dict(os.environ)
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), patch.object(reset_db, "_reset_native") as reset:
-                self.assertEqual(cli.main(["run", "--cases", str(cases), "--config", str(config)]), 2)
+                self.assertEqual(cli.main(["run", "--mode", "native", "--cases", str(cases), "--config", str(config)]), 2)
                 reset.assert_not_called()
             self.assertEqual(dict(os.environ), before)
 

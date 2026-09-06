@@ -242,6 +242,10 @@ def collect_report_artifacts(report_root: Path) -> list[dict[str, Any]]:
         return artifacts
 
     for p in sorted(report_root.rglob("*")):
+        if set(p.relative_to(report_root).parts).intersection({
+            "_workdirs", "native-appdata", "native-appconfig", "native-appcache",
+        }):
+            continue
         if p.is_file() and p.name != "runner_receipt.json":
             rel = str(p.relative_to(report_root))
             raw = p.read_bytes()

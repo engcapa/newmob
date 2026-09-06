@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
 echo "== [1/2] build packaged debug app =="
-pnpm tauri build --debug --no-bundle
+python .agents/skills/qa-ui-auto/scripts/native_build.py
 
 echo "== [2/2] manual gate checklist =="
 cat <<'EOF'
@@ -25,9 +25,10 @@ For each §8.19.10 matrix item, drive the packaged app by hand and record:
     --command "<what you did>" --layout <layout> --ime <ime> --scale <100%|200%> \
     --gap "<anything not covered>"
 
-App-data isolation note: the app writes to
-~/Library/Application Support/com.taomni.app. To protect the developer
-profile, either snapshot that directory first or set
-QA_NATIVE_HOME_OVERRIDE to a scratch HOME before launching (invasive —
-breaks Keychain; prefer the snapshot approach).
+Use only the com.taomni.app.qa build and record its binary hash and source
+identity. Use QA-owned data/config/cache and disposable workspaces. Do not
+launch the production app or redirect HOME. Workflows sharing Keychain or
+other host resources require a disposable OS account.
+Building does not prove native execution. Record observable outcomes and
+artifacts; browser evidence does not satisfy WKWebView/OS checks.
 EOF

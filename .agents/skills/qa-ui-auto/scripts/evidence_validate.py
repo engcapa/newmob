@@ -17,6 +17,7 @@ import subprocess
 import sys
 from enum import Enum
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import jsonschema
@@ -162,19 +163,19 @@ def is_path_confined(art_path_str: str) -> bool:
         return False
     if "qa-ui-auto-report" in art_path_str:
         return False
-    if art_path_str.startswith("/"):
+    if Path(art_path_str).is_absolute():
         p = Path(art_path_str).resolve()
     else:
         p = (ROOT / art_path_str).resolve()
 
     try:
-        p.relative_to(ROOT)
+        p.relative_to(ROOT.resolve())
         return True
     except ValueError:
         pass
 
     try:
-        p.relative_to(Path("/tmp"))
+        p.relative_to(Path(tempfile.gettempdir()).resolve())
         return True
     except ValueError:
         return False

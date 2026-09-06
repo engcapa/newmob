@@ -11,7 +11,7 @@ From the repository root (with the module path set as in SKILL.md):
 
 ```bash
 python .agents/skills/qa-ui-auto/scripts/native_build.py
-python -m qa_ui_auto run --filter TC-117
+python -m qa_ui_auto run --mode native --filter TC-NATIVE-CORE-001
 ```
 
 The helper builds with the QA overlay in `src-tauri/target/qa-ui-auto` and writes
@@ -24,8 +24,10 @@ accidental profile reuse, not a signature against malicious substitutions.
 The default binary is `src-tauri/target/qa-ui-auto/debug/taomni` (`taomni.exe` on
 Windows). For release-profile measurements, build with `native_build.py --release`
 and set `app.native_binary` in a dedicated config to the resulting release binary.
-Keep its identity record adjacent. Reuse builds only when source/configuration
-match the task: the binary hash cannot establish that newer edits were rebuilt.
+Keep its identity record adjacent. The helper reuses builds when source, recipe,
+platform, compiler, Node and recorded environment match; `--force` rebuilds.
+The harness rejects a mismatching recorded source fingerprint. Legacy records
+without source fingerprints cannot establish current-source execution coverage.
 
 The harness redirects Linux XDG data/config/cache or Windows AppData/LocalAppData
 to this run, then restores its environment on exit. `reset_db` only clears QA
@@ -56,8 +58,9 @@ renderer evidence, not a native WKWebView/IPC test.
 
 Choose representative native workflows for each affected OS. When a host or
 dependency is unavailable, retain available evidence and label missing targets
-unverified with the remaining action. Do not invent YAML platform fields or
-count Linux-only verbs as Windows/macOS executions.
+unverified with the remaining action. Optional `native_platforms: [Linux, Windows]`
+restricts a case; it does not prove either platform was tested. Known Linux-only
+verbs are rejected before native launch on unsupported targets.
 
 ## Performance Must Not Regress
 
@@ -79,9 +82,10 @@ latency. Compare `native-editor-performance.json` before/after as well as checki
 the absolute budget. `assert_native_process_delta` detects Linux process leaks.
 
 `scripts/perf_baseline.py --base-url URL` remains a Chromium editor diagnostic.
-It excludes samples >=1000ms and returns 0 even over budget. Inspect counts and
-verdicts; its exit code or filtered p95 cannot prove native performance or no
-regression. Do not use those filtered measurements as the sole regression gate.
+It retains all measured samples, records explicit warmup separately and fails
+over budget. `--baseline PATH --noise-ms N` additionally compares matching
+conditions against unfiltered baseline samples. Without a baseline, regression
+comparison remains unverified. It cannot prove native performance.
 
 Functional success and performance success are separate. Reproducible slowdown
 beyond measured noise fails the requirement even within an absolute budget.

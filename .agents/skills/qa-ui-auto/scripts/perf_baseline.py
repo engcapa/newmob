@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
+import hashlib
+import math
+import platform
 import sys
 import time
 from pathlib import Path
@@ -69,14 +71,37 @@ def percentile(samples: list[float], pct: float) -> float:
 
 
 def summarize(samples: list[float]) -> dict:
-    warm = [s for s in samples if s < 1000]  # drop first-key JIT/compile outliers
     return {
-        "n": len(warm),
-        "p50_ms": percentile(warm, 50),
-        "p95_ms": percentile(warm, 95),
-        "max_ms": round(max(warm), 2) if warm else None,
-        "dropped_outliers_ge_1000ms": len(samples) - len(warm),
+        "n": len(samples),
+        "p50_ms": percentile(samples, 50) if samples else None,
+        "p95_ms": percentile(samples, 95) if samples else None,
+        "max_ms": round(max(samples), 2) if samples else None,
+        "samples_ms": samples,
+        "dropped_outliers_ge_1000ms": 0,
     }
+
+
+def assess(results: dict, baseline: dict | None = None, noise_ms: float = 0) -> tuple[int, list[str]]:
+    verdict = []
+    if baseline is not None and baseline.get("conditions") != results.get("conditions"):
+        return 2, ["baseline conditions differ; comparison unverified"]
+    failed = False
+    for name, budget in (("normal_input_key_to_paint", 50), ("local_action_toggle_comment", 100)):
+        metric = results[name]
+        value = metric.get("p95_ms")
+        if not metric.get("n") or value is None or not math.isfinite(value):
+            return 2, [f"{name}: missing valid measurements"]
+        over = value > budget
+        if baseline is not None:
+            old = baseline.get(name, {})
+            if not old.get("samples_ms") or old.get("dropped_outliers_ge_1000ms"):
+                return 2, [f"{name}: baseline lacks unfiltered raw samples"]
+            over = over or value > old["p95_ms"] + noise_ms
+        failed = failed or over
+        verdict.append(f"{name}: {'failed' if over else 'within measured limits'}")
+    if baseline is None:
+        verdict.append("regression comparison unverified: no baseline supplied")
+    return int(failed), verdict
 
 
 def main(argv=None) -> int:
@@ -84,7 +109,12 @@ def main(argv=None) -> int:
     ap.add_argument("--base-url", default="http://localhost:5001")
     ap.add_argument("--keystrokes", type=int, default=200)
     ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--warmup", type=int, default=20)
+    ap.add_argument("--baseline", type=Path)
+    ap.add_argument("--noise-ms", type=float, default=0, help="previously measured noise allowance")
     args = ap.parse_args(argv)
+    if args.keystrokes < 20 or args.warmup < 0 or args.noise_ms < 0:
+        ap.error("keystrokes must be >=20; warmup and noise must be nonnegative")
 
     from playwright.sync_api import sync_playwright
 
@@ -116,7 +146,19 @@ def main(argv=None) -> int:
         # --- normal input key-to-paint -----------------------------------
         content = page.locator("[data-testid='code-workspace-editor'] .cm-content")
         content.click()
+        results["conditions"] = {
+            "os": platform.platform(), "machine": platform.node(), "processor": platform.processor(),
+            "browser": browser.version, "headless": not args.headed, "profile": "browser-dev",
+            "keystrokes": args.keystrokes, "warmup": args.warmup,
+            "dataset_sha256": hashlib.sha256(content.inner_text().encode()).hexdigest(),
+        }
+        from qa_ui_auto.provenance import source_identity
+        results["source_sha256"] = source_identity(ROOT)
         page.keyboard.press("Control+End")
+        page.keyboard.type("w" * args.warmup, delay=25)
+        page.wait_for_timeout(100)
+        results["warmup_samples_ms"] = page.evaluate("window.__perfKTP")
+        page.evaluate("window.__perfKTP = []")
         chunk = ""
         typed = 0
         while typed < args.keystrokes:
@@ -127,6 +169,7 @@ def main(argv=None) -> int:
             if len(chunk) >= 60:  # periodic newline keeps CM off one huge line
                 page.keyboard.press("Enter")
                 chunk = ""
+        page.wait_for_timeout(100)
         ktp_raw = page.evaluate("window.__perfKTP")
         results["normal_input_key_to_paint"] = summarize(ktp_raw)
         results["normal_input_key_to_paint"]["target_p95_ms"] = 50
@@ -170,15 +213,11 @@ def main(argv=None) -> int:
 
     ni = results["normal_input_key_to_paint"]
     la = results["local_action_toggle_comment"]
-    verdict = []
-    if ni["p95_ms"] <= 50:
-        verdict.append("key-to-paint WITHIN 50ms target")
-    else:
-        verdict.append("key-to-paint OVER 50ms target")
-    if la["p95_ms"] <= 100:
-        verdict.append("local action WITHIN 100ms target")
-    else:
-        verdict.append("local action OVER 100ms target")
+    baseline = json.loads(args.baseline.read_text(encoding="utf-8")) if args.baseline else None
+    exit_code, verdict = assess(results, baseline, args.noise_ms)
+    results["noise_ms"] = args.noise_ms
+    results["baseline"] = str(args.baseline) if args.baseline else None
+    results["exit_code"] = exit_code
     results["targets_verdict"] = verdict
 
     out_json.write_text(json.dumps(results, indent=1), encoding="utf-8")
@@ -188,7 +227,7 @@ def main(argv=None) -> int:
         "local_action": la,
         "verdict": verdict,
     }, indent=1))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

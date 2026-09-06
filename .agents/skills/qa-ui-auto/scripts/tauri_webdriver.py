@@ -168,6 +168,11 @@ class NativeSession:
         self.driver_url = driver_url.rstrip("/")
         self.application = application
         self.session_id: str | None = None
+        self.deadline = None
+        # A local driver must remain reachable when the desktop uses a proxy.
+        host = urllib.parse.urlsplit(self.driver_url).hostname
+        self._open = (urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+                      if host in {"localhost", "127.0.0.1", "::1"} else urllib.request.urlopen)
 
     def request(self, method: str, path: str, payload: dict | None = None) -> Any:
         body = None
@@ -178,7 +183,8 @@ class NativeSession:
             f"{self.driver_url}{path}", data=body, headers=headers, method=method
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            timeout = min(30, self.deadline.remaining()) if self.deadline else 30
+            with self._open(req, timeout=timeout) as r:
                 data = r.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")
@@ -226,6 +232,8 @@ class NativeSession:
         deadline = time.time() + timeout
         last_error = ""
         while time.time() < deadline:
+            if self.deadline:
+                self.deadline.remaining()
             try:
                 found = self.request(
                     "POST",
@@ -648,6 +656,10 @@ class NativeHarness:
         except ValueError as exc:
             raise WebDriverError(str(exc)) from exc
         overrides = native_isolation_env(self.report_root)
+        if identity.get("source_sha256"):
+            from qa_ui_auto.provenance import source_identity
+            if identity["source_sha256"] != source_identity(ROOT):
+                raise WebDriverError("QA binary source is stale; run native_build.py")
         self._previous_env = {key: os.environ.get(key) for key in overrides}
         try:
             for value in overrides.values():
@@ -656,7 +668,9 @@ class NativeHarness:
             self.report_root.mkdir(parents=True, exist_ok=True)
             (self.report_root / "native-isolation.json").write_text(
                 json.dumps({"identifier": QA_APP_ID, "binary": str(self.application.resolve()),
-                            "binary_sha256": identity["binary_sha256"], "environment": overrides}, indent=2) + "\n",
+                            "binary_sha256": identity["binary_sha256"], "environment": overrides,
+                            "source_sha256": identity.get("source_sha256"),
+                            "profile": identity.get("profile")}, indent=2) + "\n",
                 encoding="utf-8",
             )
             self.driver.start()
@@ -678,6 +692,7 @@ class NativeHarness:
 
     def create_session(self) -> NativeSession:
         session = NativeSession(self.driver.url, self.application)
+        session.deadline = getattr(self, "deadline", None)
         session.start()
         return session
 
