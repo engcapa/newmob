@@ -1,0 +1,40 @@
+id: TC-WELCOME-RS-N-04-restore-local-shell
+title: "Native: saved LocalShell run snapshot restores and locates the live tab"
+covers: [F1.6]
+tags: [welcome, native-gate, p1, needs-review]
+modes: [native]
+fixtures: [reset_db]
+timeout_sec: 300
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+
+  # Create and save a LocalShell session through the real editor.
+  - click: text="New session…"
+  - wait_for: '[data-testid="session-editor"]'
+  - click: '[data-testid="session-proto-shell"]'
+  - click: '[data-testid="session-section-bookmark"]'
+  - wait_for: '[data-testid="bookmark-settings"]'
+  - fill: {selector: '[data-testid="session-name"]', value: qa-native-shell}
+  - click: '[data-testid="session-save"]'
+  - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-native-shell"]'
+
+  # Open it once: the run-snapshot collector commits the saved-session entry.
+  - dblclick: '[data-testid="session-tree-item"][data-session-name="qa-native-shell"]'
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 30
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-panel"]'
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="available"]'
+      timeout_sec: 20
+
+  # Restore locates the live tab (ready) without duplicating it.
+  - click: '[data-testid="welcome-restore-last-session"]'
+  - wait: 2
+  - eval_readonly:
+      expression: "document.querySelectorAll('[data-tab-type]').length === 2"
+      expect_truthy: true
+  - screenshot: F1.6-native-restore-localshell.png

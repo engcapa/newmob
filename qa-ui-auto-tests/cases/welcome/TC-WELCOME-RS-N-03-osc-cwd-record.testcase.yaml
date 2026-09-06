@@ -1,0 +1,24 @@
+id: TC-WELCOME-RS-N-03-osc-cwd-record
+title: "Native: plain local terminal OSC 7 cwd records local-cwd directory use"
+covers: [F1.6]
+tags: [welcome, native-gate, p1, needs-review]
+modes: [native]
+fixtures: [reset_db]
+timeout_sec: 300
+steps:
+  - open: "${cfg.app.base_url}"
+  - vault_first_run: "qa-native-gate-password"
+  - wait_for: '[data-testid="welcome-panel"]'
+  # Plain local terminal: no requested cwd, so only a confirmed OSC 7 may
+  # record directory use (design 4.1.1).
+  - click: '[data-testid="welcome-open-local-terminal"]'
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 30
+  - wait: 8
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-history-tab-directories"]'
+  - wait_for: '[data-testid="welcome-local-directories"]'
+  - assert_visible: '[data-testid="welcome-local-directory"]'
+  - screenshot: F1.6-native-osc-cwd.png

@@ -19,10 +19,11 @@ import {
   Square,
   Settings,
   ListTree,
+  AlertTriangle,
+  RotateCcw,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
-  listCommonLocalDirectories,
   listLocalShells,
   listWslDistros,
   openLocalShellAsAdministrator,
@@ -31,12 +32,15 @@ import {
   type SessionConfig,
   type WslDistro,
 } from "../lib/ipc";
+import { useWelcomeDirectories } from "../hooks/useWelcomeDirectories";
 import { getAppPlatform } from "../lib/runtime";
 import { sftpLocalHome } from "../lib/sftp";
 import { writeText } from "../lib/clipboard";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
-import type { LocalShellSelection, RecentWorkspace } from "../types";
+import type { LocalLaunchOutcome, LocalShellSelection, RecentWorkspace } from "../types";
+import type { EntryOutcome, RestoreViewState } from "../hooks/useWelcomeSessionResume";
+import { entryDisplayName, entryKindSummary } from "../lib/welcomeSessionResume";
 import { useT, type TranslateFn } from "../lib/i18n";
 import { sessionTypeLabel } from "../lib/terminalProfile";
 import { SESSION_ROOT_LABEL, collectFolderPaths, folderOptionLabel } from "../lib/sessionPaths";
@@ -46,8 +50,29 @@ import { useConfirmDialog } from "./sidebar/ConfirmDialog";
 import { buildSessionTerminalThemeMenuItem } from "./session/SessionTerminalThemeMenu";
 import { buildSessionConnectionCommandMenuItem } from "./session/SessionConnectionCommandMenu";
 
+export interface WelcomeRestoreProp {
+  view: RestoreViewState;
+  outcomes: EntryOutcome[];
+  onStartRestore: () => void;
+  onRetryFailed: () => void;
+  onCancelRestore: () => void;
+  onClearRecord: () => void;
+}
+
 interface WelcomePanelProps {
-  onStartLocalTerminal: (shell?: LocalShellSelection, cwd?: string) => void;
+  /**
+   * One-click restore entry for the last run's session tab set (design
+   * §4.2.4). Omitted in tests that don't exercise restore.
+   */
+  restore?: WelcomeRestoreProp;
+  /**
+   * Starts a local terminal. Returns the structured launch outcome (design
+   * §4.1.5); may resolve `undefined` for legacy synchronous callers.
+   */
+  onStartLocalTerminal: (
+    shell?: LocalShellSelection,
+    cwd?: string,
+  ) => Promise<LocalLaunchOutcome | void> | void;
   onNewSession: () => void;
   onOpenLocalPath?: (path: string, opts?: { embedFolder?: boolean }) => void;
   onOpenLanChat?: () => void;
@@ -87,6 +112,7 @@ type RecentSessionSort =
 type WelcomeHistoryTab = "directories" | "workspaces" | "sessions";
 
 export function WelcomePanel({
+  restore,
   onStartLocalTerminal,
   onNewSession,
   onOpenLocalPath,
@@ -110,7 +136,7 @@ export function WelcomePanel({
   const [localShells, setLocalShells] = useState<LocalShellOption[]>([]);
   const [selectedShellId, setSelectedShellId] = useState("");
   const [shellStatus, setShellStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [localDirectories, setLocalDirectories] = useState<LocalDirectoryShortcut[]>([]);
+  const [pendingDirectoryIds, setPendingDirectoryIds] = useState<string[]>([]);
   const [wslDistros, setWslDistros] = useState<WslDistro[]>([]);
   const [selectedDistro, setSelectedDistro] = useState("");
   const [wslStatus, setWslStatus] = useState<"loading" | "ready" | "error" | "unsupported">("loading");
@@ -163,25 +189,14 @@ export function WelcomePanel({
     };
   }, [setStatusMessage, t]);
 
-  // Welcome stays mounted across tab switches; reload recent folders whenever
-  // the tab becomes visible so local `cd` / OSC-7 cwd history shows up promptly.
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    listCommonLocalDirectories()
-      .then((directories) => {
-        if (cancelled) return;
-        setLocalDirectories(Array.isArray(directories) ? directories : []);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setLocalDirectories([]);
-        setStatusMessage(t("welcome.localDirectoriesLoadFailed", { error: String(error) }));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [active, setStatusMessage, t]);
+  // Welcome stays mounted across tab switches; the directories hook reloads
+  // whenever the tab becomes visible (and honors backend revision events).
+  const {
+    directories: localDirectories,
+    status: directoriesStatus,
+    error: directoriesError,
+    reload: reloadDirectories,
+  } = useWelcomeDirectories(active);
 
   const mergedShells = useMemo<LocalShellOption[]>(() => {
     if (wslDistros.length === 0) return localShells;
@@ -299,10 +314,25 @@ export function WelcomePanel({
     }
   };
 
-  const handleStartInDirectory = (directory: LocalDirectoryShortcut) => {
-    const shell = localShellSelectionFromOption(selectedShell, directory.path);
-    const cwd = selectedShell?.id.startsWith("wsl:") ? undefined : directory.path;
-    onStartLocalTerminal(shell, cwd);
+  const handleStartInDirectory = async (directory: LocalDirectoryShortcut) => {
+    const directoryId = directory.directoryId || `${directory.kind}:${directory.path}`;
+    if (pendingDirectoryIds.includes(directoryId)) return;
+    setPendingDirectoryIds((ids) => [...ids, directoryId]);
+    try {
+      const shell = localShellSelectionFromOption(selectedShell, directory.path);
+      const cwd = selectedShell?.id.startsWith("wsl:") ? undefined : directory.path;
+      const outcome = await onStartLocalTerminal(shell, cwd);
+      if (outcome && outcome.status === "failed") {
+        setStatusMessage(
+          t("welcome.localDirectoryStartFailed", {
+            path: directory.path,
+            error: outcome.error ?? "",
+          }),
+        );
+      }
+    } finally {
+      setPendingDirectoryIds((ids) => ids.filter((id) => id !== directoryId));
+    }
   };
 
   return (
@@ -330,6 +360,10 @@ export function WelcomePanel({
             </div>
           </div>
         </div>
+
+        {restore ? (
+          <RestoreLastSessionRow restore={restore} translate={t} />
+        ) : null}
 
         <div
           className="grid gap-4 items-stretch"
@@ -403,6 +437,10 @@ export function WelcomePanel({
             <LocalDirectoriesPanel
               translate={t}
               directories={localDirectories}
+              pendingDirectoryIds={pendingDirectoryIds}
+              loadStatus={directoriesStatus}
+              loadError={directoriesError}
+              onRetry={reloadDirectories}
               onStartInDirectory={handleStartInDirectory}
             />
           )}
@@ -484,6 +522,174 @@ export function WelcomePanel({
           <span>v{__APP_VERSION__}</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RestoreLastSessionRow({
+  restore,
+  translate: t,
+}: {
+  restore: WelcomeRestoreProp;
+  translate: TranslateFn;
+}) {
+  const { view } = restore;
+  const clearConfirm = useConfirmDialog();
+  const busy =
+    view.state === "restoring" || view.state === "awaiting-auth" || view.state === "loading";
+  const disabled =
+    view.state === "loading" ||
+    view.state === "empty" ||
+    view.state === "unavailable" ||
+    busy;
+  const available = view.state === "available";
+  const finished = view.state === "succeeded" || view.state === "partial" || view.state === "failed";
+  const canRetry =
+    (view.state === "partial" || view.state === "failed") &&
+    restore.outcomes.some((o) => o.status === "failed" || o.status === "cancelled");
+
+  const summary = (() => {
+    switch (view.state) {
+      case "available":
+      case "restoring":
+      case "awaiting-auth":
+      case "succeeded":
+      case "partial":
+      case "failed": {
+        const record = "record" in view ? view.record : null;
+        if (!record) return "";
+        const kinds = record.entries.map(entryKindSummary);
+        const unique = [...new Set(kinds)].join(", ");
+        const names = record.entries
+          .slice(0, 3)
+          .map(entryDisplayName)
+          .join(", ");
+        const suffix = record.entries.length > 3 ? "…" : "";
+        return `${t("welcome.restoreEntryCount", { count: record.entries.length })} · ${unique} · ${names}${suffix}`;
+      }
+      default:
+        return "";
+    }
+  })();
+
+  const statusText = (() => {
+    switch (view.state) {
+      case "loading":
+        return t("welcome.restoreLoading");
+      case "empty":
+        return t("welcome.restoreEmpty");
+      case "available":
+        return view.legacy ? t("welcome.restoreLegacy") : t("welcome.restoreAvailable");
+      case "restoring":
+        return t("welcome.restoreRunning", {
+          completed: view.completed,
+          total: view.total,
+        });
+      case "awaiting-auth":
+        return t("welcome.restoreAwaitingAuth");
+      case "succeeded":
+        return t("welcome.restoreSucceeded", {
+          count: restore.outcomes.filter((o) => o.status === "ready").length,
+        });
+      case "partial":
+        return t("welcome.restorePartial", {
+          failed: restore.outcomes.filter((o) => o.status === "failed" || o.status === "cancelled").length,
+        });
+      case "failed":
+        return t("welcome.restoreFailed");
+      case "unavailable":
+        return view.reason === "schema"
+          ? t("welcome.restoreIncompatible")
+          : t("welcome.restoreStorageError");
+    }
+  })();
+
+  const confirmClear = async () => {
+    const confirmed = await clearConfirm.confirm({
+      title: t("welcome.restoreClearTitle"),
+      message: t("welcome.restoreClearMessage"),
+      confirmLabel: t("welcome.restoreClearConfirm"),
+      danger: true,
+    });
+    if (confirmed) restore.onClearRecord();
+  };
+
+  return (
+    <div
+      data-testid="welcome-restore-row"
+      className="mb-4 flex min-w-0 flex-wrap items-center gap-2 rounded-md border px-3 py-2"
+      style={{ borderColor: "var(--taomni-card-border)", background: "var(--taomni-card-bg)" }}
+    >
+      <button
+        data-testid="welcome-restore-last-session"
+        className="taomni-btn h-8 px-3 inline-flex items-center gap-1.5"
+        type="button"
+        disabled={disabled}
+        aria-busy={view.state === "restoring" || view.state === "awaiting-auth" || undefined}
+        aria-live="polite"
+        onClick={restore.onStartRestore}
+      >
+        <RotateCcw className="h-4 w-4" />
+        <span>{t("welcome.restoreTitle")}</span>
+      </button>
+      <div
+        data-testid="welcome-restore-status"
+        data-state={view.state}
+        className="min-w-0 flex-1 text-[12px] text-[var(--taomni-text-muted)]"
+        role={view.state === "failed" ? "alert" : "status"}
+      >
+        <span className="block truncate" title={statusText}>
+          {statusText}
+          {summary ? <span className="ml-1 opacity-80">{summary}</span> : null}
+        </span>
+        {view.state === "partial" ? (
+          <ul className="mt-1 space-y-0.5">
+            {restore.outcomes
+              .filter((o) => o.status === "failed" || o.status === "cancelled")
+              .map((o) => (
+                <li key={o.identity} className="truncate" title={o.issue?.message ?? ""}>
+                  · {o.displayName}
+                  {o.issue ? ` — ${o.issue.code}` : ""}
+                </li>
+              ))}
+          </ul>
+        ) : null}
+      </div>
+      {view.state === "restoring" || view.state === "awaiting-auth" ? (
+        <button
+          data-testid="welcome-restore-cancel"
+          className="taomni-btn h-8 px-2 inline-flex items-center"
+          type="button"
+          onClick={restore.onCancelRestore}
+        >
+          <X className="h-3.5 w-3.5" />
+          <span>{t("welcome.restoreCancel")}</span>
+        </button>
+      ) : null}
+      {canRetry ? (
+        <button
+          data-testid="welcome-restore-retry"
+          className="taomni-btn h-8 px-2 inline-flex items-center gap-1"
+          type="button"
+          onClick={restore.onRetryFailed}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          <span>{t("welcome.restoreRetryFailed")}</span>
+        </button>
+      ) : null}
+      {(available || finished) && (
+        <button
+          data-testid="welcome-restore-clear"
+          className="taomni-btn h-8 w-8 p-0 inline-flex items-center justify-center"
+          type="button"
+          title={t("welcome.restoreClearTitle")}
+          aria-label={t("welcome.restoreClearTitle")}
+          onClick={() => void confirmClear()}
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
+      )}
+      {clearConfirm.render}
     </div>
   );
 }
@@ -611,11 +817,19 @@ function WelcomeHistoryPanel({
 function LocalDirectoriesPanel({
   translate: t,
   directories,
+  pendingDirectoryIds,
+  loadStatus,
+  loadError,
+  onRetry,
   onStartInDirectory,
 }: {
   translate: TranslateFn;
   directories: LocalDirectoryShortcut[];
-  onStartInDirectory: (directory: LocalDirectoryShortcut) => void;
+  pendingDirectoryIds: string[];
+  loadStatus: "loading" | "ready" | "error";
+  loadError: string | null;
+  onRetry: () => void;
+  onStartInDirectory: (directory: LocalDirectoryShortcut) => void | Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const filteredDirectories = useMemo(() => {
@@ -648,10 +862,50 @@ function LocalDirectoriesPanel({
           />
         </div>
       </div>
+      {loadStatus === "error" && directories.length === 0 ? (        <div
+          data-testid="welcome-local-directories-error"
+          className="mb-2 flex flex-wrap items-center gap-2 rounded border px-2 py-2 text-[12px]"
+          style={{ borderColor: "var(--taomni-divider)", background: "var(--taomni-input-bg)" }}
+          role="alert"
+        >
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-[var(--taomni-warning, #d97706)]" />
+          <span className="min-w-0 flex-1 text-[var(--taomni-text-muted)]">
+            {t("welcome.localDirectoriesLoadFailed", { error: loadError ?? "" })}
+          </span>
+          <button
+            data-testid="welcome-directory-retry"
+            className="taomni-btn h-7 px-2 inline-flex items-center gap-1"
+            type="button"
+            onClick={() => onRetry()}
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            <span>{t("welcome.localDirectoriesRetry")}</span>
+          </button>
+        </div>
+      ) : null}
+      {loadError != null && directories.length > 0 ? (
+        <div
+          className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-[var(--taomni-text-muted)]"
+          role="status"
+        >
+          <span>{t("welcome.localDirectoriesRefreshFailed")}</span>
+          <button
+            data-testid="welcome-directory-retry"
+            className="taomni-btn h-6 px-2 inline-flex items-center gap-1"
+            type="button"
+            onClick={() => onRetry()}
+          >
+            <RotateCcw className="h-3 w-3" />
+            <span>{t("welcome.localDirectoriesRetry")}</span>
+          </button>
+        </div>
+      ) : null}
       <div className="max-h-[320px] overflow-auto pr-1">
         {directories.length === 0 ? (
           <div className="py-4 text-[12px] text-[var(--taomni-text-muted)]">
-            {t("welcome.localDirectoriesEmpty")}
+            {loadStatus === "loading"
+              ? t("welcome.localDirectoriesLoading")
+              : t("welcome.localDirectoriesEmpty")}
           </div>
         ) : filteredDirectories.length === 0 ? (
           <div className="py-4 text-[12px] text-[var(--taomni-text-muted)]" data-testid="welcome-local-directories-no-matches">
@@ -659,32 +913,65 @@ function LocalDirectoriesPanel({
           </div>
         ) : (
           <div className="space-y-1">
-            {filteredDirectories.map((directory) => (
-              <button
-                key={`${directory.kind}:${directory.path}`}
-                data-testid="welcome-local-directory"
-                data-directory-path={directory.path}
-                className="w-full min-w-0 rounded border bg-[var(--taomni-input-bg)] px-2 py-1.5 text-left hover:bg-[var(--taomni-control-hover)] focus-visible:bg-[var(--taomni-control-hover)]"
-                style={{ borderColor: "var(--taomni-divider)" }}
-                type="button"
-                title={directory.path}
-                aria-label={t("welcome.localDirectoryOpenAria", { label: directory.label, path: directory.path })}
-                onClick={() => onStartInDirectory(directory)}
-              >
-                <span className="flex min-w-0 items-center gap-2">
-                  <FolderOpen className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-accent)]" />
-                  <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--taomni-text)]">
-                    {directory.label}
+            {filteredDirectories.map((directory) => {
+              const directoryId = directory.directoryId || `${directory.kind}:${directory.path}`;
+              const pending = pendingDirectoryIds.includes(directoryId);
+              const unavailable =
+                directory.availability === "missing" ||
+                directory.availability === "permission-denied" ||
+                directory.availability === "unavailable";
+              return (
+                <button
+                  key={`${directory.kind}:${directory.path}`}
+                  data-testid="welcome-local-directory"
+                  data-directory-path={directory.path}
+                  data-directory-id={directory.directoryId}
+                  data-last-used-at-ms={directory.lastUsedAtMs ?? ""}
+                  data-availability={directory.availability}
+                  className="w-full min-w-0 rounded border bg-[var(--taomni-input-bg)] px-2 py-1.5 text-left hover:bg-[var(--taomni-control-hover)] focus-visible:bg-[var(--taomni-control-hover)] disabled:opacity-60"
+                  style={{ borderColor: "var(--taomni-divider)" }}
+                  type="button"
+                  disabled={pending}
+                  aria-busy={pending || undefined}
+                  title={directoryTimeTooltip(directory, t)}
+                  aria-label={t("welcome.localDirectoryOpenAria", { label: directory.label, path: directory.path })}
+                  onClick={() => void onStartInDirectory(directory)}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <FolderOpen className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-accent)]" />
+                    <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--taomni-text)]">
+                      {directory.label}
+                    </span>
+                    {unavailable ? (
+                      <span
+                        data-testid="welcome-local-directory-unavailable"
+                        className="shrink-0 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] text-[var(--taomni-warning, #d97706)]"
+                        style={{ borderColor: "var(--taomni-divider)" }}
+                      >
+                        <AlertTriangle className="w-3 h-3" />
+                        {t("welcome.localDirectoryUnavailableShort")}
+                      </span>
+                    ) : null}
+                    <span className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] taomni-mono text-[var(--taomni-text-muted)]" style={{ borderColor: "var(--taomni-divider)" }}>
+                      {directory.kind === "personal" ? t("welcome.localDirectoryPersonal") : t("welcome.localDirectorySystem")}
+                    </span>
+                    <span
+                      className="shrink-0 text-[10px] taomni-mono text-[var(--taomni-text-muted)]"
+                      data-testid="welcome-local-directory-last-used"
+                    >
+                      {directory.lastUsedAtMs != null
+                        ? formatDirectoryUsedTime(directory.lastUsedAtMs)
+                        : directory.legacyRank != null
+                          ? t("welcome.localDirectoryTimeUnknown")
+                          : ""}
+                    </span>
                   </span>
-                  <span className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] taomni-mono text-[var(--taomni-text-muted)]" style={{ borderColor: "var(--taomni-divider)" }}>
-                    {directory.kind === "personal" ? t("welcome.localDirectoryPersonal") : t("welcome.localDirectorySystem")}
+                  <span className="mt-0.5 block truncate text-[11px] taomni-mono text-[var(--taomni-text-muted)]">
+                    {directory.path}
                   </span>
-                </span>
-                <span className="mt-0.5 block truncate text-[11px] taomni-mono text-[var(--taomni-text-muted)]">
-                  {directory.path}
-                </span>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
@@ -698,6 +985,33 @@ function LocalDirectoriesPanel({
       ) : null}
     </section>
   );
+}
+
+function formatDirectoryUsedTime(ms: number): string {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** Compact hover text: real UTC time for used rows; never the current time. */
+function directoryTimeTooltip(
+  directory: LocalDirectoryShortcut,
+  t: TranslateFn,
+): string {
+  if (directory.lastUsedAtMs != null) {
+    const local = formatDirectoryUsedTime(directory.lastUsedAtMs);
+    const utc = new Date(directory.lastUsedAtMs).toISOString();
+    return `${t("welcome.localDirectoryUsedAt", { time: local })} · ${utc}`;
+  }
+  if (directory.legacyRank != null) {
+    return t("welcome.localDirectoryTimeUnknown");
+  }
+  return t("welcome.localDirectoryNeverUsed");
 }
 
 function RecentWorkspacesPanel({

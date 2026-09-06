@@ -27,14 +27,6 @@ pub struct LocalShellOption {
     pub can_elevate: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalDirectoryShortcut {
-    pub label: String,
-    pub path: String,
-    pub kind: String,
-}
-
 #[derive(Clone, Debug)]
 pub struct ShellLaunch {
     pub program: String,
@@ -65,131 +57,7 @@ pub fn list_local_shells() -> Vec<LocalShellOption> {
     shells
 }
 
-pub fn list_common_local_directories(history_commands: &[String]) -> Vec<LocalDirectoryShortcut> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let home = dirs::home_dir();
-
-    push_directory_shortcut(&mut out, &mut seen, "system", "Home", home.clone());
-    push_directory_shortcut(
-        &mut out,
-        &mut seen,
-        "system",
-        "Desktop",
-        dirs::desktop_dir(),
-    );
-    push_directory_shortcut(
-        &mut out,
-        &mut seen,
-        "system",
-        "Documents",
-        dirs::document_dir(),
-    );
-    push_directory_shortcut(
-        &mut out,
-        &mut seen,
-        "system",
-        "Downloads",
-        dirs::download_dir(),
-    );
-    push_directory_shortcut(
-        &mut out,
-        &mut seen,
-        "system",
-        "Pictures",
-        dirs::picture_dir(),
-    );
-    push_directory_shortcut(&mut out, &mut seen, "system", "Music", dirs::audio_dir());
-    push_directory_shortcut(&mut out, &mut seen, "system", "Videos", dirs::video_dir());
-
-    for command in history_commands {
-        if out.len() >= 24 {
-            break;
-        }
-        if let Some(path) = directory_from_history_command(command, home.as_deref()) {
-            push_directory_shortcut(
-                &mut out,
-                &mut seen,
-                "personal",
-                path_display_label(&path, "Directory"),
-                Some(path),
-            );
-        }
-    }
-
-    if let Some(home_dir) = home.as_deref() {
-        for name in [
-            "Code",
-            "code",
-            "Projects",
-            "projects",
-            "Workspace",
-            "workspace",
-            "work",
-            "dev",
-            "Developer",
-            "src",
-        ] {
-            if out.len() >= 24 {
-                break;
-            }
-            let candidate = home_dir.join(name);
-            push_directory_shortcut(
-                &mut out,
-                &mut seen,
-                "personal",
-                path_display_label(&candidate, name),
-                Some(candidate),
-            );
-        }
-    }
-
-    out
-}
-
-fn push_directory_shortcut(
-    out: &mut Vec<LocalDirectoryShortcut>,
-    seen: &mut HashSet<String>,
-    kind: &str,
-    label: impl Into<String>,
-    path: Option<PathBuf>,
-) {
-    let Some(path) = path else {
-        return;
-    };
-    if !path.is_dir() {
-        return;
-    }
-    let key = directory_shortcut_key(&path);
-    if !seen.insert(key) {
-        return;
-    }
-    out.push(LocalDirectoryShortcut {
-        label: label.into(),
-        path: path_to_string(path),
-        kind: kind.to_string(),
-    });
-}
-
-fn directory_shortcut_key(path: &Path) -> String {
-    let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let key = normalized.to_string_lossy().replace('\\', "/");
-    if cfg!(windows) {
-        key.to_ascii_lowercase()
-    } else {
-        key
-    }
-}
-
-fn path_display_label(path: &Path, fallback: &str) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or(fallback)
-        .to_string()
-}
-
-fn directory_from_history_command(command: &str, home: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn directory_from_history_command(command: &str, home: Option<&Path>) -> Option<PathBuf> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return None;

@@ -434,6 +434,81 @@ export interface Tab {
   terminalInitialCwd?: string;
 }
 
+/**
+ * Structured result of a Welcome local-terminal launch (design §4.1.5).
+ * The tab appearing is not proof of a started PTY; only `started` (the
+ * backend session was registered) counts.
+ */
+export type LocalLaunchOutcome = {
+  tabId: string | null;
+  status: "started" | "failed" | "cancelled";
+  error?: string;
+};
+
+/**
+ * Structured result of opening one saved-session entry (design §4.2.3).
+ * `readiness` distinguishes a real connection from a merely-started client
+ * or an opened view; `null` readiness means the opener only created the tab
+ * and no completion signal arrived yet.
+ */
+export type SessionOpenOutcome = {
+  operationId?: string;
+  tabId: string | null;
+  status: "ready" | "partial" | "failed" | "cancelled";
+  readiness: "connected" | "client-started" | "view-opened" | null;
+  error?: string;
+};
+
+/** One entry's outcome inside a batch Welcome restore (design §4.2.3). */
+export type ResumeIssueCode =
+  | "missing-session"
+  | "changed-type"
+  | "missing-directory"
+  | "permission-denied"
+  | "unavailable-directory"
+  | "authentication"
+  | "connect"
+  | "optional-state"
+  | "storage"
+  | "cancelled"
+  | "existing-config-conflict"
+  | "unsupported";
+
+export interface ResumeIssue {
+  code: ResumeIssueCode;
+  message: string;
+}
+
+export type SnapshotEntryKind = "saved-session" | "local-terminal";
+
+/** Persisted restore snapshot entry (design §4.2.1). Never carries secrets. */
+export type SnapshotEntry =
+  | {
+      kind: "saved-session";
+      identity: string;
+      savedSessionId: string;
+      savedSessionType: string;
+      displayName: string;
+    }
+  | {
+      kind: "local-terminal";
+      identity: string;
+      displayName: string;
+      shellId: string;
+      shellArgs: string[];
+      confirmedCwd: string;
+    };
+
+export interface RunSnapshotRecord {
+  schemaVersion: number;
+  revision: number;
+  runSequence: number;
+  batchId: string;
+  committedAtMs: number;
+  entries: SnapshotEntry[];
+  activeIdentity: string | null;
+}
+
 /** A single local ↔ remote path mapping entry. */
 export interface SftpPathMapping {
   localPath: string;

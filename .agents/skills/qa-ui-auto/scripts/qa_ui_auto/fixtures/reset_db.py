@@ -21,6 +21,11 @@ from typing import Any
 BUNDLE_ID = "com.taomni.app"
 
 LOCAL_STORAGE_KEYS = [
+    "taomni.welcome.directoryUsage.v1",
+    "taomni.welcome.sessionResume.v1",
+    "taomni.welcome.sessionResumeRevision.v1",
+    "taomni.welcome.sessionResumeSequence.v1",
+    "taomni.welcome.sessionResumeCleared.v1",
     "taomni.sessions.v1",
     "taomni.groups.v1",
     "taomni.tunnels.v1",

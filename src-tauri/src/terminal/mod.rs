@@ -1,5 +1,6 @@
 pub mod client;
 pub mod forwards;
+pub mod local_directories;
 pub mod network;
 pub mod pty;
 pub mod shell_integration;
@@ -51,71 +52,127 @@ pub fn list_local_shells() -> Vec<pty::LocalShellOption> {
 }
 
 #[tauri::command]
-pub fn list_common_local_directories(
+pub async fn list_common_local_directories(
     state: State<'_, AppState>,
-) -> Result<Vec<pty::LocalDirectoryShortcut>, String> {
-    let db = match state.db.try_lock() {
-        Ok(db) => db,
-        Err(std::sync::TryLockError::WouldBlock) => {
-            return Ok(pty::list_common_local_directories(&[]));
-        }
-        Err(e) => return Err(e.to_string()),
-    };
-    // Prefer directory-changing commands, ordered by recency, so Welcome's
-    // "Recent folders" reflects where the user actually `cd`s — not the most
-    // frequently run non-cd commands. Fall back to a broader recent window so
-    // shells that record `Set-Location` / `pushd` / relative forms still feed
-    // the parser.
-    let mut stmt = db
-        .prepare(
-            "SELECT command FROM command_history
-             WHERE host_key = 'local'
-               AND (
-                 lower(command) LIKE 'cd %'
-                 OR lower(command) LIKE 'cd\t%'
-                 OR lower(command) = 'cd'
-                 OR lower(command) LIKE 'chdir %'
-                 OR lower(command) LIKE 'pushd %'
-                 OR lower(command) LIKE 'set-location %'
-                 OR lower(command) LIKE 'sl %'
-               )
-             ORDER BY last_used_at DESC
-             LIMIT 300",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?;
-    let mut commands = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+) -> Result<local_directories::DirectoryListEnvelope, String> {
+    // Block on the DB lock (the old try_lock fallback returned a fake
+    // "defaults only" list, which silently lost history). Filesystem
+    // probing happens inside `list_directory_shortcuts` without the DB
+    // lock held.
+    let db = state.db.lock().map_err(|e| format!("session database is unavailable: {e}"))?;
+    let mut db = db;
+    local_directories::init_tables(&db).map_err(|e| e.to_string())?;
+    local_directories::migrate_legacy_history(&mut db).map_err(|e| e.to_string())?;
+    local_directories::list_directory_shortcuts(&db)
+}
 
-    // If history has few explicit cd lines (new install / PowerShell gap),
-    // also scan a recency-ordered general window so we don't miss paths that
-    // arrived via other directory forms.
-    if commands.len() < 24 {
-        let mut broad = db
-            .prepare(
-                "SELECT command FROM command_history
-                 WHERE host_key = 'local'
-                 ORDER BY last_used_at DESC
-                 LIMIT 500",
-            )
-            .map_err(|e| e.to_string())?;
-        let broad_rows = broad
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        let extra = broad_rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        for cmd in extra {
-            if !commands.iter().any(|c| c == &cmd) {
-                commands.push(cmd);
+/// Frontend-driven confirmed cwd report from a live native-local terminal
+/// (OSC 7). Clicks, queueing, failed spawns and remote/WSL paths never
+/// reach this command.
+#[tauri::command]
+pub async fn record_local_directory_use(
+    backend_session_id: String,
+    path: String,
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<local_directories::RecordDirectoryUseResponse, String> {
+    // Only live native-local terminals may record use. Async lock: this runs
+    // on the Tokio runtime, where `blocking_read` would panic.
+    {
+        let terminals = state.terminals.read().await;
+        match terminals.get(&backend_session_id) {
+            Some(ActiveTerminal::Local { .. }) => {}
+            _ => {
+                return Err(format!(
+                    "terminal {backend_session_id} is not a live local terminal"
+                ))
             }
         }
     }
+    record_local_directory_use_inner(&backend_session_id, &path, &state, &app_handle)
+}
 
-    Ok(pty::list_common_local_directories(&commands))
+pub(crate) fn record_local_directory_use_inner(
+    backend_session_id: &str,
+    path: &str,
+    state: &AppState,
+    app_handle: &AppHandle,
+) -> Result<local_directories::RecordDirectoryUseResponse, String> {
+    if backend_session_id.trim().is_empty() {
+        return Err("backend session id is required".to_string());
+    }
+    // Per-runtime dedup: repeated prompts/cwd probes for the same directory
+    // never rewrite the record.
+    let path_buf = std::path::PathBuf::from(path);
+    let Some(new_key) = local_directories::normalize_path_key(&path_buf) else {
+        return Err(format!("invalid local directory path: {path}"));
+    };
+    if let Some(last) = state.local_directory_runtime.lock().ok().and_then(|r| r.get(backend_session_id).cloned()) {
+        if last == new_key {
+            return Ok(local_directories::RecordDirectoryUseResponse {
+                changed: false,
+                directory: None,
+            });
+        }
+    }
+    let now_ms = local_directories::system_now_ms();
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    local_directories::init_tables(&db).map_err(|e| e.to_string())?;
+    let (changed, revision) =
+        local_directories::record_directory_use(&mut db, &path_buf, local_directories::SOURCE_LOCAL_CWD, now_ms)?;
+    if let Ok(mut runtime) = state.local_directory_runtime.lock() {
+        runtime.insert(backend_session_id.to_string(), new_key);
+    }
+    if changed {
+        let _ = app_handle.emit("welcome-directories-changed", serde_json::json!({ "revision": revision }));
+    }
+    Ok(local_directories::RecordDirectoryUseResponse {
+        changed,
+        directory: None,
+    })
+}
+
+/// Rust-internal confirmed spawn write. Called from the success path of
+/// `create_local_terminal` with the requested cwd; the frontend can never
+/// pass arbitrary times or treat clicks as successes.
+pub(crate) fn record_successful_local_start(
+    state: &AppState,
+    app_handle: &AppHandle,
+    backend_session_id: &str,
+    requested_cwd: Option<&str>,
+) -> Option<String> {
+    let Some(cwd) = requested_cwd.map(str::trim).filter(|c| !c.is_empty()) else {
+        // No requested cwd: first confirmed OSC 7 will record instead.
+        return None;
+    };
+    let path = std::path::PathBuf::from(cwd);
+    let Some(new_key) = local_directories::normalize_path_key(&path) else {
+        return None;
+    };
+    let now_ms = local_directories::system_now_ms();
+    let mut db = match state.db.lock() {
+        Ok(db) => db,
+        Err(e) => {
+            return Some(format!("local directory history save failed: {e}"));
+        }
+    };
+    let result = local_directories::record_directory_use(
+        &mut db,
+        &path,
+        local_directories::SOURCE_LOCAL_START,
+        now_ms,
+    );
+    if let Ok(mut runtime) = state.local_directory_runtime.lock() {
+        runtime.insert(backend_session_id.to_string(), new_key);
+    }
+    match result {
+        Ok((true, revision)) => {
+            let _ = app_handle.emit("welcome-directories-changed", serde_json::json!({ "revision": revision }));
+            None
+        }
+        Ok((false, _)) => None,
+        Err(error) => Some(format!("local directory history save failed: {error}")),
+    }
 }
 
 /// Probe the local system X server (Xorg / XQuartz / VcXsrv / WSLg) and report
@@ -140,6 +197,10 @@ pub struct LocalTerminalCreated {
     /// with shells that already provide them, even when the caller didn't pass
     /// an explicit `shell` arg and we resolved a default.
     pub shell_id: String,
+    /// Present when the terminal started successfully but the local-directory
+    /// usage record could not be saved. Launch success is never downgraded to
+    /// an IPC error for a history write failure (design §4.1.5).
+    pub directory_use_warning: Option<String>,
 }
 
 /// Register an already-spawned local PTY in the shared terminal runtime and
@@ -318,7 +379,7 @@ pub async fn create_local_terminal(
         rows,
         shell,
         shell_args,
-        cwd,
+        cwd.clone(),
         sdk_environment.as_ref(),
     )?;
 
@@ -344,9 +405,13 @@ pub async fn create_local_terminal(
         read_loop_local(reader, sid, app, outputs);
     });
 
+    let directory_use_warning =
+        record_successful_local_start(&state, &app_handle, &session_id, cwd.as_deref());
+
     Ok(LocalTerminalCreated {
         session_id,
         shell_id,
+        directory_use_warning,
     })
 }
 
@@ -878,6 +943,11 @@ pub async fn close_terminal(session_id: String, state: State<'_, AppState>) -> R
     }
     if let Ok(mut outputs) = state.terminal_outputs.lock() {
         outputs.remove(&session_id);
+    }
+    // A closed terminal can never accept late cwd reports; drop its
+    // per-runtime dedup entry (design §4.1.5).
+    if let Ok(mut runtime) = state.local_directory_runtime.lock() {
+        runtime.remove(&session_id);
     }
     Ok(())
 }

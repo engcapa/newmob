@@ -25,6 +25,8 @@ steps:
   - wait_for: '[data-testid="bookmark-settings"]'
   - fill: {selector: '[data-testid="session-name"]', value: qa-ui-auto-welcome-recent}
   - click: '[data-testid="session-save"]'
+  # Ensure the sidebar sessions tree is expanded before looking for the row.
+  - click: '[data-testid="side-tab-sessions"]'
   - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-welcome-recent"]'
 
   # Opening the saved session marks it connected and promotes it into history.

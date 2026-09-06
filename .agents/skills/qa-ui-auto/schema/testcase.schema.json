@@ -67,7 +67,8 @@
      "workspace_root",
      "java_sample_projects",
      "java25_projects",
-     "git_diff_repo"
+     "git_diff_repo",
+     "welcome_recents"
     ]
    },
    "uniqueItems": true

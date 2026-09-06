@@ -101,6 +101,11 @@ pub struct AppState {
     pub ssh_auth_responders: Arc<Mutex<HashMap<String, SshAuthResponder>>>,
     pub clipboard: Arc<Mutex<Option<arboard::Clipboard>>>,
     pub db: Mutex<rusqlite::Connection>,
+    /// Per-runtime local-directory dedup state (design §4.1.5): the last
+    /// confirmed directory path key reported by each live native-local
+    /// terminal, keyed by backend session id. `close_terminal` clears it so
+    /// late OSC reports after close can never write.
+    pub local_directory_runtime: Arc<Mutex<HashMap<String, String>>>,
     /// Dedicated connection to the standalone Tao Notes database (`notes.db`),
     /// kept separate from `taomni.db` so note storage can evolve independently.
     pub notes_db: Mutex<rusqlite::Connection>,
@@ -220,6 +225,7 @@ impl AppState {
             ssh_auth_responders: Arc::new(Mutex::new(HashMap::new())),
             clipboard: Arc::new(Mutex::new(None)),
             db: Mutex::new(db),
+            local_directory_runtime: Arc::new(Mutex::new(HashMap::new())),
             notes_db: Mutex::new(notes_db),
             mail_db_dir,
             mail_dbs: Arc::new(Mutex::new(HashMap::new())),

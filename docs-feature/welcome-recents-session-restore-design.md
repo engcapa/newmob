@@ -2,22 +2,48 @@
 
 ## 1. 交付范围与决策状态
 
-- 类型：现有能力扩展；本次仅交付设计，不包含功能实现。
+- 类型：现有能力扩展；本次交付包含设计修订与功能实现、测试及当前平台真机验证。
 - 调研日期：2026-09-05；基线提交：`6d3cfb0c3cf2510395d1b238362671efcf6aadd1`；应用版本：根 `package.json` 的 `0.4.22`。
 - 写入前工作树干净，目标同名文档不存在；适用规则为根 `AGENTS.md`，未发现更深层 `AGENTS.md`。
-- 平台固定为 Windows、macOS、Linux 的 Tauri 桌面应用；当前环境为 Windows / PowerShell。浏览器仅作辅助验证。
-- 设计状态：**部分可实施**。目录排序契约已确定；session 部分提供完整的单会话推荐方案，恢复范围仍有一个用户决策项 D-01。本文中的“拟新增”均未实现，全部 TASK/V 初始为待执行。
-- 目标：默认目录与历史目录统一按真实最近使用排序；Welcome 提供独立的一键恢复入口，复用既有会话打开、认证及面板能力。
+- 平台固定为 Windows、macOS、Linux 的 Tauri 桌面应用。设计撰写时环境为 Windows / PowerShell；**2026-09-06 用户决策：D-01 采用方案 B**（详见 D-01 节），本文 session 章节已按 B 原位修订。实施与真机验证在 Linux 桌面执行；Windows/macOS 结果不外推、保持未验证记录。
+- 设计状态：**已定稿并实施**。目录排序契约（TASK-01/02）与 session 运行批次快照契约（TASK-03/04/05）均已确定。实现完成状态见第 5/6 节与 TASK 状态。
+- 目标：默认目录与历史目录统一按真实最近使用排序；Welcome 提供独立的一键恢复入口，恢复“上次运行的 session 标签集合（含本地终端，不含整个工作区）”，复用既有会话打开、认证及面板能力。
 
-### D-01：Session 恢复范围，待用户确认
+### 交付记录（2026-09-06，Linux 当前端）
 
-已提出的具体问题：新入口恢复“最近使用的单个 session”，还是“上次应用运行的 session 标签集合，包含本地终端但不包含整个工作区”？截至本稿未收到选择；继续工作不视为选择某一范围。
+TASK-01 至 TASK-06 已实现并通过本轮自动化；TASK-07 的 Linux 原生核心链路已真机执行，Windows/macOS 未验证（无设备，不外推）。汇总：
 
-**推荐 A，本文 session 章节的实施基准：最近成功使用的单个已保存 `SessionConfig`。** 同一配置的多个运行标签只恢复/定位一个；不包含 Welcome 临时启动且无 `sessionId` 的本地终端、未保存 Quick Connect、Code Workspace、Git、设置、聊天或分离窗口集合。已保存 `LocalShell` 可以补充恢复已确认的主机本地 cwd。选择 A 时需连同这些边界确认，避免将“单个 session”误读为任意临时标签。
+| 层 | 结果 |
+|---|---|
+| Rust 内联测试 | `terminal::local_directories` 8/8、`terminal::` 全量 51/51（3 ignored 既有）、`session::resume` 8/8、`session::` 56/56；集成 `welcome_recents_resume` 5/5（真实 SQLite reopen/回滚/CAS） |
+| 前端 Vitest | 全仓 3732/3732 通过（含新增 `useWelcomeDirectories` 7、`useWelcomeSessionResume` 10、`welcomeSessionResume` 7、WelcomePanel 恢复行/目录 V-04 7、TerminalPanel V-03 5、MainLayout 快照收集 3） |
+| 类型/构建 | `pnpm exec tsc --noEmit`、`pnpm build`、`pnpm tauri build --debug --no-bundle` 通过 |
+| browser 用例 | TC-WELCOME-RS-01/02/03/04 全部通过（Vite dev 5001 + Playwright Chromium；TC-auto-F1-6 在基线上同样失败，属既有环境问题，与本功能无关） |
+| native 用例（Linux/WebKitGTK + tauri-driver） | TC-WELCOME-RS-N-01（空态+真实 PTY+快照落库）、N-03（OSC 7 → local-cwd 落库）、N-04（保存 LocalShell 快照恢复定位现有 tab）通过 |
+| 原生跨重启（`scripts/welcome_native_restart.py`） | 同一隔离 app-data：Phase A 保存+打开 LocalShell → collector 提交 saved-session 快照（`welcome_run_snapshot` revision=1）+ OSC cwd 记录（`local-cwd`）；Phase B 重启后入口 available → 点击恢复 → 真实新 PTY 出现、`sessions.last_connected_at` 更新、快照未被破坏。产物在 `qa-ui-auto-report/welcome-recents-session-restore/linux/` 与 `qa-ui-auto-report/run-*`（gitignored） |
+| DB 证据（隔离 app-data 的 taomni.db） | 4 张 welcome 表创建、迁移标记 complete、目录 usage 行带毫秒时间与来源（local-start/local-cwd）、快照单行含白名单 local-terminal 条目（confirmedCwd=/home/zhyhang） |
 
-选择 B 会改变数据结构和验收：必须新增运行批次标识、非空标签快照、条目身份/顺序/活动项、临时本地终端的配置白名单，以及逐项结果和失败重试集。此时需原位修订第 4.2、4.3、5、6、7 节中 session 部分和相关 AC，保留本文 ID，新增条目向后编号；不能将最近 N 个 `SessionConfig` 当成上次运行集合。目录方案与 TASK-01/02 不受影响。
+真机过程中发现并修复的缺陷：`record_local_directory_use` 在 Tokio 运行时内使用 `RwLock::blocking_read` 导致命令 panic、OSC 确认路径静默失败（改为 `read().await`）；重新进入 Welcome 时 `load()` 覆盖进行中/已完成的恢复状态（违反 AC-13，改为同 revision 保结果、操作中不覆盖）；重试时把断连失败 tab 误判为可定位（`findExistingTab` 排除 disconnected，重试替换 operation 拥有的失败 tab）。
 
-本设计不恢复操作系统进程、PTY 输出缓冲、正在执行的命令、传输、数据库事务、运行中的任务或现有网络连接，也不新增整个工作区恢复。不将 `taomni.detached.*` 短期交接数据改成恢复存档。
+明确偏差（记录为后续接续，不冒充完成）：
+- 每协议 readiness 适配未做全：非 terminal 面板（SFTP/RDP/VNC/DB/Mail/ObjectStorage）目前以“tab 存在且存活”给出 view-opened 级结果，connected 级仅 terminal（onSessionReady）覆盖；SQL 子工作区逐项 partial 未实现。
+- 白名单 local-terminal 的快照恢复在原生 N-01/N-04 未直接执行（N-01 验证了快照收集与 spawn 链路）；恢复新 PTY 已由 saved-session LocalShell 原生覆盖。
+- 认证取消（AuthPrompt/Vault onCancel）会解除 waiter，但“取消后晚到成功需释放新建资源”仅有 waiter 侧防重入，未逐面板验证。
+- `git status` 中 `qa-ui-auto-report/` 产物不入库；`coverage-baseline` 的 F25.5 shallow 回归与 release-evidence gate 为 main 既有失败，未动 baseline。
+
+### D-01：Session 恢复范围，已决策为方案 B（2026-09-06）
+
+初始问题：新入口恢复“最近使用的单个 session”，还是“上次应用运行的 session 标签集合，包含本地终端但不包含整个工作区”？**用户于 2026-09-06 确认选择 B**，并确认以下边界。本文第 4.2/4.3/5/6/7 节 session 部分已原位修订为 B 契约；保留原 ID，新增断言向后编号（AC-19、AC-20）。
+
+方案 B 的定义与已确认边界：
+
+- 恢复对象是**上次主窗口运行中、退出（或最后提交）时仍打开的、可恢复的 session 标签集合**：每个条目为已保存 `SessionConfig`（按 4.2.2 能力表判定可恢复性），或满足白名单的临时本地终端（非 WSL、有经 OSC 确认的 native cwd）。不包含 Code Workspace、Git、设置、聊天、LanChat、Browser、placeholder、分离窗口集合，也不恢复整个工作区布局（侧栏、分屏、焦点光标位置等仅按既有全局 UI 偏好加载）。
+- 快照包含：运行批次标识（`batch_id`）、非空有序标签条目（身份 + 顺序）、活动项标识、每条目最小恢复载荷；**不得**把最近 N 个 `SessionConfig` 冒充上次运行集合，`last_connected_at` 语义保持不变。
+- 临时本地终端白名单：`localShell` 启动参数 + 已确认的 native cwd；WSL 终端不进入快照（无法证明目标目录就绪）。该白名单就是临时终端恢复的全部持久化内容；不保存 PTY 输出缓冲、进程、环境变量。
+- 恢复按记录顺序重放既有 opener，恢复完成后将活动项设为记录中的活动条目；逐条目报告成功等级（ready / client-started / view-opened / failed），失败条目不阻断后续条目，且失败重试集允许只重试失败项。
+- 不恢复操作系统进程、PTY 输出缓冲、正在执行的命令、传输、数据库事务、运行中任务或现有网络连接；不将 `taomni.detached.*` 短期交接数据改成恢复存档。
+
+目录方案与 TASK-01/02 不受本次决策影响。
 
 ## 2. 当前实现与证据
 
@@ -45,7 +71,7 @@
 
 ## 3. 可观察验收条件
 
-AC-08 至 AC-18 中涉及范围的断言以 D-01 推荐 A 为前提，确认前不宣称这些需求已被产品接受。全部 AC 尚未实现验收。
+AC-08 至 AC-20 中涉及范围的断言以 D-01 方案 B（2026-09-06 确认）为前提。全部 AC 的验收状态见第 9 节证据表。
 
 | ID | 前置、动作 | 必须观察到的结果 |
 |---|---|---|
@@ -56,17 +82,19 @@ AC-08 至 AC-18 中涉及范围的断言以 D-01 推荐 A 为前提，确认前�
 | AC-05 | 旧 DB 升级、迁移中断、再次初始化、DB 暂忙 | 旧表/时间保留，迁移原子且幂等；暂忙重试或报错并保留上次列表，不假装只剩默认项；成功写入后重开仍为同一顺序。 |
 | AC-06 | 已记录目录被移除、权限收回、盘符/挂载暂离线 | 行保留，展示已知不可用状态和完整路径提示；点击重新检查，可重试；失败不提权、不自动创建目录、不改使用时间。重新可用后可原入口打开。 |
 | AC-07 | 成功改变 cwd A -> B -> A；重复 OSC；SSH/WSL 不可映射 cwd；打开本地目录面板 | 主机本地确认 cwd 的实际变化计时，重复报告不刷时间；远程路径/无法确认主机映射不污染本地目录；面板列目录不被当成启动终端使用。 |
-| AC-08 | 第一次安装、只有未使用配置、旧最近配置、已有新恢复记录 | 无候选时入口禁用且显示“暂无可恢复会话”；旧最近配置可作标明来源的配置候选；新记录优先，绝不把最近 N 条当上次运行集合。 |
-| AC-09 | 最近成功使用保存配置 B，先前 A 更新过名称，随后进入 Welcome | 入口明确显示 B 的名称/协议，一次动作只恢复或定位 B；更新配置、进入 Welcome、关闭到空状态不将 A 或空内容写为上次记录。 |
-| AC-10 | 保存 LocalShell 有确认 cwd；普通 SSH/SFTP/DB 配置可连 | 打开一个对应 tab，使用当前保存配置；LocalShell 回到确认的本地 cwd；连接由现有协议重新建立。SQL 子工作区仅沿用已有持久化，未保存状态不凭空出现。 |
-| AC-11 | 无历史/加载中/恢复中/等待认证/成功/失败/部分成功 | 显示第 4.2.4 节各状态；区分面板已打开、客户端已启动与连接已建立。认证等待不算成功，单 session 不显示多项计数。 |
-| AC-12 | 连续点击、恢复中再点、已有相同配置 tab、同配置其他版本已打开 | 一次活动恢复最多建一个目标；重复操作返回同一 operation；可用现有 tab 被定位且内容不被改写；旧配置实例冲突按明确策略处理。 |
-| AC-13 | 恢复期间切换页面、关闭目标、完成后再进 Welcome | 完成不抢走用户已转移的焦点；留在操作流程内时聚焦目标主要控件；Welcome 历史页签和过滤状态不被恢复器重置；关闭目标释放操作且晚到响应无效。 |
-| AC-14 | 正常退出、确认后异常终止、仅启动后退出、失败恢复后退出 | 最近有效提交保留；启动/退出不写空快照；未提交的最后一次事件可丢失但不得破坏上次提交；失败/取消/部分恢复不覆盖有效记录。 |
-| AC-15 | 目录缺失、配置删除、协议改变、认证失败、存储失败、未知 schema | 原因可见且入口保留重试/编辑/清除所需操作；不自动换成另一个 session，不恢复已删除配置；未知 schema 不覆盖，写失败不谎报记录已保存。 |
-| AC-16 | SSH 认证/主机确认、保险箱锁定、可选子状态失败、运行中任务曾存在 | 沿用现有认证及资源生命周期；不复制明文密钥、一次性密码、进程/连接/任务 ID；部分成功明确缺失状态，旧命令/查询/传输不自动重放。 |
-| AC-17 | 恢复保存 LocalShell 于 A 成功、失败、仅定位已有 tab、明确选择默认 cwd 降级 | 只有新成功使用的真实本地 cwd 推进目录时间；失败和纯定位不推进；降级仅记实际 cwd，A 保持原时间和原恢复记录。 |
-| AC-18 | 三端正常构建与原生执行；中英文、800x600/1280x800、系统缩放 | 既有 Welcome 视觉和导航保持，按钮/长路径无重叠，键盘可达，状态可被辅助技术读取；无 Windows 专属假设泄漏到 macOS/Linux。每端原生结果独立记录。 |
+| AC-08 | 第一次安装、只有未使用配置、旧最近配置、已有新恢复记录 | 无候选时入口禁用且显示“暂无可恢复会话”；旧最近配置可作标明来源的配置候选；新记录优先，绝不把最近 N 条当上次运行集合。**（B）空快照不产生候选**：上次运行无可恢复条目时同 empty。 |
+| AC-09 | 上次运行含保存配置 B（名称后被更新），更早还有 A 的标签，随后进入 Welcome | 入口明确显示快照条目集合（含 B 的名称/协议），一次动作按记录顺序恢复全部条目；更新配置、进入 Welcome、关闭到空状态不将 A 或空内容写为上次记录。**（B）关闭所有可恢复标签后不再写非空快照，旧记录保留。** |
+| AC-10 | 快照含保存 LocalShell 有确认 cwd；普通 SSH/SFTP/DB 配置可连；**（B）含一个满足白名单的临时本地终端** | 按记录顺序各打开对应 tab，使用当前保存配置；LocalShell 回到确认的本地 cwd；临时终端以白名单 shell+cwd 启动；连接由现有协议重新建立。SQL 子工作区仅沿用已有持久化，未保存状态不凭空出现。 |
+| AC-11 | 无历史/加载中/恢复中/等待认证/成功/失败/部分成功 | 显示 4.2.4 各状态；区分条目已打开、客户端已启动与连接已建立；**（B）按条目聚合为成功/部分成功/失败，partial 列出失败条目明细**。认证等待不算成功。 |
+| AC-12 | 连续点击、恢复中再点、已有相同配置 tab、同配置其他版本已打开 | 一次恢复最多为每条目建一个目标；重复操作返回同一 operation；可用现有 tab 被定位且内容不被改写；旧配置实例冲突按明确策略处理。**（B）活动项定位优先，其余条目按 tab 顺序第一个。** |
+| AC-13 | 恢复期间切换页面、关闭目标、完成后再进 Welcome | 完成不抢走用户已转移的焦点；留在操作流程内时聚焦目标主要控件；Welcome 历史页签和过滤状态不被恢复器重置；**（B）恢复中途关闭某条目标，该条目标记 cancelled，其余条目继续**。 |
+| AC-14 | 正常退出、确认后异常终止、仅启动后退出、失败恢复后退出 | 最近有效提交保留；启动/退出不写空快照；未提交的最后一次事件可丢失但不得破坏上次提交；失败/取消/部分恢复不覆盖有效记录。**（B）快照提交跟随运行内标签变化增量提交，异常退出只保证最后已提交批次。** |
+| AC-15 | 目录缺失、配置删除、协议改变、认证失败、存储失败、未知 schema | 原因可见且入口保留重试/编辑/清除所需操作；不自动换成另一个 session，不恢复已删除配置；未知 schema 不覆盖，写失败不谎报记录已保存。**（B）删除配置的条目在恢复中报 missing-session，其余条目不受影响。** |
+| AC-16 | SSH 认证/主机确认、保险箱锁定、可选子状态失败、运行中任务曾存在 | 沿用现有认证及资源生命周期；不复制明文密钥、一次性密码、进程/连接/任务 ID；**（B）认证对逐条目暂停，成功后继续下一待认证条目**；旧命令/查询/传输不自动重放。 |
+| AC-17 | 恢复 LocalShell 于 A 成功、失败、仅定位已有 tab、明确选择默认 cwd 降级 | 只有新成功使用的真实本地 cwd 推进目录时间；失败和纯定位不推进；降级仅记实际 cwd，A 保持原时间和原恢复记录。**（B）临时终端白名单 cwd 启动成功同样推进目录时间。** |
+| AC-18 | 三端正常构建与原生执行；中英文、800x600/1280x800、系统缩放 | 既有 Welcome 视觉和导航保持，按钮/长路径无重叠，键盘可达，状态可被辅助技术读取；无平台专属假设泄漏到其他端。每端原生结果独立记录。 |
+| AC-19 | （B 新增）快照含多条目与活动项；恢复后检查 tab 顺序与活动项、失败条目重试集 | 恢复后 tab 顺序与记录一致，活动项为记录的活动条目；partial 时仅失败条目可单独重试且成功后聚合状态推进；重复恢复不产生重复 tab。 |
+| AC-20 | （B 新增）白名单边界：WSL 终端、无确认 cwd 的本地终端、Code Workspace/设置/聊天标签在运行中存在 | 这些标签不进入快照；恢复结果不含它们；快照仍含同时存在的其他合格条目。 |
 
 ## 4. 推荐方案与共享契约
 
@@ -187,81 +215,98 @@ recordLocalDirectoryUse(input: {
 
 目录列表 load 错误保留最近成功数组并给重试按钮；初次失败显示错误状态，与真正空目录区分。复用现有 active 刷新，同时监听拟新增 `welcome-directories-changed` Tauri 事件 `{revision}`：仅成功事务后广播，Welcome 可见时合并短时间内的刷新，隐藏时置 dirty 再于 active 加载。listener 卸载释放；请求序号防止旧响应覆盖新数组。后端列表返回 revision（建议 IPC 包装为 `{revision, directories}`，TS wrapper 对组件仍返回目录数组并在专用 hook 内消费 revision）；其确切实现以第 4.3 节统一契约为准。
 
-### 4.2 一键恢复最近的单个已保存 Session（D-01 推荐 A）
+### 4.2 一键恢复上次运行的 session 标签集合（D-01 方案 B，2026-09-06 修订）
 
-#### 4.2.1 “上次”的定义与记录
+#### 4.2.1 快照的定义、收集与提交
 
-“上次”是同一 app-data 中，**主窗口最后成功呈现并成为活动项的可恢复保存配置**。包括成功新开、用户再次激活已 ready 的该配置 tab；关闭其他 tab 导致其成为活动项也算一次激活。Welcome、编辑配置、后台输出/自动重连、配置列表排序、关闭所有 tab 不算使用。后台尚未活动的连接完成不抢占记录，待其实际成为活动项才记录。
+“上次”指**同一 app-data 中，主窗口最近一次有效提交的运行批次快照**：批次内是提交时刻仍打开且可恢复的 session 标签条目（已保存配置标签 + 满足白名单的临时本地终端），含顺序与活动项。快照持久化到 `taomni.db` 专用单行表，不借用 `last_connected_at`，不把最近 N 条 `SessionConfig` 当作上次运行集合；既有字段与最近列表行为保持不变。
 
-恢复记录持久化到 `taomni.db` 的专用单行表，不借用 `last_connected_at` 作为新语义真源。既有字段及最近列表行为保留，避免本次顺带改变所有“最近连接”含义。拟新增：
+快照条目（`SnapshotEntry`）：
+
+```ts
+type SnapshotEntry =
+  | { kind: "saved-session"; identity: string; savedSessionId: string;
+      savedSessionType: string; displayName: string }
+  | { kind: "local-terminal"; identity: string; displayName: string;
+      shellId: string; shellArgs: string[]; confirmedCwd: string };
+```
+
+- `saved-session` 条目仅存配置引用与展示摘要（id、类型、名称），不复制 `options_json`、密码、vault 明文、运行句柄或终端内容。`local-terminal` 条目是白名单条目：仅当本地终端拥有经 OSC 7 确认并归一化的 native `cwd`（`normalizeLocalStartCwd` 非 null）且非 WSL（`localShell.id` 不以 `wsl:` 开头、非 `wsl.exe`）时才进入快照；未确认 cwd 的临时终端、SSH 命令终端（`commandTerminal`）、SocksCap PTY 不进入。`identity` 为条目去重键（`saved:<sessionId>` / `local:<tabId>`）。
+- **可恢复类型判定**复用 4.2.2 能力表：`saved-session` 覆盖该表支持恢复的全部已保存类型；Browser、外部 File/URL、未知/placeholder 类型不进入快照。Code Workspace、Git、设置、聊天、LanChat、proxy-test、nettools、sockscap 标签不进入。
+- 收集器在主窗口运行：`addTab`（合格条目）、`removeTab`、`setActiveTab`（合格条目成为活动项）、以及临时终端首次确认 cwd，均触发快照重建。重建后与上次已提交快照做**深比较**（条目集合、顺序、活动项、cwd/名称均一致则跳过），仅在实际变化时提交。关闭所有合格条目不提交空快照；已有非空记录保留为“上次”。
+- 活动项：提交时刻的活动 tab 若是合格条目则记为 `activeIdentity`；活动项不合格（Welcome/设置等）时记 `null`，恢复后保持最后一个恢复条目为活动。
+- 恢复期间的收集抑制：恢复 operation 拥有的新建/定位条目标记 `resumeIncomplete`（内存标志，不持久化为 Tab 快照），这些条目不进入普通快照收集；恢复完全成功后清除标志并纳入正常收集。恢复期间用户成功正常使用的新条目按正常规则进入快照。
+- 恢复触发的 addTab/active/cwd 事件不产生目录或快照写入副作用（除 4.2.5 第 7 条允许的目录推进）。
 
 ```sql
-CREATE TABLE IF NOT EXISTS welcome_session_resume (
+CREATE TABLE IF NOT EXISTS welcome_run_snapshot (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   schema_version INTEGER NOT NULL,
   revision INTEGER NOT NULL,
-  use_sequence INTEGER NOT NULL,
-  saved_session_id TEXT NOT NULL,
-  saved_session_type TEXT NOT NULL,
-  display_name TEXT NOT NULL,
-  used_at_ms INTEGER NOT NULL,
-  local_cwd TEXT
+  run_sequence INTEGER NOT NULL,
+  batch_id TEXT NOT NULL,
+  committed_at_ms INTEGER NOT NULL,
+  entries_json TEXT NOT NULL,
+  active_identity TEXT
 );
 ```
 
-- 只存配置引用、展示摘要、成功使用次序/时间及可选 native local cwd，不复制 options_json、密码、vault 明文、运行句柄、认证回答或终端内容。不添加对 `sessions` 的级联外键。
-- `use_sequence` 在 SQLite 事务中递增，决定“最后一次”以避免同毫秒冲突；usedAtMs 为真实系统时钟。系统时间回拨时使用次序仍可判定上次，不把时间强行改为前值+1。目录保持按最大已记录真实时间排序，时钟回拨不会伪造未来时间，可能暂不置顶，应记录为产品边界。
-- 主窗口 `useWelcomeSessionResume` 拟新增 hook 接收各面板生命周期，并顺序提交使用事件；只保留本次主窗口最新的激活 generation，较旧异步结果不回写。首次 ready 与同一 activation 去重；后台 cwd 变化不算激活。
-- 保存 LocalShell 在 ready 时保存确认 cwd；其仍是当前上次对象时，后续确认 cwd 可仅更新 context/revision，不变更 usedAtMs/useSequence。旧会话的后台 cwd 不抢占上次对象。
-- detach 后主窗口保留上次有效记录；分离窗口不参与竞争写入。回到主窗口 reattach 并激活可记录一次。恢复时若该配置仍在已知 detached 窗口，按冲突策略定位，不凭短 TTL handoff 判断窗口已不存在。
-- 正常退出不清空记录。主窗口每次 qualifying event 立即发起写入，正常退出在现有确认后等待当前持久化队列完成/报告错误，不绕过已有退出清理。异常退出只保证最后已提交事务；未完成的最后事件可能丢失，这是明确边界。只打开 Welcome 又退出不会覆盖旧记录。
+- `entries_json` 是有序 JSON 数组，条目结构即上方 `SnapshotEntry`；`active_identity` 为条目 `identity` 或 null。`run_sequence` 在事务中递增，决定“最后一次”以避免同毫秒冲突；`committed_at_ms` 为真实系统时钟，时钟回拨时批次序仍可判定，不伪造未来时间。每条目可携带 `usedAtMs`（saved-session 条目）用于展示，来源与 `use_sequence` 同批提交。
+- 每次合格变化立即在事务中提交（upsert 单行 + revision 自增 + `welcome_metadata` 中 snapshot revision 推进），提交失败仅记状态栏错误，不影响正在使用的标签；正常退出流程在现有确认后等待挂起的快照写完成，不绕过既有退出清理；异常退出只保证最后已提交批次。
+- 只打开 Welcome 又退出、启动后未产生合格条目：不写任何快照，旧记录保留。
 
-旧数据候选规则：若无新表有效记录且没有用户 clear 标记，读取现有 `sessions.last_connected_at` 中有效正数的最大值，同时间按 `id` 字节序；过滤第 4.2.2 节不支持类型。返回 `source: "legacy-open"`，显示“最近会话配置”，不宣称曾连接成功；不写新使用时间、不借旧记录推导 cwd。候选只在实际成功恢复/使用后晋升为新记录。已存在新记录但配置损坏或删除时保留错误对象，不偷偷回退到别的 session。
+旧数据候选规则（B）：若无新表有效记录且没有用户 clear 标记，读取现有 `sessions.last_connected_at` 中有效正数的最大值（同时间按 `id` 字节序），过滤 4.2.2 不支持类型后构造**单条目**快照（`source: "legacy-open"`），显示“最近会话配置”，不宣称曾连接成功；不写新使用时间、不借旧记录推导 cwd。该候选只在实际成功恢复/使用后晋升为新记录。已存在新记录但其中配置损坏或删除时保留条目错误对象，不偷偷回退到别的 session。
 
-清除入口只删除恢复记录并在 `welcome_metadata` 写 `session_resume_cleared_v1=true`，阻止下一刷新又从旧最近列表复活；下一次新的正常成功使用可重新建立记录并删除 clear 标记。未来未知 schema 返回不兼容状态，不自动 clear、覆盖或降级读取。
+#### 4.2.2 恢复对象与实际能力表（沿用，按条目执行）
 
-#### 4.2.2 恢复对象与实际能力表
-
-| 保存 SessionConfig 类型/状态 | 本次恢复内容与可复用落点 | 成功等级/明确边界 |
+| 快照条目类型/状态 | 本次恢复内容与可复用落点 | 成功等级/明确边界 |
 |---|---|---|
-| native LocalShell | 当前保存的 shell/args、terminal profile，加本设计新增且已确认 native cwd；`openLocalTab` -> TerminalPanel | `ready` 为 PTY 已创建；shell RC 自行改变 cwd 后以新 OSC 为准。不是恢复旧 shell 进程、环境变量、历史输出、未完成命令。 |
-| WSL 形式 LocalShell | 现有 session options 中 distro/argv，经原 opener 启动 | 客户端已启动等级；不保存/注入无法映射的 Linux cwd，不宣称 WSL 内 shell 已就绪。缺发行版显示现有失败，不能换 distro。 |
-| SSH | 当前主机/认证/网络/主题配置，复用认证队列与 TerminalPanel | SSH 建连成功等级。远程 cwd 本次不新增持久化，不自动重放 cd；既有显式配置的 startup command/端口转发仍会按普通连接执行，入口 tooltip 标明“重新连接”，不重放临时命令。 |
-| SFTP | 当前保存连接，FileBrowser/useSftpStore.attach | attach 成功；浏览初始目录失败为可选状态部分失败；不承诺上次 remote/local 浏览位置、传输队列或进度。 |
-| RDP / VNC | 当前连接配置，现有 RdpPanel/VncPanel 与 stores | 收到实际 connected 状态；不绕过证书/认证。分辨率等使用当前配置，远端 OS 是否保留旧登录态由远端决定。 |
-| SQL 引擎 / Redis / HBaseShell | `DbClientTab` / `RedisClientTab` / `HBaseShellTab` 原连接入口；继续模块自有查询工作区加载 | 真实 connect 成功。SQL 持久化子标签/活动面板按现有模块能力恢复，不能替代整个应用 tab 布局；失败加载不报告完全成功，不重执行 SQL。 |
-| S3 / AzureBlob | ObjectStorageBrowser/useObjectStorageStore.attach，原凭据引用 | attach 成功；bucket/list 权限失败可部分成功，不重放上传下载。 |
-| File（嵌入的本地目录） | 当前 session.host 指定目录，LocalFileBrowserPanel/attachLocalOnly | 首次本地目录读取成功；不把上次面板导航位置作为新增持久化，不修改目录终端使用时间。 |
-| Mail | 当前账户设置与已有本地缓存，MailClientTab 原 cache/load/sync 流程 | 面板及缓存成功加载即可“会话已打开”；同步按原 sync.onOpen 配置进行并单独展示失败，不强制网络同步/发送邮件，不声称登录成功或恢复旧邮件子标签。 |
-| Proxy | 原测试面板及保存配置 | 配置面板呈现成功；不自动执行代理测试，也不宣称远端连接成功。 |
-| FTP/Telnet/Rlogin/Mosh/Serial 命令客户端 | 原 `openCommandTerminalTab` 及命令 PTY | 客户端启动成功等级，协议登录/设备握手由客户端负责，不能把 spawn 报告为协议恢复成功。 |
-| Browser、外部 File/URL、未知/placeholder 类型；无保存 id 的临时 tab | 本入口不可恢复，不进入新记录候选 | 可继续使用现有普通打开入口。不能为了恢复强行接管外部程序/创建保存配置。 |
+| saved-session: native LocalShell | 当前保存的 shell/args、terminal profile，加快照保存且已确认 native cwd；`openLocalTab` -> TerminalPanel | `ready` 为 PTY 已创建；shell RC 自行改变 cwd 后以新 OSC 为准。不是恢复旧 shell 进程、环境变量、历史输出。 |
+| saved-session: WSL 形式 LocalShell | 现有 session options 中 distro/argv，经原 opener 启动 | 客户端已启动等级；不保存/注入无法映射的 Linux cwd。缺发行版显示现有失败，不能换 distro。 |
+| saved-session: SSH | 当前主机/认证/网络/主题配置，复用认证队列与 TerminalPanel | SSH 建连成功等级。远程 cwd 不持久化；既有显式 startup command 按普通连接执行，入口 tooltip 标明“重新连接”。 |
+| saved-session: SFTP | 当前保存连接，FileBrowser/useSftpStore.attach | attach 成功；初始目录失败为部分失败。 |
+| saved-session: RDP / VNC | 现有 RdpPanel/VncPanel 与 stores | 收到实际 connected 状态；不绕过证书/认证。 |
+| saved-session: SQL / Redis / HBaseShell | `DbClientTab` / `RedisClientTab` / `HBaseShellTab` 原连接入口 | 真实 connect 成功；SQL 持久化子标签按现有模块能力恢复。 |
+| saved-session: S3 / AzureBlob | ObjectStorageBrowser/useObjectStorageStore.attach | attach 成功；bucket/list 权限失败可部分成功。 |
+| saved-session: File（嵌入本地目录） | `session.host` 指定目录，LocalFileBrowserPanel/attachLocalOnly | 首次本地目录读取成功；不改目录终端使用时间。 |
+| saved-session: Mail | 账户设置与本地缓存，MailClientTab 原 cache/load 流程 | 面板及缓存成功加载即“已打开”；同步失败单独展示。 |
+| saved-session: Proxy | 原测试面板及保存配置 | 配置面板呈现成功；不自动执行测试。 |
+| saved-session: FTP/Telnet/Rlogin/Mosh/Serial | 原 `openCommandTerminalTab` 及命令 PTY | 客户端启动成功等级。 |
+| local-terminal（白名单临时终端） | `localShell`（shell id/args）+ 快照 `confirmedCwd` 经 `openLocalTab` 启动新 PTY | `ready` 为 PTY 已创建；不恢复旧进程/输出缓冲；启动失败不重写白名单 cwd。 |
+| Browser、外部 File/URL、未知/placeholder、无保存 id 的临时 tab、Code Workspace/Git/设置/聊天 | 不可恢复，不进入快照 | 可继续使用现有普通打开入口。 |
 
-标签标题默认由当前保存名称及既有自动标题规则生成；不承诺手工重命名、标签顺序、分屏成员、侧栏展开、主面板布局、焦点光标位置的快照。既有全局 UI 偏好照常加载。恢复目标成为活动 tab 是本设计新增导航动作，不代表旧活动项已持久化。
+标签标题默认由当前保存名称及既有自动标题规则生成；不承诺手工重命名、标签顺序细节（恢复后新 tab 按记录顺序追加）、分屏成员、侧栏展开、焦点光标位置的快照。既有全局 UI 偏好照常加载。
 
 #### 4.2.3 恢复记录、打开请求与结果契约
 
-新增 `src/lib/welcomeSessionResume.ts`，保持输入与结果使用结构化类型；新增 `src/hooks/useWelcomeSessionResume.ts` 管理主窗口收集和运行中的 operation，Welcome 仅渲染状态。
+新增 `src/lib/welcomeSessionResume.ts`（类型与 eligible 判定）；新增 `src/hooks/useWelcomeSessionResume.ts` 管理快照收集协调、恢复 operation 与状态机，Welcome 仅渲染状态。
 
 ```ts
-type ResumeRecord = {
+type RunSnapshotRecord = {
   schemaVersion: 1;
   revision: number;
-  source: "confirmed-use" | "legacy-open";
-  savedSessionId: string;
-  savedSessionType: string;
-  displayName: string;
-  usedAtMs: number | null;
-  useSequence: number | null;
-  localCwd: string | null;
+  runSequence: number;
+  batchId: string;
+  committedAtMs: number;
+  entries: SnapshotEntry[];
+  activeIdentity: string | null;
 };
 type ResumeViewState =
   | { state: "loading" | "empty" }
-  | { state: "available"; record: ResumeRecord }
-  | { state: "restoring" | "awaiting-auth"; operationId: string; record: ResumeRecord }
-  | { state: "succeeded" | "partial" | "failed"; record: ResumeRecord;
-      operationId: string; tabId: string | null; issues: ResumeIssue[] }
+  | { state: "available"; record: RunSnapshotRecord }
+  | { state: "restoring" | "awaiting-auth"; operationId: string; record: RunSnapshotRecord }
+  | { state: "succeeded" | "partial" | "failed"; record: RunSnapshotRecord;
+      operationId: string; outcomes: EntryOutcome[] }
   | { state: "unavailable"; reason: "storage" | "schema"; message: string };
+type EntryOutcome = {
+  identity: string;
+  kind: SnapshotEntry["kind"];
+  displayName: string;
+  status: "ready" | "partial" | "failed" | "cancelled";
+  readiness: "connected" | "client-started" | "view-opened" | null;
+  tabId: string | null;
+  issue: ResumeIssue | null;
+};
 type ResumeIssue = {
   code: "missing-session" | "changed-type" | "missing-directory" |
     "permission-denied" | "unavailable-directory" | "authentication" |
@@ -269,53 +314,46 @@ type ResumeIssue = {
     "existing-config-conflict" | "unsupported";
   message: string;
 };
-type SessionOpenOutcome = {
+type RestoreOperationOutcome = {
   operationId: string;
-  tabId: string | null;
-  status: "ready" | "partial" | "failed" | "cancelled";
-  readiness: "connected" | "client-started" | "view-opened" | null;
-  issues: ResumeIssue[];
+  status: "succeeded" | "partial" | "failed" | "cancelled";
+  outcomes: EntryOutcome[];
 };
 ```
 
-`ResumeRecord` 为只读快照；一次操作锁定 record.revision 和 savedSessionId。点击时 `getSession(id)` 重新读取当前配置而非使用 Welcome 传入的陈旧 SessionConfig；按 `saved_session_type` 校验。已改变 endpoint/主题/认证配置时以当前已保存配置为准，不恢复旧密码；协议类型改变则报告 changed-type，并提供原会话编辑/普通打开动作，由新的正常成功使用重建记录。
+`RunSnapshotRecord` 为只读快照；一次操作锁定 `record.revision` 与 entries。点击时对每个 saved-session 条目 `getSession(id)` 重新读取当前配置，按 `saved_session_type` 校验；协议类型改变报 `changed-type`，配置删除报 `missing-session`——该条目失败，其余条目继续。
 
-扩展 MainLayout 连接队列条目为 `{session, requestId, origin, resumeContext?}`，origin 为 `normal` / `welcome-resume`。复用 `openQueuedSession`、`continueConnectQueue`、`pendingAuth`、`queueVaultUnlock`、`handleAuthSubmit`，给它们传递 requestId；不能让密码弹窗取消丢失操作归属。`opened` 保留为“已分发”，最终结果必须由目标面板回调/状态适配器完成，不以 addTab、markConnected 或按钮消失推断。
+MainLayout 连接队列条目扩展为 `{session, requestId, origin, entryIdentity?, resumeContext?}`，origin 为 `normal` / `welcome-resume`。复用 `openQueuedSession`、`continueConnectQueue`、`pendingAuth`、`queueVaultUnlock`、`handleAuthSubmit` 并传递 requestId；密码弹窗取消不得丢失操作归属。`opened` 保留为“已分发”；最终结果由目标面板回调/状态适配器完成，不以 addTab/markConnected 推断。
 
-各 opener 返回实际 tabId 或结构化即时失败，使用 UUID 防止同毫秒 ID 碰撞。拟新增 `onOpenOutcome` 可选回调接在对应面板真正完成/失败位置；老普通调用者无需强制处理恢复结果。TerminalPanel 复用 `handleConnected` / `handleConnectFailure`；SFTP/object storage 必须检查 attach 后 pane error，不能仅以 `attached` 掩盖部分失败；Mail 取缓存加载结果而非后台同步触发；数据库同时收集 connect 与已有子工作区 load 状态。取消/销毁/新连接 generation 后旧回调无效。
+各 opener 返回实际 tabId 或结构化即时失败，使用 UUID。拟新增 `onOpenOutcome` 可选回调接在对应面板真正完成/失败位置；普通调用者无需处理。TerminalPanel 复用 `handleConnected`/`handleConnectFailure`（新增 `onSessionLaunchFailed`）；SFTP/object storage 检查 attach 后 pane error；数据库收集 connect 与子工作区 load 状态。取消/销毁/新 generation 后旧回调无效。
 
 #### 4.2.4 Welcome 入口、状态与焦点
 
-在品牌标题区之后、既有启动入口之前增加紧凑操作行，不增加大型 ActionCard，不改变三个历史 tab 的顺序/默认选择。主按钮使用 lucide `RotateCcw` + “恢复上次会话 / Restore last session”；旁边显示名称和协议，长文字可截断并带完整 tooltip。右侧复用小图标按钮模式提供清除记录，清除复用 ConfirmDialog。
+在品牌标题区之后、既有启动入口之前增加紧凑操作行，不增加大型 ActionCard。主按钮 lucide `RotateCcw` + “恢复上次会话 / Restore last session”；旁显示快照摘要（条目数 + 类型徽标，长名称截断带 tooltip）。右侧小图标提供清除记录（ConfirmDialog 确认）。
 
 | 状态 | 可见内容/操作 | 下一步与焦点 |
 |---|---|---|
-| loading | 恢复按钮禁用，固定宽度 spinner，状态“正在读取” | 不抢初始页面焦点。 |
+| loading | 按钮禁用，固定宽度 spinner，“正在读取” | 不抢初始页面焦点。 |
 | empty | 禁用按钮；“暂无可恢复会话” | 保留新会话与本地终端原入口。 |
-| available | 可点击恢复，显示明确对象；legacy 候选显示“最近会话配置” | Enter/Space 和点击走同一路径，无新增全局快捷键。 |
-| restoring | 按钮禁用并 aria-busy；显示目标名称；可取消当前恢复 | 立即切到目标连接面板供认证/错误反馈，Welcome state 留在 hook。 |
-| awaiting-auth | “等待认证”，沿用密码、保险箱、MFA/证书 UI | 焦点由现有认证组件接管；取消返回可重试状态，记录保留。 |
-| succeeded | 按 readiness 显示“已连接”“客户端已启动”或“会话已打开” | 若用户仍在本操作目标/Welcome，聚焦终端输入、目录列表或目标面板首个主控件；之后可再次进 Welcome 并定位现有目标。 |
-| failed | 行内错误摘要和 lucide 重试按钮；适用时显示编辑/清除操作 | 预检失败留 Welcome 并焦点落重试；已建失败 tab 可保留诊断，重试复用/替换此操作拥有的失败 tab。 |
-| partial | “会话已打开，部分状态未恢复”及具体原因；“重试缺失状态”或明确降级动作 | 只重试缺失子状态，不重连成功的主连接；不覆盖有效恢复记录。 |
-| unavailable | 读取存储失败可重试；未知 schema 显示版本不兼容 | 不装作 empty，不在此状态自动写空值/迁移。 |
+| available | 可点击恢复；显示条目摘要；“最近会话配置”来源标明（若为 legacy 候选） | Enter/Space 与点击同一路径。 |
+| restoring | 禁用 + aria-busy；显示目标摘要；可取消 | 逐步分发条目；认证出现时进入 awaiting-auth。 |
+| awaiting-auth | “等待认证 (i/n)”，沿用密码/保险箱/MFA UI | 取消当前条目认证后该条目 cancelled，队列继续下一待认证条目。 |
+| succeeded | “已恢复 N 个会话” | 焦点落活动项目标主要控件（用户仍在本流程内时）。 |
+| partial | “部分会话未恢复” + 失败条目明细行；“重试失败项” | 仅重试失败/取消条目，不重连已成功条目。 |
+| failed | 全部失败时行内错误摘要 + 重试 | 不覆盖有效快照。 |
+| unavailable | 存储失败可重试；未知 schema 显示版本不兼容 | 不装作 empty，不自动写空值。 |
 
-单会话方案没有“恢复 3/5 个会话”状态。partial 用于主连接/面板已可用但既有 SQL 子状态加载失败等场景；认证尚未完成不是 partial。保存 native cwd 不可访问时先失败，允许用户明确点“使用默认目录打开”，成功后标记 partial 并保留原恢复记录；不能默认降级。已知实际默认 cwd 可记录目录使用，不能把缺失的原 cwd 提前。
-
-恢复过程中用户切走，完成/失败只更新 operation 状态和 status bar，不把活动 tab/焦点拉回。取消不会影响其他既有 tab；晚到新建连接必须通过该面板已有 disconnect/close 路径释放。取消必须停止队列后续分发并解除本 operation 的认证等待。连接 IPC 暂不能中断时进入“取消处理中”，保持同 target 去重占用直到回调释放资源；不伪称已取消而允许并发新建。普通网络超时沿用协议配置，无统一超时强杀。纯等待认证不设置擅自提交/跳过的超时。
-
-状态用 `aria-live="polite"`，失败用 alert；保持按钮高度 32px，icon 16px，使用现有 taomni-btn/颜色变量，无新说明性教程文本或快捷键说明。最小桌面 800x600、多语言和系统缩放验证不依赖浏览器截图推断。
+恢复过程中用户切走，完成/失败只更新 operation 状态和 status bar，不拉回焦点。取消停止后续分发并解除本 operation 认证等待；已创建条目保留，取消不关闭它们（用户可按原 UI 关闭）。连接 IPC 暂不能中断时进入“取消处理中”，保持去重占用直到回调释放。状态用 `aria-live="polite"`，失败用 alert；按钮高 32px、icon 16px、现有 taomni-btn/颜色变量。
 
 #### 4.2.5 重复、冲突、保留与两项功能联动
 
-1. 同一主窗口全局只允许一个 Welcome restore operation。重复点击返回其 promise/operationId；与普通连接队列按 savedSessionId 进行 admission 去重，不能只对一次传入数组去重。普通手动“再开一个”在无恢复占用时保持原能力。
-2. 查找当前相同 savedSessionId + 相同主视图类型的 live tab；优先当前活动的匹配项，否则按 appStore.tabs 顺序第一个。ready 时定位，connecting/awaiting-auth 时加入同一结果等待。失败时优先调用该面板现有reconnect；若无reconnect（例如首次native LocalShell启动失败），仅在原失败tab属于本operation时，等待其资源关闭后移除并以新UUID建立替代tab。同配置的普通失败tab不自动删除，定位它并给出按原UI关闭/重试的操作。不得重连其他可用匹配项。
-3. 相同 id 的现有 tab 若用的是不同当前配置 fingerprint，返回 existing-config-conflict 并提供“定位已打开会话”；这不算成功恢复当前配置。默认不改写 live options、不关现有连接；用户可按原 UI 关闭/重新打开。不以密码明文构造或持久化 fingerprint，比较保存配置的非敏感身份字段及会话修订标记。
-4. 与当前 detached 窗口冲突时复用 MainLayout 已有 detach 跟踪，在持有/已确认该窗口时聚焦该窗口；无法确认 owner 则报告冲突，提供 reattach/普通打开路径，不能因 handoff TTL 过期就新建重复连接。本功能不新增跨多个独立主进程的会话唯一性协议；同 app-data 多进程写入由 DB 事务保证完整，最后提交 wins，这不是上次运行集合语义。
-5. 操作锁定旧记录；恢复触发的 addTab/active/ready/cwd 事件暂不进入普通上次记录收集。完全成功才提交同一目标的新使用；partial/failed/cancelled 不提交。正常新会话在此期间被用户成功使用，则它可成为新上次记录；旧恢复完成用 expectedRevision 比较，不能覆盖已经更晚的正常使用。
-   此抑制从分发前登记，不能等ready后补标记；partial目标保留内存中的`resumeIncomplete`标志，即使再次激活也不能借普通active收集覆盖原有效记录。完整重试成功后清除此标志，或用户明确通过原普通入口重新打开后按新正常使用采集。该标志不持久化为Tab快照。
-6. 重试始终用用户选中的失败目标和当前保存配置重新校验，保留 record 副本；若上次对象已变化，Welcome 主入口显示新对象，旧操作的“重试”仍指旧目标，不自动混用。配置删除/目录离线不设置自动 TTL 淘汰；仅显式清除或新正常成功使用取代记录。
-7. native LocalShell 成功新开和实际 cwd 变化由第 4.1 节更新目录时间；上次 session 记录提交另行执行。纯定位 ready tab 可更新上次 session 的 usedAtMs，但不改目录时间；失败记录写入不会导致再次 spawn。恢复降级产生的真实目录使用可以保存，原有效 session resume context 仍保留。
+1. 同一主窗口全局只允许一个 Welcome restore operation；重复点击返回同一 operationId。与普通连接队列按条目去重：条目已有 live tab（同 savedSessionId + 同主视图类型 / 白名单同 cwd 本地终端）时定位而不新建。优先当前活动匹配项，否则按 tabs 顺序第一个；ready 定位，connecting/awaiting-auth 加入同一结果等待；失败条目优先该面板现有 reconnect，若无 reconnect 且原失败 tab 属于本 operation，则等资源关闭后移除并以新 UUID 重建。
+2. 相同 id 的现有 tab 若用的是不同当前配置 fingerprint，返回 existing-config-conflict（该条目 issue），提供“定位已打开会话”；不改写 live options、不关现有连接。fingerprint 只比较非敏感身份字段与会话修订标记，不含密码明文。
+3. 分离窗口冲突：复用 MainLayout 已有 detach 跟踪，持有/已确认该窗口时聚焦该窗口（该条目记 view-opened）；无法确认 owner 则报冲突。不新增跨主进程唯一性协议；同 app-data 多进程写入最后提交 wins。
+4. 操作锁定旧快照；恢复触发的 addTab/active/ready 事件暂不进入普通快照收集。完全成功后提交同一批条目的新快照（清除 `resumeIncomplete`）；partial/failed/cancelled 不提交。恢复期间用户正常成功使用的新条目按正常规则进入快照；恢复完成用 expectedRevision 比较，不覆盖更晚的正常提交。
+5. 重试（整体或仅失败项）始终按当前保存配置重新校验，保留 record 副本；若快照已变化，Welcome 主入口显示新对象，旧操作重试仍指旧目标。
+6. native LocalShell（含白名单临时终端）成功新开与实际 cwd 变化由第 4.1 节更新目录时间；纯定位 ready tab 不推进目录时间；失败记录写入不会导致再次 spawn。恢复降级产生的真实目录使用可保存，原快照 context 保留。
+7. 清除入口原子删除快照并在 `welcome_metadata` 写 `session_resume_cleared_v1=true`，阻止下一刷新复活；下一次正常成功使用可重新建立并删除标记。未知 schema 返回不兼容状态，不自动 clear/覆盖/降级。
 
 ### 4.3 IPC 与存储统一约定
 
@@ -325,10 +363,9 @@ type SessionOpenOutcome = {
 |---|---|---|
 | `list_common_local_directories`（扩展 wire 返回） | 无 | `{revision: number, directories: LocalDirectoryShortcut[]}`；前端统一 wrapper/hook 接受旧数组作为兼容输入。目录 revision 在持久化事务内递增，不以系统时间代替。 |
 | `record_local_directory_use` / `recordLocalDirectoryUse`（新增） | `{backendSessionId,path}` | `{changed,directory}`；只接受 live native-local cwd 确认；成功事务广播目录 revision。 |
-| `get_welcome_session_resume` / `getWelcomeSessionResume`（新增） | 无 | `{record: ResumeRecord|null, issue: ResumeIssue|null}`；未知 schema/存储失败为结构化错误，不能落为 null。删除配置可返回 record + missing-session。 |
-| `record_welcome_session_use` / `recordWelcomeSessionUse`（新增） | `{sessionId,localCwd?:string|null,expectedRevision?:number}` | `{record,applied:boolean}`；重新查保存配置；仅经过主窗口成功收集器调用。expectedRevision 不匹配时不覆盖，返回当前记录。系统时间和 sequence 由 Rust 产生。 |
-| `update_welcome_session_context`（新增） | `{sessionId,localCwd,expectedRevision}` | 同目标且 revision 匹配才更新 cwd/revision，usedAtMs/sequence 不变；不接受远程/WSL cwd 冒充 native cwd。 |
-| `clear_welcome_session_resume` / `clearWelcomeSessionResume`（新增） | `{expectedRevision}` | 原子删除+clear 标记；revision 冲突返回具体错误，防止删除新的记录。 |
+| `get_welcome_run_snapshot` / `getWelcomeRunSnapshot`（新增） | 无 | `{record: RunSnapshotRecord\|null, legacyCandidate: SnapshotEntry\|null, issue: ResumeIssue\|null}`；未知 schema/存储失败为结构化错误，不能落为 null。删除配置的条目保留在 record 中由前端预检报 missing-session。 |
+| `commit_welcome_run_snapshot` / `commitWelcomeRunSnapshot`（新增） | `{batchId, entries, activeIdentity, expectedRevision?, restored?:boolean}` | `{record,applied:boolean}`；条目经 Rust 侧基本校验（无空 entries、类型合法），时间/sequence/revision 由 Rust 产生；expectedRevision 不匹配时返回当前记录不覆盖。恢复成功提交 restored=true 并同时清 clear 标记。 |
+| `clear_welcome_run_snapshot` / `clearWelcomeRunSnapshot`（新增） | `{expectedRevision}` | 原子删除+clear 标记；revision 冲突返回具体错误，防止删除新的记录。 |
 | `create_local_terminal`（扩展成功 DTO） | 既有参数 | 原 `{sessionId,shellId}` 加 `directoryUseWarning: string|null`；失败仍由启动路径报告，历史写失败不导致重复创建。 |
 
 目录 DTO/返回 envelope 的消费者已定位于 Welcome、stub 与测试；TASK-02 统一适配，不能让前端把 envelope 误当空数组。`welcome_metadata` 中分别存 directory revision、session clear 标记与 migration 状态，职责不相互覆盖；session resume 被清除后其 revision 仍在 metadata 中单调推进，防止清除再建立造成 ABA 冲突。
@@ -351,9 +388,9 @@ SQLite 访问复用现有 `AppState.db`，事务写入完整记录；不得在�
 | `src/hooks/useWelcomeDirectories.ts`（新增）、`src/components/WelcomePanel.tsx` | 目录加载/错误/事件/过期请求；目录行状态、实际时间、稳定 ID、重试，保留过滤与页签 | TASK-02 |
 | `src/components/terminal/TerminalPanel.tsx`、`src/lib/terminalCwd.ts` | 成功/OSC 的结构化本地使用报告、严格 cwd 边界、WSL/MSYS区分、错误提示；TASK-04 后追加可选 lifecycle outcome | TASK-02 -> TASK-04 |
 | `src/layouts/MainLayout.tsx`：`openLocalTab`、TerminalPanel回调接线 | TASK-02先提供独立LocalLaunchOutcome及关闭pending清理；TASK-04复用并扩展到保存session队列，不能使目录工作等待D-01 | TASK-02 -> TASK-04 |
-| `src-tauri/src/session/resume.rs`（新增）、`src-tauri/src/session/mod.rs` | resume DTO、schema、候选读取、record/context/clear、revision CAS；复用 db::get_session，未知协议不得走 SessionType 的默认 SSH 回退 | TASK-03 |
-| `src/lib/welcomeSessionResume.ts`（新增） | eligible session 判定、类型映射、operation 与 outcome 类型、非敏感配置身份比较；类型与 Rust 契约对齐 | TASK-03 -> TASK-04 |
-| `src/layouts/MainLayout.tsx`、`src/types/index.ts` | 队列 requestId/origin、opener 返回结果、认证取消/继续传播、tab outcome/版本标记、native cwd context 传递；不持久化整个 Tab | TASK-04 |
+| `src-tauri/src/session/resume.rs`（新增）、`src-tauri/src/session/mod.rs` | run snapshot DTO、schema、legacy 候选、commit/clear、revision CAS、schema 校验；未知协议不得走 SessionType 的默认 SSH 回退 | TASK-03 |
+| `src/lib/welcomeSessionResume.ts`（新增） | SnapshotEntry/RunSnapshotRecord 类型、eligible 判定、operation 与 outcome 类型、非敏感配置身份比较；类型与 Rust 契约对齐 | TASK-03 -> TASK-04 |
+| `src/layouts/MainLayout.tsx`、`src/types/index.ts` | 队列 requestId/origin、opener 返回结果、认证取消/继续传播、tab outcome/版本标记、快照收集（合格条目/活动项/抑制）；不持久化整个 Tab | TASK-04 -> TASK-05 |
 | `src/components/filebrowser/FileBrowser.tsx`、`LocalFileBrowserPanel.tsx`；`src/components/database/DbClientTab.tsx`、`RedisClientTab.tsx`、`HBaseShellTab.tsx` | 从 attach/connect/本地列目录/已有查询工作区加载路径发出 ready/partial/error；不能只看通用 attached/挂载状态 | TASK-04 |
 | `src/components/rdp/RdpPanel.tsx`、`src/components/vnc/VncPanel.tsx`、`src/components/objectstorage/ObjectStorageBrowser.tsx`、`src/components/mail/MailClientTab.tsx` | 适配 connected、attach、缓存 load 和失败结果；复用 `rdpStore/vncStore/sftpStore/objectStorageStore` 已有事实，原则上不改 store 的连接协议 | TASK-04 |
 | `src/hooks/useWelcomeSessionResume.ts`（新增） | 主窗口 ready+active 收集、单操作去重、revision 冲突、恢复抑制写回、焦点归属、重试/取消/清除、退出队列 flush | TASK-05 |
@@ -384,33 +421,33 @@ SQLite 访问复用现有 `AppState.db`，事务写入完整记录；不得在�
 - 关联验收：AC-01 至 AC-07、AC-17、AC-18。验证：V-03、V-04，与 TASK-06 的 V-08 和 TASK-07 的 V-10。
 - 完成条件：验证真实目录顺序而非只检查调用次数；重复 OSC、失败请求、hidden/active 刷新有行为断言；旧 Welcome 筛选和启动选项测试继续通过。
 
-### TASK-03：上次单 Session 存储与引用契约
+### TASK-03：运行批次快照存储与引用契约（B）
 
-- 状态：待执行；**实施前依赖 D-01 选择 A**。独立源码阅读和测试数据准备可先进行；选择 B 需先修订 schema。
+- 状态：已随 D-01=B 确认解除阻塞。独立源码阅读和测试数据准备可先进行。
 - 文件职责：session/resume.rs、session/mod.rs、session/db.rs、lib.rs 注册、ipc.ts session 部分、welcomeSessionResume.ts 的数据类型/eligible 判断及同位测试。共享 lib.rs/db.rs/ipc.ts 在目录任务变更之上追加。
-- 实施要点：实现单行记录、legacy 候选、clear tombstone、未知版本保护、revision/CAS、删除配置与变更协议错误；原 `last_connected_at` 不改语义。localCwd 只接受 native LocalShell 合法绝对路径，当前配置/协议重新校验。时间和 sequence 由 Rust 决定。
-- 关联验收：AC-08 至 AC-10、AC-14 至 AC-17。验证：V-05、V-09。
-- 完成条件：legacy 不制造成功时间；REPLACE 保存 session 不删除 resume；clear 后不复活；CAS 与未知 schema 不能破坏有效记录；输出与前端类型完全匹配。
+- 实施要点：实现单行批次快照（entries_json 有序条目、batch_id、active_identity）、legacy 单条目候选、clear tombstone、未知版本保护、revision/CAS、删除配置条目错误；原 `last_connected_at` 不改语义。entries 经 Rust 基本校验，时间和 sequence 由 Rust 决定。
+- 关联验收：AC-08、AC-09、AC-14、AC-15、AC-16、AC-19、AC-20。验证：V-05、V-09。
+- 完成条件：legacy 不制造成功时间；REPLACE 保存 session 不删除 snapshot；clear 后不复活；CAS 与未知 schema 不能破坏有效记录；输出与前端类型完全匹配。
 
-### TASK-04：复用连接队列并提供真实打开结果
+### TASK-04：复用连接队列并提供真实打开结果（按条目重放）
 
-- 状态：待执行；依赖 D-01=A、TASK-03 类型；TerminalPanel 修改在 TASK-02 之后集成。
+- 状态：待执行；依赖 TASK-03 类型；TerminalPanel 修改在 TASK-02 之后集成。
 - 文件职责：MainLayout 队列/所有 opener、types/index、各协议面板的可选 onOpenOutcome、welcomeSessionResume 的适配类型、MainLayout 和面板同位测试。
-- 实施要点：建立 requestId -> tabId -> lifecycle generation 关联，密码/保险箱/MFA/证书与取消传播不丢失归属；opener 使用 UUID。逐一落实第 4.2.2 节的成功等级，明确部分失败。normal 队列可忽略最终 outcome，但不能回归已有认证串行行为。
-- 关联验收：AC-09 至 AC-13、AC-15 至 AC-18。验证：V-06、V-12；需要的真实协议依赖在 V-11 单列。
+- 实施要点：建立 requestId -> tabId -> lifecycle generation 关联，密码/保险箱/MFA/证书与取消传播不丢失归属；opener 使用 UUID。按 4.2.2 能力表逐条目落实成功等级，明确部分失败。normal 队列可忽略最终 outcome，但不能回归已有认证串行行为。快照收集（合格条目、活动项、恢复抑制）在本任务接线。
+- 关联验收：AC-09 至 AC-13、AC-15、AC-16、AC-19、AC-20。验证：V-06、V-12；需要的真实协议依赖在 V-11 单列。
 - 完成条件：覆盖所有宣称 eligible 的类型；无泛化“tab 存在即 ready”；没有为恢复添加自动重跑任务/SQL/传输；取消后新 runtime 释放，既有 live tab 不受影响。面板输出结果必须有可观察用户结果断言。
 
-### TASK-05：恢复协调器与 Welcome 入口
+### TASK-05：恢复协调器与 Welcome 入口（批次重放）
 
-- 状态：待执行；依赖 D-01=A、TASK-03/04；与 TASK-02 目录功能集成。
+- 状态：待执行；依赖 TASK-03/04；与 TASK-02 目录功能集成。
 - 文件职责：useWelcomeSessionResume、WelcomePanel 恢复部分、MainLayout hook 接线/退出 flush、locales、browser stub resume 部分、hook 和组件测试。
-- 实施要点：单入口/单 operation、活动 ready 采集、恢复暂缓写回、部分/失败保留、已有 tab/窗口冲突、当前配置读取、revision 条件提交、局部重试与焦点归属。新普通成功使用不能被旧恢复结果覆盖。默认 cwd 降级必须由用户单独操作触发。
-- 关联验收：AC-08 至 AC-18。验证：V-07、V-08、V-10、V-11。
+- 实施要点：单入口/单 operation、按记录顺序逐条目重放、活动项恢复、逐条目 outcome 聚合、恢复暂缓写回、已有 tab/窗口冲突、当前配置读取、revision 条件提交、失败项重试与焦点归属。快照收集去重/抑制由 hook 提供，MainLayout 采集。新正常使用不能被旧恢复结果覆盖。
+- 关联验收：AC-08 至 AC-20。验证：V-07、V-08、V-10、V-11。
 - 完成条件：全状态用户流程可观察；再次进入 Welcome 不丢 operation 或改过滤；普通启动与恢复相同目录遵守同一时间规则；恢复记录 write error 不重复打开。
 
 ### TASK-06：集成测试与 UI 自动化交接
 
-- 状态：待执行；目录测试可随 TASK-01/02 开始；session 测试实现依赖 D-01=A、TASK-03 至 TASK-05。
+- 状态：待执行；目录测试可随 TASK-01/02 开始；session 测试实现依赖 TASK-03 至 TASK-05。
 - 文件职责：Rust welcome 集成模块；新的 TC-WELCOME-RS cases/fixture；F1.6 controls、自动生成 testid catalog；必要的相关回归用例修改限本功能。
 - 实施要点：真实 SQLite reopen/rollback、真实路径测试；browser 使用 VFS File session 验证一键打开/去重，用现有“不支持本地 PTY”验证失败保留。fixture 只在隔离 browser context 写明确测试键，YAML 不用 eval_readonly 变更状态。不能让重新 seed 的页面被当成持久化通过。
 - 关联验收：全部 AC 的自动化部分。验证：V-08、V-09、V-12。
@@ -418,11 +455,11 @@ SQLite 访问复用现有 `AppState.db`，事务写入完整记录；不得在�
 
 ### TASK-07：整体集成、三端检查、当前端真机与证据回填
 
-- 状态：待执行；依赖被交付范围内的前序任务；完整 session 交付依赖 D-01=A。
+- 状态：待执行；依赖被交付范围内的前序任务。
 - 文件职责：最终集成与本文 AC/V/证据表；按 V-10/11 执行原生步骤，产物仅在 gitignored report 目录。
 - 实施要点：执行相关自动化及当前 Windows 构建，检查三端 cfg/API；用 debug 独立 app-data 和测试目录完成正常退出/异常终止/重开、权限和联动步骤。macOS/Linux 保留独立未验证计划；发现已知编译不兼容必须处理。
 - 关联验收：AC-01 至 AC-18。验证：V-10 至 V-12。
-- 完成条件：当前 Windows 原生主流程及本轮必要自动化通过，有脱敏步骤和实际证据；其他平台明确未验证与接续方式，不继承 Windows 结果。D-01 未决时只能报告目录部分交付，不能把完整功能标完成。
+- 完成条件：当前 Windows 原生主流程及本轮必要自动化通过，有脱敏步骤和实际证据；其他平台明确未验证与接续方式，不继承当前平台结果。
 
 ## 7. V 验证方案
 
@@ -436,9 +473,9 @@ SQLite 访问复用现有 `AppState.db`，事务写入完整记录；不得在�
 | V-02 | Rust inline：目录 SQLite/生命周期 | tempfile DB 装入旧 command_history，有成功性未知 cd、relative、bad timestamp、同秒 id；两次 migration/reopen 数据相同，lastUsed 仍 null；事务中途失败无完成标记。模拟 spawn 失败、注册失败、输出通道失败、DB busy；无假使用写入，成功 spawn 的 write failure 只 warning。clock 回拨不生成未来时间。 | 02/03/05/06/07/17 | 待执行 |
 | V-03 | Vitest：`TerminalPanel.test.tsx`、`terminalCwd.test.ts`；新增 `useWelcomeDirectories.test.tsx` | native local 成功/失败，A->B->A 与重复 OSC；同 spawn 首次 OSC 不重复；远程/WSL未知映射不写；Windows /D:/、MSYS /d 与 UNC，Unix含反斜杠按原路径；记录 write warning 不再次 create；事件合并、取消 listener、旧响应晚到不覆盖新列表。 | 02/04/05/07/17 | 待执行 |
 | V-04 | Vitest：`WelcomePanel.test.tsx` | 返回排序后的混合默认/历史数组，断言实际 DOM 行路径顺序、时间未知文案；过滤保序；load error 保留旧数组；不可用可重试但时间不动；pending 不重复分发；返回 Welcome 不强制切历史 tab。 | 01/03/05/06/18 | 待执行 |
-| V-05 | Rust inline：新增 `session/resume.rs` tests | 旧 sessions 候选取最大有效时间/id；配置更新但 last_connected 空不进入；savedSessionType 原始未知值不默认 SSH；新确认记录优先；clear tombstone、delete session、REPLACE 更新、schema>1、CAS 不匹配、事务失败/reopen 保留有效记录。usedAt/sequence 单位和冲突验证。 | 08/09/14/15/16 | 待执行 |
-| V-06 | Vitest：`MainLayout.test.tsx` 与受影响面板测试；新增 `welcomeSessionResume.test.ts` | 表驱动逐协议判定最终 readiness，至少实际调用适配器的 fulfilled/rejected/partial 分支；认证暂停/提交/取消/MFA，操作 ID 不串线；反复按钮/普通队列同目标只建一个；不同配置 live tab 冲突；取消 late resolve 关闭自己新资源、不关闭已有资源。SQL恢复内容/active panel断言，不能仅数回调。 | 09/10/11/12/13/15/16 | 待执行 |
-| V-07 | Vitest：新增 `useWelcomeSessionResume.test.tsx`、WelcomePanel 测试 | fake DB/可控 Promise：ready+active 才写；Welcome/空状态/失败/partial 不写；重复事件去重；旧恢复完成不覆盖较新正常使用；缺 cwd 默认降级需显式动作；存储错误不重连。断言按钮状态、错误文案、最终 tab 数量/活动项、focus 和记录内容。 | 08-18 | 待执行 |
+| V-05 | Rust inline：新增 `session/resume.rs` tests | 旧 sessions 候选取最大有效时间/id；配置更新但 last_connected 空不进入；entries 含原始未知类型/空数组被拒或按校验处理；savedSessionType 原始未知值不默认 SSH；新确认快照优先；clear tombstone、delete session、REPLACE 更新、schema>1、CAS 不匹配、事务失败/reopen 保留有效记录。sequence/revision 单位和冲突验证。 | 08/09/14/15/16/19/20 | 待执行 |
+| V-06 | Vitest：`MainLayout.test.tsx` 与受影响面板测试；新增 `welcomeSessionResume.test.ts` | 表驱动逐协议判定最终 readiness，至少实际调用适配器的 fulfilled/rejected/partial 分支；认证暂停/提交/取消/MFA，操作 ID 不串线；反复按钮/普通队列同目标只建一个；不同配置 live tab 冲突；取消 late resolve 关闭自己新资源、不关闭已有资源。快照收集：合格条目增删/激活/关闭全部/空快照不提交/恢复抑制。SQL恢复内容/active panel断言，不能仅数回调。 | 09/10/11/12/13/15/16/19/20 | 待执行 |
+| V-07 | Vitest：新增 `useWelcomeSessionResume.test.tsx`、WelcomePanel 测试 | fake DB/可控 Promise：按顺序重放条目；认证暂停逐条目；partial 聚合与仅失败项重试；空/失败/partial 不写快照；恢复抑制写回；旧恢复完成不覆盖较新正常提交；存储错误不重连。断言按钮状态、错误文案、最终 tab 数量/顺序/活动项、focus 和记录内容。 | 08-20 | 待执行 |
 | V-08 | browser YAML：第 7.2 节 4 个新 case，现有 TC-038 和 recent-sessions 回归 | VFS 固定目录数据的实际 DOM 顺序；保存嵌入 File session 成功打开/定位，三个 tab 页面都可用恢复入口；本地 PTY 不支持错误不能覆盖 seed 的有效记录；无历史禁用、clear 不复活。新功能失败/成功使用各自真实 browser 能力，不伪造 PTY。 | 01/03/06/08/09/11/12/13/15/17/18 的 UI 部分 | 待执行 |
 | V-09 | Rust integration：新增 `tests/integration/welcome_recents_resume.rs` | 真实 tempfile 目录+独立 SQLite：init->旧数据导入->写确认记录->释放 Connection->重开排序/恢复对象一致；未 commit 事务回滚；删除/权限恢复；两连接CAS/并发冲突；spawn 成功/close 后 runtime 不再接受 cwd。使用服务层真实函数，不声称已覆盖 Tauri WebView。 | 01-10/14/15/17 | 待执行 |
 | V-10 | Windows 当前端真机，第 8 节步骤 | 真实 WebView2+Rust+本地 PTY、默认目录、保存 LocalShell、正常/异常退出和真实 app-data reopen、未保存临时终端边界、目录失败/重试/联动。 | 01-15/17/18 | 待执行 |
@@ -551,7 +588,7 @@ V-11真实依赖：隔离SSH/SFTP服务器、测试账号与可撤销凭据，�
 4. 用系统常用目录的另一个路径写法访问同目录，确认只有一行且默认名称保留。Windows大小写、UNC根和空格必测；junction需测试权限，不能创建时记录未执行，并用普通大小写测试+Rustidentity测试证明已有覆盖范围。Linux/macOS分别测symlink、实际case-sensitive/insensitive卷。
 5. 成功记录A后关闭相应终端，将A在本轮根内暂改名，或断开本轮专用挂载；回Welcome行保留并打开失败。还原路径再原行重试，成功才更新时间。权限故障在测试子目录上对测试用户撤销遍历/读取权限，记录并还原ACL；不得修改真实Home权限。Unix非root测试用户使用受限目录，root绕过权限不算有效失败测试。
 6. 经会话编辑器新建并保存 `LocalShell` 配置 `qa-welcome-local`；成功打开后进入测试A，等待resume记录写入。关闭该tab，再从Welcome恢复：新PTY ID且实际 `pwd`/`Get-Location` 为A，目录A时间推进。再次进Welcome点恢复，tab/进程数不增加且目录时间不变。
-7. 打开一个没有保存sessionId的临时终端，随后回Welcome。按推荐A，它不覆盖上次保存配置记录；既有最近目录仍可因真实cwd使用变化。此步骤是D-01边界的实物验收。
+7. 打开一个没有保存sessionId的临时本地终端并确认cwd，随后回Welcome。按方案B，它应进入快照（白名单条目）；WSL/无确认cwd终端不进入。既有最近目录仍可因真实cwd使用变化。此步骤是D-01=B边界的实物验收。
 8. 从窗口X正常退出，再使用相同隔离app-data启动。无自动建连，Welcome候选仍为qa-welcome-local，目录排序/毫秒值与退出前一致；恢复后仅一个tab。先只打开Welcome又退出，第三次启动记录仍在。
 9. 成功提交记录后，通过OS任务管理器/进程管理工具终止**本轮已记录PID的应用实例**，不操作其他Taomni进程。重启确认最后已提交记录可恢复；待提交事件可能丢失但表不能变空/半写。检查旧PTY是否被应用清理/OS终止，新恢复PTY必须新ID；遗留进程即便存在也不可自动接管。
 10. 将resume指向的A暂改名，恢复先明确失败；不操作降级时记录不变。点“使用默认目录打开”后标记partial，只记录真实确认的新cwd，原A使用时间与resume context不变；还原A并重试原上下文可完整恢复。
@@ -591,27 +628,27 @@ macOS与Linux独立执行V-10/11，额外覆盖它们的真实shell/case sensiti
 | AC-05 | 4.1.2/4.1.5/4.3 | 01/02/06 | V-02/03/04/09 | migration回滚/幂等、busy不清空，待实现/执行 |
 | AC-06 | 4.1.4/4.1.5 | 01/02/07 | V-02/04/08/10 | 缺失/权限/离线与恢复截图+时间，待实现/执行 |
 | AC-07 | 4.1.1/4.1.4 | 01/02/07 | V-02/03/10 | cwd事件和非本地主机不写记录，待实现/执行 |
-| AC-08 | 4.2.1/4.2.2 | 03/05/06 | V-05/07/08/10 | empty/legacy/confirmed候选，D-01待决+待执行 |
-| AC-09 | 4.2.1/4.2.5 | 03/04/05 | V-05/06/07/08/11 | 活动对象/非空保护，D-01待决+待执行 |
-| AC-10 | 4.2.2/4.2.3 | 03/04/05/07 | V-06/09/10/11 | cwd/配置/SQL子状态真实结果，D-01待决+待执行 |
-| AC-11 | 4.2.3/4.2.4 | 04/05/06 | V-06/07/08/11 | 全状态及readiness文案，D-01待决+待执行 |
-| AC-12 | 4.2.5 | 04/05/06 | V-06/07/08/11 | tab/连接数及冲突行为，D-01待决+待执行 |
-| AC-13 | 4.2.4/4.2.5 | 04/05/07 | V-06/07/08/10/11 | 焦点/取消late callback资源归属，D-01待决+待执行 |
-| AC-14 | 4.2.1/4.2.5/4.3 | 03/05/06/07 | V-05/07/09/10 | 正常/异常退出DB保留，D-01待决+待执行 |
-| AC-15 | 4.2.3/4.2.5/4.3 | 03/04/05/07 | V-05/06/07/10/11 | 删除/版本/认证/CAS/存储失败，D-01待决+待执行 |
-| AC-16 | 4.2.1/4.2.2/4.2.4 | 03/04/05/07 | V-05/06/07/11 | 脱敏存档及未重放真实结果，D-01待决+待执行 |
-| AC-17 | 4.1.1/4.2.5 | 01/02/03/05/07 | V-02/03/07/09/10 | 同目录成功/失败/纯定位时间对比，联动依赖D-01 |
+| AC-08 | 4.2.1/4.2.2 | 03/05/06 | V-05/07/08/10 | empty/legacy/confirmed候选，D-01=B已决，待实现/执行 |
+| AC-09 | 4.2.1/4.2.5 | 03/04/05 | V-05/06/07/08/11 | 活动对象/非空保护，D-01=B已决，待实现/执行 |
+| AC-10 | 4.2.2/4.2.3 | 03/04/05/07 | V-06/09/10/11 | cwd/配置/SQL子状态真实结果，D-01=B已决，待实现/执行 |
+| AC-11 | 4.2.3/4.2.4 | 04/05/06 | V-06/07/08/11 | 全状态及readiness文案，D-01=B已决，待实现/执行 |
+| AC-12 | 4.2.5 | 04/05/06 | V-06/07/08/11 | tab/连接数及冲突行为，D-01=B已决，待实现/执行 |
+| AC-13 | 4.2.4/4.2.5 | 04/05/07 | V-06/07/08/10/11 | 焦点/取消late callback资源归属，D-01=B已决，待实现/执行 |
+| AC-14 | 4.2.1/4.2.5/4.3 | 03/05/06/07 | V-05/07/09/10 | 正常/异常退出DB保留，D-01=B已决，待实现/执行 |
+| AC-15 | 4.2.3/4.2.5/4.3 | 03/04/05/07 | V-05/06/07/10/11 | 删除/版本/认证/CAS/存储失败，D-01=B已决，待实现/执行 |
+| AC-16 | 4.2.1/4.2.2/4.2.4 | 03/04/05/07 | V-05/06/07/11 | 脱敏存档及未重放真实结果，D-01=B已决，待实现/执行 |
+| AC-17 | 4.1.1/4.2.5 | 01/02/03/05/07 | V-02/03/07/09/10 | 同目录成功/失败/纯定位时间对比，联动依赖D-01=B |
 | AC-18 | 4.1.4/4.2.4/第8节 | 01/02/04/05/07 | V-10/11/12，三端 | 当前端build+native；另两端明确未验证 |
 
 TASK列简写`01`为TASK-01。各层级通过的含义独立：Vitest/mock不证明网络成功；Rust服务层不证明真实WebView；browser/VFS不证明本地PTY；当前Windows结果不外推macOS/Linux。
 
-完整实施交付条件：D-01已确定且文档契约一致；相关TASK实施完成；本轮必要自动化/三端代码兼容检查通过；Windows V-10/11核心原生步骤真实通过；证据表已回填。其他两端缺设备可保留未验证及接续步骤。**当前交付只有设计，以上均未完成；E-15的66项基线通过不能替代任何新AC。**
+完整实施交付条件：D-01已确定为B且文档契约一致；相关TASK实施完成；本轮必要自动化/三端代码兼容检查通过；当前平台（Linux）原生核心步骤真实通过；证据表已回填。其他两端缺设备可保留未验证及接续步骤。E-15的66项基线通过不能替代任何新AC。
 
 ## 10. 未决项、风险与回退
 
 | 项目 | 依据/影响 | 决策、最小验证与解除条件 | 阻塞范围 |
 |---|---|---|---|
-| D-01 恢复单个保存配置还是上次运行集合 | 现有session是配置，tabs不整体持久化；用户目标存在实质范围歧义 | 已提出具体选择；建议A，连同临时tab不纳入的边界确认。选B先修订session契约与验收，不拿最近列表冒充集合 | TASK-03至05实施、TASK-06/07的session部分；目录TASK-01/02不受阻 |
+| D-01 已决策为方案 B（2026-09-06）：恢复上次运行的 session 标签集合 | 现有session是配置，tabs不整体持久化 | 契约已按 B 修订（4.2 节、AC-19/20），实现按批次快照执行，不拿最近列表冒充集合 | 无阻塞；目录TASK-01/02与本项并行 |
 | 旧命令历史无法证明cd成功 | 输入历史与OSC模拟cd混存 | 保留旧时间为legacy观察，lastUsed=null；V-02/09证明不伪造。无需用户另选数据迁移时刻 | 不阻塞，是已确定兼容取舍 |
 | 路径identity/网络探测的三端差异 | 现有无条件小写可能误合并；OS调用可能阻塞 | 同实体确认才合并、有界任务、离线保留；V-01/10三端实测，无法证明的别名允许独立行 | 不阻塞设计；实测发现不兼容时阻塞对应实现完成 |
 | 每协议没有统一ready/failed契约 | opener/markConnected过早，Mail/命令客户端也不等同网络连接 | TASK-04明确readiness，不依赖无证据的tab出现；V-06及V-11覆盖 | 已纳入实施任务，不是外部审批阻塞 |
@@ -620,4 +657,4 @@ TASK列简写`01`为TASK-01。各层级通过的含义独立：Vitest/mock不证
 
 回退采用代码回退和保留新增表：旧版本忽略welcome新表，不删除它们、不重写原sessions/command_history。若单条新恢复记录不可解析，保留其数据并禁用新入口，原普通打开和目录访问可继续；数据库文件整体损坏交由已有备份恢复能力，本功能不自动替换数据库。升级后再次降级运行产生的历史间隙不伪造补齐。
 
-当前可开始：TASK-01目录Rust实现与V-01/02、TASK-02目录组件/契约测试准备、TASK-06目录集成用例准备。当前确实存在的决策阻塞只有D-01；没有证据表明其他端代码已不兼容或当前端工具链不可用。设计完成不表示实现、验收或真机验证完成。
+当前可开始：TASK-01目录Rust实现与V-01/02、TASK-02目录组件/契约测试、TASK-03批次快照存储、TASK-06集成用例。D-01已决，无剩余决策阻塞；实现与验证完成状态以各 TASK 状态行为准。

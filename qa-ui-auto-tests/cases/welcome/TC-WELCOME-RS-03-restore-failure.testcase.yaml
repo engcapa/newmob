@@ -1,0 +1,48 @@
+id: TC-WELCOME-RS-03-restore-failure
+title: Local-shell restore fails honestly in browser mode and retries without stacking tabs
+description: |
+  Fixture seeds a confirmed snapshot whose entry is a saved LocalShell. The
+  browser stub refuses create_local_terminal, so the restore must surface a
+  real failed state (never "succeeded"), keep the seeded record intact, and
+  retry must not stack terminal tabs.
+covers: [F1.6]
+tags: [auto-generated, p1, welcome, needs-review]
+modes: [browser]
+fixtures: [reset_db, welcome_recents]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="available"]'
+      timeout_sec: 15
+
+  - click: '[data-testid="welcome-restore-last-session"]'
+  # The failed local launch keeps its diagnostic tab; wait for it, then
+  # return to Welcome to observe the honest failed state.
+  - wait_for:
+      selector: '[data-testid="tab-item"][data-tab-type="terminal"]'
+      timeout_sec: 15
+  - wait: 1
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait: 1
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="failed"]'
+      timeout_sec: 30
+
+  # The failure detail is user-visible; retry is offered.
+  - wait_for: '[data-testid="welcome-restore-retry"]'
+
+  # Retry must not accumulate failed terminal tabs.
+  - click: '[data-testid="welcome-restore-retry"]'
+  - wait: 4
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait: 1
+  - assert_count: {selector: '[data-testid="tab-item"][data-tab-type="terminal"]', equal: 1}
+
+  # The seeded record was not overwritten by the failed restore: the entry is
+  # still offered.
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="failed"], [data-testid="welcome-restore-status"][data-state="partial"]'
+      timeout_sec: 15
+  - screenshot: F1.6-welcome-restore-failure.png

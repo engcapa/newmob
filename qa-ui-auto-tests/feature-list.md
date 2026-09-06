@@ -324,6 +324,53 @@ controls:
     selector: '[data-testid="welcome-history-tab-workspaces"]'
     kind: interactive
     optional: true       # template testid welcome-history-tab-${tab.id}; sessions|workspaces|directories
+  - id: history-tab-sessions
+    selector: '[data-testid="welcome-history-tab-sessions"]'
+    kind: interactive
+  - id: history-tab-directories
+    selector: '[data-testid="welcome-history-tab-directories"]'
+    kind: interactive
+  - id: local-directories
+    selector: '[data-testid="welcome-local-directories"]'
+    kind: display
+  - id: local-directory-filter
+    selector: '[data-testid="welcome-local-directory-filter"]'
+    kind: interactive
+  # Welcome recents ordering + last-run restore (design
+  # docs-feature/welcome-recents-session-restore-design.md §4.1/§4.2).
+  - id: restore-row
+    selector: '[data-testid="welcome-restore-row"]'
+    kind: display
+  - id: local-directory-row
+    selector: '[data-testid="welcome-local-directory"]'
+    kind: interactive
+    optional: true       # data-directory-path/-id/-last-used-at-ms attributes
+  - id: local-directory-unavailable
+    selector: '[data-testid="welcome-local-directory-unavailable"]'
+    kind: display
+    optional: true       # only when a directory is missing/denied/unavailable
+  - id: directory-retry
+    selector: '[data-testid="welcome-directory-retry"]'
+    kind: interactive
+    optional: true       # rendered on load error / failed refresh
+  - id: restore-last-session
+    selector: '[data-testid="welcome-restore-last-session"]'
+    kind: interactive
+  - id: restore-status
+    selector: '[data-testid="welcome-restore-status"]'
+    kind: display
+  - id: restore-retry
+    selector: '[data-testid="welcome-restore-retry"]'
+    kind: interactive
+    optional: true       # only when a restore has failed/cancelled entries
+  - id: restore-cancel
+    selector: '[data-testid="welcome-restore-cancel"]'
+    kind: interactive
+    optional: true       # only while restoring / awaiting auth
+  - id: restore-clear
+    selector: '[data-testid="welcome-restore-clear"]'
+    kind: interactive
+    optional: true       # only when a record is available/finished
   - id: tips-section
     selector: 'text="Tips"'
     kind: display

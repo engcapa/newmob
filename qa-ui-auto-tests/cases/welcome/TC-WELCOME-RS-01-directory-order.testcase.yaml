@@ -1,0 +1,44 @@
+id: TC-WELCOME-RS-01-directory-order
+title: Welcome local directories follow confirmed-use ordering with unknown-time rows
+description: |
+  Fixture seeds confirmed use times (A=3000, Home=2000, Downloads=1000) and a
+  legacy rank row. The directories tab must render the backend order
+  (A/Home/Downloads), keep it under filtering, preserve the default Home
+  time, and not advance any time when a row is clicked in browser mode
+  (local PTY is unsupported there).
+covers: [F1.6]
+tags: [auto-generated, p1, welcome, needs-review]
+modes: [browser]
+fixtures: [reset_db, welcome_recents]
+timeout_sec: 60
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-history-tab-directories"]'
+  - wait_for: '[data-testid="welcome-local-directories"]'
+
+  # Backend order: confirmed times first, newest first (A, Home, Downloads).
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=0', name: data-directory-path, equals: /preview/A}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=1', name: data-directory-path, equals: /preview}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=2', name: data-directory-path, equals: /preview/Downloads}
+  # Default Home keeps its confirmed time (discovery never fabricates one).
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"][data-directory-path="/preview"]', name: data-last-used-at-ms, equals: '2000'}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"][data-directory-path="/preview/A"]', name: data-last-used-at-ms, equals: '3000'}
+
+  # Filtering preserves the relative order of the remaining rows.
+  - fill: {selector: '[data-testid="welcome-local-directory-filter"]', value: preview}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=0', name: data-directory-path, equals: /preview/A}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=1', name: data-directory-path, equals: /preview}
+  - fill: {selector: '[data-testid="welcome-local-directory-filter"]', value: ''}
+  - assert_count: {selector: '[data-testid="welcome-local-directory"]', min: 4}
+
+  # A legacy row shows "time unknown" instead of a fabricated time.
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"][data-directory-path="/preview/Legacy"]', name: data-last-used-at-ms, equals: ''}
+  - assert_text: {selector: '[data-testid="welcome-local-directory"][data-directory-path="/preview/Legacy"]', contains: unknown}
+
+  # Clicking a directory in browser mode cannot start a local PTY: no time
+  # may change and no failure may overwrite the list.
+  - click: '[data-testid="welcome-local-directory"][data-directory-path="/preview/A"]'
+  - wait: 1
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"][data-directory-path="/preview/A"]', name: data-last-used-at-ms, equals: '3000'}
+  - screenshot: F1.6-welcome-directory-order.png

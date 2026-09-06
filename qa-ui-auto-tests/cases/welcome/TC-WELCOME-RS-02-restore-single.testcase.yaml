@@ -1,0 +1,45 @@
+id: TC-WELCOME-RS-02-restore-single
+title: Welcome restores the seeded snapshot entry and locates the existing tab on repeat
+description: |
+  Fixture seeds a saved embedded-File session over the readable VFS home plus
+  a confirmed run snapshot containing it. Restore opens the file browser tab
+  with real directory entries; a second restore locates the existing tab
+  instead of duplicating it; switching history tabs keeps the restore entry
+  and does not reset the sessions filter.
+covers: [F1.6]
+tags: [auto-generated, p1, welcome, needs-review]
+modes: [browser]
+fixtures: [reset_db, welcome_recents]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="available"]'
+      timeout_sec: 15
+
+  # Restore the seeded snapshot entry.
+  - click: '[data-testid="welcome-restore-last-session"]'
+  # The restore navigates to the restored tab; switch back to Welcome.
+  - wait_for:
+      selector: '[data-testid="tab-item"][data-tab-type="file-browser"]'
+      timeout_sec: 15
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for:
+      selector: '[data-testid="welcome-restore-status"][data-state="succeeded"], [data-testid="welcome-restore-status"][data-state="partial"]'
+      timeout_sec: 30
+
+  # Repeat restore must locate the existing tab, not duplicate it.
+  - click: '[data-testid="welcome-restore-last-session"]'
+  - wait: 2
+  - assert_count: {selector: '[data-testid="tab-item"][data-tab-type="file-browser"]', equal: 1}
+
+  # Locate switched to the restored tab; back to Welcome, then check that
+  # switching history tabs keeps the restore row and the sessions filter.
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-restore-row"]'
+  - click: '[data-testid="welcome-history-tab-directories"]'
+  - wait_for: '[data-testid="welcome-local-directories"]'
+  - click: '[data-testid="welcome-history-tab-sessions"]'
+  - wait_for: '[data-testid="welcome-restore-row"]'
+  - screenshot: F1.6-welcome-restore-single.png

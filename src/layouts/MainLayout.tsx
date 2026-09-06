@@ -79,7 +79,7 @@ import { redactVncHandoff, vncConsumeDetachClaim, vncCreateDetachClaim } from ".
 import { Columns2, Grid2X2, Lock, Rows3, Unlock, X } from "lucide-react";
 import type { SftpTabInfo, Tab, DbConnectInfo, HBaseConnectInfo, MailConnectionSecurity, MailTabInfo, MailAuthMode, MailProvider, CodeWorkspaceRootInfo, CodeWorkspaceTabInfo, GitWorkspaceRootInfo, RecentWorkspace } from "../types";
 import { computeNewTerminalTitle, newWorkspaceInstanceId, recentWorkspaceIdFromParts, useAppStore, type TerminalSplitLayout } from "../stores/appStore";
-import { terminalCwdTitlePrefix } from "../lib/terminalCwd";
+import { normalizeLocalStartCwd, terminalCwdTitlePrefix } from "../lib/terminalCwd";
 import { buildTabDetailSummary } from "../lib/tabDetails";
 import { useSessionStore } from "../stores/sessionStore";
 import { WelcomePanel } from "../components/WelcomePanel";
@@ -88,7 +88,7 @@ import { UpdateDialog } from "../components/UpdateDialog";
 import { useUpdateStore } from "../stores/updateStore";
 import { useServersStore } from "../stores/serversStore";
 import { parseQuickConnectInput } from "../lib/quickConnect";
-import { exitApp, selectFolderPath, type SessionConfig } from "../lib/ipc";
+import { exitApp, selectFolderPath, getSession, type SessionConfig } from "../lib/ipc";
 import {
   vaultPut,
   VAULT_LOCKED_EVENT,
@@ -107,7 +107,21 @@ import { getSessionNetworkSettings, toNetworkSettingsPayload } from "../lib/netw
 import { loadResizableLayout, saveResizableLayout } from "../lib/resizableLayout";
 import { parsePathMappings } from "../components/filebrowser/PathMappingsEditor";
 import { parseRdpOptions } from "../types/rdp";
-import type { LocalShellSelection } from "../types";
+import type {
+  LocalLaunchOutcome,
+  LocalShellSelection,
+  ResumeIssue,
+  SnapshotEntry,
+} from "../types";
+import {
+  isResumeEligibleSavedSession,
+  localTerminalEntry,
+  primaryViewTypeForEntry,
+  savedSessionEntry,
+  snapshotEntriesFingerprint,
+  commitWelcomeRunSnapshot,
+} from "../lib/welcomeSessionResume";
+import { useWelcomeSessionResume, type OpenEntryResult } from "../hooks/useWelcomeSessionResume";
 import { ChatDrawer } from "../components/chat/ChatDrawer";
 import { TaoRibbon } from "../components/tao/TaoRibbon";
 import { FloatingNotesPanel } from "../components/notes/FloatingNotesPanel";
@@ -134,6 +148,9 @@ const ProxyTestTab = lazy(() => import("../components/proxy/ProxyTestTab"));
 interface PendingSessionAuth {
   kind: "session";
   session: SessionConfig;
+  /** Present when the auth wait belongs to a Welcome restore operation. */
+  resumeRequestId?: string;
+  restoreOperationId?: string;
 }
 
 interface PendingJumpAuth {
@@ -159,6 +176,32 @@ interface ControlToolDispatch {
 type ControlToolExecutor = (dispatch: ControlToolDispatch) => Promise<void>;
 
 type ConnectQueueOutcome = "opened" | "awaiting-auth" | "awaiting-vault";
+
+/** Connect-queue entry carrying optional Welcome restore context. */
+interface ConnectQueueEntry {
+  session: SessionConfig;
+  resume?: ResumeQueueContext;
+}
+
+interface ResumeQueueContext {
+  requestId: string;
+  operationId: string;
+  entryIdentity: string;
+}
+
+/** A pending Welcome restore entry open, resolved by tab readiness/cancel. */
+interface ResumeWaiter {
+  requestId: string;
+  operationId: string;
+  entryIdentity: string;
+  sessionId: string;
+  tabId: string | null;
+  resolve: (result: OpenEntryResult) => void;
+  settled: boolean;
+  /** Tabs that already existed when the waiter registered (never bind). */
+  excludeTabIds: Set<string>;
+  guardTimer: number | null;
+}
 
 const MIN_SPLIT_WEIGHT = 0.35;
 const SAVED_PASSWORD_VAULT_REASON_KEY = "vault.unlockReasonDefault";
@@ -805,8 +848,27 @@ export function MainLayout() {
   const [splitGridRowWeights, setSplitGridRowWeights] = useState<number[]>([]);
   const [vaultUnlockReason, setVaultUnlockReason] = useState<string | null>(null);
   const pendingVaultActionRef = useRef<(() => void) | null>(null);
-  const connectQueueRef = useRef<SessionConfig[]>([]);
+  const connectQueueRef = useRef<ConnectQueueEntry[]>([]);
   const connectQueueRunningRef = useRef(false);
+  /// Pending Welcome local-terminal launches keyed by tab id (design §4.1.5).
+  const pendingLocalLaunchesRef = useRef<Map<string, (outcome: LocalLaunchOutcome) => void>>(new Map());
+  /// Welcome restore orchestration (design §4.2.3): per-entry waiters keyed by
+  /// request id, plus tabId bindings and readiness timers.
+  const resumeWaitersRef = useRef<Map<string, ResumeWaiter>>(new Map());
+  const resumeWaiterBySessionRef = useRef<Map<string, string>>(new Map());
+  const resumeWaiterByTabRef = useRef<Map<string, string>>(new Map());
+  /// Non-terminal restored tabs: settle timer -> view-opened while alive.
+  const resumeSettleTimersRef = useRef<Map<string, number>>(new Map());
+  /// Failed tabs owned by a restore operation, keyed by entry identity;
+  /// retry replaces them instead of stacking (design §4.2.5).
+  const restoreFailedLocalTabsRef = useRef<Map<string, string>>(new Map());
+  /// Run-snapshot collector state (design §4.2.1).
+  const runBatchIdRef = useRef<string>(
+    globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  const snapshotFingerprintRef = useRef<string>("");
+  const snapshotRevisionRef = useRef<number>(0);
+  const snapshotCommitTimerRef = useRef<number | null>(null);
   const awaitingManualAuthRef = useRef(false);
   const awaitingVaultUnlockRef = useRef(false);
   const continueConnectQueueRef = useRef<() => void>(() => undefined);
@@ -1638,8 +1700,10 @@ export function MainLayout() {
     terminalProfile?: TerminalProfile,
     localShell?: LocalShellSelection,
     initialCwd?: string,
-  ) => {
-    const id = `local-${Date.now()}`;
+  ): Promise<LocalLaunchOutcome> => {
+    // UUID-based tab id: callers of the structured launch outcome correlate
+    // by tab id, so same-millisecond ids must never collide.
+    const id = `local-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
     const resolvedTerminalProfile = terminalProfile ?? loadTerminalDefaultProfile();
     const initialTitlePrefix = initialCwd ? terminalCwdTitlePrefix(initialCwd) : null;
     const requestedTitle = initialTitlePrefix || title || tr("tabs.localTerminal");
@@ -1662,7 +1726,35 @@ export function MainLayout() {
       closable: true,
     });
     if (sessionId) void markConnected(sessionId);
+    // Structured launch outcome (design §4.1.5): resolved by the terminal's
+    // onSessionReady / onSessionLaunchFailed callbacks, or cancelled when the
+    // pending tab closes before either fires.
+    return new Promise<LocalLaunchOutcome>((resolve) => {
+      pendingLocalLaunchesRef.current.set(id, resolve);
+    });
   }, [addTab, markConnected]);
+
+  /** Resolve the structured local-launch request for `tabId` if still pending. */
+  const completeLocalLaunch = useCallback((tabId: string, outcome: LocalLaunchOutcome) => {
+    const resolve = pendingLocalLaunchesRef.current.get(tabId);
+    if (resolve) {
+      pendingLocalLaunchesRef.current.delete(tabId);
+      resolve(outcome);
+    }
+  }, []);
+
+  // Close-before-ready: a pending launch whose tab disappears completes as
+  // cancelled so Welcome's per-directory pending state never leaks.
+  useEffect(() => {
+    if (pendingLocalLaunchesRef.current.size === 0) return;
+    const liveIds = new Set(tabs.map((tab) => tab.id));
+    for (const [tabId, resolve] of Array.from(pendingLocalLaunchesRef.current.entries())) {
+      if (!liveIds.has(tabId)) {
+        pendingLocalLaunchesRef.current.delete(tabId);
+        resolve({ tabId, status: "cancelled" });
+      }
+    }
+  }, [tabs]);
 
   const handleEditSession = useCallback((session: SessionConfig) => {
     setEditingSession(session);
@@ -2293,8 +2385,11 @@ export function MainLayout() {
     });
   }, [addTab]);
 
-  const queueVaultUnlock = useCallback((session: SessionConfig): ConnectQueueOutcome => {
-    connectQueueRef.current.unshift(session);
+  const queueVaultUnlock = useCallback((
+    session: SessionConfig,
+    resume?: ResumeQueueContext,
+  ): ConnectQueueOutcome => {
+    connectQueueRef.current.unshift({ session, resume });
     awaitingVaultUnlockRef.current = true;
     pendingVaultActionRef.current = () => {
       awaitingVaultUnlockRef.current = false;
@@ -2325,6 +2420,7 @@ export function MainLayout() {
   const openQueuedSession = useCallback((
     session: SessionConfig,
     localShellOverride?: LocalShellSelection,
+    resume?: ResumeQueueContext,
   ): ConnectQueueOutcome => {
     if (session.session_type === "SSH") {
       const { method, data } = resolveSessionAuth(session);
@@ -2332,11 +2428,16 @@ export function MainLayout() {
         const ref = passwordRefFromOptions(session);
         if (ref) {
           const vaultState = useVaultStore.getState().state;
-          if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session);
+          if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session, resume);
           return openAfterJumpPassword(session, (effectiveSession) => openSshTab(effectiveSession, "Password", ref));
         } else {
           awaitingManualAuthRef.current = true;
-          setPendingAuth({ kind: "session", session });
+          setPendingAuth({
+            kind: "session",
+            session,
+            resumeRequestId: resume?.requestId,
+            restoreOperationId: resume?.operationId,
+          });
           return "awaiting-auth";
         }
       } else {
@@ -2348,11 +2449,16 @@ export function MainLayout() {
         const ref = passwordRefFromOptions(session);
         if (ref) {
           const vaultState = useVaultStore.getState().state;
-          if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session);
+          if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session, resume);
           return openAfterJumpPassword(session, (effectiveSession) => openSftpTab(effectiveSession, "Password", ref));
         } else {
           awaitingManualAuthRef.current = true;
-          setPendingAuth({ kind: "session", session });
+          setPendingAuth({
+            kind: "session",
+            session,
+            resumeRequestId: resume?.requestId,
+            restoreOperationId: resume?.operationId,
+          });
           return "awaiting-auth";
         }
       } else {
@@ -2371,11 +2477,16 @@ export function MainLayout() {
         const ref = passwordRefFromOptions(session);
         if (ref) {
           const vaultState = useVaultStore.getState().state;
-          if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session);
+          if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session, resume);
           openVncTab(session, ref);
         } else {
           awaitingManualAuthRef.current = true;
-          setPendingAuth({ kind: "session", session });
+          setPendingAuth({
+            kind: "session",
+            session,
+            resumeRequestId: resume?.requestId,
+            restoreOperationId: resume?.operationId,
+          });
           return "awaiting-auth";
         }
       } else {
@@ -2387,11 +2498,16 @@ export function MainLayout() {
         const ref = passwordRefFromOptions(session);
         if (ref) {
           const vaultState = useVaultStore.getState().state;
-          if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session);
+          if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session, resume);
           return openAfterJumpPassword(session, (effectiveSession) => openRdpTab(effectiveSession, ref));
         } else {
           awaitingManualAuthRef.current = true;
-          setPendingAuth({ kind: "session", session });
+          setPendingAuth({
+            kind: "session",
+            session,
+            resumeRequestId: resume?.requestId,
+            restoreOperationId: resume?.operationId,
+          });
           return "awaiting-auth";
         }
       } else {
@@ -2420,7 +2536,7 @@ export function MainLayout() {
       const ref = passwordRefFromOptions(session);
       if (ref) {
         const vaultState = useVaultStore.getState().state;
-        if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session);
+        if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session, resume);
         return openAfterJumpPassword(session, (effectiveSession) => openDbTab(effectiveSession, ref));
       } else {
         return openAfterJumpPassword(session, (effectiveSession) => openDbTab(effectiveSession, undefined));
@@ -2429,7 +2545,7 @@ export function MainLayout() {
       const ref = passwordRefFromOptions(session);
       if (ref) {
         const vaultState = useVaultStore.getState().state;
-        if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session);
+        if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session, resume);
         openHBaseShellTab(session, ref);
       } else {
         openHBaseShellTab(session, undefined);
@@ -2442,7 +2558,7 @@ export function MainLayout() {
       // first so the attach doesn't fail with a cryptic error.
       if (objectStorageHasVaultSecret(session)) {
         const vaultState = useVaultStore.getState().state;
-        if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session);
+        if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session, resume);
       }
       return openAfterJumpPassword(session, openObjectStorageTab);
     } else if (session.session_type === "Mail") {
@@ -2455,7 +2571,7 @@ export function MainLayout() {
       const smtpRef = mailSmtpPasswordRefFromOptions(session);
       if (ref || smtpRef) {
         const vaultState = useVaultStore.getState().state;
-        if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session);
+        if (vaultState !== "unlocked" && vaultState !== "empty") return queueVaultUnlock(session, resume);
       }
       openMailTab(session, ref ?? undefined, smtpRef ?? undefined);
     } else {
@@ -2489,9 +2605,9 @@ export function MainLayout() {
     connectQueueRunningRef.current = true;
     try {
       while (connectQueueRef.current.length > 0) {
-        const session = connectQueueRef.current.shift();
-        if (!session) continue;
-        const outcome = openQueuedSession(session);
+        const entry = connectQueueRef.current.shift();
+        if (!entry) continue;
+        const outcome = openQueuedSession(entry.session, undefined, entry.resume);
         if (outcome !== "opened") return;
       }
     } finally {
@@ -2503,8 +2619,388 @@ export function MainLayout() {
     continueConnectQueueRef.current = continueConnectQueue;
   }, [continueConnectQueue]);
 
+  // -------------------------------------------------------------------------
+  // Welcome restore orchestration (design §4.2.3-4.2.5)
+  // -------------------------------------------------------------------------
+
+  const resolveResumeWaiter = useCallback((requestId: string, result: OpenEntryResult) => {
+    const waiter = resumeWaitersRef.current.get(requestId);
+    if (!waiter || waiter.settled) return;
+    waiter.settled = true;
+    resumeWaitersRef.current.delete(requestId);
+    if (waiter.guardTimer != null) {
+      window.clearTimeout(waiter.guardTimer);
+      waiter.guardTimer = null;
+    }
+    if (waiter.tabId) resumeWaiterByTabRef.current.delete(waiter.tabId);
+    if (resumeWaiterBySessionRef.current.get(waiter.sessionId) === requestId) {
+      resumeWaiterBySessionRef.current.delete(waiter.sessionId);
+    }
+    const settleTimer = resumeSettleTimersRef.current.get(requestId);
+    if (settleTimer != null) {
+      window.clearTimeout(settleTimer);
+      resumeSettleTimersRef.current.delete(requestId);
+    }
+    waiter.resolve(result);
+  }, []);
+
+  const cancelResumeWaiter = useCallback(
+    (requestId: string, code: ResumeIssue["code"], message: string) => {
+      resolveResumeWaiter(requestId, {
+        tabId: null,
+        status: "cancelled",
+        readiness: null,
+        issue: { code, message },
+      });
+    },
+    [resolveResumeWaiter],
+  );
+
+  const cancelAllResumeWaiters = useCallback(
+    (code: ResumeIssue["code"], message: string) => {
+      for (const requestId of Array.from(resumeWaitersRef.current.keys())) {
+        cancelResumeWaiter(requestId, code, message);
+      }
+    },
+    [cancelResumeWaiter],
+  );
+
+  /** Resolve the waiter bound to a restored tab by its readiness outcome. */
+  const resolveResumeWaiterForTab = useCallback(
+    (tabId: string, status: "connected" | "failed", error?: unknown) => {
+      const requestId = resumeWaiterByTabRef.current.get(tabId);
+      if (!requestId) return;
+      if (status === "connected") {
+        resolveResumeWaiter(requestId, {
+          tabId,
+          status: "ready",
+          readiness: "connected",
+          issue: null,
+        });
+      } else {
+        const waiter = resumeWaitersRef.current.get(requestId);
+        if (waiter) {
+          restoreFailedLocalTabsRef.current.set(waiter.entryIdentity, tabId);
+        }
+        resolveResumeWaiter(requestId, {
+          tabId,
+          status: "failed",
+          readiness: null,
+          issue: { code: "connect", message: String(error ?? "Connection failed") },
+        });
+      }
+    },
+    [resolveResumeWaiter],
+  );
+
+  // Bind newly created tabs (sessionId match, tab absent at registration) to
+  // their waiting restore entry, then start a settle fallback. A bound tab
+  // that closes before readiness completes its entry as cancelled.
+  useEffect(() => {
+    const liveIds = new Set(tabs.map((tab) => tab.id));
+    for (const [tabId, requestId] of Array.from(resumeWaiterByTabRef.current.entries())) {
+      if (!liveIds.has(tabId)) {
+        resumeWaiterByTabRef.current.delete(tabId);
+        cancelResumeWaiter(requestId, "cancelled", "Restored tab was closed");
+      }
+    }
+    if (resumeWaiterBySessionRef.current.size === 0) return;
+    for (const tab of tabs) {
+      if (!tab.sessionId) continue;
+      const requestId = resumeWaiterBySessionRef.current.get(tab.sessionId);
+      if (!requestId) continue;
+      const waiter = resumeWaitersRef.current.get(requestId);
+      if (!waiter || waiter.tabId || waiter.excludeTabIds.has(tab.id)) continue;
+      waiter.tabId = tab.id;
+      resumeWaiterBySessionRef.current.delete(waiter.sessionId);
+      resumeWaiterByTabRef.current.set(tab.id, requestId);
+      const isTerminalTab = tab.type === "terminal";
+      const settleMs = isTerminalTab ? 15000 : 6000;
+      const timer = window.setTimeout(() => {
+        resumeSettleTimersRef.current.delete(requestId);
+        const tabAlive = useAppStore
+          .getState()
+          .tabs.some((candidate) => candidate.id === waiter.tabId);
+        if (tabAlive) {
+          resolveResumeWaiter(requestId, {
+            tabId: waiter.tabId,
+            status: "ready",
+            readiness: isTerminalTab ? "client-started" : "view-opened",
+            issue: null,
+          });
+        } else {
+          cancelResumeWaiter(requestId, "cancelled", "Restored tab closed before it became ready");
+        }
+      }, settleMs);
+      resumeSettleTimersRef.current.set(requestId, timer);
+    }
+  }, [tabs, resolveResumeWaiter, cancelResumeWaiter]);
+
+  const openSavedSessionForRestore = useCallback(
+    (
+      session: SessionConfig,
+      context: { operationId: string; entryIdentity: string },
+    ): Promise<OpenEntryResult> => {
+      return new Promise<OpenEntryResult>((resolve) => {
+        const requestId = `resume-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
+        const excludeTabIds = new Set(
+          useAppStore
+            .getState()
+            .tabs.filter((tab) => tab.sessionId === session.id)
+            .map((tab) => tab.id),
+        );
+        const waiter: ResumeWaiter = {
+          requestId,
+          operationId: context.operationId,
+          entryIdentity: context.entryIdentity,
+          sessionId: session.id,
+          tabId: null,
+          resolve,
+          settled: false,
+          excludeTabIds,
+          guardTimer: null,
+        };
+        resumeWaitersRef.current.set(requestId, waiter);
+        resumeWaiterBySessionRef.current.set(session.id, requestId);
+        waiter.guardTimer = window.setTimeout(() => {
+          cancelResumeWaiter(requestId, "connect", "Restore entry timed out waiting for dispatch");
+        }, 60000);
+        // A retry replaces the operation-owned failed tab (design §4.2.5).
+        const previousFailed = restoreFailedLocalTabsRef.current.get(context.entryIdentity);
+        if (previousFailed) {
+          restoreFailedLocalTabsRef.current.delete(context.entryIdentity);
+          if (useAppStore.getState().tabs.some((tab) => tab.id === previousFailed)) {
+            removeTab(previousFailed);
+          }
+        }
+        openQueuedSession(session, undefined, {
+          requestId,
+          operationId: context.operationId,
+          entryIdentity: context.entryIdentity,
+        });
+      });
+    },
+    [openQueuedSession, cancelResumeWaiter, removeTab],
+  );
+
+  const openLocalTerminalForRestore = useCallback(
+    async (
+      entry: Extract<SnapshotEntry, { kind: "local-terminal" }>,
+      _context: { operationId: string },
+    ): Promise<OpenEntryResult> => {
+      // Retry of an operation-owned failed tab replaces it (never stacks).
+      const previousFailed = restoreFailedLocalTabsRef.current.get(entry.identity);
+      if (previousFailed) {
+        restoreFailedLocalTabsRef.current.delete(entry.identity);
+        if (useAppStore.getState().tabs.some((tab) => tab.id === previousFailed)) {
+          removeTab(previousFailed);
+        }
+      }
+      const shellSelection: LocalShellSelection = {
+        id: entry.shellId,
+        name: entry.displayName,
+        ...(entry.shellArgs.length > 0 ? { args: [...entry.shellArgs] } : {}),
+      };
+      const outcome = await openLocalTab(
+        entry.displayName,
+        undefined,
+        undefined,
+        shellSelection,
+        entry.confirmedCwd,
+      );
+      switch (outcome.status) {
+        case "started":
+          return { tabId: outcome.tabId, status: "ready", readiness: "connected", issue: null };
+        case "failed":
+          if (outcome.tabId) {
+            restoreFailedLocalTabsRef.current.set(entry.identity, outcome.tabId);
+          }
+          return {
+            tabId: outcome.tabId,
+            status: "failed",
+            readiness: null,
+            issue: { code: "connect", message: outcome.error ?? "Local terminal failed to start" },
+          };
+        default:
+          return {
+            tabId: outcome.tabId,
+            status: "cancelled",
+            readiness: null,
+            issue: { code: "cancelled", message: "Local terminal launch cancelled" },
+          };
+      }
+    },
+    [openLocalTab, removeTab],
+  );
+
+  const loadSessionConfigForRestore = useCallback(async (savedSessionId: string): Promise<SessionConfig> => {
+    try {
+      return await getSession(savedSessionId);
+    } catch {
+      throw Object.assign(
+        new Error(`Saved session ${savedSessionId} no longer exists`),
+        { code: "missing-session" },
+      );
+    }
+  }, []);
+
+  const findExistingTabForEntry = useCallback((entry: SnapshotEntry): string | null => {
+    if (entry.kind !== "saved-session") return null;
+    const expectedType = primaryViewTypeForEntry(entry);
+    const runtimeByTab = useAppStore.getState().terminalRuntimeByTab;
+    const match = useAppStore.getState().tabs.find(
+      (tab) =>
+        tab.sessionId === entry.savedSessionId &&
+        tab.type === expectedType &&
+        // A disconnected (failed) terminal is not a restorable target; retry
+        // must rebuild it, not "locate" it (design §4.2.5).
+        runtimeByTab[tab.id]?.state !== "disconnected",
+    );
+    return match?.id ?? null;
+  }, []);
+
+  const cancelPendingAuthForRestore = useCallback(
+    (operationId: string) => {
+      setPendingAuth((current) => {
+        if (current && current.kind === "session" && current.restoreOperationId === operationId) {
+          if (current.resumeRequestId) {
+            cancelResumeWaiter(current.resumeRequestId, "cancelled", "Restore cancelled");
+          }
+          awaitingManualAuthRef.current = false;
+          continueConnectQueueRef.current();
+          return null;
+        }
+        return current;
+      });
+      for (const [requestId, waiter] of Array.from(resumeWaitersRef.current.entries())) {
+        if (waiter.operationId === operationId) {
+          cancelResumeWaiter(requestId, "cancelled", "Restore cancelled");
+        }
+      }
+    },
+    [cancelResumeWaiter],
+  );
+
+  const restoreCallbacksRef = useRef({
+    loadSessionConfig: loadSessionConfigForRestore,
+    findExistingTab: findExistingTabForEntry,
+    activateTab: setActiveTab,
+    openSavedSession: openSavedSessionForRestore,
+    openLocalTerminal: openLocalTerminalForRestore,
+    cancelPendingAuth: cancelPendingAuthForRestore,
+  });
+  restoreCallbacksRef.current = {
+    loadSessionConfig: loadSessionConfigForRestore,
+    findExistingTab: findExistingTabForEntry,
+    activateTab: setActiveTab,
+    openSavedSession: openSavedSessionForRestore,
+    openLocalTerminal: openLocalTerminalForRestore,
+    cancelPendingAuth: cancelPendingAuthForRestore,
+  };
+
+  const welcomeRestore = useWelcomeSessionResume(
+    activeTab?.type === "welcome" || !activeTab,
+    restoreCallbacksRef.current,
+  );
+  const welcomeRestoreViewRef = useRef(welcomeRestore.view);
+  welcomeRestoreViewRef.current = welcomeRestore.view;
+  const welcomeRestoreInstanceRef = useRef(welcomeRestore);
+  welcomeRestoreInstanceRef.current = welcomeRestore;
+
+  // -------------------------------------------------------------------------
+  // Run-snapshot collector (design §4.2.1): eligible tabs + active identity,
+  // deep-compare, debounced commit. Empty snapshots are never written.
+  // -------------------------------------------------------------------------
+
+  const buildRunSnapshotEntries = useCallback(() => {
+    const sessionsById = new Map(
+      useSessionStore.getState().sessions.map((session) => [session.id, session]),
+    );
+    const entries: SnapshotEntry[] = [];
+    const identityByTab = new Map<string, string>();
+    for (const tab of tabs) {
+      let entry: SnapshotEntry | null = null;
+      if (tab.type === "terminal") {
+        if (tab.sessionId) {
+          const session = sessionsById.get(tab.sessionId);
+          if (session && isResumeEligibleSavedSession(session)) {
+            entry = savedSessionEntry(session);
+          }
+        } else if (
+          tab.localShell &&
+          tab.localShell.id !== "wsl.exe" &&
+          !tab.localShell.id.startsWith("wsl:")
+        ) {
+          const rawCwd = terminalCwds[tab.id] ?? null;
+          const confirmedCwd = rawCwd ? normalizeLocalStartCwd(rawCwd, getAppPlatform()) : null;
+          if (confirmedCwd) {
+            entry = localTerminalEntry({
+              tabId: tab.id,
+              displayName: tab.localShell.name,
+              shellId: tab.localShell.id,
+              shellArgs: tab.localShell.args,
+              confirmedCwd,
+            });
+          }
+        }
+      } else if (
+        tab.sessionId &&
+        ["sftp", "vnc", "rdp", "database", "redis", "hbase-shell", "proxy-test", "object-storage", "mail", "file-browser"].includes(tab.type)
+      ) {
+        const session = sessionsById.get(tab.sessionId);
+        if (session && isResumeEligibleSavedSession(session)) {
+          entry = savedSessionEntry(session);
+        }
+      }
+      if (entry && !welcomeRestoreInstanceRef.current.isIdentitySuppressed(entry.identity)) {
+        entries.push(entry);
+        identityByTab.set(tab.id, entry.identity);
+      }
+    }
+    const activeIdentity = identityByTab.get(activeTabId ?? "") ?? null;
+    return { entries, activeIdentity };
+  }, [tabs, activeTabId, terminalCwds]);
+
+  const commitRunSnapshotNow = useCallback(async () => {
+    const state = welcomeRestoreViewRef.current.state;
+    if (state === "restoring" || state === "awaiting-auth") return; // suppression
+    const { entries, activeIdentity } = buildRunSnapshotEntries();
+    if (entries.length === 0) return; // never write empty snapshots
+    const fingerprint = snapshotEntriesFingerprint(entries, activeIdentity);
+    if (fingerprint === snapshotFingerprintRef.current) return;
+    try {
+      const response = await commitWelcomeRunSnapshot({
+        batchId: runBatchIdRef.current,
+        entries,
+        activeIdentity,
+        expectedRevision: snapshotRevisionRef.current || undefined,
+        restored: false,
+      });
+      if (response.record) snapshotRevisionRef.current = response.record.revision;
+      if (response.applied) snapshotFingerprintRef.current = fingerprint;
+    } catch (error) {
+      setStatusMessage(tr("welcome.snapshotSaveFailed", { error: String(error) }));
+    }
+  }, [buildRunSnapshotEntries, setStatusMessage, tr]);
+
+  // Always execute the latest collector closure when the pending timer
+  // fires, so a change committed during the debounce window is not lost.
+  const commitRunSnapshotNowRef = useRef(commitRunSnapshotNow);
+  commitRunSnapshotNowRef.current = commitRunSnapshotNow;
+  const commitRunSnapshotSoon = useCallback(() => {
+    if (snapshotCommitTimerRef.current != null) return;
+    snapshotCommitTimerRef.current = window.setTimeout(() => {
+      snapshotCommitTimerRef.current = null;
+      void commitRunSnapshotNowRef.current();
+    }, 400);
+  }, []);
+
+  useEffect(() => {
+    commitRunSnapshotSoon();
+  }, [tabs, activeTabId, terminalCwds, commitRunSnapshotSoon]);
+
   const handleConnectSession = useCallback((session: SessionConfig) => {
-    connectQueueRef.current.push(session);
+    connectQueueRef.current.push({ session });
     continueConnectQueue();
   }, [continueConnectQueue]);
 
@@ -2516,7 +3012,7 @@ export function MainLayout() {
       return true;
     });
     if (unique.length === 0) return;
-    connectQueueRef.current.push(...unique);
+    connectQueueRef.current.push(...unique.map((session) => ({ session })));
     continueConnectQueue();
   }, [continueConnectQueue]);
 
@@ -3530,6 +4026,14 @@ export function MainLayout() {
                 >
                   <WelcomePanel
                     active={activeTab?.type === "welcome" || !activeTab}
+                    restore={{
+                      view: welcomeRestore.view,
+                      outcomes: welcomeRestore.outcomes,
+                      onStartRestore: welcomeRestore.startRestore,
+                      onRetryFailed: welcomeRestore.retryFailed,
+                      onCancelRestore: welcomeRestore.cancelRestore,
+                      onClearRecord: () => void welcomeRestore.clearRecord(),
+                    }}
                     onStartLocalTerminal={(localShell, cwd) => openLocalTab(localShell?.name ?? tr("tabs.localTerminal"), undefined, undefined, localShell, cwd)}
                     onNewSession={handleNewSession}
                     onOpenLocalPath={(path, opts) => void handleOpenLocalPath(path, opts)}
@@ -3612,7 +4116,19 @@ export function MainLayout() {
                             inputLocked={inputLocked}
                             onCwdChange={(cwd) => handleTerminalCwd(tab.id, cwd)}
                             cwdRequestToken={terminalCwdRequestTokens[tab.id] ?? 0}
-                            onSessionReady={(sid) => { terminalSessionIds.current[tab.id] = sid; }}
+                            onSessionReady={(sid) => {
+                              terminalSessionIds.current[tab.id] = sid;
+                              completeLocalLaunch(tab.id, { tabId: tab.id, status: "started" });
+                              resolveResumeWaiterForTab(tab.id, "connected");
+                            }}
+                            onSessionLaunchFailed={(error) => {
+                              completeLocalLaunch(tab.id, {
+                                tabId: tab.id,
+                                status: "failed",
+                                error: String(error),
+                              });
+                              resolveResumeWaiterForTab(tab.id, "failed", error);
+                            }}
                             onOutput={() => handleTerminalOutput(tab.id)}
                             onUploadLocalPaths={
                               tab.ssh
@@ -4230,6 +4746,9 @@ export function MainLayout() {
           username={pendingAuth.kind === "jump" ? pendingAuth.username : pendingAuth.session.username ?? "root"}
           onSubmit={handleAuthSubmit}
           onCancel={() => {
+            if (pendingAuth.kind === "session" && pendingAuth.resumeRequestId) {
+              cancelResumeWaiter(pendingAuth.resumeRequestId, "authentication", "Authentication cancelled");
+            }
             setPendingAuth(null);
             awaitingManualAuthRef.current = false;
             continueConnectQueueRef.current();
@@ -4245,6 +4764,7 @@ export function MainLayout() {
             awaitingVaultUnlockRef.current = false;
             connectQueueRef.current = [];
             setVaultUnlockReason(null);
+            cancelAllResumeWaiters("authentication", "Vault unlock cancelled");
           }}
           onSubmit={async (pw) => {
             await unlockVault(pw);
