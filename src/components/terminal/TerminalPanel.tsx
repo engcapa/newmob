@@ -81,6 +81,7 @@ import {
   createCommandTerminal,
   createLocalTerminal,
   createSshTerminal,
+  recordLocalDirectoryUse,
   listenSshAuthPrompt,
   submitSshAuthResponse,
   type SshAuthPromptPayload,
@@ -228,6 +229,8 @@ interface TerminalPanelProps {
   cwdRequestToken?: number;
   /** Called once the backend terminal session ID is known (after connect). */
   onSessionReady?: (sessionId: string) => void;
+  /** Called when the backend terminal fails to start (after connect attempt). */
+  onSessionLaunchFailed?: (error: string) => void;
   /** Called whenever the terminal receives output (for new-output badge). */
   onOutput?: () => void;
   /** Workspace task terminals report their shell exit marker through OSC 633. */
@@ -331,6 +334,7 @@ export function TerminalPanel({
   onCwdChange,
   cwdRequestToken = 0,
   onSessionReady,
+  onSessionLaunchFailed,
   onOutput,
   onTaskExit,
   onUploadLocalPaths,
@@ -347,6 +351,7 @@ export function TerminalPanel({
   const { confirm: confirmTerminalDefaults, render: terminalDefaultsConfirmDialog } = useConfirmDialog();
   const cwdCallbackRef = useRef<typeof onCwdChange>(onCwdChange);
   const onSessionReadyRef = useRef<typeof onSessionReady>(onSessionReady);
+  const onSessionLaunchFailedRef = useRef<typeof onSessionLaunchFailed>(onSessionLaunchFailed);
   const onOutputRef = useRef<typeof onOutput>(onOutput);
   const onTaskExitRef = useRef<typeof onTaskExit>(onTaskExit);
   const onUploadLocalPathsRef = useRef<typeof onUploadLocalPaths>(onUploadLocalPaths);
@@ -360,6 +365,7 @@ export function TerminalPanel({
   useEffect(() => {
     cwdCallbackRef.current = onCwdChange;
     onSessionReadyRef.current = onSessionReady;
+    onSessionLaunchFailedRef.current = onSessionLaunchFailed;
     onOutputRef.current = onOutput;
     onTaskExitRef.current = onTaskExit;
     onUploadLocalPathsRef.current = onUploadLocalPaths;
@@ -372,6 +378,7 @@ export function TerminalPanel({
   }, [
     onCwdChange,
     onSessionReady,
+    onSessionLaunchFailed,
     onOutput,
     onTaskExit,
     onUploadLocalPaths,
@@ -829,12 +836,14 @@ export function TerminalPanel({
   const isLocalRef = useRef(isLocal);
   /** Last absolute local cwd we already recorded into command history. */
   const lastRecordedLocalDirRef = useRef<string | null>(null);
+  const localShellIdRef = useRef<string | null>(null);
   useEffect(() => {
     historyRef.current = history;
     suggestionsActiveRef.current = suggestionsActive;
     inlineSuggestionsSourceRef.current = inlineSuggestionsSource;
     isLocalRef.current = isLocal;
-  }, [history, suggestionsActive, inlineSuggestionsSource, isLocal]);
+    localShellIdRef.current = resolvedLocalShellId ?? localShell?.id ?? null;
+  }, [history, suggestionsActive, inlineSuggestionsSource, isLocal, resolvedLocalShellId, localShell?.id]);
 
   // AI suggestion source resolver (data sources 2 + 3).
   // The resolver caches its options on every render; passing a thunk for
@@ -2478,13 +2487,31 @@ export function TerminalPanel({
             });
           }
           if (isLocalRef.current) {
+            const shellId = localShellIdRef.current ?? "";
+            // WSL Linux cwd / SSH cwd must never pollute host-local recency.
+            const isWslShell = shellId.startsWith("wsl:") || shellId === "wsl.exe";
             const normalized = normalizeLocalStartCwd(cwd, getAppPlatform());
             if (
               normalized
+              && !isWslShell
               && normalized !== lastRecordedLocalDirRef.current
             ) {
               lastRecordedLocalDirRef.current = normalized;
               historyRef.current.commit(formatHistoryCdCommand(normalized));
+              const backendId = sessionIdRef.current;
+              if (backendId) {
+                void recordLocalDirectoryUse({ backendSessionId: backendId, path: normalized }).catch(
+                  (error) => {
+                    try {
+                      useAppStore.getState().setStatusMessage(
+                        `终端已打开，最近使用记录保存失败: ${String(error)}`,
+                      );
+                    } catch {
+                      /* status store unavailable in tests */
+                    }
+                  },
+                );
+              }
             }
           }
         }
@@ -2996,6 +3023,7 @@ export function TerminalPanel({
       }
       const label = ssh && mode === "reconnect" ? "Reconnect failed" : "Connection failed";
       appendEvent("error", `${label}: ${message}`);
+      onSessionLaunchFailedRef.current?.(message);
       if (ssh && !adopted) {
         term.write(`\r\n\x1b[31m[${label}] ${message}\x1b[0m\r\n\x1b[33mPress Enter to retry.\x1b[0m\r\n`);
         setStatusMessage(`${label}; press Enter to retry`);

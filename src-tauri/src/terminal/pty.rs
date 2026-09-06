@@ -147,6 +147,70 @@ pub fn list_common_local_directories(history_commands: &[String]) -> Vec<LocalDi
     out
 }
 
+/// Ordered default directory candidates with stable ids/ranks (design 4.1.3).
+/// System dirs first (Home/Desktop/Documents/Downloads/Pictures/Music/Videos),
+/// then home guesses (Code/code/Projects/projects/Workspace/workspace/work/dev/
+/// Developer/src). Callers filter by existence; identity merge lives in
+/// `super::local_directories`.
+pub(crate) struct DefaultDirectoryCandidate {
+    pub(crate) default_id: &'static str,
+    pub(crate) default_rank: i64,
+    pub(crate) label: String,
+    pub(crate) kind: &'static str,
+    pub(crate) path: PathBuf,
+}
+
+pub(crate) fn default_directory_candidates() -> Vec<DefaultDirectoryCandidate> {
+    let mut out = Vec::new();
+    let home = dirs::home_dir();
+    let system: Vec<(&'static str, &'static str, Option<PathBuf>)> = vec![
+        ("home", "Home", home.clone()),
+        ("desktop", "Desktop", dirs::desktop_dir()),
+        ("documents", "Documents", dirs::document_dir()),
+        ("downloads", "Downloads", dirs::download_dir()),
+        ("pictures", "Pictures", dirs::picture_dir()),
+        ("music", "Music", dirs::audio_dir()),
+        ("videos", "Videos", dirs::video_dir()),
+    ];
+    for (rank, (id, label, path)) in system.into_iter().enumerate() {
+        if let Some(path) = path {
+            out.push(DefaultDirectoryCandidate {
+                default_id: id,
+                default_rank: rank as i64,
+                label: label.to_string(),
+                kind: "system",
+                path,
+            });
+        }
+    }
+    if let Some(home_dir) = home.as_deref() {
+        for (i, (id, name)) in [
+            ("guess-Code", "Code"),
+            ("guess-code", "code"),
+            ("guess-Projects", "Projects"),
+            ("guess-projects", "projects"),
+            ("guess-Workspace", "Workspace"),
+            ("guess-workspace", "workspace"),
+            ("guess-work", "work"),
+            ("guess-dev", "dev"),
+            ("guess-Developer", "Developer"),
+            ("guess-src", "src"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            out.push(DefaultDirectoryCandidate {
+                default_id: id,
+                default_rank: 7 + i as i64,
+                label: name.to_string(),
+                kind: "personal",
+                path: home_dir.join(name),
+            });
+        }
+    }
+    out
+}
+
 fn push_directory_shortcut(
     out: &mut Vec<LocalDirectoryShortcut>,
     seen: &mut HashSet<String>,
@@ -189,7 +253,10 @@ fn path_display_label(path: &Path, fallback: &str) -> String {
         .to_string()
 }
 
-fn directory_from_history_command(command: &str, home: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn directory_from_history_command(
+    command: &str,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return None;

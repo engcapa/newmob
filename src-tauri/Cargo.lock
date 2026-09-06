@@ -10446,6 +10446,7 @@ dependencies = [
  "rustls 0.23.41",
  "rustls-native-certs 0.8.4",
  "rusty-s3",
+ "same-file",
  "schemars 1.2.1",
  "scopeguard",
  "security-framework 3.7.0",

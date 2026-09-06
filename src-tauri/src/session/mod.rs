@@ -2,6 +2,7 @@ pub mod db;
 pub mod import;
 pub mod import_secrets;
 pub mod models;
+pub mod run_snapshot;
 
 use crate::state::AppState;
 use models::{SessionConfig, SessionGroup};
@@ -64,4 +65,54 @@ pub async fn save_session_group(
 pub async fn delete_session_group(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db::delete_group(&db, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_welcome_run_snapshot(
+    state: State<'_, AppState>,
+) -> Result<run_snapshot::GetSnapshotResponse, String> {
+    let db = state.db.lock().map_err(|e| format!("storage: {e}"))?;
+    run_snapshot::get_snapshot(&db)
+}
+
+#[tauri::command]
+pub async fn record_welcome_run_snapshot(
+    run_id: String,
+    entries: Vec<run_snapshot::RunEntryInput>,
+    active_entry_key: Option<String>,
+    expected_revision: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<run_snapshot::RecordSnapshotResponse, String> {
+    // App version is informational for debugging downgrades; fall back safely.
+    let app_version = "0.4.22".to_string();
+    let db = state.db.lock().map_err(|e| format!("storage: {e}"))?;
+    run_snapshot::record_snapshot(
+        &db,
+        &run_id,
+        &entries,
+        active_entry_key.as_deref(),
+        expected_revision,
+        &app_version,
+    )
+}
+
+#[tauri::command]
+pub async fn update_welcome_run_context(
+    run_id: String,
+    entry_key: String,
+    local_cwd: String,
+    expected_revision: i64,
+    state: State<'_, AppState>,
+) -> Result<run_snapshot::RecordSnapshotResponse, String> {
+    let db = state.db.lock().map_err(|e| format!("storage: {e}"))?;
+    run_snapshot::update_entry_context(&db, &run_id, &entry_key, &local_cwd, expected_revision)
+}
+
+#[tauri::command]
+pub async fn clear_welcome_run_snapshot(
+    expected_revision: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let db = state.db.lock().map_err(|e| format!("storage: {e}"))?;
+    run_snapshot::clear_snapshot(&db, expected_revision)
 }

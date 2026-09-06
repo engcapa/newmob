@@ -75,6 +75,10 @@ pub type CcPermissionResponder = tokio::sync::oneshot::Sender<CcPermissionDecisi
 pub struct AppState {
     pub terminals: Arc<RwLock<HashMap<String, ActiveTerminal>>>,
     pub terminal_outputs: Arc<Mutex<HashMap<String, Vec<TerminalOutputChannel>>>>,
+    /// Per-runtime last recorded directory identity for Welcome recency dedup.
+    /// Keyed by backend terminal session id; cleared in `close_terminal`.
+    /// Late OSC reports after close must not write.
+    pub local_directory_runtime: Arc<Mutex<HashMap<String, String>>>,
     pub sftp_sessions: Arc<RwLock<HashMap<String, Arc<ActiveSftp>>>>,
     pub transfers: Arc<RwLock<HashMap<String, Arc<TransferHandle>>>>,
     pub tunnels: Arc<TunnelRegistry>,
@@ -204,6 +208,7 @@ impl AppState {
         Self {
             terminals: Arc::new(RwLock::new(HashMap::new())),
             terminal_outputs: Arc::new(Mutex::new(HashMap::new())),
+            local_directory_runtime: Arc::new(Mutex::new(HashMap::new())),
             sftp_sessions: Arc::new(RwLock::new(HashMap::new())),
             transfers: Arc::new(RwLock::new(HashMap::new())),
             tunnels: Arc::new(TunnelRegistry::new()),

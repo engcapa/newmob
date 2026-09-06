@@ -324,6 +324,9 @@ controls:
     selector: '[data-testid="welcome-history-tab-workspaces"]'
     kind: interactive
     optional: true       # template testid welcome-history-tab-${tab.id}; sessions|workspaces|directories
+  - id: history-tab-sessions
+    selector: '[data-testid="welcome-history-tab-sessions"]'
+    kind: interactive
   - id: tips-section
     selector: 'text="Tips"'
     kind: display
@@ -333,6 +336,37 @@ controls:
   - id: version-footer
     selector: '[data-testid="welcome-version-footer"]'
     kind: display
+  - id: history-tab-directories
+    selector: '[data-testid="welcome-history-tab-directories"]'
+    kind: interactive
+  - id: local-directory-filter
+    selector: '[data-testid="welcome-local-directory-filter"]'
+    kind: interactive
+  - id: local-directory-row
+    selector: '[data-testid="welcome-local-directory"]'
+    kind: interactive
+  - id: directory-retry
+    selector: '[data-testid="welcome-directory-retry"]'
+    kind: interactive
+    optional: true       # only rendered on directory load error
+  - id: restore-last-session
+    selector: '[data-testid="welcome-restore-last-session"]'
+    kind: interactive
+  - id: restore-status
+    selector: '[data-testid="welcome-restore-status"]'
+    kind: display
+  - id: restore-retry
+    selector: '[data-testid="welcome-restore-retry"]'
+    kind: interactive
+    optional: true       # only rendered when a batch restore partially/fully failed
+  - id: restore-cancel
+    selector: '[data-testid="welcome-restore-cancel"]'
+    kind: interactive
+    optional: true       # only rendered while a restore is in flight
+  - id: restore-clear
+    selector: '[data-testid="welcome-restore-clear"]'
+    kind: interactive
+    optional: true       # only rendered when a snapshot or failed result exists
 -->
 
 - 启动入口：开始本地终端、新建会话、导入 OpenSSH config
@@ -1657,6 +1691,10 @@ controls:
   - id: panel-root
     selector: '[data-testid="sftp-browser"]'
     kind: display
+  - id: embedded-file-pane
+    selector: '[data-testid="file-browser-pane"]'
+    kind: display
+    optional: true       # only rendered for embedded File-session tabs (LocalFileBrowserPanel)
   - id: download-prompt-dialog      # fixed overlay, no testid — addressed via role+title text
     selector: '[role="dialog"][aria-modal="true"]:has-text("Open remote file?")'
     kind: display

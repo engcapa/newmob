@@ -8,6 +8,9 @@ import type { RecentWorkspace } from "../types";
 
 const ipcMocks = vi.hoisted(() => ({
   listCommonLocalDirectories: vi.fn(),
+  listCommonLocalDirectoriesWithRevision: vi.fn(),
+  listenWelcomeDirectoriesChanged: vi.fn(),
+  recordLocalDirectoryUse: vi.fn(),
   listLocalShells: vi.fn(),
   listSessionGroups: vi.fn(),
   listSessions: vi.fn(),
@@ -15,10 +18,16 @@ const ipcMocks = vi.hoisted(() => ({
   listWslDistros: vi.fn(),
   openLocalShellAsAdministrator: vi.fn(),
   saveSession: vi.fn(),
+  getWelcomeRunSnapshot: vi.fn(),
+  recordWelcomeRunSnapshot: vi.fn(),
+  clearWelcomeRunSnapshot: vi.fn(),
 }));
 
 vi.mock("../lib/ipc", () => ({
   listCommonLocalDirectories: ipcMocks.listCommonLocalDirectories,
+  listCommonLocalDirectoriesWithRevision: ipcMocks.listCommonLocalDirectoriesWithRevision,
+  listenWelcomeDirectoriesChanged: ipcMocks.listenWelcomeDirectoriesChanged,
+  recordLocalDirectoryUse: ipcMocks.recordLocalDirectoryUse,
   listLocalShells: ipcMocks.listLocalShells,
   listSessionGroups: ipcMocks.listSessionGroups,
   listSessions: ipcMocks.listSessions,
@@ -26,6 +35,9 @@ vi.mock("../lib/ipc", () => ({
   listWslDistros: ipcMocks.listWslDistros,
   openLocalShellAsAdministrator: ipcMocks.openLocalShellAsAdministrator,
   saveSession: ipcMocks.saveSession,
+  getWelcomeRunSnapshot: ipcMocks.getWelcomeRunSnapshot,
+  recordWelcomeRunSnapshot: ipcMocks.recordWelcomeRunSnapshot,
+  clearWelcomeRunSnapshot: ipcMocks.clearWelcomeRunSnapshot,
 }));
 
 vi.mock("../lib/runtime", () => ({
@@ -55,6 +67,14 @@ describe("WelcomePanel", () => {
       { label: "Home", path: "/home/test", kind: "system" },
       { label: "Projects", path: "/home/test/projects", kind: "personal" },
     ]);
+    ipcMocks.listCommonLocalDirectoriesWithRevision.mockResolvedValue({
+      revision: 1,
+      directories: [
+        { label: "Home", path: "/home/test", kind: "system" },
+        { label: "Projects", path: "/home/test/projects", kind: "personal" },
+      ],
+    });
+    ipcMocks.listenWelcomeDirectoriesChanged.mockResolvedValue(() => undefined);
     ipcMocks.listSessions.mockResolvedValue([]);
     ipcMocks.listSessionGroups.mockResolvedValue([]);
     ipcMocks.listSystemFonts.mockResolvedValue(["monospace", "JetBrains Mono"]);

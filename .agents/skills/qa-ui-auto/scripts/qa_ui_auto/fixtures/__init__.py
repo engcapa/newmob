@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from . import git_diff_repo, java25_projects, java_sample_projects, jdtls_required, reset_db, sftp_required, ssh_required, workspace_root
+from . import git_diff_repo, java25_projects, java_sample_projects, jdtls_required, reset_db, sftp_required, ssh_required, welcome_recents, workspace_root
 
 
 class FixtureContext(Protocol):
@@ -47,6 +47,7 @@ REGISTRY: dict[str, Fixture] = {
     "java_sample_projects": Fixture("java_sample_projects", java_sample_projects.setup),
     "java25_projects": Fixture("java25_projects", java25_projects.setup),
     "git_diff_repo": Fixture("git_diff_repo", git_diff_repo.setup, git_diff_repo.teardown),
+    "welcome_recents": Fixture("welcome_recents", welcome_recents.setup, welcome_recents.teardown),
 }
 
 

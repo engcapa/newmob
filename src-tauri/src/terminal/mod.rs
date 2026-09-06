@@ -1,5 +1,6 @@
 pub mod client;
 pub mod forwards;
+pub mod local_directories;
 pub mod network;
 pub mod pty;
 pub mod shell_integration;
@@ -9,6 +10,7 @@ pub mod x11_forward;
 
 use crate::state::AppState;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use rusqlite::OptionalExtension;
 use russh::Sig;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -53,69 +55,12 @@ pub fn list_local_shells() -> Vec<pty::LocalShellOption> {
 #[tauri::command]
 pub fn list_common_local_directories(
     state: State<'_, AppState>,
-) -> Result<Vec<pty::LocalDirectoryShortcut>, String> {
-    let db = match state.db.try_lock() {
-        Ok(db) => db,
-        Err(std::sync::TryLockError::WouldBlock) => {
-            return Ok(pty::list_common_local_directories(&[]));
-        }
-        Err(e) => return Err(e.to_string()),
-    };
-    // Prefer directory-changing commands, ordered by recency, so Welcome's
-    // "Recent folders" reflects where the user actually `cd`s — not the most
-    // frequently run non-cd commands. Fall back to a broader recent window so
-    // shells that record `Set-Location` / `pushd` / relative forms still feed
-    // the parser.
-    let mut stmt = db
-        .prepare(
-            "SELECT command FROM command_history
-             WHERE host_key = 'local'
-               AND (
-                 lower(command) LIKE 'cd %'
-                 OR lower(command) LIKE 'cd\t%'
-                 OR lower(command) = 'cd'
-                 OR lower(command) LIKE 'chdir %'
-                 OR lower(command) LIKE 'pushd %'
-                 OR lower(command) LIKE 'set-location %'
-                 OR lower(command) LIKE 'sl %'
-               )
-             ORDER BY last_used_at DESC
-             LIMIT 300",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?;
-    let mut commands = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    // If history has few explicit cd lines (new install / PowerShell gap),
-    // also scan a recency-ordered general window so we don't miss paths that
-    // arrived via other directory forms.
-    if commands.len() < 24 {
-        let mut broad = db
-            .prepare(
-                "SELECT command FROM command_history
-                 WHERE host_key = 'local'
-                 ORDER BY last_used_at DESC
-                 LIMIT 500",
-            )
-            .map_err(|e| e.to_string())?;
-        let broad_rows = broad
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        let extra = broad_rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        for cmd in extra {
-            if !commands.iter().any(|c| c == &cmd) {
-                commands.push(cmd);
-            }
-        }
-    }
-
-    Ok(pty::list_common_local_directories(&commands))
+) -> Result<local_directories::DirectoryListResponse, String> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|e| format!("storage: directory database unavailable: {e}"))?;
+    local_directories::list_directory_shortcuts(&db)
 }
 
 /// Probe the local system X server (Xorg / XQuartz / VcXsrv / WSLg) and report
@@ -140,6 +85,10 @@ pub struct LocalTerminalCreated {
     /// with shells that already provide them, even when the caller didn't pass
     /// an explicit `shell` arg and we resolved a default.
     pub shell_id: String,
+    /// Set when the terminal started but persisting its directory recency
+    /// failed. The terminal stays usable; the UI surfaces this warning and
+    /// keeps the last committed ordering.
+    pub directory_use_warning: Option<String>,
 }
 
 /// Register an already-spawned local PTY in the shared terminal runtime and
@@ -291,6 +240,7 @@ pub async fn create_local_terminal(
     app_handle: AppHandle,
 ) -> Result<LocalTerminalCreated, String> {
     validate_session_id(&session_id)?;
+    let requested_cwd = cwd.clone();
     let sdk_environment = if let Some(root) = workspace_root
         .as_deref()
         .map(str::trim)
@@ -344,10 +294,143 @@ pub async fn create_local_terminal(
         read_loop_local(reader, sid, app, outputs);
     });
 
+    // Successful native-local start with an explicit cwd is a confirmed
+    // directory use. Storage failure must not fail the started terminal.
+    let mut directory_use_warning: Option<String> = None;
+    if let Some(cwd_value) = requested_cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let cwd_path = std::path::Path::new(cwd_value);
+        if cwd_path.is_absolute() {
+            let at_ms = local_directories::now_ms();
+            let record_result =
+                (|| -> Result<local_directories::RecordDirectoryResponse, String> {
+                    let db = state
+                        .db
+                        .lock()
+                        .map_err(|e| format!("storage: directory database unavailable: {e}"))?;
+                    local_directories::record_successful_use(&db, cwd_value, "local-start", at_ms)
+                })();
+            match record_result {
+                Ok(response) => {
+                    if let Some(dir) = response.directory {
+                        if let Ok(mut runtime) = state.local_directory_runtime.lock() {
+                            runtime.insert(session_id.clone(), dir.directory_id);
+                        }
+                    }
+                    let revision = state
+                        .db
+                        .lock()
+                        .map(|db| local_directories::current_revision(&db))
+                        .unwrap_or(0);
+                    let _ = app_handle.emit(
+                        "welcome-directories-changed",
+                        serde_json::json!({ "revision": revision }),
+                    );
+                }
+                Err(error) => {
+                    directory_use_warning =
+                        Some(format!("终端已打开，最近使用记录保存失败: {error}"));
+                }
+            }
+        }
+    }
+
     Ok(LocalTerminalCreated {
         session_id,
         shell_id,
+        directory_use_warning,
     })
+}
+
+/// Confirmed host cwd report for a live native-local terminal (OSC 7 path).
+/// Only the frontend's TerminalPanel calls this after strict native/MSYS
+/// classification; remote/WSL-unmapped paths must never reach here.
+#[tauri::command]
+pub fn record_local_directory_use(
+    backend_session_id: String,
+    path: String,
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<local_directories::RecordDirectoryResponse, String> {
+    validate_session_id(&backend_session_id)?;
+    if path.is_empty() || path.contains('\0') {
+        return Err("invalid path".to_string());
+    }
+    let candidate = std::path::Path::new(&path);
+    if !candidate.is_absolute() {
+        return Err("path must be absolute".to_string());
+    }
+    {
+        let terminals = state
+            .terminals
+            .try_read()
+            .map_err(|_| "terminal runtime busy".to_string())?;
+        match terminals.get(&backend_session_id) {
+            Some(ActiveTerminal::Local { .. }) => {}
+            _ => return Err("unknown native-local terminal".to_string()),
+        }
+    }
+    let key = local_directories::normalize_path_key(candidate)
+        .map_err(|e| format!("invalid path: {e}"))?;
+    // Per-runtime dedup: repeated reports for the same identity don't refresh time.
+    if let Ok(runtime) = state.local_directory_runtime.lock() {
+        if runtime.get(&backend_session_id).is_some() {
+            // Compare against the stored directory's keys via DB aliases.
+            if let Ok(db) = state.db.lock() {
+                let alias_hit: Option<String> = db
+                    .query_row(
+                        "SELECT directory_id FROM welcome_directory_alias WHERE path_key = ?1",
+                        rusqlite::params![key],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .unwrap_or(None);
+                if let Some(hit) = alias_hit {
+                    if runtime.get(&backend_session_id).is_some_and(|v| v == &hit) {
+                        let existing = db
+                            .query_row(
+                                "SELECT directory_id FROM welcome_directory_usage WHERE directory_id = ?1",
+                                rusqlite::params![hit],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()
+                            .unwrap_or(None);
+                        if existing.is_some() {
+                            return Ok(local_directories::RecordDirectoryResponse {
+                                changed: false,
+                                directory: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let at_ms = local_directories::now_ms();
+    let db = state
+        .db
+        .lock()
+        .map_err(|e| format!("storage: directory database unavailable: {e}"))?;
+    let response = local_directories::record_successful_use(&db, &path, "local-cwd", at_ms)?;
+    drop(db);
+    if let Some(dir) = response.directory.clone() {
+        if let Ok(mut runtime) = state.local_directory_runtime.lock() {
+            runtime.insert(backend_session_id, dir.directory_id);
+        }
+    }
+    let revision = state
+        .db
+        .lock()
+        .map(|db| local_directories::current_revision(&db))
+        .unwrap_or(0);
+    let _ = app_handle.emit(
+        "welcome-directories-changed",
+        serde_json::json!({ "revision": revision }),
+    );
+    Ok(response)
 }
 
 #[tauri::command]
@@ -878,6 +961,9 @@ pub async fn close_terminal(session_id: String, state: State<'_, AppState>) -> R
     }
     if let Ok(mut outputs) = state.terminal_outputs.lock() {
         outputs.remove(&session_id);
+    }
+    if let Ok(mut runtime) = state.local_directory_runtime.lock() {
+        runtime.remove(&session_id);
     }
     Ok(())
 }

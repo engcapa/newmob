@@ -37,6 +37,17 @@ export interface LocalDirectoryShortcut {
   label: string;
   path: string;
   kind: "system" | "personal";
+  directoryId?: string | null;
+  lastUsedAtMs?: number | null;
+  timeSource?: "local-start" | "local-cwd" | null;
+  legacyRank?: number | null;
+  defaultId?: string | null;
+  availability?: "unknown" | "available" | "missing" | "permission-denied" | "unavailable" | null;
+}
+
+export interface DirectoryListResponse {
+  revision: number;
+  directories: LocalDirectoryShortcut[];
 }
 
 export async function listLocalShells(): Promise<LocalShellOption[]> {
@@ -44,7 +55,50 @@ export async function listLocalShells(): Promise<LocalShellOption[]> {
 }
 
 export async function listCommonLocalDirectories(): Promise<LocalDirectoryShortcut[]> {
-  return invoke<LocalDirectoryShortcut[]>("list_common_local_directories", {});
+  const raw = await invoke<LocalDirectoryShortcut[] | DirectoryListResponse>(
+    "list_common_local_directories",
+    {},
+  );
+  if (Array.isArray(raw)) return raw;
+  if (raw && Array.isArray((raw as DirectoryListResponse).directories)) {
+    return (raw as DirectoryListResponse).directories;
+  }
+  return [];
+}
+
+export async function listCommonLocalDirectoriesWithRevision(): Promise<DirectoryListResponse> {
+  const raw = await invoke<LocalDirectoryShortcut[] | DirectoryListResponse>(
+    "list_common_local_directories",
+    {},
+  );
+  if (Array.isArray(raw)) return { revision: 0, directories: raw };
+  if (raw && Array.isArray((raw as DirectoryListResponse).directories)) {
+    return raw as DirectoryListResponse;
+  }
+  return { revision: 0, directories: [] };
+}
+
+export interface RecordDirectoryResponse {
+  changed: boolean;
+  directory: LocalDirectoryShortcut | null;
+}
+
+export async function recordLocalDirectoryUse(input: {
+  backendSessionId: string;
+  path: string;
+}): Promise<RecordDirectoryResponse> {
+  return invoke<RecordDirectoryResponse>("record_local_directory_use", {
+    backendSessionId: input.backendSessionId,
+    path: input.path,
+  });
+}
+
+export function listenWelcomeDirectoriesChanged(
+  callback: (revision: number) => void,
+): Promise<UnlistenFn> {
+  return listen<{ revision: number }>("welcome-directories-changed", (event) => {
+    callback(event.payload?.revision ?? 0);
+  });
 }
 
 export async function openLocalShellAsAdministrator(shell?: string): Promise<void> {
@@ -78,6 +132,14 @@ export interface LocalTerminalCreated {
   sessionId: string;
   /** `LocalShellOption.id` of the shell the backend actually launched. */
   shellId: string;
+  /** Set when the terminal started but directory recency persistence failed. */
+  directoryUseWarning?: string | null;
+}
+
+export interface LocalLaunchOutcome {
+  tabId: string;
+  status: "started" | "failed" | "cancelled";
+  error?: string;
 }
 
 export async function createLocalTerminal(
@@ -477,6 +539,86 @@ export async function saveSessionGroup(group: SessionGroup): Promise<void> {
 
 export async function deleteSessionGroup(id: string): Promise<void> {
   return invoke("delete_session_group", { id });
+}
+
+export interface RunTempShell {
+  id: string;
+  name: string;
+  args: string[];
+}
+
+export interface RunEntryInput {
+  entryKey: string;
+  orderIndex: number;
+  kind: string;
+  savedSessionId?: string | null;
+  savedSessionType?: string | null;
+  displayName: string;
+  localCwd?: string | null;
+  tempShell?: RunTempShell | null;
+  profileRef?: string | null;
+}
+
+export interface RunEntry {
+  entryKey: string;
+  orderIndex: number;
+  kind: string;
+  savedSessionId: string | null;
+  savedSessionType: string | null;
+  displayName: string;
+  localCwd: string | null;
+  tempShell: RunTempShell | null;
+  profileRef: string | null;
+}
+
+export interface RunSnapshot {
+  schemaVersion: number;
+  revision: number;
+  runId: string;
+  createdAtMs: number;
+  activeEntryKey: string | null;
+  entries: RunEntry[];
+}
+
+export interface RunSnapshotIssue {
+  code: string;
+  message: string;
+}
+
+export async function getWelcomeRunSnapshot(): Promise<{
+  snapshot: RunSnapshot | null;
+  issue: RunSnapshotIssue | null;
+}> {
+  return invoke("get_welcome_run_snapshot", {});
+}
+
+export async function recordWelcomeRunSnapshot(input: {
+  runId: string;
+  entries: RunEntryInput[];
+  activeEntryKey?: string | null;
+  expectedRevision?: number | null;
+}): Promise<{ snapshot: RunSnapshot; applied: boolean }> {
+  return invoke("record_welcome_run_snapshot", {
+    runId: input.runId,
+    entries: input.entries,
+    activeEntryKey: input.activeEntryKey ?? null,
+    expectedRevision: input.expectedRevision ?? null,
+  });
+}
+
+export async function updateWelcomeRunContext(input: {
+  runId: string;
+  entryKey: string;
+  localCwd: string;
+  expectedRevision: number;
+}): Promise<{ snapshot: RunSnapshot; applied: boolean }> {
+  return invoke("update_welcome_run_context", input);
+}
+
+export async function clearWelcomeRunSnapshot(expectedRevision?: number | null): Promise<boolean> {
+  return invoke("clear_welcome_run_snapshot", {
+    expectedRevision: expectedRevision ?? null,
+  });
 }
 
 export interface LocalSessionFile {

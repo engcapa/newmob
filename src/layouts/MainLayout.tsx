@@ -83,12 +83,15 @@ import { terminalCwdTitlePrefix } from "../lib/terminalCwd";
 import { buildTabDetailSummary } from "../lib/tabDetails";
 import { useSessionStore } from "../stores/sessionStore";
 import { WelcomePanel } from "../components/WelcomePanel";
+import { useWelcomeRunRestore } from "../hooks/useWelcomeRunRestore";
+import { getWelcomeRunSnapshot } from "../lib/ipc";
+import type { EntryOutcome } from "../lib/welcomeRunRestore";
 import { AboutDialog } from "../components/AboutDialog";
 import { UpdateDialog } from "../components/UpdateDialog";
 import { useUpdateStore } from "../stores/updateStore";
 import { useServersStore } from "../stores/serversStore";
 import { parseQuickConnectInput } from "../lib/quickConnect";
-import { exitApp, selectFolderPath, type SessionConfig } from "../lib/ipc";
+import { exitApp, selectFolderPath, type LocalLaunchOutcome, type SessionConfig } from "../lib/ipc";
 import {
   vaultPut,
   VAULT_LOCKED_EVENT,
@@ -810,6 +813,21 @@ export function MainLayout() {
   const awaitingManualAuthRef = useRef(false);
   const awaitingVaultUnlockRef = useRef(false);
   const continueConnectQueueRef = useRef<() => void>(() => undefined);
+  const pendingLocalLaunchesRef = useRef(
+    new Map<string, (outcome: LocalLaunchOutcome) => void>(),
+  );
+
+  // Closing a not-yet-ready local tab resolves its launch as cancelled so
+  // Welcome pending state never hangs.
+  useEffect(() => {
+    const live = new Set(tabs.map((tab) => tab.id));
+    for (const [tabId, resolve] of [...pendingLocalLaunchesRef.current.entries()]) {
+      if (!live.has(tabId)) {
+        pendingLocalLaunchesRef.current.delete(tabId);
+        resolve({ tabId, status: "cancelled" });
+      }
+    }
+  }, [tabs]);
   const splitPanesRef = useRef<HTMLDivElement>(null);
   const refreshVault = useVaultStore((s) => s.refresh);
   const unlockVault = useVaultStore((s) => s.unlock);
@@ -1638,8 +1656,8 @@ export function MainLayout() {
     terminalProfile?: TerminalProfile,
     localShell?: LocalShellSelection,
     initialCwd?: string,
-  ) => {
-    const id = `local-${Date.now()}`;
+  ): Promise<LocalLaunchOutcome> => {
+    const id = `local-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
     const resolvedTerminalProfile = terminalProfile ?? loadTerminalDefaultProfile();
     const initialTitlePrefix = initialCwd ? terminalCwdTitlePrefix(initialCwd) : null;
     const requestedTitle = initialTitlePrefix || title || tr("tabs.localTerminal");
@@ -1649,6 +1667,9 @@ export function MainLayout() {
         .filter((tab) => tab.type === "terminal")
         .map((tab) => tab.title),
     );
+    const outcome = new Promise<LocalLaunchOutcome>((resolve) => {
+      pendingLocalLaunchesRef.current.set(id, resolve);
+    });
     addTab({
       id,
       type: "terminal",
@@ -1662,7 +1683,112 @@ export function MainLayout() {
       closable: true,
     });
     if (sessionId) void markConnected(sessionId);
+    return outcome;
   }, [addTab, markConnected]);
+
+  const completeLocalLaunch = useCallback((tabId: string, status: LocalLaunchOutcome["status"], error?: string) => {
+    const resolve = pendingLocalLaunchesRef.current.get(tabId);
+    if (!resolve) return;
+    pendingLocalLaunchesRef.current.delete(tabId);
+    resolve({ tabId, status, error });
+  }, []);
+
+  // Last-run set restore (D-01=B MVP): terminal (saved LocalShell + temp
+  // whitelist) and embedded File sessions. Other protocols return an explicit
+  // unsupported issue so gaps stay visible instead of masquerading as success.
+  const openRunEntry = useCallback(async (entryKey: string): Promise<EntryOutcome> => {
+    const fail = (code: EntryOutcome["issues"][number]["code"], message: string): EntryOutcome => ({
+      entryKey,
+      tabId: null,
+      status: "failed",
+      readiness: null,
+      issues: [{ code, message }],
+    });
+    // Openers dispatch asynchronously (void); wait for the tab to materialize
+    // instead of mistaking dispatch for failure.
+    const waitForTab = async (
+      predicate: (tabs: Tab[]) => Tab | undefined,
+      timeoutMs = 5000,
+    ): Promise<Tab | undefined> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const found = predicate(useAppStore.getState().tabs);
+        if (found) return found;
+        if (Date.now() >= deadline) return undefined;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    };
+    let snapshotEntries: { entryKey: string; kind: string; savedSessionId: string | null; displayName: string; localCwd: string | null; tempShell: { id: string; name: string; args: string[] } | null }[] = [];
+    try {
+      const response = await getWelcomeRunSnapshot();
+      snapshotEntries = (response.snapshot?.entries ?? []).map((e) => ({
+        entryKey: e.entryKey,
+        kind: e.kind,
+        savedSessionId: e.savedSessionId,
+        displayName: e.displayName,
+        localCwd: e.localCwd,
+        tempShell: e.tempShell,
+      }));
+    } catch (error) {
+      return fail("storage", String(error));
+    }
+    const entry = snapshotEntries.find((e) => e.entryKey === entryKey);
+    if (!entry) return fail("missing-session", `Unknown restore entry ${entryKey}`);
+    const liveTabs = useAppStore.getState().tabs;
+    if (entry.savedSessionId) {
+      const live = liveTabs.find((t) => t.sessionId === entry.savedSessionId && t.type === entry.kind);
+      if (live) {
+        useAppStore.getState().setActiveTab(live.id);
+        return { entryKey, tabId: live.id, status: "ready", readiness: "view-opened", issues: [] };
+      }
+      const session = useSessionStore.getState().sessions.find((s) => s.id === entry.savedSessionId);
+      if (!session) {
+        return fail("missing-session", `Saved session ${entry.savedSessionId} no longer exists`);
+      }
+      if (session.session_type !== "LocalShell" && entry.kind === "terminal") {
+        return fail("changed-type", `Session ${session.name} changed type to ${session.session_type}`);
+      }
+      if (entry.kind === "terminal" && session.session_type === "LocalShell") {
+        const outcome = await openLocalTab(
+          session.name,
+          session.id,
+          undefined,
+          localShellSelectionFromSession(session),
+          entry.localCwd ?? undefined,
+        );
+        if (outcome.status !== "started") {
+          return fail("connect", outcome.error ?? "Local terminal failed to start");
+        }
+        return { entryKey, tabId: outcome.tabId, status: "ready", readiness: "client-started", issues: [] };
+      }
+      if (entry.kind === "file-browser") {
+        openFileSession(session);
+        const opened = await waitForTab((tabs) =>
+          tabs.find((t) => t.sessionId === session.id && t.type === "file-browser"),
+        );
+        if (!opened) return fail("connect", `File session ${session.name} failed to open`);
+        return { entryKey, tabId: opened.id, status: "ready", readiness: "view-opened", issues: [] };
+      }
+      return fail("unsupported", `Restore for ${session.session_type} is not implemented in this build`);
+    }
+    // Temp native-local terminal from the whitelist.
+    if (entry.tempShell) {
+      const outcome = await openLocalTab(
+        entry.displayName,
+        undefined,
+        undefined,
+        { id: entry.tempShell.id, name: entry.tempShell.name, args: entry.tempShell.args },
+        entry.localCwd ?? undefined,
+      );
+      if (outcome.status !== "started") {
+        return fail("connect", outcome.error ?? "Local terminal failed to start");
+      }
+      return { entryKey, tabId: outcome.tabId, status: "ready", readiness: "client-started", issues: [] };
+    }
+    return fail("unsupported", `Restore entry ${entryKey} has no saved session or temp shell`);
+  }, [openLocalTab]);
+
+  const runRestore = useWelcomeRunRestore(openRunEntry);
 
   const handleEditSession = useCallback((session: SessionConfig) => {
     setEditingSession(session);
@@ -3548,6 +3674,21 @@ export function MainLayout() {
                     onRevealRecentWorkspace={revealRecentCodeWorkspace}
                     onOpenNewWorkspace={() => void openNewCodeWorkspaceFromWelcome()}
                     onOpenSettings={openSettingsTab}
+                    runRestoreView={runRestore.view}
+                    onRestoreBatch={() => void runRestore.restore()}
+                    onRetryFailedRestore={() => {
+                      if (
+                        runRestore.view.state === "partial" ||
+                        runRestore.view.state === "failed"
+                      ) {
+                        const keys = runRestore.view.results
+                          .filter((r) => r.status === "failed" || r.status === "cancelled")
+                          .map((r) => r.entryKey);
+                        void runRestore.restore(keys);
+                      }
+                    }}
+                    onCancelRestore={runRestore.cancel}
+                    onClearRunSnapshot={() => void runRestore.clear()}
                   />
                 </div>
 
@@ -3612,7 +3753,13 @@ export function MainLayout() {
                             inputLocked={inputLocked}
                             onCwdChange={(cwd) => handleTerminalCwd(tab.id, cwd)}
                             cwdRequestToken={terminalCwdRequestTokens[tab.id] ?? 0}
-                            onSessionReady={(sid) => { terminalSessionIds.current[tab.id] = sid; }}
+                            onSessionReady={(sid) => {
+                              terminalSessionIds.current[tab.id] = sid;
+                              completeLocalLaunch(tab.id, "started");
+                            }}
+                            onSessionLaunchFailed={(error) => {
+                              completeLocalLaunch(tab.id, "failed", error);
+                            }}
                             onOutput={() => handleTerminalOutput(tab.id)}
                             onUploadLocalPaths={
                               tab.ssh

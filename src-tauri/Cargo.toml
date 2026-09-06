@@ -97,6 +97,7 @@ shellexpand = "3"
 libc = "0.2"
 font-kit = "0.14"
 dirs = "6"
+same-file = "1"
 flate2 = "1"
 # Read source files returned as jar:/kls: definition URIs without extracting
 # archives to the workspace. Keep formats narrow: SDK/source JARs use deflate.

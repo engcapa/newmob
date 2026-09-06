@@ -115,6 +115,7 @@ const ipcMocks = vi.hoisted(() => {
       _workspaceRoot?: string,
     ) => ({ sessionId, shellId: "default" })),
     createSshTerminal: vi.fn(async (sessionId: string) => sessionId),
+    recordLocalDirectoryUse: vi.fn(async () => ({ changed: false, directory: null })),
     listenSshAuthPrompt: vi.fn(async () => vi.fn()),
     submitSshAuthResponse: vi.fn(async () => undefined),
     createTerminalSessionId: vi.fn(() => "terminal-session"),

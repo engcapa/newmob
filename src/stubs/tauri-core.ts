@@ -1581,11 +1581,95 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     }
     case "list_common_local_directories": {
       const home = await vfsHome();
-      const dirs: LocalDirectoryShortcut[] = [
-        { label: "Home", path: home, kind: "system" },
-        { label: "Workspace", path: VFS_ROOT, kind: "personal" },
+      const base: LocalDirectoryShortcut[] = [
+        { label: "Home", path: home, kind: "system", directoryId: "stub-home", lastUsedAtMs: null, availability: "available" },
+        { label: "Workspace", path: VFS_ROOT, kind: "personal", directoryId: "stub-workspace", lastUsedAtMs: null, availability: "available" },
       ];
-      return dirs as T;
+      // Test seed (browser fixture only, never a native authority):
+      // localStorage `taomni.welcome.directoryUsage.v1` = JSON array of
+      // {path,label?,kind?,lastUsedAtMs?}. Seeded rows sort by confirmed time
+      // DESC, nulls last, preserving backend order semantics for RS-01.
+      try {
+        const raw = localStorage.getItem("taomni.welcome.directoryUsage.v1");
+        if (raw) {
+          const seeded = JSON.parse(raw) as Array<{
+            path: string;
+            label?: string;
+            kind?: "system" | "personal";
+            lastUsedAtMs?: number | null;
+          }>;
+          if (Array.isArray(seeded) && seeded.length > 0) {
+            const rows: LocalDirectoryShortcut[] = seeded
+              .filter((s) => typeof s?.path === "string" && s.path.length > 0)
+              .map((s, index) => ({
+                label: s.label ?? s.path.split("/").pop() ?? s.path,
+                path: s.path,
+                kind: s.kind ?? "personal",
+                directoryId: `stub-seed-${index}`,
+                lastUsedAtMs: s.lastUsedAtMs ?? null,
+                availability: "available" as const,
+              }));
+            rows.sort((a, b) => (b.lastUsedAtMs ?? -1) - (a.lastUsedAtMs ?? -1));
+            return { revision: 1, directories: rows } as T;
+          }
+        }
+      } catch {
+        /* malformed seed ignored */
+      }
+      return { revision: 0, directories: base } as T;
+    }
+    case "record_local_directory_use": {
+      // Browser has no native-local PTY; never fabricate a success time.
+      return { changed: false, directory: null } as T;
+    }
+    case "get_welcome_run_snapshot": {
+      try {
+        const raw = localStorage.getItem("taomni.welcome.runSnapshot.v1");
+        if (!raw) return { snapshot: null, issue: null } as T;
+        const parsed = JSON.parse(raw) as {
+          snapshot?: unknown;
+          issue?: { code: string; message: string } | null;
+        };
+        if (parsed && typeof parsed === "object" && "snapshot" in parsed) {
+          return { snapshot: (parsed.snapshot as never) ?? null, issue: parsed.issue ?? null } as T;
+        }
+      } catch {
+        /* fall through to empty */
+      }
+      return { snapshot: null, issue: null } as T;
+    }
+    case "record_welcome_run_snapshot": {
+      const entries = (args?.entries as Array<{ entryKey?: string; kind?: string }> | undefined) ?? [];
+      if (entries.length === 0) {
+        const raw = localStorage.getItem("taomni.welcome.runSnapshot.v1");
+        if (raw) return { snapshot: JSON.parse(raw).snapshot, applied: false } as T;
+        throw new Error("refusing to persist an empty run snapshot");
+      }
+      const excluded = new Set(["welcome", "settings", "placeholder", "code-workspace", "git", "browser"]);
+      for (const entry of entries) {
+        if (entry && excluded.has(String(entry.kind ?? ""))) {
+          throw new Error(`kind '${entry.kind}' is excluded from restore`);
+        }
+      }
+      const snapshot = {
+        schemaVersion: 2,
+        revision: Date.now(),
+        runId: (args?.runId as string) ?? "stub-run",
+        createdAtMs: Date.now(),
+        activeEntryKey: (args?.activeEntryKey as string | null) ?? null,
+        entries: (args?.entries as never[]) ?? [],
+      };
+      localStorage.setItem("taomni.welcome.runSnapshot.v1", JSON.stringify({ snapshot, issue: null }));
+      localStorage.removeItem("taomni.welcome.runSnapshotCleared.v1");
+      return { snapshot, applied: true } as T;
+    }
+    case "update_welcome_run_context": {
+      return { snapshot: null, applied: false } as T;
+    }
+    case "clear_welcome_run_snapshot": {
+      localStorage.removeItem("taomni.welcome.runSnapshot.v1");
+      localStorage.setItem("taomni.welcome.runSnapshotCleared.v1", "true");
+      return true as T;
     }
     case "list_system_fonts": {
       return [] as T;

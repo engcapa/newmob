@@ -1,0 +1,28 @@
+id: TC-WELCOME-RS-03
+title: Failed restore keeps the valid record and retry does not stack tabs
+description: |
+  The fixture seeds a saved LocalShell resume for this case. Browser preview
+  has no native PTY, so the real create_local_terminal error must surface as
+  a failed entry: the stored snapshot keeps the original object and the UI
+  reports 0/1 instead of success.
+covers: [F1.6]
+tags: [welcome, p1, auto-generated, needs-review]
+modes: [browser]
+fixtures: [reset_db, welcome_recents]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - assert_visible: '[data-testid="welcome-restore-status"]'
+  - click: '[data-testid="welcome-restore-last-session"]'
+  # The failed LocalShell tab takes focus; back on Welcome the entry reports
+  # failure instead of success.
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-restore-status"][data-state="failed"]'
+  - assert_text:
+      selector: '[data-testid="welcome-restore-status"]'
+      contains: "0/1"
+  - assert_localstorage:
+      key: taomni.welcome.runSnapshot.v1
+      contains: local-seed
+  - screenshot: rs-03-restore-failure.png

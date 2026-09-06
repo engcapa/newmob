@@ -58,18 +58,19 @@
   "fixtures": {
    "type": "array",
    "description": "Pre/post fixtures applied around this case. Each is implemented in scripts/fixtures/.",
-   "items": {
-    "enum": [
-     "reset_db",
-     "ssh_required",
-     "sftp_required",
-     "jdtls_required",
-     "workspace_root",
-     "java_sample_projects",
-     "java25_projects",
-     "git_diff_repo"
-    ]
-   },
+    "items": {
+     "enum": [
+      "reset_db",
+      "ssh_required",
+      "sftp_required",
+      "jdtls_required",
+      "workspace_root",
+      "java_sample_projects",
+      "java25_projects",
+      "git_diff_repo",
+      "welcome_recents"
+     ]
+    },
    "uniqueItems": true
   },
   "timeout_sec": {

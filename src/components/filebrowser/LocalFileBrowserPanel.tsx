@@ -211,7 +211,12 @@ export function LocalFileBrowserPanel({ tabId, initialPath }: Props) {
   }
 
   return (
-    <div className="w-full h-full flex flex-col" style={{ background: "var(--taomni-bg)" }}>
+    <div
+      data-testid="file-browser-pane"
+      data-tab-id={tabId}
+      className="w-full h-full flex flex-col"
+      style={{ background: "var(--taomni-bg)" }}
+    >
       <FilePanel
         sessionId={tabId}
         side="local"

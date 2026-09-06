@@ -28,6 +28,10 @@ LOCAL_STORAGE_KEYS = [
     "taomni.terminalProfile.v1",
     "taomni.compactMode",
     "taomni.stub.sdkRegistry.v1",
+    "taomni.welcome.directoryUsage.v1",
+    "taomni.welcome.runSnapshot.v1",
+    "taomni.welcome.runSnapshotCleared.v1",
+    "taomni.welcome.runId.v1",
 ]
 LOCAL_STORAGE_PREFIXES = [
     "taomni.sftp.",

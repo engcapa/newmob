@@ -1,0 +1,31 @@
+id: TC-WELCOME-RS-04
+title: Empty restore stays disabled and clear does not resurrect legacy rows
+description: |
+  The fixture seeds one File session plus its run snapshot, but the first
+  half runs on a clean slate: with only reset_db the restore entry is
+  disabled and empty. With the seeded snapshot, restoring opens the seeded
+  directory (which marks the session connected, so a legacy recent row
+  appears); after clearing, the restore entry returns to empty while the
+  legacy recent-session row is still listed and nothing resurrects.
+covers: [F1.6]
+tags: [welcome, p1, auto-generated, needs-review]
+modes: [browser]
+fixtures: [reset_db, welcome_recents]
+timeout_sec: 120
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - assert_text:
+      selector: '[data-testid="welcome-restore-status"]'
+      contains: Seed files
+  - click: '[data-testid="welcome-restore-last-session"]'
+  - wait_for:
+      selector: '[data-testid="file-browser-pane"]'
+      timeout_sec: 20
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-recent-session-row"][data-session-name="Seed files"]'
+  - click: '[data-testid="welcome-restore-clear"]'
+  - wait_for: '[data-testid="welcome-restore-status"][data-state="empty"]'
+  - assert_disabled: '[data-testid="welcome-restore-last-session"]'
+  - assert_visible: '[data-testid="welcome-recent-session-row"][data-session-name="Seed files"]'
+  - screenshot: rs-04-empty-and-clear.png

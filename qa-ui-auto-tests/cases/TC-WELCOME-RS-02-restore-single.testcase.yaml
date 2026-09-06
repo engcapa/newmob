@@ -1,0 +1,34 @@
+id: TC-WELCOME-RS-02
+title: One click restores the last-run tab set and re-click only focuses it
+description: |
+  Fixture seeds one saved embedded File session plus a one-entry run
+  snapshot. Restore opens the directory listing in a single file-browser
+  tab; entering Welcome and restoring again focuses the same tab without
+  duplicating it. Switching history tabs keeps the same restore object.
+covers: [F1.6]
+tags: [welcome, p1, auto-generated, needs-review]
+modes: [browser]
+fixtures: [reset_db, welcome_recents]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - assert_visible: '[data-testid="welcome-restore-status"]'
+  - assert_text:
+      selector: '[data-testid="welcome-restore-status"]'
+      contains: Seed files
+  - click: '[data-testid="welcome-restore-last-session"]'
+  - wait_for:
+      selector: '[data-testid="file-browser-pane"]'
+      timeout_sec: 20
+  - assert_count: {selector: '[data-testid="file-browser-pane"]', equal: 1}
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-restore-last-session"]'
+  - assert_count: {selector: '[data-testid="file-browser-pane"]', equal: 1}
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-history-tab-directories"]'
+  - click: '[data-testid="welcome-history-tab-sessions"]'
+  - assert_attribute: {selector: '[data-testid="welcome-restore-status"]', name: data-state, equals: succeeded}
+  - screenshot: rs-02-restore-single.png

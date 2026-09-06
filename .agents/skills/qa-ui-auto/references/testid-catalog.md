@@ -773,9 +773,19 @@
 - `[data-testid="welcome-recent-no-matches"]` — display [optional] — F1.6.recent-no-matches
 - `[data-testid="welcome-recent-workspace-row"]` — interactive [optional] — F1.6.recent-workspace-row
 - `[data-testid="welcome-history-tab-workspaces"]` — interactive [optional] — F1.6.history-tab-workspaces
+- `[data-testid="welcome-history-tab-sessions"]` — interactive — F1.6.history-tab-sessions
 - `text="Tips"` — display — F1.6.tips-section
 - `[data-testid="welcome-version"]` — display — F1.6.version-header
 - `[data-testid="welcome-version-footer"]` — display — F1.6.version-footer
+- `[data-testid="welcome-history-tab-directories"]` — interactive — F1.6.history-tab-directories
+- `[data-testid="welcome-local-directory-filter"]` — interactive — F1.6.local-directory-filter
+- `[data-testid="welcome-local-directory"]` — interactive — F1.6.local-directory-row
+- `[data-testid="welcome-directory-retry"]` — interactive [optional] — F1.6.directory-retry
+- `[data-testid="welcome-restore-last-session"]` — interactive — F1.6.restore-last-session
+- `[data-testid="welcome-restore-status"]` — display — F1.6.restore-status
+- `[data-testid="welcome-restore-retry"]` — interactive [optional] — F1.6.restore-retry
+- `[data-testid="welcome-restore-cancel"]` — interactive [optional] — F1.6.restore-cancel
+- `[data-testid="welcome-restore-clear"]` — interactive [optional] — F1.6.restore-clear
 
 ## main/window (F1.3)
 
@@ -1123,6 +1133,7 @@
 ## sftp (F7.2)
 
 - `[data-testid="sftp-browser"]` — display — F7.2.panel-root
+- `[data-testid="file-browser-pane"]` — display [optional] — F7.2.embedded-file-pane
 - `[role="dialog"][aria-modal="true"]:has-text("Open remote file?")` — display [optional] — F7.2.download-prompt-dialog
 - `[data-testid="sftp-local-pane"]` — display — F7.2.local-pane
 - `[data-testid="sftp-remote-pane"]` — display — F7.2.remote-pane

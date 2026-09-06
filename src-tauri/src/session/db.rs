@@ -76,6 +76,10 @@ pub fn init_db(conn: &Connection) -> SqlResult<()> {
     crate::database::history::init_history_tables(conn)?;
     crate::database::query_workspace::init_query_workspace_tables(conn)?;
     crate::database::saved_queries::init_saved_query_tables(conn)?;
+    // Welcome recency (directory usage + run-batch snapshot). Additive only;
+    // old code ignores the new tables on downgrade.
+    crate::terminal::local_directories::init_tables(conn)?;
+    crate::session::run_snapshot::init_tables(conn)?;
 
     Ok(())
 }

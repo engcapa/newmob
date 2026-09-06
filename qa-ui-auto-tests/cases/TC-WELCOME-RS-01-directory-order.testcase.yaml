@@ -1,0 +1,34 @@
+id: TC-WELCOME-RS-01
+title: Welcome directories render in confirmed-use order and keep it while filtering
+description: |
+  Fixture seeds VFS directory usage (A=3000, Home=2000, Downloads=1000).
+  Assert the DOM row order matches backend recency, that search preserves
+  relative order, and that clearing the filter restores the full order.
+  Browser-only: real restart persistence is covered by V-09B/V-10B, not reload.
+covers: [F1.6]
+tags: [welcome, p1, auto-generated, needs-review]
+modes: [browser]
+fixtures: [reset_db, welcome_recents]
+timeout_sec: 60
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-history-tab-directories"]'
+  - wait_for: '[data-testid="welcome-local-directory"]'
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=0', name: data-directory-path, equals: /preview/seed/A}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=1', name: data-directory-path, equals: /preview/seed/Home}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=2', name: data-directory-path, equals: /preview/seed/Downloads}
+  - fill: {selector: '[data-testid="welcome-local-directory-filter"]', value: seed}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=0', name: data-directory-path, equals: /preview/seed/A}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=2', name: data-directory-path, equals: /preview/seed/Downloads}
+  - fill: {selector: '[data-testid="welcome-local-directory-filter"]', value: ""}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=0', name: data-directory-path, equals: /preview/seed/A}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=1', name: data-directory-path, equals: /preview/seed/Home}
+  # Starting a native PTY fails in browser preview; the failed launch must
+  # not rewrite recency: back on Welcome the order is unchanged (AC-02 slice).
+  - click: '[data-testid="welcome-local-directory"] >> nth=0'
+  - click: '[data-testid="tab-item"][data-tab-type="welcome"]'
+  - wait_for: '[data-testid="welcome-local-directory"]'
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=0', name: data-directory-path, equals: /preview/seed/A}
+  - assert_attribute: {selector: '[data-testid="welcome-local-directory"] >> nth=1', name: data-directory-path, equals: /preview/seed/Home}
+  - screenshot: rs-01-directory-order.png

@@ -32,7 +32,8 @@ mod rdp;
 mod sdk;
 mod serial;
 mod servers;
-mod session;
+// Public for integration tests (welcome run-batch snapshot, V-09B).
+pub mod session;
 pub mod sockscap;
 mod state;
 mod tab;
@@ -407,6 +408,7 @@ pub fn run() {
             terminal::resize_terminal,
             terminal::send_terminal_signal,
             terminal::close_terminal,
+            terminal::record_local_directory_use,
             session::list_sessions,
             session::get_session,
             session::save_session,
@@ -415,6 +417,10 @@ pub fn run() {
             session::list_session_groups,
             session::save_session_group,
             session::delete_session_group,
+            session::get_welcome_run_snapshot,
+            session::record_welcome_run_snapshot,
+            session::update_welcome_run_context,
+            session::clear_welcome_run_snapshot,
             session::import::import_putty_sessions,
             session::import::import_wsl_sessions,
             session::import::import_external_bash_sessions,
