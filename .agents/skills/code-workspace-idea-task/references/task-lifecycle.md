@@ -1,15 +1,22 @@
 # Task Lifecycle
 
-Use these commands from the repository root. The script locks and atomically rewrites only the selected task metadata.
+Use these commands from the repository root. Select the caller's board once and pass it to every command. The script locks and atomically rewrites only the selected task metadata.
+
+```bash
+task_board_doc=claudedocs/code-workspace-idea-parity-backlog-2026-09-audit.md
+# For a caller-selected earlier board, assign its path instead.
+```
+
+The discovery example uses ED-AUDIT-001 on the new board. Terminal-state examples illustrate different cards; replace each ID with your actually claimed card and never update an unclaimed example card. PowerShell users should pass the literal board path through --doc. Never mix a claim on one board with an update on another.
 
 ## 1. Discover And Inspect
 
 Record current HEAD and `git status --short`, then validate the board:
 
 ```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py validate
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py list --claimable
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py show ED-CLIP-001
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" validate
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" list --claimable
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" show ED-AUDIT-001
 ```
 
 If the caller supplied an ID, inspect that card and reject it when `claimable` is false. Otherwise choose the first highest-priority claimable card that does not overlap files currently being edited. `implemented` is claimable because it still needs a named audit/evidence gap closed.
@@ -19,9 +26,9 @@ Use the owner supplied by the harness or caller. Otherwise create a stable label
 ## 2. Claim Before Production Edits
 
 ```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py claim ED-CLIP-001 \
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" claim ED-AUDIT-001 \
   --owner <owner>
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-CLIP-001 \
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" update ED-AUDIT-001 \
   --owner <owner> \
   --status in_progress
 ```
@@ -46,7 +53,7 @@ Create evidence using [evidence-policy.md](evidence-policy.md). Prefer `--eviden
 Complete:
 
 ```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-CLIP-001 \
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" update ED-AUDIT-001 \
   --owner <owner> \
   --status done \
   --evidence-file <evidence.json>
@@ -55,7 +62,7 @@ python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-C
 Production complete but required evidence remains:
 
 ```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-CLIP-001 \
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" update ED-AUDIT-010 \
   --owner <owner> \
   --status implemented \
   --evidence-file <evidence.json> \
@@ -65,7 +72,7 @@ python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-C
 Material contract conflict:
 
 ```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-CLIP-001 \
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" update ED-AUDIT-010 \
   --owner <owner> \
   --status review_required \
   --evidence-file <evidence.json> \
@@ -75,7 +82,7 @@ python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-C
 External blocker:
 
 ```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-PROJECT-002 \
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" update ED-AUDIT-007 \
   --owner <owner> \
   --status blocked \
   --note "Maven fixture cannot resolve offline; resume with the configured repository mirror"
@@ -86,7 +93,7 @@ python .agents/skills/code-workspace-idea-task/scripts/task_board.py update ED-P
 Always finish with:
 
 ```bash
-python .agents/skills/code-workspace-idea-task/scripts/task_board.py validate
+python .agents/skills/code-workspace-idea-task/scripts/task_board.py --doc "$task_board_doc" validate
 git diff --check
 git status --short
 ```
@@ -98,7 +105,7 @@ Only commit when the caller or loop explicitly authorizes it. Inspect the diff, 
 Use a conventional message containing the task ID, for example:
 
 ```text
-fix(code-workspace): complete ED-CLIP-001 lease ownership
+feat(code-workspace): add ED-AUDIT-001 comparison validator
 ```
 
 Do not use broad staging in a dirty worktree. Do not amend, rewrite, or include other owners' changes. Report the resulting commit hash and any task-owned files intentionally left uncommitted.
