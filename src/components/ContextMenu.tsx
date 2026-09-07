@@ -97,6 +97,13 @@ export const MenuSurface = forwardRef<HTMLDivElement, {
     else if (forwardedRef) forwardedRef.current = node;
   }, [forwardedRef]);
 
+  // Context menus are opened from the editor (for example with Alt+Enter).
+  // Move focus into the menu so navigation keys are owned by the menu rather
+  // than also being interpreted by the editor as cursor movement.
+  useEffect(() => {
+    innerRef.current?.focus();
+  }, []);
+
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -170,6 +177,7 @@ export const MenuSurface = forwardRef<HTMLDivElement, {
   return (
     <div
       ref={setRef}
+      tabIndex={-1}
       data-testid="context-menu"
       data-taomni-context-menu=""
       className="min-w-[220px] py-1 rounded shadow-lg border text-[12px] outline-none"
