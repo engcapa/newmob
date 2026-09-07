@@ -141,6 +141,12 @@ describe("ContextMenu", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("takes focus when opened so editor navigation keys are not targeted at the editor", () => {
+    render(<ContextMenu items={[{ label: "Inspect" }]} x={10} y={10} onClose={vi.fn()} />);
+
+    expect(screen.getByTestId("context-menu")).toHaveFocus();
+  });
+
   it("closes on Escape key press", () => {
     const onClose = vi.fn();
     render(<ContextMenu items={[{ label: "Action" }]} x={10} y={10} onClose={onClose} />);
