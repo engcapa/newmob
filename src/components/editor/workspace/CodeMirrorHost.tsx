@@ -946,6 +946,21 @@ function guessEditorLanguageId(view: EditorView): string | null {
   return editorLanguageByView.get(view) ?? liveTemplateLanguageForPath(null);
 }
 
+const COMPOSITION_NAVIGATION_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+]);
+
+function isCompositionNavigationKey(key: string): boolean {
+  return COMPOSITION_NAVIGATION_KEYS.has(key);
+}
+
 function editorCommandPort(view: EditorView): EditorCommandPort {
   return {
     execute(commandId, options) {
@@ -2581,6 +2596,17 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     const view = new EditorView({ state, parent: hostRef.current });
     editorLanguageByView.set(view, liveTemplateLanguageForPath(pathRef.current));
     viewRef.current = view;
+    const compositionNavigationGuard = (event: KeyboardEvent) => {
+      if (
+        (!view.composing && event.isComposing !== true)
+        || !isCompositionNavigationKey(event.key)
+      ) return;
+      // CodeMirror intentionally ignores key handlers during composition, so
+      // this capture listener also has to stop the contenteditable default
+      // action from moving the caret before the composition is committed.
+      event.preventDefault();
+    };
+    view.contentDOM.addEventListener("keydown", compositionNavigationGuard, true);
     emitSelection(view);
     emitViewport(view);
 
@@ -2674,6 +2700,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       requestParameterInfoRef.current = null;
       cancelActiveHoverResize(activeHoverResizeSessionRef);
       clipboardContextByView.delete(view);
+      view.contentDOM.removeEventListener("keydown", compositionNavigationGuard, true);
       view.destroy();
       viewRef.current = null;
       if (owner && sharedFileKey) owner.releaseView(sharedFileKey, sharedViewId);

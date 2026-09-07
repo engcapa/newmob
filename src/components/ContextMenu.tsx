@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useLayoutEffect, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { ChevronRight } from "lucide-react";
 
 export interface MenuItem {
@@ -54,9 +54,7 @@ export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
       }
     };
     document.addEventListener("mousedown", handler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-    };
+    return () => document.removeEventListener("mousedown", handler);
   }, [onClose]);
 
   const style: CSSProperties = {
@@ -407,13 +405,15 @@ export function useContextMenu() {
     setMenu({ x: e.clientX, y: e.clientY, items });
   }, []);
   const showAt = useCallback((x: number, y: number, items: MenuItem[]) => {
-    setMenu({ x, y, items });
+    flushSync(() => setMenu({ x, y, items }));
   }, []);
   const refreshItems = useCallback((items: MenuItem[]) => {
     setMenu((current) => current ? { ...current, items } : current);
   }, []);
 
-  const close = useCallback(() => setMenu(null), []);
+  const close = useCallback(() => {
+    setMenu(null);
+  }, []);
 
   return useMemo(() => ({
     show,

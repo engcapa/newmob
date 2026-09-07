@@ -40,9 +40,13 @@ def setup(ctx: Any) -> None:
     worker = int(getattr(ctx, "worker_id", 0))
     root = Path(tempfile.mkdtemp(prefix=f"{case_id}-w{worker}-", dir=str(base)))
     for name, content in SEED_FILES.items():
-        (root / name).write_text(content, encoding="utf-8")
+        # Preserve the fixture's declared LF bytes on Windows; text-mode
+        # writes would silently translate them to CRLF before the app opens it.
+        (root / name).write_bytes(content.encode("utf-8"))
     values: dict[str, str] = getattr(ctx, "values")
-    values["workspace_root"] = str(root.resolve())
+    # These values are interpolated into JSON localStorage payloads and CSS
+    # selectors. Slash-separated absolute paths work on Windows and POSIX.
+    values["workspace_root"] = root.as_posix()
 
 
 def teardown(ctx: Any) -> None:

@@ -2169,7 +2169,20 @@ describe("TerminalPanel focus behavior", () => {
 });
 
 describe("TerminalPanel local directory confirmed-use reporting (V-03)", () => {
+  let originalPlatform: string;
+  let originalUserAgent: string;
+
   beforeEach(() => {
+    originalPlatform = window.navigator.platform;
+    originalUserAgent = window.navigator.userAgent;
+    Object.defineProperty(window.navigator, "platform", {
+      configurable: true,
+      value: "Linux x86_64",
+    });
+    Object.defineProperty(window.navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    });
     window.localStorage.clear();
     terminalMocks.oscHandlers.clear();
     terminalMocks.state.onDataHandler = null;
@@ -2194,6 +2207,14 @@ describe("TerminalPanel local directory confirmed-use reporting (V-03)", () => {
 
   afterEach(() => {
     cleanup();
+    Object.defineProperty(window.navigator, "platform", {
+      configurable: true,
+      value: originalPlatform,
+    });
+    Object.defineProperty(window.navigator, "userAgent", {
+      configurable: true,
+      value: originalUserAgent,
+    });
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });

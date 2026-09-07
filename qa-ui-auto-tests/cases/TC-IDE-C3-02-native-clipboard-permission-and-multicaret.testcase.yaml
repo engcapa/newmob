@@ -22,7 +22,7 @@ description: |
 covers: [F25.5, F1.7]
 tags: [code-workspace, ide-c3, clipboard, native-gate, accessibility, p0]
 modes: [native]
-fixtures: [reset_db, workspace_root]
+fixtures: [linux_x11_required, reset_db, workspace_root]
 timeout_sec: 420
 steps:
   - open: "${cfg.app.base_url}"

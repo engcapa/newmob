@@ -1,5 +1,10 @@
 import type { WorkspaceProjectFactsEntry } from "../../../stores/projectFactsStore";
-import { isPathExcluded, type ProjectStructureSnapshotV2 } from "./projectStructureModel";
+import {
+  isPathExcluded,
+  isPathWithinRoot,
+  type ProjectStructureSnapshotV2,
+} from "./projectStructureModel";
+import { fsPathEquals } from "./codeWorkspaceModel";
 
 export type FindInFilesScopeKind = "project" | "module" | "directory" | "recent" | "custom";
 
@@ -267,17 +272,12 @@ export function isFileInScopePlan(
 
   // 3. Check explicit files list
   if (plan.explicitFiles && plan.explicitFiles.length > 0) {
-    const norm = filePath.replace(/\\/g, "/");
-    return plan.explicitFiles.some((ef) => ef.replace(/\\/g, "/") === norm);
+    return plan.explicitFiles.some((ef) => fsPathEquals(ef, filePath));
   }
 
   // 4. Check directory/module roots
   if (plan.roots.length > 0) {
-    const norm = filePath.replace(/\\/g, "/");
-    return plan.roots.some((r) => {
-      const normRoot = r.replace(/\\/g, "/");
-      return norm === normRoot || norm.startsWith(normRoot.endsWith("/") ? normRoot : `${normRoot}/`);
-    });
+    return plan.roots.some((root) => isPathWithinRoot(filePath, root));
   }
 
   return true;

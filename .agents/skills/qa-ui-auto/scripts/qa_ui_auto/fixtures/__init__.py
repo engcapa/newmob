@@ -6,6 +6,7 @@ Fixtures are referenced from a testcase's `fixtures: [...]` list. Builtin set:
 * ssh_required    - probe the configured ssh.host:port over TCP; skip case otherwise
 * sftp_required   - probe the configured sftp.host:port over TCP; skip case otherwise
 * jdtls_required  - JDK-on-PATH probe; skip case otherwise (never auto-fallback)
+* linux_x11_required - require the Linux X11/fcitx5 tools used by X11 gates
 * workspace_root  - native-only: temp host dir seeded with files, exposed as
                     ${fixture.workspace_root}
 * java_sample_projects - expose in-repo sample Maven/Gradle project roots as
@@ -21,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from . import git_diff_repo, java25_projects, java_sample_projects, jdtls_required, reset_db, sftp_required, ssh_required, welcome_recents, workspace_root
+from . import git_diff_repo, java25_projects, java_sample_projects, jdtls_required, linux_x11_required, reset_db, sftp_required, ssh_required, welcome_recents, workspace_root
 
 
 class FixtureContext(Protocol):
@@ -43,6 +44,7 @@ REGISTRY: dict[str, Fixture] = {
     "ssh_required": Fixture("ssh_required", ssh_required.setup),
     "sftp_required": Fixture("sftp_required", sftp_required.setup),
     "jdtls_required": Fixture("jdtls_required", jdtls_required.setup),
+    "linux_x11_required": Fixture("linux_x11_required", linux_x11_required.setup),
     "workspace_root": Fixture("workspace_root", workspace_root.setup, workspace_root.teardown),
     "java_sample_projects": Fixture("java_sample_projects", java_sample_projects.setup),
     "java25_projects": Fixture("java25_projects", java25_projects.setup),

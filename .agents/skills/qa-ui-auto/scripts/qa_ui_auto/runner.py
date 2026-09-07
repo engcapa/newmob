@@ -522,7 +522,20 @@ def _rotate_runs(report_dir: Path, keep: int) -> None:
             shutil.rmtree(old)
 
 
+def _configure_console_encoding() -> None:
+    """Keep report output printable on Windows consoles using legacy code pages."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_console_encoding()
     ap = argparse.ArgumentParser(prog="qa_ui_auto.runner")
     ap.add_argument("--mode", choices=["browser", "native"], default=None)
     ap.add_argument("--config", default="qa-ui-auto-tests/qa-ui-auto.config.yaml")

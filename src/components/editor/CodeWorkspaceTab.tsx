@@ -3,6 +3,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1143,6 +1144,11 @@ export function debugCurrentLineForFile(
   return sourceName && fileName && sourceName === fileName ? frame.line : null;
 }
 
+interface PendingClosedFile {
+  cleanup: Promise<ResourceCleanupOutcome> | null;
+  didCloseCompleted: boolean;
+}
+
 export function CodeWorkspaceTab({
   tabId,
   workspace,
@@ -2064,6 +2070,12 @@ export function CodeWorkspaceTab({
   const [occurrenceSession, setOccurrenceSession] = useState<OccurrenceHighlightSession | null>(null);
   const occurrenceSessionRef = useRef<OccurrenceHighlightSession | null>(occurrenceSession);
   occurrenceSessionRef.current = occurrenceSession;
+  const occurrenceActiveFileKeyRef = useRef<string | null>(activeKey);
+  occurrenceActiveFileKeyRef.current = activeKey;
+  const occurrenceActiveGroupIdRef = useRef<EditorGroupId>(activeEditorGroupId);
+  occurrenceActiveGroupIdRef.current = activeEditorGroupId;
+  const autoHighlightRequestGenerationRef = useRef(0);
+  const occurrenceRequestGenerationRef = useRef(0);
   const [dismissedBannerKeys, setDismissedBannerKeys] = useState<Set<string>>(new Set());
   useEffect(() => {
     setDismissedBannerKeys(new Set());
@@ -2911,6 +2923,7 @@ export function CodeWorkspaceTab({
   const closeFileRef = useRef<
     ((key: string, groupId?: EditorGroupId, options?: { discard?: boolean }) => Promise<void>) | null
   >(null);
+  const pendingClosedFilesRef = useRef(new Map<string, PendingClosedFile>());
 
   const openFile = useCallback(
     async (
@@ -2934,6 +2947,7 @@ export function CodeWorkspaceTab({
         return;
       }
       const key = fileKey(ref);
+      const pendingClosedFile = pendingClosedFilesRef.current.get(key);
       const currentUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
       const groupId = options.groupId ?? currentUi.activeEditorGroupId;
       const shouldActivate = options.activate !== false;
@@ -2997,6 +3011,18 @@ export function CodeWorkspaceTab({
       }
       if (!isCurrent()) {
         return;
+      }
+      // A close can have committed the layout before its LSP/buffer cleanup
+      // finishes. Reopening the entry must wait for that cleanup so a late
+      // buffer teardown cannot erase the newly visible editor.
+      if (pendingClosedFile?.cleanup) {
+        await pendingClosedFile.cleanup;
+        if (!isCurrent()) return;
+        const latest = openFilesRef.current[key];
+        if (pendingClosedFile.didCloseCompleted && latest && !latest.loading) {
+          await syncLspDocument(latest, "open");
+          if (!isCurrent()) return;
+        }
       }
       if (openFilesRef.current[key] && !openFilesRef.current[key].loading) {
         return;
@@ -3114,6 +3140,7 @@ export function CodeWorkspaceTab({
       lspDescriptorForPath,
       restoreBookmarksForFileKey,
       setStatusMessage,
+      syncLspDocument,
       updateEditorGroup,
       workspaceInstanceId,
     ],
@@ -4249,12 +4276,18 @@ export function CodeWorkspaceTab({
   const importInspectionBaselineFromClipboard = useCallback(async () => {
     try {
       const text = await readText();
-      persistInspectionProfile((current) => importInspectionBaseline(current, text));
+      // Validate before entering the state updater. An invalid clipboard
+      // payload must report an import error without throwing during render.
+      const imported = importInspectionBaseline(inspectionProfile, text);
+      persistInspectionProfile((current) => ({
+        ...current,
+        baseline: imported.baseline,
+      }));
       setStatusMessage("Inspection baseline imported");
     } catch (error) {
       setStatusMessage(errorMessage(error));
     }
-  }, [persistInspectionProfile, setStatusMessage]);
+  }, [inspectionProfile, persistInspectionProfile, setStatusMessage]);
 
   const readWorkspaceEditPathSnapshot = useCallback(async (
     absolutePath: string,
@@ -6198,12 +6231,46 @@ export function CodeWorkspaceTab({
       const coordinator = resourceRecoveryCoordinatorRef.current;
       const closedTree = currentUi.layoutTreeV2;
       const closedLeaf = findLeafNode(closedTree, groupId);
+      const pendingClosedFile: PendingClosedFile | null = file
+        ? { cleanup: null, didCloseCompleted: false }
+        : null;
+      const closedTabEntry: ClosedTabEntry | null = file
+        ? {
+            fileIdentity: workspaceFileIdentity(file.ref),
+            ref: file.ref,
+            title: file.title,
+            subtitle: file.subtitle,
+            leafPath: [groupId],
+            closedAt: Date.now(),
+            location: {
+              leafId: groupId,
+              treeRoute: buildReopenTreeRoute(closedTree, groupId),
+              siblingFileKeys: (closedLeaf?.openFileKeys ?? []).filter((entryKey) => entryKey !== key),
+            },
+          }
+        : null;
+      if (pendingClosedFile) {
+        pendingClosedFilesRef.current.set(key, pendingClosedFile);
+      }
+      // The editor tab is already committed closed at this point. Publish its
+      // reopen claim before awaiting provider cleanup so shell routing can
+      // honor an immediate Ctrl+Shift+T.
+      if (closedTabEntry) {
+        setClosedTabsStack((stack) => pushClosedTab(stack, closedTabEntry));
+      }
+      const isResourceReopened = () => {
+        const liveUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+        return Object.values(liveUi.editorGroups).some((candidate) => candidate.openOrder.includes(key));
+      };
 
       const cleanupHandlers: ResourceCleanupHandlers = {
         didClose: async () => {
-          if (file) await closeLspDocumentAndWait(file);
+          if (!file || isResourceReopened()) return;
+          await closeLspDocumentAndWait(file);
+          if (pendingClosedFile) pendingClosedFile.didCloseCompleted = true;
         },
         watcher: () => {
+          if (isResourceReopened()) return;
           const pending = pendingExternalFileEventsRef.current.get(key);
           if (pending) {
             window.clearTimeout(pending.timer);
@@ -6211,6 +6278,7 @@ export function CodeWorkspaceTab({
           }
         },
         buffer: () => {
+          if (isResourceReopened()) return;
           saveTransactionRegistryRef.current.discardFile(
             workspaceInstanceId,
             key,
@@ -6236,30 +6304,24 @@ export function CodeWorkspaceTab({
           });
         },
         history: () => {
-          if (file) {
-            setClosedTabsStack((stack) =>
-              pushClosedTab(stack, {
-                fileIdentity: workspaceFileIdentity(file.ref),
-                ref: file.ref,
-                title: file.title,
-                subtitle: file.subtitle,
-                leafPath: [groupId],
-                closedAt: Date.now(),
-                location: {
-                  leafId: groupId,
-                  treeRoute: buildReopenTreeRoute(closedTree, groupId),
-                  siblingFileKeys: (closedLeaf?.openFileKeys ?? []).filter((entryKey) => entryKey !== key),
-                },
-              }),
-            );
-          }
+          // History was published with the committed layout above. Keeping
+          // this stage side-effect free prevents a delayed cleanup from
+          // re-adding an entry that the user already reopened.
         },
       };
-      const outcome = await coordinator.executeResourceCleanup(key, cleanupHandlers);
-      observeResourceCleanupOutcome(outcome, cleanupHandlers);
+      const cleanupPromise = coordinator.executeResourceCleanup(key, cleanupHandlers);
+      if (pendingClosedFile) pendingClosedFile.cleanup = cleanupPromise;
+      try {
+        const outcome = await cleanupPromise;
+        observeResourceCleanupOutcome(outcome, cleanupHandlers);
 
-      if (outcome.status === "committed-with-recovery") {
-        setStatusMessage(outcome.message);
+        if (outcome.status === "committed-with-recovery") {
+          setStatusMessage(outcome.message);
+        }
+      } finally {
+        if (pendingClosedFilesRef.current.get(key) === pendingClosedFile) {
+          pendingClosedFilesRef.current.delete(key);
+        }
       }
     },
     [activeEditorGroupId, closeLayoutTabInLeaf, closeLspDocumentAndWait, observeResourceCleanupOutcome, workspaceInstanceId],
@@ -6834,6 +6896,17 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     const groupId = activeEditorGroupId;
     const file = activeFile;
+    const requestGeneration = ++autoHighlightRequestGenerationRef.current;
+    const canApply = () => (
+      autoHighlightRequestGenerationRef.current === requestGeneration
+      && occurrenceActiveFileKeyRef.current === file?.key
+      && occurrenceActiveGroupIdRef.current === groupId
+      && !occurrenceSessionRef.current
+      && (!file || openFilesRef.current[file.key]?.text === file.text)
+    );
+    // Explicit occurrence highlighting owns this overlay until the session is
+    // cleared. Cursor-driven refreshes must not replace it asynchronously.
+    if (file && occurrenceSessionRef.current?.fileKey === file.key) return;
     // Large-file mode: no per-cursor highlight (LSP request nor text-scan fallback).
     if (!file || file.loading || activeFileIsLarge) {
       setHighlightsByGroup((current) => (
@@ -6846,7 +6919,7 @@ export function CodeWorkspaceTab({
     const descriptor = lspDescriptorForFile(file);
     if (!activeCapabilities?.documentHighlight || !descriptor) {
       const timer = window.setTimeout(() => {
-        if (!cancelled && openFilesRef.current[file.key]?.text === file.text) {
+        if (!cancelled && canApply()) {
           setHighlightsByGroup((current) => ({
             ...current,
             [groupId]: fallbackWordHighlights(file.text, position),
@@ -6866,15 +6939,15 @@ export function CodeWorkspaceTab({
     }
     const epoch = lspDocumentEpochRef.current[file.key] ?? 0;
     const timer = window.setTimeout(() => {
-      if (!isCurrentLspDocumentRequest(file, epoch)) return;
+      if (!canApply() || !isCurrentLspDocumentRequest(file, epoch)) return;
       void lspDocumentHighlights(descriptor, position)
         .then((result) => {
-          if (cancelled || !isCurrentLspDocumentRequest(file, epoch)) return;
+          if (cancelled || !canApply() || !isCurrentLspDocumentRequest(file, epoch)) return;
           updateLspStatusForFile(file, result.status);
           setHighlightsByGroup((current) => ({ ...current, [groupId]: result.highlights }));
         })
         .catch(() => {
-          if (cancelled || !isCurrentLspDocumentRequest(file, epoch)) return;
+          if (cancelled || !canApply() || !isCurrentLspDocumentRequest(file, epoch)) return;
           setHighlightsByGroup((current) => ({
             ...current,
             [groupId]: fallbackWordHighlights(file.text, position),
@@ -10371,9 +10444,23 @@ export function CodeWorkspaceTab({
   const highlightUsagesInFile = useCallback(async () => {
     const file = activeFile;
     if (!file) return;
+    const requestGeneration = ++occurrenceRequestGenerationRef.current;
+    // A manual request supersedes any cursor-driven request that is still in
+    // flight. Its response may not overwrite the explicit session afterward.
+    autoHighlightRequestGenerationRef.current += 1;
     const position = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
     const descriptor = lspDescriptorForFile(file);
     const rev = lspDocumentEpochRef.current[file.key] ?? 0;
+    const needsLiveLspCheck = Boolean(
+      activeCapabilities?.documentHighlight && descriptor && activeLspDocumentIsSynced,
+    );
+    const canApply = () => (
+      occurrenceRequestGenerationRef.current === requestGeneration
+      && occurrenceActiveFileKeyRef.current === file.key
+      && occurrenceActiveGroupIdRef.current === activeEditorGroupId
+      && openFilesRef.current[file.key]?.text === file.text
+      && (!needsLiveLspCheck || isCurrentLspDocumentRequest(file, rev))
+    );
     const lines = file.text.split("\n");
     let offset = 0;
     for (let l = 0; l < Math.min(position.line, lines.length); l += 1) {
@@ -10395,6 +10482,7 @@ export function CodeWorkspaceTab({
       highlights = fallbackWordHighlights(file.text, position);
     }
 
+    if (!canApply()) return;
     if (highlights.length === 0) {
       setStatusMessage(`No occurrences found for "${word}"`);
       setOccurrenceSession(null);
@@ -10416,6 +10504,7 @@ export function CodeWorkspaceTab({
     activeFile,
     activeLspDocumentIsSynced,
     cursorPositions,
+    isCurrentLspDocumentRequest,
     lspDescriptorForFile,
     setStatusMessage,
   ]);
@@ -10437,6 +10526,8 @@ export function CodeWorkspaceTab({
 
   const clearHighlightUsages = useCallback(() => {
     const session = occurrenceSessionRef.current;
+    autoHighlightRequestGenerationRef.current += 1;
+    occurrenceRequestGenerationRef.current += 1;
     if (!session) return false;
     setOccurrenceSession(null);
     occurrenceSessionRef.current = null;
@@ -11241,16 +11332,26 @@ export function CodeWorkspaceTab({
             : null;
           setClosedTabsStack(rest);
           if (entry && entry.ref) {
-            void openFile(entry.ref as never, resolution ? { groupId: resolution.leafId } : undefined);
-            if (resolution?.kind === "relocated") {
-              setStatusMessage(
-                resolution.reason === "route"
-                  ? `Reopened ${entry.title} in the nearest surviving split`
-                  : resolution.reason === "sibling"
-                    ? `Reopened ${entry.title} next to its former tab group`
-                    : `Reopened ${entry.title} in the active editor`,
-              );
-            }
+            const openPromise = openFile(
+              entry.ref as never,
+              resolution ? { groupId: resolution.leafId } : undefined,
+            );
+            void openPromise.then(() => {
+              const opened = Object.values(openFilesRef.current).some((candidate) => (
+                workspaceFileIdentity(candidate.ref) === entry.fileIdentity
+                && !candidate.loading
+                && !candidate.error
+              ));
+              if (opened && resolution?.kind === "relocated") {
+                setStatusMessage(
+                  resolution.reason === "route"
+                    ? `Reopened ${entry.title} in the nearest surviving split`
+                    : resolution.reason === "sibling"
+                      ? `Reopened ${entry.title} next to its former tab group`
+                      : `Reopened ${entry.title} in the active editor`,
+                );
+              }
+            }).catch((error) => setStatusMessage(errorMessage(error)));
             return true;
           }
         }
@@ -13341,6 +13442,7 @@ export function CodeWorkspaceTab({
   commitTabSwitcherRef.current = commitTabSwitcher;
   const closeFromTabSwitcherRef = useRef(closeFromTabSwitcher);
   closeFromTabSwitcherRef.current = closeFromTabSwitcher;
+  const dispatchWorkspaceKeydownV2 = actionsController.dispatchKeydownV2;
 
   useEffect(() => {
     if (!visible) return;
@@ -13388,6 +13490,16 @@ export function CodeWorkspaceTab({
       // Otherwise the active editor's insertTab action would consume a banner,
       // tree, or settings control's browser focus navigation.
       if (logicalKey === "tab" && !switcherModifier && !isEditorSurfaceKeyEvent(event.target)) return;
+      // Ctrl+Shift+T is shared with MainLayout's shell owner. Let the root
+      // router consume it so the workspace claim and terminal fallback cannot
+      // both run for the same key event.
+      if (
+        logicalKey === "t"
+        && (event.ctrlKey || event.metaKey)
+        && event.shiftKey
+        && !event.altKey
+        && onCommandsChange
+      ) return;
       // §8.18.5: Backspace inside the open Switcher closes the selected
       // editor entry (dirty tabs confirm) or hides the selected tool window.
       if (logicalKey === "backspace" && tabSwitcherOpenRef.current) {
@@ -13412,7 +13524,7 @@ export function CodeWorkspaceTab({
           && ["arrowup", "arrowdown", "pageup", "pagedown", "enter", "escape"].includes(logicalKey)
         ) return;
       }
-      const dispatchResult = actionsController.dispatchKeydownV2({
+      const dispatchResult = dispatchWorkspaceKeydownV2({
         event,
         workspaceId: workspaceInstanceId,
         // CodeMirrorHost registers each split by its stable leaf/view id;
@@ -13446,7 +13558,7 @@ export function CodeWorkspaceTab({
       window.removeEventListener("keydown", handleWorkspaceCommand, true);
       window.removeEventListener("keyup", release, true);
     };
-  }, [actionsController, isEditorSurfaceKeyEvent, isSurfaceOwnedKeyEvent, openFile, visible]);
+  }, [dispatchWorkspaceKeydownV2, isEditorSurfaceKeyEvent, isSurfaceOwnedKeyEvent, onCommandsChange, openFile, visible]);
 
   const runSearchEverywhereCommand = useCallback((commandId: string) => {
     setSearchEverywhereOpen(false);
@@ -13485,7 +13597,7 @@ export function CodeWorkspaceTab({
     [commandRegistration, shellShortcutClaims],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!onCommandsChange) return;
     onCommandsChange(tabId, commandRegistrationWithClaims);
   }, [commandRegistrationWithClaims, onCommandsChange, tabId]);
@@ -13627,14 +13739,12 @@ export function CodeWorkspaceTab({
       if (openFilesRef.current[live.key]?.text !== live.text) return null;
       const descriptor = lspDescriptorForFile(live);
       if (!descriptor) return null;
-      const epoch = lspDocumentEpochRef.current[live.key] ?? 0;
       try {
         const result = await lspCompletion(descriptor, position, triggerCharacter, invocation);
         // Drop only when the buffer moved again while IPC was in flight; CM
         // re-queries on the next keystroke / incomplete list.
         if (!openFilesRef.current[live.key]) return null;
         if (openFilesRef.current[live.key]?.text !== live.text) return null;
-        if (lspDocumentEpochRef.current[live.key] !== epoch) return null;
         // Token identity must still match the live request origin; a stale
         // request from a switched file/restarted session is dropped here too.
         if (!isCompletionTokenCurrent(token)) return null;

@@ -1,5 +1,6 @@
 import type { JavaProjectAnalysisSnapshotV1, JavaProjectModuleV1 } from "./projectAnalysisModel";
 import { sha256Hex } from "./projectAnalysisModel";
+import { fsPathComparisonKey, relativePathWithinRoot } from "./codeWorkspaceModel";
 
 /**
  * §8.21.6 V5 Project Structure With Provenance.
@@ -484,12 +485,24 @@ export class WorkspaceProjectStructureStore {
 /**
  * Tests whether a path belongs to an excluded root.
  */
+export function isPathWithinRoot(filePath: string, rootPath: string): boolean {
+  if (relativePathWithinRoot(rootPath, filePath) !== null) return true;
+
+  // Project facts can be produced before a provider has returned fully
+  // qualified paths. Keep the fallback lexical, but preserve path boundaries
+  // so `/repo/app` does not match `/repo/application`.
+  const normalizedRoot = fsPathComparisonKey(rootPath).replace(/\/+$/, "");
+  const normalizedFile = fsPathComparisonKey(filePath);
+  return normalizedFile === normalizedRoot
+    || (normalizedRoot.length > 0 && normalizedFile.startsWith(`${normalizedRoot}/`));
+}
+
 export function isPathExcluded(
   structure: ProjectStructureSnapshotV2 | null,
   path: string,
 ): boolean {
   if (!structure) return false;
-  return structure.excludedRoots.some((excluded) => path.startsWith(excluded));
+  return structure.excludedRoots.some((excluded) => isPathWithinRoot(path, excluded));
 }
 
 /**
@@ -503,7 +516,7 @@ export function findPathSourceSet(
   for (const mod of structure.modules) {
     for (const ss of mod.sourceSets) {
       for (const root of ss.roots) {
-        if (path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`)) {
+        if (isPathWithinRoot(path, root)) {
           return { moduleId: mod.id, kind: ss.kind };
         }
       }

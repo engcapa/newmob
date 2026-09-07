@@ -175,9 +175,12 @@ def setup(ctx: Any) -> None:
 
     values: dict[str, str] = getattr(ctx, "values")
     values.update({
-        "java25_maven_root": str(maven_root.resolve()),
-        "java25_gradle_root": str(gradle_root.resolve()),
-        "java25_maven_app": str((maven_root / "src/main/java/com/example/app/App.java").resolve()),
-        "java25_maven_helper": str((maven_root / "src/main/java/com/example/other/Helper.java").resolve()),
+        # These values are interpolated into JSON localStorage payloads and
+        # CSS selectors. Slash-separated absolute paths work on Windows and
+        # POSIX while remaining valid host paths for native assertions.
+        "java25_maven_root": maven_root.as_posix(),
+        "java25_gradle_root": gradle_root.as_posix(),
+        "java25_maven_app": (maven_root / "src/main/java/com/example/app/App.java").as_posix(),
+        "java25_maven_helper": (maven_root / "src/main/java/com/example/other/Helper.java").as_posix(),
         "jdtls_process_count_before": str(_jdtls_process_count()),
     })

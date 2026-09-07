@@ -148,5 +148,34 @@ describe("ED-FIND-003: findInFilesScopeModel scope and file-mask filtering", () 
       // Rejects other directory outside module roots
       expect(isFileInScopePlan("/workspace/app/src/main/java/App.java", plan, mockStructure)).toBe(false);
     });
+
+    it("normalizes Windows separators, drive casing, and root boundaries", () => {
+      const windowsPlan = {
+        status: "ready" as const,
+        kind: "module" as const,
+        roots: ["C:\\Workspace\\core"],
+        fileMask: "*.java",
+      };
+      const windowsStructure = {
+        ...mockStructure,
+        excludedRoots: ["C:\\Workspace\\target"],
+      };
+
+      expect(isFileInScopePlan(
+        "c:/workspace/CORE/src/main/java/Service.java",
+        windowsPlan,
+        windowsStructure,
+      )).toBe(true);
+      expect(isFileInScopePlan(
+        "C:\\WORKSPACE\\target\\Generated.java",
+        windowsPlan,
+        windowsStructure,
+      )).toBe(false);
+      expect(isFileInScopePlan(
+        "C:\\Workspace\\core-legacy\\Service.java",
+        windowsPlan,
+        windowsStructure,
+      )).toBe(false);
+    });
   });
 });

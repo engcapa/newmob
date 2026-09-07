@@ -839,6 +839,8 @@ export function TerminalPanel({
   const isLocalRef = useRef(isLocal);
   /** Last absolute local cwd we already recorded into command history. */
   const lastRecordedLocalDirRef = useRef<string | null>(null);
+  /** OSC-7 reports can arrive before the async PTY creation result. */
+  const pendingLocalDirectoryReportsRef = useRef<string[]>([]);
   useEffect(() => {
     historyRef.current = history;
     suggestionsActiveRef.current = suggestionsActive;
@@ -2334,6 +2336,30 @@ export function TerminalPanel({
     let sockscapLaunchTimer: ReturnType<typeof setTimeout> | undefined;
     let launchedSockscapPid: number | null = null;
 
+    const submitLocalDirectoryUse = (path: string) => {
+      const backendSessionId = sessionIdRef.current;
+      if (!backendSessionId) {
+        pendingLocalDirectoryReportsRef.current.push(path);
+        return;
+      }
+      recordLocalDirectoryUse({ backendSessionId, path }).catch(
+        (error) => {
+          console.warn("Local directory use record failed:", error);
+        },
+      );
+    };
+
+    const flushPendingLocalDirectoryReports = (backendSessionId: string) => {
+      const pending = pendingLocalDirectoryReportsRef.current.splice(0);
+      for (const path of pending) {
+        recordLocalDirectoryUse({ backendSessionId, path }).catch(
+          (error) => {
+            console.warn("Local directory use record failed:", error);
+          },
+        );
+      }
+    };
+
     const primaryFont = getPrimaryFontName(fontFamily);
     const safeFontFamily = isMonospaceFont(primaryFont) ? fontFamily : getDefaultTerminalFontFamily();
 
@@ -2499,14 +2525,7 @@ export function TerminalPanel({
               // validates the live native-local runtime and dedups per
               // runtime; remote/WSL cwd never reaches this call because
               // normalizeLocalStartCwd returned null for it.
-              const backendSessionId = sessionIdRef.current;
-              if (backendSessionId) {
-                recordLocalDirectoryUse({ backendSessionId, path: normalized }).catch(
-                  (error) => {
-                    console.warn("Local directory use record failed:", error);
-                  },
-                );
-              }
+              submitLocalDirectoryUse(normalized);
             }
           }
         }
@@ -2869,6 +2888,7 @@ export function TerminalPanel({
 
       connectionStateRef.current = "connected";
       sessionIdRef.current = connectedSid;
+      if (isLocalRef.current) flushPendingLocalDirectoryReports(connectedSid);
       lastTerminalSizeSyncRef.current = null;
       setRegisteredSessionId(connectedSid);
       if (tabId) {
@@ -3018,6 +3038,7 @@ export function TerminalPanel({
       cancelPendingMfa();
       connectionStateRef.current = ssh ? "disconnected" : "idle";
       sessionIdRef.current = null;
+      pendingLocalDirectoryReportsRef.current = [];
       setRegisteredSessionId(null);
       zmodemRef.current = null;
       const message = String(err);
@@ -3250,6 +3271,7 @@ export function TerminalPanel({
       fitAddonRef.current = null;
       searchAddonRef.current = null;
       sessionIdRef.current = null;
+      pendingLocalDirectoryReportsRef.current = [];
       connectionStateRef.current = "idle";
       reconnectSshRef.current = null;
       setRegisteredSessionId(null);
